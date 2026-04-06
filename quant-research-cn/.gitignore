@@ -1,0 +1,13 @@
+/target
+/data
+/logs
+/reports
+config.yaml
+credentials.json
+token.json
+token.pickle
+*.duckdb
+*.duckdb.wal
+.codex-runs/
+runs/
+__pycache__/

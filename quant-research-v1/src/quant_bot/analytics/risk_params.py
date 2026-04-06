@@ -1,0 +1,83 @@
+"""
+Risk parameters: entry, stop, target, R:R ratio.
+Computed from ATR and probability cone.
+"""
+from __future__ import annotations
+
+from typing import Any
+
+
+def compute_risk_params(item: dict) -> dict[str, Any]:
+    """
+    For a notable item with momentum and options data, compute:
+
+    entry  = current price
+    stop   = price - 2 * ATR  (2-ATR trailing stop for longs; inverted for shorts)
+    target = price + expected_move  (from options cone or ATR-based)
+    rr_ratio = |target - entry| / |entry - stop|
+    half_life = from cointegration OU fit if available
+
+    Returns: {entry, stop, target, rr_ratio, half_life} or empty dict on insufficient data.
+    """
+    price = item.get("price")
+    atr = item.get("atr")
+    if price is None or atr is None or price <= 0 or atr <= 0:
+        return {}
+
+    # Direction from signal classification
+    sig = item.get("signal", {})
+    direction = sig.get("direction", "long")
+
+    # Expected move: prefer options-implied, fall back to ATR-based
+    expected_move_pct = None
+    opts = item.get("options") or {}
+    if opts.get("expected_move_pct"):
+        expected_move_pct = opts["expected_move_pct"]
+    elif (item.get("momentum") or {}).get("expected_move_pct"):
+        expected_move_pct = item["momentum"]["expected_move_pct"]
+
+    if expected_move_pct is None:
+        # Fallback: 2 ATR as percentage
+        expected_move_pct = (2.0 * atr / price) * 100.0
+
+    expected_move_usd = price * expected_move_pct / 100.0
+
+    # Compute entry, stop, target based on direction
+    entry = round(price, 2)
+    stop_distance = 2.0 * atr  # 2-ATR stop
+
+    if direction == "short":
+        stop = round(price + stop_distance, 2)
+        target = round(price - expected_move_usd, 2)
+    else:
+        # Default to long
+        stop = round(price - stop_distance, 2)
+        target = round(price + expected_move_usd, 2)
+
+    # R:R ratio = reward / risk
+    risk = abs(entry - stop)
+    reward = abs(target - entry)
+    rr_ratio = round(reward / risk, 2) if risk > 0 else None
+
+    result: dict[str, Any] = {
+        "entry": entry,
+        "stop": stop,
+        "target": target,
+        "rr_ratio": rr_ratio,
+        "stop_distance_atr": 2.0,
+        "expected_move_pct": round(expected_move_pct, 2),
+    }
+
+    # Half-life from cointegration if available
+    price_signals = item.get("price_signals") or {}
+    coint = price_signals.get("cointegration")
+    if coint:
+        # coint may be a list of pairs; take the one with shortest half_life
+        if isinstance(coint, list):
+            hl_values = [p.get("half_life_days") for p in coint if p.get("half_life_days")]
+            if hl_values:
+                result["half_life"] = round(min(hl_values), 1)
+        elif isinstance(coint, dict) and coint.get("half_life_days"):
+            result["half_life"] = round(coint["half_life_days"], 1)
+
+    return result

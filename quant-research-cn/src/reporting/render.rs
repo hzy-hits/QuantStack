@@ -1,0 +1,2087 @@
+/// Payload renderer — generates structured Markdown for 4 Claude agent consumption.
+///
+/// Outputs 3 split files:
+///   1. `{date}_payload_macro.md`      → 宏观分析师 + 风险分析师
+///   2. `{date}_payload_structural.md`  → 量化分析师 + 风险分析师
+///   3. `{date}_payload_events.md`      → 事件分析师
+///
+/// The payload is the program's output. ALL arithmetic is computed upstream.
+/// Agents NEVER touch arithmetic — every number they see is pre-computed.
+use anyhow::Result;
+use chrono::{FixedOffset, NaiveDate, Utc};
+use duckdb::Connection;
+use std::fmt::Write;
+use tracing::{info, warn};
+
+use crate::config::Settings;
+use crate::filtering::notable::NotableItem;
+
+/// Precision rules reminder prepended to every payload file.
+const PRECISION_RULES: &str = "\
+> **精度规则 (Precision Rules)**
+> - 禁止 P=1.00 或 P=0.00 (不允许确定性声明)
+> - 所有概率保留3位小数
+> - 必须注明样本量 (n=)
+> - 必须注明数据时滞 (月度指标滞后说明)
+> - 区分先验概率 / 条件概率 / 后验概率\n";
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Public entry point
+// ═════════════════════════════════════════════════════════════════════════════
+
+pub fn render_payload(
+    db: &Connection,
+    _cfg: &Settings,
+    as_of: NaiveDate,
+    notable: &[NotableItem],
+) -> Result<String> {
+    let shanghai = FixedOffset::east_opt(8 * 3600).unwrap();
+    let generated_at = Utc::now()
+        .with_timezone(&shanghai)
+        .format("%Y-%m-%d %H:%M:%S CST")
+        .to_string();
+
+    let date_str = as_of.to_string();
+    std::fs::create_dir_all("reports")?;
+
+    // ── File 1: Macro ─────────────────────────────────────────────────────
+    let macro_md = render_macro(db, &date_str, &generated_at)?;
+    let macro_path = format!("reports/{}_payload_macro.md", as_of);
+    std::fs::write(&macro_path, &macro_md)?;
+    info!(path = %macro_path, bytes = macro_md.len(), "macro payload written");
+
+    // ── File 2: Structural ────────────────────────────────────────────────
+    let structural_md = render_structural(db, &date_str, &generated_at, notable)?;
+    let structural_path = format!("reports/{}_payload_structural.md", as_of);
+    std::fs::write(&structural_path, &structural_md)?;
+    info!(path = %structural_path, bytes = structural_md.len(), "structural payload written");
+
+    // ── File 3: Events ────────────────────────────────────────────────────
+    let events_md = render_events(db, &date_str, &generated_at)?;
+    let events_path = format!("reports/{}_payload_events.md", as_of);
+    std::fs::write(&events_path, &events_md)?;
+    info!(path = %events_path, bytes = events_md.len(), "events payload written");
+
+    // Return the macro path as the "main" payload path (for backward compat)
+    Ok(macro_path)
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// File 1: Macro — 宏观环境
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn render_macro(db: &Connection, date_str: &str, generated_at: &str) -> Result<String> {
+    let mut md = String::with_capacity(32 * 1024);
+
+    writeln!(md, "# A股量化研究 Payload — 宏观环境")?;
+    writeln!(md, "## 生成时间: {}", generated_at)?;
+    writeln!(md, "## 交易日: {}", date_str)?;
+    writeln!(md)?;
+    writeln!(md, "{}", PRECISION_RULES)?;
+
+    // ── 大盘概览 ──────────────────────────────────────────────────────────
+    render_benchmark_overview(&mut md, db, date_str)?;
+
+    // ── HMM 市场状态 ──────────────────────────────────────────────────────
+    render_hmm_state(&mut md, db, date_str)?;
+
+    // ── 波动率HMM ─────────────────────────────────────────────────────────
+    render_vol_hmm(&mut md, db, date_str)?;
+
+    // ── 宏观网关 ──────────────────────────────────────────────────────────
+    render_macro_gate(&mut md, db, date_str)?;
+
+    // ── 宏观数据 ──────────────────────────────────────────────────────────
+    render_macro_data(&mut md, db, date_str)?;
+
+    // ── 北向资金 ──────────────────────────────────────────────────────────
+    render_northbound_flow(&mut md, db, date_str)?;
+
+    // ── 行业资金流向 ──────────────────────────────────────────────────────
+    render_sector_fund_flow(&mut md, db, date_str)?;
+
+    // ── 概念板块热点 ──────────────────────────────────────────────────────
+    render_concept_board(&mut md, db, date_str)?;
+
+    // ── 概念主题聚类 (DeepSeek) ──────────────────────────────────────────
+    render_theme_clusters(&mut md, db, date_str)?;
+
+    // ── ETF期权活跃度 ────────────────────────────────────────────────────
+    render_etf_options(&mut md, db, date_str)?;
+
+    // ── 板块轮动 ──────────────────────────────────────────────────────
+    render_sector_rotation(&mut md, db, date_str)?;
+
+    // ── 跨市场信号 ──────────────────────────────────────────────────────
+    render_cross_market(&mut md, db, date_str)?;
+
+    Ok(md)
+}
+
+fn render_benchmark_overview(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 大盘概览")?;
+    writeln!(md)?;
+
+    let benchmarks = [
+        ("000300.SH", "沪深300"),
+        ("000016.SH", "上证50"),
+        ("399006.SZ", "创业板指"),
+    ];
+
+    let sql = "SELECT close, pct_chg, vol
+               FROM prices
+               WHERE ts_code = ? AND trade_date = (
+                   SELECT MAX(trade_date) FROM prices
+                   WHERE ts_code = ? AND trade_date <= CAST(? AS DATE)
+               )";
+
+    for (code, label) in benchmarks {
+        match db.prepare(sql).and_then(|mut stmt| {
+            stmt.query_row(duckdb::params![code, code, date_str], |row| {
+                Ok((
+                    row.get::<_, Option<f64>>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            })
+        }) {
+            Ok((close, pct_chg, vol)) => {
+                writeln!(
+                    md,
+                    "- **{}** ({}): close={}, pct_chg={}%, vol={}",
+                    label,
+                    code,
+                    fmt_f64(close),
+                    fmt_f64(pct_chg),
+                    fmt_vol(vol),
+                )?;
+            }
+            Err(_) => {
+                writeln!(md, "- **{}** ({}): 数据缺失", label, code)?;
+            }
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_hmm_state(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### HMM 市场状态")?;
+    writeln!(md)?;
+
+    // Query all HMM metrics from analytics
+    let sql = "SELECT metric, value, detail
+               FROM analytics
+               WHERE ts_code = '_MARKET' AND as_of = ? AND module = 'hmm'
+               ORDER BY metric";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, f64, Option<String>)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "- HMM 数据缺失 (样本不足或模块未运行)")?;
+            } else {
+                // Extract regime label from p_bull detail JSON
+                let mut regime_label = String::new();
+                let mut n_samples = 0u64;
+                if let Some((_, _, Some(detail))) = rows.iter().find(|(m, _, _)| m == "p_bull") {
+                    // Parse "regime":"consolidation" from JSON
+                    if let Some(start) = detail.find("\"regime\":\"") {
+                        let rest = &detail[start + 10..];
+                        if let Some(end) = rest.find('"') {
+                            regime_label = rest[..end].to_string();
+                        }
+                    }
+                    if let Some(start) = detail.find("\"n\":") {
+                        let rest = &detail[start + 4..];
+                        let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                        n_samples = num_str.parse().unwrap_or(0);
+                    }
+                }
+
+                for (metric, value, _detail) in &rows {
+                    match metric.as_str() {
+                        "p_bull" => {
+                            if n_samples > 0 {
+                                writeln!(md, "- P(bull) = {:.3} (n={}个交易日)", value, n_samples)?;
+                            } else {
+                                writeln!(md, "- P(bull) = {:.3}", value)?;
+                            }
+                            if !regime_label.is_empty() {
+                                writeln!(md, "- current_regime = {}", regime_label)?;
+                            }
+                        }
+                        "p_ret_positive" => {
+                            writeln!(md, "- p_ret_positive = {:.4}", value)?;
+                        }
+                        "regime_duration" => {
+                            writeln!(md, "- regime_duration = {} 天", *value as i64)?;
+                        }
+                        "brier_score" => writeln!(md, "- brier_score = {:.4}", value)?,
+                        "hit_rate" => writeln!(md, "- hit_rate = {:.3}", value)?,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            writeln!(md, "- HMM 数据缺失")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_vol_hmm(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 波动率HMM (Vol Regime)")?;
+    writeln!(md)?;
+
+    let sql = "SELECT metric, value, detail
+               FROM analytics
+               WHERE ts_code = '_MARKET' AND as_of = ? AND module = 'vol_hmm'
+               ORDER BY metric";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, f64, Option<String>)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "- 波动率HMM 数据缺失")?;
+            } else {
+                // Parse detail from p_high_vol
+                let mut regime_label = String::new();
+                let mut vol_low = 0.0;
+                let mut vol_high = 0.0;
+                let mut n_samples = 0u64;
+                if let Some((_, _, Some(detail))) = rows.iter().find(|(m, _, _)| m == "p_high_vol") {
+                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(detail) {
+                        regime_label = obj.get("regime").and_then(|v| v.as_str())
+                            .unwrap_or("").to_string();
+                        if let Some(arr) = obj.get("vol_approx").and_then(|v| v.as_array()) {
+                            vol_low = arr.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
+                            vol_high = arr.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        }
+                        n_samples = obj.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
+                    }
+                }
+
+                for (metric, value, _) in &rows {
+                    match metric.as_str() {
+                        "p_high_vol" => {
+                            writeln!(md, "- P(high_vol) = {:.3} (n={})", value, n_samples)?;
+                            if !regime_label.is_empty() {
+                                writeln!(md, "- vol_regime = {}", regime_label)?;
+                            }
+                            if vol_low > 0.0 || vol_high > 0.0 {
+                                writeln!(md, "- 典型波动率: low={:.1}%, high={:.1}%", vol_low, vol_high)?;
+                            }
+                        }
+                        "p_high_vol_tomorrow" => {
+                            writeln!(md, "- P(high_vol 明日) = {:.3}", value)?;
+                        }
+                        "rv_gk_20d" => {
+                            writeln!(md, "- RV(GK,20d) = {:.2}% (年化)", value)?;
+                        }
+                        "vol_regime_duration" => {
+                            writeln!(md, "- vol_regime_duration = {} 天", *value as i64)?;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            writeln!(md, "- 波动率HMM 数据缺失")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_macro_gate(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 宏观网关")?;
+    writeln!(md)?;
+
+    let sql = "SELECT metric, value, detail
+               FROM analytics
+               WHERE ts_code = '_MARKET' AND as_of = ? AND module = 'macro_gate'
+               ORDER BY metric";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, f64, Option<String>)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, f64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "- 宏观网关数据缺失")?;
+            } else {
+                for (metric, value, detail) in &rows {
+                    match metric.as_str() {
+                        "gate_multiplier" => {
+                            writeln!(md, "- gate_multiplier = {:.2}", value)?;
+                            // Parse detail JSON if available
+                            if let Some(d) = detail {
+                                if let Ok(obj) = serde_json::from_str::<serde_json::Value>(d) {
+                                    if let Some(vr) = obj.get("vol_regime").and_then(|v| v.as_str())
+                                    {
+                                        writeln!(md, "- 波动率状态 = {}", vr)?;
+                                    }
+                                    if let Some(yc) =
+                                        obj.get("yield_curve").and_then(|v| v.as_str())
+                                    {
+                                        writeln!(md, "- 利差状态 = {}", yc)?;
+                                    }
+                                    if let Some(va) = obj.get("vol_ann").and_then(|v| v.as_f64()) {
+                                        writeln!(md, "- 实现波动率(年化) = {:.2}%", va)?;
+                                    }
+                                    if let Some(sp) = obj.get("spread").and_then(|v| v.as_f64()) {
+                                        writeln!(md, "- LPR-Shibor利差 = {:.3}", sp)?;
+                                    }
+                                }
+                            }
+                        }
+                        "realized_vol_ann" => {
+                            // Already printed via gate_multiplier detail; skip duplication
+                        }
+                        "vol_regime" => {
+                            let label = match *value as i32 {
+                                0 => "calm",
+                                1 => "elevated",
+                                2 => "panic",
+                                _ => "unknown",
+                            };
+                            writeln!(md, "- vol_regime_code = {} ({})", *value as i32, label)?;
+                        }
+                        "yield_curve" => {
+                            let label = match *value as i32 {
+                                0 => "normal",
+                                1 => "flat",
+                                2 => "steep",
+                                _ => "unknown",
+                            };
+                            writeln!(md, "- yield_curve_code = {} ({})", *value as i32, label)?;
+                        }
+                        "market_opt_stress" => {
+                            writeln!(md, "- 期权市场压力 z = {:.2}", value)?;
+                        }
+                        other => {
+                            writeln!(md, "- {} = {:.4}", other, value)?;
+                        }
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            writeln!(md, "- 宏观网关数据缺失")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_macro_data(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 宏观数据")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| 指标 | 系列ID | 最新值 | 日期 | 说明 |"
+    )?;
+    writeln!(md, "|------|--------|--------|------|------|")?;
+
+    // Query the most recent value for each series on or before as_of.
+    // Filter out legacy M00xxxxx series (stale data, never fetched by current pipeline).
+    let sql = "WITH latest AS (
+                   SELECT series_id, series_name, value, date,
+                          ROW_NUMBER() OVER (PARTITION BY series_id ORDER BY date DESC) AS rn
+                   FROM macro_cn
+                   WHERE date <= CAST(? AS DATE)
+                     AND series_id NOT LIKE 'M0%'
+               )
+               SELECT series_id, series_name, value, CAST(date AS VARCHAR)
+               FROM latest
+               WHERE rn = 1
+               ORDER BY series_id";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, Option<String>, Option<f64>, String)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "| (无数据) | - | - | - | - |")?;
+            } else {
+                for (series_id, name, value, date) in &rows {
+                    let cadence = macro_cadence(series_id);
+                    writeln!(
+                        md,
+                        "| {} | {} | {} | {} | {} |",
+                        name.as_deref().unwrap_or(series_id),
+                        series_id,
+                        fmt_f64(value.as_ref().copied()),
+                        date,
+                        cadence,
+                    )?;
+                }
+            }
+        }
+        Err(e) => {
+            warn!(err = %e, "macro_cn query failed");
+            writeln!(md, "| (查询失败) | - | - | - | - |")?;
+        }
+    }
+    writeln!(md)?;
+    writeln!(md, "> 注: 月度指标 (CPI, PPI, PMI, 社融) 通常滞后15-30天发布")?;
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_northbound_flow(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 北向资金 (近5日) — 仅供叙事参考，非量化信号")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| 交易日 | 买入(亿) | 卖出(亿) | 净流入(亿) | 来源 |"
+    )?;
+    writeln!(md, "|--------|----------|----------|------------|------|")?;
+
+    let sql = "SELECT CAST(trade_date AS VARCHAR), buy_amount, sell_amount, net_amount, source
+               FROM northbound_flow
+               WHERE trade_date <= CAST(? AS DATE)
+               ORDER BY trade_date DESC
+               LIMIT 5";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, Option<f64>, Option<f64>, Option<f64>, Option<String>)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "| (无数据) | - | - | - | - |")?;
+            } else {
+                // Check if all 'total' rows have null net_amount
+                let totals_all_null = rows.iter()
+                    .filter(|(_, _, _, _, src)| src.as_deref() == Some("total"))
+                    .all(|(_, _, _, net, _)| net.is_none());
+                for (date, buy, sell, net, source) in &rows {
+                    writeln!(
+                        md,
+                        "| {} | {} | {} | {} | {} |",
+                        date,
+                        fmt_f64_yi(*buy),
+                        fmt_f64_yi(*sell),
+                        fmt_f64_yi(*net),
+                        source.as_deref().unwrap_or("-"),
+                    )?;
+                }
+                if totals_all_null {
+                    writeln!(md)?;
+                    writeln!(md, "> ⚠ 北向资金净流入数据为空 — Tushare moneyflow_hsgt 返回null")?;
+                }
+            }
+        }
+        Err(e) => {
+            warn!(err = %e, "northbound_flow query failed");
+            writeln!(md, "| (查询失败) | - | - | - | - |")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_sector_fund_flow(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 行业资金流向 (AKShare)")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| 行业 | 涨跌幅% | 主力净流入(亿) | 主力净占比% |"
+    )?;
+    writeln!(md, "|------|---------|---------------|------------|")?;
+
+    let sql = "SELECT sector_name, pct_chg, main_net_in, main_net_pct
+               FROM sector_fund_flow
+               WHERE trade_date = (
+                   SELECT MAX(trade_date) FROM sector_fund_flow
+                   WHERE trade_date <= CAST(? AS DATE)
+               )
+               ORDER BY ABS(main_net_in) DESC
+               LIMIT 10";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, Option<f64>, Option<f64>, Option<f64>)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "| (无数据) | - | - | - |")?;
+            } else {
+                for (name, pct, net_in, net_pct) in &rows {
+                    writeln!(
+                        md,
+                        "| {} | {} | {} | {} |",
+                        name,
+                        fmt_pct(*pct),
+                        fmt_f64_yi(*net_in),
+                        fmt_pct(*net_pct),
+                    )?;
+                }
+            }
+        }
+        Err(e) => {
+            warn!(err = %e, "sector_fund_flow query failed");
+            writeln!(md, "| (查询失败) | - | - | - |")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_concept_board(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 概念板块热点 (AKShare)")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| 概念 | 涨跌幅% | 上涨/下跌 | 领涨股 |"
+    )?;
+    writeln!(md, "|------|---------|-----------|--------|")?;
+
+    let sql = "SELECT board_name, pct_chg, up_count, down_count, lead_stock
+               FROM concept_board
+               WHERE trade_date = (
+                   SELECT MAX(trade_date) FROM concept_board
+                   WHERE trade_date <= CAST(? AS DATE)
+               )
+               ORDER BY pct_chg DESC
+               LIMIT 10";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, Option<f64>, Option<i32>, Option<i32>, Option<String>)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<i32>>(2)?,
+                        row.get::<_, Option<i32>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "| (无数据) | - | - | - |")?;
+            } else {
+                for (name, pct, up, down, lead) in &rows {
+                    writeln!(
+                        md,
+                        "| {} | {} | {}/{} | {} |",
+                        name,
+                        fmt_pct(*pct),
+                        up.unwrap_or(0),
+                        down.unwrap_or(0),
+                        lead.as_deref().unwrap_or("-"),
+                    )?;
+                }
+            }
+        }
+        Err(e) => {
+            warn!(err = %e, "concept_board query failed");
+            writeln!(md, "| (查询失败) | - | - | - |")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_theme_clusters(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 概念主题聚类 (DeepSeek)")?;
+    writeln!(md)?;
+
+    let sql = "SELECT theme_name, description, boards, avg_pct_chg
+               FROM theme_clusters
+               WHERE trade_date = (
+                   SELECT MAX(trade_date) FROM theme_clusters
+                   WHERE trade_date <= CAST(? AS DATE)
+               )
+               ORDER BY avg_pct_chg DESC";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, Option<String>, Option<String>, Option<f64>)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "- (未生成主题聚类)")?;
+            } else {
+                for (name, desc, boards_json, avg_pct) in &rows {
+                    writeln!(
+                        md,
+                        "**{} ({:+.2}%)**",
+                        name,
+                        avg_pct.unwrap_or(0.0),
+                    )?;
+                    if let Some(d) = desc {
+                        writeln!(md, "  {}", d)?;
+                    }
+                    if let Some(bj) = boards_json {
+                        if let Ok(boards) = serde_json::from_str::<Vec<String>>(bj) {
+                            writeln!(md, "  板块: {}", boards.join("、"))?;
+                        }
+                    }
+                    writeln!(md)?;
+                }
+            }
+        }
+        Err(_) => {
+            writeln!(md, "- (theme_clusters表不可用)")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_etf_options(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### ETF期权活跃度")?;
+    writeln!(md)?;
+
+    let sql = "SELECT
+                   SUM(COALESCE(vol, 0)) AS total_vol,
+                   SUM(COALESCE(oi, 0)) AS total_oi,
+                   SUM(COALESCE(amount, 0)) AS total_amount,
+                   COUNT(*) AS n_contracts
+               FROM opt_daily
+               WHERE trade_date = (
+                   SELECT MAX(trade_date) FROM opt_daily
+                   WHERE trade_date <= CAST(? AS DATE)
+               )";
+
+    match db.prepare(sql).and_then(|mut stmt| {
+        stmt.query_row(duckdb::params![date_str], |row| {
+            Ok((
+                row.get::<_, Option<f64>>(0)?,
+                row.get::<_, Option<f64>>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
+    }) {
+        Ok((vol, oi, amount, n)) => {
+            writeln!(md, "- 合约数: {}", n.unwrap_or(0))?;
+            writeln!(md, "- 总成交量: {}", fmt_f64(vol))?;
+            writeln!(md, "- 总持仓量: {}", fmt_f64(oi))?;
+            writeln!(md, "- 总成交额: {}", fmt_f64(amount))?;
+            if let (Some(v), Some(o)) = (vol, oi) {
+                if o > 1e-6 {
+                    writeln!(md, "- 换手率 (vol/oi): {:.2}", v / o)?;
+                }
+            }
+        }
+        Err(_) => {
+            writeln!(md, "- ETF期权数据缺失")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_sector_rotation(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 板块轮动（行业动量）")?;
+    writeln!(md)?;
+
+    // Query sector rotation data from analytics
+    let sql = "SELECT ts_code, value, detail FROM analytics
+               WHERE as_of = ? AND module = 'sector_rotation' AND metric = 'ret_5d'
+               ORDER BY value DESC";
+
+    let mut stmt = match db.prepare(sql) {
+        Ok(s) => s,
+        Err(_) => { writeln!(md, "无板块轮动数据")?; writeln!(md)?; return Ok(()); }
+    };
+
+    let rows: Vec<(String, f64, Option<String>)> = match stmt
+        .query_map(duckdb::params![date_str], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1).unwrap_or(0.0),
+                row.get::<_, Option<String>>(2).ok().flatten(),
+            ))
+        }) {
+        Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+        Err(_) => Vec::new(),
+    };
+
+    if rows.is_empty() {
+        writeln!(md, "无板块轮动数据（stock_basic.industry 为空？）")?;
+        writeln!(md)?;
+        return Ok(());
+    }
+
+    // Show top-10 (strongest momentum) and bottom-10 (weakest)
+    writeln!(md, "**领涨行业 (Top 10)**")?;
+    writeln!(md)?;
+    writeln!(md, "| 行业 | 5D均涨幅 | 20D均涨幅 | 资金流分 | 动量z | 轮动分 | 股票数 |")?;
+    writeln!(md, "|------|---------|---------|---------|------|-------|--------|")?;
+
+    let top10 = rows.iter().take(10);
+    for (ts_code, ret_5d, detail) in top10 {
+        let industry = ts_code.strip_prefix("_SECTOR_").unwrap_or(ts_code);
+        if let Some(d) = detail {
+            if let Ok(j) = serde_json::from_str::<serde_json::Value>(d) {
+                let ret_20d = j.get("ret_20d").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let flow = j.get("flow_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let mom_z = j.get("momentum_z").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let n = j.get("n_stocks").and_then(|v| v.as_i64()).unwrap_or(0);
+
+                // Query rotation_score
+                let rot = db.query_row(
+                    "SELECT value FROM analytics WHERE ts_code = ? AND as_of = ? AND module = 'sector_rotation' AND metric = 'rotation_score'",
+                    duckdb::params![ts_code, date_str],
+                    |r| r.get::<_, f64>(0),
+                ).unwrap_or(0.0);
+
+                writeln!(
+                    md, "| {} | {:.1}% | {:.1}% | {:.3} | {:.2} | {:.2} | {} |",
+                    industry, ret_5d, ret_20d, flow, mom_z, rot, n
+                )?;
+            }
+        }
+    }
+    writeln!(md)?;
+
+    if rows.len() > 10 {
+        writeln!(md, "**领跌行业 (Bottom 5)**")?;
+        writeln!(md)?;
+        writeln!(md, "| 行业 | 5D均涨幅 | 20D均涨幅 | 资金流分 | 动量z | 股票数 |")?;
+        writeln!(md, "|------|---------|---------|---------|------|--------|")?;
+
+        let bot5 = rows.iter().rev().take(5);
+        for (ts_code, ret_5d, detail) in bot5 {
+            let industry = ts_code.strip_prefix("_SECTOR_").unwrap_or(ts_code);
+            if let Some(d) = detail {
+                if let Ok(j) = serde_json::from_str::<serde_json::Value>(d) {
+                    let ret_20d = j.get("ret_20d").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let flow = j.get("flow_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let mom_z = j.get("momentum_z").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let n = j.get("n_stocks").and_then(|v| v.as_i64()).unwrap_or(0);
+                    writeln!(
+                        md, "| {} | {:.1}% | {:.1}% | {:.3} | {:.2} | {} |",
+                        industry, ret_5d, ret_20d, flow, mom_z, n
+                    )?;
+                }
+            }
+        }
+        writeln!(md)?;
+    }
+
+    Ok(())
+}
+
+fn render_cross_market(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 跨市场信号")?;
+    writeln!(md)?;
+
+    // ── 黄金 (SGE) ─────────────────────────────────────────────────────────
+    // Compute pct_change locally (Tushare pct_change is unreliable for SGE).
+    writeln!(md, "**黄金 (上海金交所)**")?;
+    let sge_sql = "WITH ranked AS (
+                       SELECT ts_code, trade_date, close, vol,
+                              LAG(close) OVER (PARTITION BY ts_code ORDER BY trade_date) AS prev_close,
+                              ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
+                       FROM sge_daily
+                       WHERE trade_date <= CAST(? AS DATE)
+                   )
+                   SELECT ts_code, close,
+                          CASE WHEN prev_close > 0
+                               THEN (close / prev_close - 1.0) * 100.0
+                               ELSE NULL END AS pct_chg,
+                          vol
+                   FROM ranked
+                   WHERE rn = 1
+                   ORDER BY vol DESC
+                   LIMIT 3";
+
+    match db.prepare(sge_sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, Option<f64>, Option<f64>, Option<f64>)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "- 数据缺失")?;
+            } else {
+                for (code, close, pct, vol) in &rows {
+                    writeln!(
+                        md,
+                        "- {}: close={}, pct_chg={}%, vol={}",
+                        code,
+                        fmt_f64(*close),
+                        fmt_f64(*pct),
+                        fmt_f64(*vol),
+                    )?;
+                }
+            }
+        }
+        Err(_) => writeln!(md, "- 黄金数据缺失")?,
+    }
+    writeln!(md)?;
+
+    // ── 可转债 ────────────────────────────────────────────────────────────
+    writeln!(md, "**可转债 (聚合)**")?;
+    let cb_sql = "SELECT
+                      COUNT(*) AS n,
+                      AVG(cb_over_rate) AS avg_premium,
+                      SUM(amount) AS total_amount,
+                      AVG(CASE WHEN close > 0 AND cb_value > 0 THEN close / cb_value - 1.0 ELSE NULL END) AS avg_cb_premium
+                  FROM cb_daily
+                  WHERE trade_date = (
+                      SELECT MAX(trade_date) FROM cb_daily
+                      WHERE trade_date <= CAST(? AS DATE)
+                  )";
+
+    match db.prepare(cb_sql).and_then(|mut stmt| {
+        stmt.query_row(duckdb::params![date_str], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<f64>>(1)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, Option<f64>>(3)?,
+            ))
+        })
+    }) {
+        Ok((n, avg_prem, total_amt, avg_cb_prem)) => {
+            writeln!(md, "- 交易数量: {}", n.unwrap_or(0))?;
+            writeln!(md, "- 平均转股溢价率: {}%", fmt_f64(avg_prem))?;
+            writeln!(md, "- 总成交额: {}", fmt_f64(total_amt))?;
+            writeln!(md, "- 平均价格/转股价值溢价: {}%", fmt_pct(avg_cb_prem))?;
+        }
+        Err(_) => writeln!(md, "- 可转债数据缺失")?,
+    }
+    writeln!(md)?;
+
+    // ── 期货 (top movers) ────────────────────────────────────────────────
+    // Deduplicate: generic/continuous contracts (LL.DCE, VL.DCE) share
+    // identical close/vol/oi with specific dated contracts (L2603.DCE).
+    // Group by (close, vol, oi) and prefer the specific contract (has digits).
+    // Also filter out illiquid contracts (vol < 100).
+    writeln!(md, "**期货 (涨跌幅前5)**")?;
+    let fut_sql = "WITH latest AS (
+                       SELECT ts_code, close, settle, vol, oi,
+                              CASE WHEN settle > 0
+                                   THEN (close / settle - 1.0) * 100.0
+                                   ELSE 0 END AS pct_chg,
+                              regexp_matches(ts_code, '\\d{4}\\.') AS is_specific
+                       FROM fut_daily
+                       WHERE trade_date = (
+                           SELECT MAX(trade_date) FROM fut_daily
+                           WHERE trade_date <= CAST(? AS DATE)
+                       )
+                       AND COALESCE(vol, 0) > 100
+                   ),
+                   deduped AS (
+                       SELECT *,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY close, vol, oi
+                                  ORDER BY is_specific DESC, ts_code
+                              ) AS rn
+                       FROM latest
+                   )
+                   SELECT ts_code, close, settle, pct_chg, vol, oi
+                   FROM deduped
+                   WHERE rn = 1
+                   ORDER BY ABS(pct_chg) DESC
+                   LIMIT 5";
+
+    match db.prepare(fut_sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<f64>>(4)?,
+                        row.get::<_, Option<f64>>(5)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "- 数据缺失")?;
+            } else {
+                writeln!(md, "| 合约 | 收盘 | 涨跌% | 成交量 | 持仓量 |")?;
+                writeln!(md, "|------|------|-------|--------|--------|")?;
+                for (code, close, _settle, pct, vol, oi) in &rows {
+                    writeln!(
+                        md,
+                        "| {} | {} | {} | {} | {} |",
+                        code,
+                        fmt_f64(*close),
+                        fmt_pct(*pct),
+                        fmt_f64(*vol),
+                        fmt_f64(*oi),
+                    )?;
+                }
+            }
+        }
+        Err(_) => writeln!(md, "- 期货数据缺失")?,
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// File 2: Structural — 结构化信号
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn render_structural(
+    db: &Connection,
+    date_str: &str,
+    generated_at: &str,
+    notable: &[NotableItem],
+) -> Result<String> {
+    let mut md = String::with_capacity(64 * 1024);
+
+    writeln!(md, "# A股量化研究 Payload — 结构化信号")?;
+    writeln!(md, "## 生成时间: {}", generated_at)?;
+    writeln!(md, "## 交易日: {}", date_str)?;
+    writeln!(md)?;
+    writeln!(md, "{}", PRECISION_RULES)?;
+
+    // ── Report lanes ──────────────────────────────────────────────────────
+    writeln!(md, "### 报告分层总览")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "- 共 {} 个结构信号，按 `CORE BOOK / THEME ROTATION / RADAR` 三层组织，避免把主题轮动与主报告主线混在一起。",
+        notable.len(),
+    )?;
+    writeln!(
+        md,
+        "- `CORE BOOK` = 主报告正文，优先承载高置信、方向明确、可代表市场主线的信号。"
+    )?;
+    writeln!(
+        md,
+        "- `THEME ROTATION` = 主题轮动与资金主线观察，适合写成板块/篮子，不宜直接当作单一主书结论。"
+    )?;
+    writeln!(
+        md,
+        "- `RADAR` = 边缘信号与持续跟踪名单，只保留最值得复核的残余观察项。"
+    )?;
+    writeln!(md)?;
+
+    for bucket in ["CORE BOOK", "THEME ROTATION", "RADAR"] {
+        let bucket_items: Vec<&NotableItem> = notable
+            .iter()
+            .filter(|item| item.report_bucket == bucket)
+            .collect();
+        if bucket_items.is_empty() {
+            continue;
+        }
+
+        writeln!(md, "### {}", bucket)?;
+        writeln!(md)?;
+        writeln!(md, "- {}", report_bucket_description(bucket))?;
+        writeln!(md, "- 条目数: {}", bucket_items.len())?;
+        writeln!(md)?;
+
+        for item in bucket_items {
+            render_notable_item(&mut md, db, date_str, item)?;
+        }
+    }
+
+    render_report_bucket_distribution(&mut md, notable)?;
+
+    // ── Confidence Distribution ──────────────────────────────────────────
+    render_confidence_distribution(&mut md, notable)?;
+
+    Ok(md)
+}
+
+fn render_notable_item(
+    md: &mut String,
+    db: &Connection,
+    date_str: &str,
+    item: &NotableItem,
+) -> Result<()> {
+    writeln!(
+        md,
+        "#### {} {} — {} [{}] | {}",
+        item.ts_code,
+        if item.name.is_empty() { "" } else { &item.name },
+        item.signal.confidence,
+        item.signal.direction,
+        item.report_bucket,
+    )?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "- **报告层级**: {}",
+        item.report_bucket,
+    )?;
+    writeln!(
+        md,
+        "- **层级定位**: {}",
+        item.report_reason,
+    )?;
+
+    let detail = &item.detail;
+
+    // ── 价格 ──────────────────────────────────────────────────────────────
+    let ret_5d = detail.get("ret_5d").and_then(|v| v.as_f64());
+    let ret_20d = detail.get("ret_20d").and_then(|v| v.as_f64());
+
+    // Fetch latest close + valuation from prices + daily_basic
+    let (close, pe, pb, total_mv) = query_stock_valuation(db, &item.ts_code, date_str);
+
+    writeln!(
+        md,
+        "- **价格**: 5D ret={}%, 20D ret={}%, 最新价={}",
+        fmt_opt_f64(ret_5d, 2),
+        fmt_opt_f64(ret_20d, 2),
+        fmt_f64(close),
+    )?;
+    writeln!(
+        md,
+        "- **估值**: PE={}, PB={}, 总市值={}亿",
+        fmt_f64(pe),
+        fmt_f64(pb),
+        fmt_f64_yi(total_mv),
+    )?;
+
+    // ── 动量 ──────────────────────────────────────────────────────────────
+    let trend_prob = detail.get("trend_prob").and_then(|v| v.as_f64());
+    let trend_prob_n = detail.get("trend_prob_n").and_then(|v| v.as_f64());
+
+    // Query regime and vol_bucket from analytics
+    let (regime, vol_bucket, ci_low, ci_high) =
+        query_momentum_detail(db, &item.ts_code, date_str);
+
+    writeln!(
+        md,
+        "- **动量**: trend_prob={} [{}, {}] (n={}, regime={}, vol_bucket={})",
+        fmt_opt_f64(trend_prob, 3),
+        fmt_opt_f64(ci_low, 3),
+        fmt_opt_f64(ci_high, 3),
+        fmt_opt_f64(trend_prob_n, 0),
+        regime.as_deref().unwrap_or("-"),
+        vol_bucket.as_deref().unwrap_or("-"),
+    )?;
+
+    // ── 信息分 (flow components) ──────────────────────────────────────────
+    let flow_components = query_flow_components(db, &item.ts_code, date_str);
+
+    writeln!(
+        md,
+        "- **信息分**: information_score={:.3}",
+        item.flow_score
+    )?;
+    for (metric, value) in &flow_components {
+        match metric.as_str() {
+            "large_flow_z" => writeln!(md, "  - 大单流向 z={:.2}", value)?,
+            "tape_z" => writeln!(md, "  - 异动信号 z={:.2}", value)?,
+            "margin_z" => writeln!(md, "  - 融资 z={:.2}", value)?,
+            "block_z" => writeln!(md, "  - 大宗 z={:.2}", value)?,
+            "insider_z" => writeln!(md, "  - 内部人 z={:.2}", value)?,
+            "event_clock" => writeln!(md, "  - 事件时钟={:.2}", value)?,
+            "market_vol_z" => writeln!(md, "  - 市场波动 z={:.2}", value)?,
+            _ => {}
+        }
+    }
+
+    // ── 业绩预告 ──────────────────────────────────────────────────────────
+    let p_upside = detail.get("p_upside").and_then(|v| v.as_f64());
+    if p_upside.is_some() {
+        let forecast = query_latest_forecast(db, &item.ts_code, date_str);
+        if let Some((ftype, p_min, p_max)) = forecast {
+            writeln!(
+                md,
+                "- **业绩预告**: type={}, p_upside={}, p_change=[{}%, {}%]",
+                ftype,
+                fmt_opt_f64(p_upside, 3),
+                fmt_opt_f64(p_min, 1),
+                fmt_opt_f64(p_max, 1),
+            )?;
+        }
+    }
+
+    // ── 解禁 ──────────────────────────────────────────────────────────────
+    let p_drop = detail.get("p_drop").and_then(|v| v.as_f64());
+    let unlock_days = detail.get("unlock_days").and_then(|v| v.as_f64());
+    let float_ratio = detail.get("float_ratio").and_then(|v| v.as_f64());
+    if let (Some(days), Some(ratio), Some(pd)) = (unlock_days, float_ratio, p_drop) {
+        writeln!(
+            md,
+            "- **解禁**: days={:.0}, ratio={:.2}%, p_drop={:.3}",
+            days, ratio, pd,
+        )?;
+    }
+
+    // ── 综合 ──────────────────────────────────────────────────────────────
+    writeln!(
+        md,
+        "- **综合**: composite={:.3}, magnitude={:.3}, momentum={:.3}, event={:.3}, flow={:.3}, cross_asset={:.3}",
+        item.composite_score,
+        item.magnitude_score,
+        item.momentum_score,
+        item.event_score,
+        item.flow_score,
+        item.cross_asset_score,
+    )?;
+
+    // ── 资金流 (moneyflow) ───────────────────────────────────────────────
+    let mf = query_moneyflow(db, &item.ts_code, date_str);
+    if let Some((net_mf, elg_net)) = mf {
+        writeln!(
+            md,
+            "- **资金流**: net_mf_amount={:.2}万, 超大单净流入={:.2}万",
+            net_mf, elg_net,
+        )?;
+    }
+
+    // ── 融资 (margin_detail) ────────────────────────────────────────────
+    let margin = query_margin_detail(db, &item.ts_code, date_str);
+    if let Some((rzye, delta_rzye)) = margin {
+        writeln!(
+            md,
+            "- **融资**: rzye={:.2}万, 5D变化={:.2}万",
+            rzye, delta_rzye,
+        )?;
+    }
+
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_report_bucket_distribution(md: &mut String, notable: &[NotableItem]) -> Result<()> {
+    writeln!(md, "### 报告层级分布")?;
+    writeln!(md)?;
+    writeln!(md, "| 层级 | 数量 | 占比 |")?;
+    writeln!(md, "|------|------|------|")?;
+
+    let total = notable.len() as f64;
+    let mut counts = [0usize; 3]; // CORE BOOK, THEME ROTATION, RADAR
+    for item in notable {
+        match item.report_bucket.as_str() {
+            "CORE BOOK" => counts[0] += 1,
+            "THEME ROTATION" => counts[1] += 1,
+            _ => counts[2] += 1,
+        }
+    }
+
+    let labels = ["CORE BOOK", "THEME ROTATION", "RADAR"];
+    for (i, label) in labels.iter().enumerate() {
+        let pct = if total > 0.0 {
+            counts[i] as f64 / total * 100.0
+        } else {
+            0.0
+        };
+        writeln!(md, "| {} | {} | {:.1}% |", label, counts[i], pct)?;
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_confidence_distribution(md: &mut String, notable: &[NotableItem]) -> Result<()> {
+    writeln!(md, "### 综合评分分布")?;
+    writeln!(md)?;
+    writeln!(md, "| 置信度 | 数量 | 占比 |")?;
+    writeln!(md, "|--------|------|------|")?;
+
+    let total = notable.len() as f64;
+    let mut counts = [0usize; 4]; // HIGH, MODERATE, WATCH, LOW
+    for item in notable {
+        match item.signal.confidence.as_str() {
+            "HIGH" => counts[0] += 1,
+            "MODERATE" => counts[1] += 1,
+            "WATCH" => counts[2] += 1,
+            _ => counts[3] += 1,
+        }
+    }
+
+    let labels = ["HIGH", "MODERATE", "WATCH", "LOW"];
+    for (i, label) in labels.iter().enumerate() {
+        let pct = if total > 0.0 {
+            counts[i] as f64 / total * 100.0
+        } else {
+            0.0
+        };
+        writeln!(md, "| {} | {} | {:.1}% |", label, counts[i], pct)?;
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn report_bucket_description(bucket: &str) -> &'static str {
+    match bucket {
+        "CORE BOOK" => "主报告正文层。优先看这里来形成 house view。",
+        "THEME ROTATION" => "主题轮动层。更适合写成行业/概念/资金主线，而不是单一主书押注。",
+        _ => "雷达层。用于保留边缘但仍值得持续跟踪的信号。",
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// File 3: Events — 事件与新闻
+// ═════════════════════════════════════════════════════════════════════════════
+
+fn render_events(db: &Connection, date_str: &str, generated_at: &str) -> Result<String> {
+    let mut md = String::with_capacity(32 * 1024);
+
+    writeln!(md, "# A股量化研究 Payload — 事件与新闻")?;
+    writeln!(md, "## 生成时间: {}", generated_at)?;
+    writeln!(md, "## 交易日: {}", date_str)?;
+    writeln!(md)?;
+    writeln!(md, "{}", PRECISION_RULES)?;
+
+    // ── 近期业绩预告 ──────────────────────────────────────────────────────
+    render_recent_forecasts(&mut md, db, date_str)?;
+
+    // ── 即将解禁 ──────────────────────────────────────────────────────────
+    render_upcoming_unlocks(&mut md, db, date_str)?;
+
+    // ── 财报披露日历 ──────────────────────────────────────────────────────
+    render_disclosure_calendar(&mut md, db, date_str)?;
+
+    // ── 个股新闻 (DeepSeek enriched) ──────────────────────────────────────
+    render_enriched_news(&mut md, db, date_str)?;
+
+    // ── 新闻情感汇总 ──────────────────────────────────────────────────────
+    render_sentiment_summary(&mut md, db, date_str)?;
+
+    // ── 股东增减持 ──────────────────────────────────────────────────────
+    render_holder_trades(&mut md, db, date_str)?;
+
+    // ── 回购 ──────────────────────────────────────────────────────────────
+    render_repurchase(&mut md, db, date_str)?;
+
+    Ok(md)
+}
+
+fn render_recent_forecasts(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 近期业绩预告 (7日内)")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| 代码 | 公告日 | 类型 | 变动幅度 | 摘要 |"
+    )?;
+    writeln!(md, "|------|--------|------|----------|------|")?;
+
+    let sql = "SELECT ts_code, CAST(ann_date AS VARCHAR), forecast_type,
+                      CONCAT(COALESCE(CAST(ROUND(p_change_min, 1) AS VARCHAR), '?'),
+                             '% ~ ',
+                             COALESCE(CAST(ROUND(p_change_max, 1) AS VARCHAR), '?'),
+                             '%') AS change_range,
+                      COALESCE(summary, '-')
+               FROM forecast
+               WHERE ann_date >= CAST(? AS DATE) - INTERVAL '7 days'
+                 AND ann_date <= CAST(? AS DATE)
+               ORDER BY ann_date DESC
+               LIMIT 30";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, String, String, String, String)> = stmt
+                .query_map(duckdb::params![date_str, date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "| (近7日无业绩预告) | - | - | - | - |")?;
+            } else {
+                for (code, ann, ftype, range, summary) in &rows {
+                    // Truncate summary to 50 chars
+                    let short_summary: String = summary.chars().take(50).collect();
+                    writeln!(
+                        md,
+                        "| {} | {} | {} | {} | {} |",
+                        code, ann, ftype, range, short_summary,
+                    )?;
+                }
+            }
+        }
+        Err(e) => {
+            warn!(err = %e, "forecast query failed");
+            writeln!(md, "| (查询失败) | - | - | - | - |")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_upcoming_unlocks(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 即将解禁 (30日内)")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| 代码 | 解禁日 | 解禁比例% | 解禁股数(万股) | 持有人 | 类型 |"
+    )?;
+    writeln!(md, "|------|--------|----------|---------------|--------|------|")?;
+
+    let sql = "SELECT ts_code, CAST(float_date AS VARCHAR), float_ratio,
+                      float_share, holder_name, share_type
+               FROM share_unlock
+               WHERE float_date >= CAST(? AS DATE)
+                 AND float_date <= CAST(? AS DATE) + INTERVAL '30 days'
+               ORDER BY float_date, float_ratio DESC
+               LIMIT 30";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(
+                String,
+                String,
+                Option<f64>,
+                Option<f64>,
+                Option<String>,
+                Option<String>,
+            )> = stmt
+                .query_map(duckdb::params![date_str, date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<f64>>(2)?,
+                        row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "| (30日内无解禁) | - | - | - | - | - |")?;
+            } else {
+                for (code, fdate, ratio, shares, holder, stype) in &rows {
+                    writeln!(
+                        md,
+                        "| {} | {} | {} | {} | {} | {} |",
+                        code,
+                        fdate,
+                        fmt_pct(*ratio),
+                        fmt_f64_wan(*shares),
+                        holder.as_deref().unwrap_or("-"),
+                        stype.as_deref().unwrap_or("-"),
+                    )?;
+                }
+            }
+        }
+        Err(e) => {
+            warn!(err = %e, "share_unlock query failed");
+            writeln!(md, "| (查询失败) | - | - | - | - | - |")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_disclosure_calendar(md: &mut String, db: &Connection, _date_str: &str) -> Result<()> {
+    writeln!(md, "### 财报披露日历")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| 代码 | 报告期 | 预约日 | 实际日 |"
+    )?;
+    writeln!(md, "|------|--------|--------|--------|")?;
+
+    // Get the latest quarter end date
+    let sql = "SELECT ts_code, CAST(end_date AS VARCHAR),
+                      COALESCE(pre_date, '-'),
+                      COALESCE(actual_date, '-')
+               FROM disclosure_date
+               WHERE end_date = (
+                   SELECT MAX(end_date) FROM disclosure_date
+               )
+               ORDER BY COALESCE(actual_date, pre_date, '9999')
+               LIMIT 30";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, String, String, String)> = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "| (无数据) | - | - | - |")?;
+            } else {
+                for (code, end, pre, actual) in &rows {
+                    writeln!(md, "| {} | {} | {} | {} |", code, end, pre, actual)?;
+                }
+            }
+        }
+        Err(e) => {
+            warn!(err = %e, "disclosure_date query failed");
+            writeln!(md, "| (查询失败) | - | - | - |")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_enriched_news(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 个股新闻 (DeepSeek enriched)")?;
+    writeln!(md)?;
+
+    let sql = "SELECT ts_code, published_at, headline, event_type, sentiment,
+                      relevance, summary_one_line
+               FROM news_enriched
+               WHERE published_at >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS VARCHAR)
+               ORDER BY relevance DESC, published_at DESC
+               LIMIT 40";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<f64>,
+                Option<String>,
+            )> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, Option<f64>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "- (近3日无enriched新闻)")?;
+            } else {
+                for (code, pub_at, headline, event_type, sentiment, relevance, summary) in &rows {
+                    writeln!(
+                        md,
+                        "- **{}** [{}] [{}] rel={:.2}",
+                        code,
+                        event_type.as_deref().unwrap_or("other"),
+                        sentiment.as_deref().unwrap_or("neutral"),
+                        relevance.unwrap_or(0.0),
+                    )?;
+                    writeln!(
+                        md,
+                        "  {}",
+                        summary.as_deref().unwrap_or(headline.as_deref().unwrap_or("-")),
+                    )?;
+                    writeln!(md, "  时间: {}", pub_at)?;
+                }
+            }
+        }
+        Err(_) => {
+            // news_enriched table may not exist yet — fall back to stock_news
+            writeln!(md, "*(enriched表不可用, 回退到原始新闻)*")?;
+            writeln!(md)?;
+            render_raw_stock_news(md, db, date_str)?;
+        }
+    }
+    writeln!(md)?;
+
+    // Also render raw stock_news for supplementary coverage
+    writeln!(md, "### 原始新闻 (AKShare stock_news, 近3日)")?;
+    writeln!(md)?;
+    render_raw_stock_news(md, db, date_str)?;
+
+    Ok(())
+}
+
+fn render_raw_stock_news(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    let sql = "SELECT ts_code, publish_time, title, source
+               FROM stock_news
+               WHERE publish_time >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS VARCHAR)
+               ORDER BY publish_time DESC
+               LIMIT 30";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, String, String, Option<String>)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "- (无原始新闻)")?;
+            } else {
+                for (code, pub_time, title, source) in &rows {
+                    writeln!(
+                        md,
+                        "- **{}**: {} — 来源: {}, 时间: {}",
+                        code,
+                        title,
+                        source.as_deref().unwrap_or("-"),
+                        pub_time,
+                    )?;
+                }
+            }
+        }
+        Err(_) => {
+            writeln!(md, "- (stock_news表不可用)")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_sentiment_summary(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 新闻情感汇总 (DeepSeek)")?;
+    writeln!(md)?;
+
+    let sql = "SELECT ts_code,
+                      COUNT(CASE WHEN sentiment = 'positive' THEN 1 END) AS pos,
+                      COUNT(CASE WHEN sentiment = 'neutral' THEN 1 END) AS neu,
+                      COUNT(CASE WHEN sentiment = 'negative' THEN 1 END) AS neg,
+                      COUNT(CASE WHEN sentiment = 'negative'
+                                  AND sentiment_confidence >= 0.7 THEN 1 END) AS high_neg
+               FROM news_enriched
+               WHERE published_at >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS VARCHAR)
+               GROUP BY ts_code
+               ORDER BY neg DESC, high_neg DESC";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, i64, i64, i64, i64)> = stmt
+                .query_map(duckdb::params![date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "- (无情感数据)")?;
+            } else {
+                writeln!(md, "| 代码 | 正面 | 中性 | 负面 | 高置信负面 |")?;
+                writeln!(md, "|------|------|------|------|-----------|")?;
+                for (code, pos, neu, neg, high_neg) in &rows {
+                    writeln!(
+                        md,
+                        "| {} | {} | {} | {} | {} |",
+                        code, pos, neu, neg, high_neg,
+                    )?;
+                }
+            }
+        }
+        Err(_) => {
+            writeln!(md, "- (news_enriched表不可用)")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_holder_trades(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 股东增减持 (近7日)")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| 代码 | 公告日 | 股东 | 类型 | 增减持 | 变动比例% | 变动后持股% |"
+    )?;
+    writeln!(md, "|------|--------|------|------|--------|----------|------------|")?;
+
+    let sql = "SELECT ts_code, CAST(ann_date AS VARCHAR), holder_name,
+                      COALESCE(holder_type, '-'),
+                      COALESCE(in_de, '-'),
+                      change_ratio,
+                      after_ratio
+               FROM stk_holdertrade
+               WHERE ann_date >= CAST(? AS DATE) - INTERVAL '7 days'
+                 AND ann_date <= CAST(? AS DATE)
+               ORDER BY ann_date DESC, ABS(COALESCE(change_ratio, 0)) DESC
+               LIMIT 20";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(
+                String,
+                String,
+                String,
+                String,
+                String,
+                Option<f64>,
+                Option<f64>,
+            )> = stmt
+                .query_map(duckdb::params![date_str, date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<f64>>(5)?,
+                        row.get::<_, Option<f64>>(6)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "| (近7日无增减持) | - | - | - | - | - | - |")?;
+            } else {
+                for (code, ann, holder, htype, in_de, change_ratio, after_ratio) in &rows {
+                    // Truncate holder name to 10 chars
+                    let short_holder: String = holder.chars().take(10).collect();
+                    writeln!(
+                        md,
+                        "| {} | {} | {} | {} | {} | {} | {} |",
+                        code,
+                        ann,
+                        short_holder,
+                        htype,
+                        in_de,
+                        fmt_pct(*change_ratio),
+                        fmt_pct(*after_ratio),
+                    )?;
+                }
+            }
+        }
+        Err(e) => {
+            warn!(err = %e, "stk_holdertrade query failed");
+            writeln!(md, "| (查询失败) | - | - | - | - | - | - |")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_repurchase(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 回购 (近7日)")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| 代码 | 公告日 | 进度 | 到期日 | 数量(万股) | 金额(万) |"
+    )?;
+    writeln!(md, "|------|--------|------|--------|-----------|---------|")?;
+
+    let sql = "SELECT ts_code, CAST(ann_date AS VARCHAR),
+                      COALESCE(proc, '-'),
+                      COALESCE(exp_date, '-'),
+                      vol, amount
+               FROM repurchase
+               WHERE ann_date >= CAST(? AS DATE) - INTERVAL '7 days'
+                 AND ann_date <= CAST(? AS DATE)
+               ORDER BY ann_date DESC
+               LIMIT 15";
+
+    match db.prepare(sql) {
+        Ok(mut stmt) => {
+            let rows: Vec<(String, String, String, String, Option<f64>, Option<f64>)> = stmt
+                .query_map(duckdb::params![date_str, date_str], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<f64>>(4)?,
+                        row.get::<_, Option<f64>>(5)?,
+                    ))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+
+            if rows.is_empty() {
+                writeln!(md, "| (近7日无回购) | - | - | - | - | - |")?;
+            } else {
+                for (code, ann, proc_, exp, vol, amount) in &rows {
+                    writeln!(
+                        md,
+                        "| {} | {} | {} | {} | {} | {} |",
+                        code,
+                        ann,
+                        proc_,
+                        exp,
+                        fmt_f64_wan(*vol),
+                        fmt_f64_wan(*amount),
+                    )?;
+                }
+            }
+        }
+        Err(e) => {
+            warn!(err = %e, "repurchase query failed");
+            writeln!(md, "| (查询失败) | - | - | - | - | - |")?;
+        }
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Helper queries for notable items
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Fetch close, PE, PB, total_mv for a stock.
+fn query_stock_valuation(
+    db: &Connection,
+    ts_code: &str,
+    date_str: &str,
+) -> (Option<f64>, Option<f64>, Option<f64>, Option<f64>) {
+    let sql = "SELECT p.close, d.pe, d.pb, d.total_mv
+               FROM prices p
+               LEFT JOIN daily_basic d ON p.ts_code = d.ts_code AND p.trade_date = d.trade_date
+               WHERE p.ts_code = ?
+                 AND p.trade_date = (
+                     SELECT MAX(trade_date) FROM prices
+                     WHERE ts_code = ? AND trade_date <= CAST(? AS DATE)
+                 )";
+
+    db.prepare(sql)
+        .and_then(|mut stmt| {
+            stmt.query_row(duckdb::params![ts_code, ts_code, date_str], |row| {
+                Ok((
+                    row.get::<_, Option<f64>>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                    row.get::<_, Option<f64>>(3)?,
+                ))
+            })
+        })
+        .unwrap_or((None, None, None, None))
+}
+
+/// Fetch momentum detail: regime, vol_bucket, CI from analytics.
+fn query_momentum_detail(
+    db: &Connection,
+    ts_code: &str,
+    date_str: &str,
+) -> (Option<String>, Option<String>, Option<f64>, Option<f64>) {
+    let sql = "SELECT metric, value, detail
+               FROM analytics
+               WHERE ts_code = ? AND as_of = ? AND module = 'momentum'
+               ORDER BY metric";
+
+    let mut regime = None;
+    let mut vol_bucket = None;
+    let mut ci_low = None;
+    let mut ci_high = None;
+
+    if let Ok(mut stmt) = db.prepare(sql) {
+        let rows: Vec<(String, f64, Option<String>)> = stmt
+            .query_map(duckdb::params![ts_code, date_str], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            })
+            .map(|r| r.filter_map(|x| x.ok()).collect())
+            .unwrap_or_default();
+
+        for (metric, value, detail) in &rows {
+            match metric.as_str() {
+                "regime" => {
+                    regime = Some(
+                        match *value as i32 {
+                            0 => "trending",
+                            1 => "mean_reverting",
+                            _ => "noisy",
+                        }
+                        .to_string(),
+                    );
+                }
+                "vol_bucket" => {
+                    vol_bucket = Some(
+                        match *value as i32 {
+                            0 => "low",
+                            1 => "mid",
+                            _ => "high",
+                        }
+                        .to_string(),
+                    );
+                }
+                "trend_prob" => {
+                    // Parse CI from detail JSON if available
+                    if let Some(d) = detail {
+                        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(d) {
+                            ci_low = obj.get("ci_low").and_then(|v| v.as_f64());
+                            ci_high = obj.get("ci_high").and_then(|v| v.as_f64());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    (regime, vol_bucket, ci_low, ci_high)
+}
+
+/// Fetch flow component z-scores from analytics.
+fn query_flow_components(
+    db: &Connection,
+    ts_code: &str,
+    date_str: &str,
+) -> Vec<(String, f64)> {
+    let sql = "SELECT metric, value
+               FROM analytics
+               WHERE ts_code = ? AND as_of = ? AND module = 'flow'
+                 AND metric != 'information_score'
+               ORDER BY metric";
+
+    db.prepare(sql)
+        .and_then(|mut stmt| {
+            let rows = stmt.query_map(duckdb::params![ts_code, date_str], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+            })?;
+            Ok(rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default()
+}
+
+/// Fetch the latest forecast for a stock.
+fn query_latest_forecast(
+    db: &Connection,
+    ts_code: &str,
+    date_str: &str,
+) -> Option<(String, Option<f64>, Option<f64>)> {
+    let sql = "SELECT forecast_type, p_change_min, p_change_max
+               FROM forecast
+               WHERE ts_code = ? AND ann_date <= CAST(? AS DATE)
+               ORDER BY ann_date DESC
+               LIMIT 1";
+
+    db.prepare(sql)
+        .and_then(|mut stmt| {
+            stmt.query_row(duckdb::params![ts_code, date_str], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, Option<f64>>(2)?,
+                ))
+            })
+        })
+        .ok()
+}
+
+/// Fetch latest moneyflow: net_mf_amount, super-large net.
+fn query_moneyflow(
+    db: &Connection,
+    ts_code: &str,
+    date_str: &str,
+) -> Option<(f64, f64)> {
+    let sql = "SELECT net_mf_amount,
+                      COALESCE(buy_elg_amount, 0) - COALESCE(sell_elg_amount, 0) AS elg_net
+               FROM moneyflow
+               WHERE ts_code = ? AND trade_date = (
+                   SELECT MAX(trade_date) FROM moneyflow
+                   WHERE ts_code = ? AND trade_date <= CAST(? AS DATE)
+               )";
+
+    db.prepare(sql)
+        .and_then(|mut stmt| {
+            stmt.query_row(duckdb::params![ts_code, ts_code, date_str], |row| {
+                Ok((
+                    row.get::<_, Option<f64>>(0)?.unwrap_or(0.0),
+                    row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                ))
+            })
+        })
+        .ok()
+}
+
+/// Fetch margin detail: rzye today + 5D delta.
+fn query_margin_detail(
+    db: &Connection,
+    ts_code: &str,
+    date_str: &str,
+) -> Option<(f64, f64)> {
+    let sql = "WITH ranked AS (
+                   SELECT rzye,
+                          ROW_NUMBER() OVER (ORDER BY trade_date DESC) AS rn
+                   FROM margin_detail
+                   WHERE ts_code = ? AND trade_date <= CAST(? AS DATE)
+                   LIMIT 6
+               )
+               SELECT
+                   (SELECT rzye FROM ranked WHERE rn = 1),
+                   COALESCE((SELECT rzye FROM ranked WHERE rn = 1), 0)
+                 - COALESCE((SELECT rzye FROM ranked WHERE rn = 6), 0)";
+
+    db.prepare(sql)
+        .and_then(|mut stmt| {
+            stmt.query_row(duckdb::params![ts_code, date_str], |row| {
+                Ok((
+                    row.get::<_, Option<f64>>(0)?.unwrap_or(0.0),
+                    row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                ))
+            })
+        })
+        .ok()
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Formatting utilities
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Format an Option<f64> with a given number of decimal places.
+fn fmt_opt_f64(v: Option<f64>, decimals: usize) -> String {
+    match v {
+        Some(val) => format!("{:.prec$}", val, prec = decimals),
+        None => "-".to_string(),
+    }
+}
+
+/// Format Option<f64> to 2 decimal places, or "-" if None.
+fn fmt_f64(v: Option<f64>) -> String {
+    match v {
+        Some(val) => format!("{:.2}", val),
+        None => "-".to_string(),
+    }
+}
+
+/// Format percentage (already in % units): "1.23" or "-".
+fn fmt_pct(v: Option<f64>) -> String {
+    match v {
+        Some(val) => format!("{:.2}", val),
+        None => "-".to_string(),
+    }
+}
+
+/// Format volume — large numbers get K/M suffix.
+fn fmt_vol(v: Option<f64>) -> String {
+    match v {
+        Some(val) if val >= 1_000_000.0 => format!("{:.1}M", val / 1_000_000.0),
+        Some(val) if val >= 1_000.0 => format!("{:.1}K", val / 1_000.0),
+        Some(val) => format!("{:.0}", val),
+        None => "-".to_string(),
+    }
+}
+
+/// Format f64 as "亿" (divide by 10000 if already in 万 units).
+/// The Tushare moneyflow amounts are in 万 (10K), but northbound_flow amounts
+/// and total_mv in daily_basic are in 万. For display we convert to 亿 (/10000).
+fn fmt_f64_yi(v: Option<f64>) -> String {
+    match v {
+        Some(val) => format!("{:.2}", val / 10000.0),
+        None => "-".to_string(),
+    }
+}
+
+/// Format f64 as 万 (10K units, Tushare default for many monetary fields).
+fn fmt_f64_wan(v: Option<f64>) -> String {
+    match v {
+        Some(val) => format!("{:.2}", val),
+        None => "-".to_string(),
+    }
+}
+
+/// Classify macro series cadence for footer notes.
+fn macro_cadence(series_id: &str) -> &'static str {
+    match series_id {
+        // Monthly indicators
+        "CPI" | "CPIAUCSL" | "PPI" | "PMI" | "M2" => "月度, 滞后~15天",
+        // Social financing, credit
+        "TSF" | "社融" => "月度, 滞后~15天",
+        // Daily/weekly rates
+        "M0009970" | "SHIBOR" | "Shibor" => "日度",
+        "M0062063" | "LPR" => "月度(每月20日)",
+        // Quarterly
+        "GDP" => "季度, 滞后~45天",
+        _ => "-",
+    }
+}

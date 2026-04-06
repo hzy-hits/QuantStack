@@ -1,0 +1,35 @@
+# Secrets (API keys, OAuth tokens — NEVER commit)
+config.yaml
+credentials.json
+token.json
+.env
+
+# Runtime data
+data/
+logs/
+reports/
+
+# Pipeline run artifacts (agent outputs, codex runs, reviews)
+run-*/
+codex-*/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Rust
+rust/target/
+
+# Editor
+.vscode/
+.idea/
+*.swp

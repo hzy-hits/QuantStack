@@ -1,0 +1,183 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 720" font-family="'Segoe UI',system-ui,sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#64748b"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#3b82f6"/>
+    </marker>
+    <filter id="shadow">
+      <feDropShadow dx="1" dy="2" stdDeviation="2" flood-opacity="0.08"/>
+    </filter>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#f1f5f9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1100" height="720" fill="url(#bg)" rx="12"/>
+
+  <!-- Title -->
+  <text x="550" y="38" text-anchor="middle" font-size="20" font-weight="700" fill="#0f172a">Pipeline Overview</text>
+  <text x="550" y="58" text-anchor="middle" font-size="12" fill="#64748b">Cron (2x/day) &#8594; Data &#8594; Analytics &#8594; Agent Analysis &#8594; Email</text>
+
+  <!-- ═══ Phase 1: Cron Trigger ═══ -->
+  <rect x="30" y="80" width="160" height="80" rx="10" fill="#7c3aed" filter="url(#shadow)"/>
+  <text x="110" y="108" text-anchor="middle" font-size="13" font-weight="600" fill="#fff">Cron Scheduler</text>
+  <text x="110" y="128" text-anchor="middle" font-size="10" fill="#ddd6fe">05:00 CST &#30424;&#21518; (Tue-Sat)</text>
+  <text x="110" y="143" text-anchor="middle" font-size="10" fill="#ddd6fe">21:00 CST &#30424;&#21069; (Mon-Fri)</text>
+  <line x1="190" y1="120" x2="225" y2="120" stroke="#64748b" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+  <!-- run_full.sh -->
+  <rect x="228" y="90" width="120" height="56" rx="8" fill="#fff" stroke="#7c3aed" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="288" y="115" text-anchor="middle" font-size="11" font-weight="600" fill="#7c3aed">run_full.sh</text>
+  <text x="288" y="132" text-anchor="middle" font-size="9" fill="#64748b">orchestrator</text>
+
+  <!-- ═══ Phase 1: Data Pipeline ═══ -->
+  <rect x="30" y="185" width="1040" height="240" rx="10" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="50" y="205" font-size="12" font-weight="700" fill="#1e40af">Phase 1: Data Pipeline (run_daily.py) ~27 min</text>
+
+  <!-- Universe -->
+  <rect x="50" y="218" width="130" height="50" rx="6" fill="#fff" stroke="#3b82f6" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="115" y="240" text-anchor="middle" font-size="10" font-weight="600" fill="#1e40af">Universe Builder</text>
+  <text x="115" y="254" text-anchor="middle" font-size="9" fill="#64748b">~748 symbols</text>
+  <line x1="180" y1="243" x2="205" y2="243" stroke="#64748b" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- Rust Fetcher -->
+  <rect x="208" y="215" width="155" height="56" rx="6" fill="#fff7ed" stroke="#f97316" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="286" y="237" text-anchor="middle" font-size="10" font-weight="600" fill="#c2410c">Rust Fetcher</text>
+  <text x="286" y="250" text-anchor="middle" font-size="8" fill="#64748b">News / FRED / SEC 8-K</text>
+  <text x="286" y="262" text-anchor="middle" font-size="8" fill="#64748b">Polymarket / Earnings</text>
+  <line x1="363" y1="243" x2="388" y2="243" stroke="#64748b" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- Prices -->
+  <rect x="391" y="218" width="105" height="50" rx="6" fill="#fff" stroke="#3b82f6" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="444" y="240" text-anchor="middle" font-size="10" font-weight="600" fill="#1e40af">Prices</text>
+  <text x="444" y="254" text-anchor="middle" font-size="9" fill="#64748b">yfinance OHLCV</text>
+  <line x1="496" y1="243" x2="521" y2="243" stroke="#64748b" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- Options -->
+  <rect x="524" y="218" width="105" height="50" rx="6" fill="#fff" stroke="#3b82f6" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="577" y="240" text-anchor="middle" font-size="10" font-weight="600" fill="#1e40af">Options</text>
+  <text x="577" y="254" text-anchor="middle" font-size="9" fill="#64748b">CBOE CDN</text>
+  <line x1="629" y1="243" x2="654" y2="243" stroke="#64748b" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- Fundamentals -->
+  <rect x="657" y="218" width="115" height="50" rx="6" fill="#fff" stroke="#3b82f6" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="715" y="240" text-anchor="middle" font-size="10" font-weight="600" fill="#1e40af">Fundamentals</text>
+  <text x="715" y="254" text-anchor="middle" font-size="9" fill="#64748b">Finnhub profile</text>
+
+  <!-- DuckDB -->
+  <rect x="820" y="210" width="110" height="64" rx="8" fill="#fef3c7" stroke="#f59e0b" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="875" y="236" text-anchor="middle" font-size="11" font-weight="700" fill="#92400e">DuckDB</text>
+  <text x="875" y="252" text-anchor="middle" font-size="9" fill="#78716c">quant.duckdb</text>
+  <text x="875" y="265" text-anchor="middle" font-size="8" fill="#78716c">12 tables</text>
+  <line x1="772" y1="243" x2="818" y2="243" stroke="#64748b" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <!-- Analytics Row -->
+  <text x="50" y="298" font-size="10" font-weight="600" fill="#1e40af">Analytics:</text>
+
+  <rect x="120" y="285" width="95" height="36" rx="5" fill="#e0e7ff" stroke="#818cf8" stroke-width="1"/>
+  <text x="168" y="302" text-anchor="middle" font-size="8.5" font-weight="500" fill="#3730a3">Momentum/CPT</text>
+  <text x="168" y="314" text-anchor="middle" font-size="7.5" fill="#64748b">trend_prob</text>
+
+  <rect x="222" y="285" width="95" height="36" rx="5" fill="#e0e7ff" stroke="#818cf8" stroke-width="1"/>
+  <text x="270" y="302" text-anchor="middle" font-size="8.5" font-weight="500" fill="#3730a3">Earnings Risk</text>
+  <text x="270" y="314" text-anchor="middle" font-size="7.5" fill="#64748b">p_upside</text>
+
+  <rect x="324" y="285" width="75" height="36" rx="5" fill="#e0e7ff" stroke="#818cf8" stroke-width="1"/>
+  <text x="362" y="302" text-anchor="middle" font-size="8.5" font-weight="500" fill="#3730a3">VRP</text>
+  <text x="362" y="314" text-anchor="middle" font-size="7.5" fill="#64748b">iv - rv</text>
+
+  <rect x="406" y="285" width="82" height="36" rx="5" fill="#e0e7ff" stroke="#818cf8" stroke-width="1"/>
+  <text x="447" y="302" text-anchor="middle" font-size="8.5" font-weight="500" fill="#3730a3">Sentiment</text>
+  <text x="447" y="314" text-anchor="middle" font-size="7.5" fill="#64748b">EWMA z</text>
+
+  <rect x="495" y="285" width="82" height="36" rx="5" fill="#e0e7ff" stroke="#818cf8" stroke-width="1"/>
+  <text x="536" y="302" text-anchor="middle" font-size="8.5" font-weight="500" fill="#3730a3">Kalman Beta</text>
+  <text x="536" y="314" text-anchor="middle" font-size="7.5" fill="#64748b">time-varying</text>
+
+  <rect x="584" y="285" width="72" height="36" rx="5" fill="#e0e7ff" stroke="#818cf8" stroke-width="1"/>
+  <text x="620" y="302" text-anchor="middle" font-size="8.5" font-weight="500" fill="#3730a3">Pairs</text>
+  <text x="620" y="314" text-anchor="middle" font-size="7.5" fill="#64748b">Engle-Granger</text>
+
+  <rect x="663" y="285" width="72" height="36" rx="5" fill="#e0e7ff" stroke="#818cf8" stroke-width="1"/>
+  <text x="699" y="302" text-anchor="middle" font-size="8.5" font-weight="500" fill="#3730a3">HMM</text>
+  <text x="699" y="314" text-anchor="middle" font-size="7.5" fill="#64748b">2-state regime</text>
+
+  <rect x="742" y="285" width="85" height="36" rx="5" fill="#e0e7ff" stroke="#818cf8" stroke-width="1"/>
+  <text x="785" y="302" text-anchor="middle" font-size="8.5" font-weight="500" fill="#3730a3">Macro Gate</text>
+  <text x="785" y="314" text-anchor="middle" font-size="7.5" fill="#64748b">VIX x Yield</text>
+
+  <!-- Filter + Render Row -->
+  <text x="50" y="350" font-size="10" font-weight="600" fill="#1e40af">Filter &amp; Output:</text>
+
+  <rect x="150" y="337" width="140" height="36" rx="5" fill="#dcfce7" stroke="#22c55e" stroke-width="1"/>
+  <text x="220" y="354" text-anchor="middle" font-size="9" font-weight="500" fill="#166534">Notable Filter</text>
+  <text x="220" y="366" text-anchor="middle" font-size="8" fill="#64748b">120 &#8594; 30 items (2-pass)</text>
+
+  <line x1="290" y1="355" x2="320" y2="355" stroke="#64748b" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <rect x="323" y="337" width="140" height="36" rx="5" fill="#dcfce7" stroke="#22c55e" stroke-width="1"/>
+  <text x="393" y="354" text-anchor="middle" font-size="9" font-weight="500" fill="#166534">Signal Classify</text>
+  <text x="393" y="366" text-anchor="middle" font-size="8" fill="#64748b">HIGH / MOD / WATCH / LOW</text>
+
+  <line x1="463" y1="355" x2="493" y2="355" stroke="#64748b" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <rect x="496" y="337" width="130" height="36" rx="5" fill="#dcfce7" stroke="#22c55e" stroke-width="1"/>
+  <text x="561" y="354" text-anchor="middle" font-size="9" font-weight="500" fill="#166534">Render Payload</text>
+  <text x="561" y="366" text-anchor="middle" font-size="8" fill="#64748b">{date}_payload.md</text>
+
+  <line x1="626" y1="355" x2="656" y2="355" stroke="#64748b" stroke-width="1.2" marker-end="url(#arrow)"/>
+
+  <rect x="659" y="337" width="130" height="36" rx="5" fill="#dcfce7" stroke="#22c55e" stroke-width="1"/>
+  <text x="724" y="354" text-anchor="middle" font-size="9" font-weight="500" fill="#166534">Charts (7)</text>
+  <text x="724" y="366" text-anchor="middle" font-size="8" fill="#64748b">matplotlib dark theme</text>
+
+  <!-- Arrow from Phase 1 to Phase 2 -->
+  <line x1="550" y1="425" x2="550" y2="448" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- ═══ Phase 2: Split ═══ -->
+  <rect x="380" y="450" width="340" height="50" rx="10" fill="#f0fdf4" stroke="#86efac" stroke-width="1" filter="url(#shadow)"/>
+  <text x="550" y="472" text-anchor="middle" font-size="12" font-weight="700" fill="#166534">Phase 2: Split Payload</text>
+  <text x="550" y="488" text-anchor="middle" font-size="9" fill="#64748b">&#8594; macro.md + structural.md + news.md</text>
+
+  <!-- Arrow to Phase 3 -->
+  <line x1="550" y1="500" x2="550" y2="523" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- ═══ Phase 3: Agents ═══ -->
+  <rect x="70" y="525" width="960" height="95" rx="10" fill="#fdf4ff" stroke="#e9d5ff" stroke-width="1"/>
+  <text x="90" y="548" font-size="12" font-weight="700" fill="#7e22ce">Phase 3: Multi-Agent Analysis (claude -p) ~10 min</text>
+
+  <!-- 4 agents -->
+  <rect x="90" y="558" width="140" height="46" rx="6" fill="#fff" stroke="#a78bfa" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="160" y="578" text-anchor="middle" font-size="10" font-weight="500" fill="#6d28d9">Macro Analyst</text>
+  <text x="160" y="593" text-anchor="middle" font-size="8" fill="#64748b">EN &#8594; macro context</text>
+
+  <rect x="245" y="558" width="140" height="46" rx="6" fill="#fff" stroke="#a78bfa" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="315" y="578" text-anchor="middle" font-size="10" font-weight="500" fill="#6d28d9">Quant Analyst</text>
+  <text x="315" y="593" text-anchor="middle" font-size="8" fill="#64748b">EN &#8594; structural</text>
+
+  <rect x="400" y="558" width="140" height="46" rx="6" fill="#fff" stroke="#a78bfa" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="470" y="578" text-anchor="middle" font-size="10" font-weight="500" fill="#6d28d9">News Analyst</text>
+  <text x="470" y="593" text-anchor="middle" font-size="8" fill="#64748b">EN &#8594; events</text>
+
+  <rect x="555" y="558" width="140" height="46" rx="6" fill="#fff" stroke="#a78bfa" stroke-width="1.2" filter="url(#shadow)"/>
+  <text x="625" y="578" text-anchor="middle" font-size="10" font-weight="500" fill="#6d28d9">Risk Analyst</text>
+  <text x="625" y="593" text-anchor="middle" font-size="8" fill="#64748b">EN &#8594; risk/portfolio</text>
+
+  <!-- Merge -->
+  <line x1="695" y1="581" x2="740" y2="581" stroke="#64748b" stroke-width="1.2" marker-end="url(#arrow)"/>
+  <rect x="743" y="555" width="180" height="52" rx="6" fill="#f5f3ff" stroke="#7c3aed" stroke-width="1.5" filter="url(#shadow)"/>
+  <text x="833" y="577" text-anchor="middle" font-size="10" font-weight="600" fill="#7c3aed">Merge Agent (ZH)</text>
+  <text x="833" y="593" text-anchor="middle" font-size="8" fill="#64748b">{date}_report_zh_{session}.md</text>
+
+  <!-- Arrow to Phase 4 -->
+  <line x1="550" y1="620" x2="550" y2="643" stroke="#3b82f6" stroke-width="1.5" marker-end="url(#arrow-blue)"/>
+
+  <!-- ═══ Phase 4: Email ═══ -->
+  <rect x="370" y="645" width="360" height="55" rx="10" fill="#fef2f2" stroke="#fca5a5" stroke-width="1" filter="url(#shadow)"/>
+  <text x="550" y="668" text-anchor="middle" font-size="12" font-weight="700" fill="#991b1b">Phase 4: Email Delivery (Gmail API)</text>
+  <text x="550" y="686" text-anchor="middle" font-size="9" fill="#64748b">HTML + inline charts (CID) &#8594; 7 recipients</text>
+</svg>

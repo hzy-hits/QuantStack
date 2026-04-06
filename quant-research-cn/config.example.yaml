@@ -1,0 +1,96 @@
+# A-Share Quant Research Bot — Configuration
+# Copy to config.yaml and fill in API keys. Never commit config.yaml.
+#
+# PHILOSOPHY: Program computes probabilities. Agent narrates. No trading signals.
+
+api:
+  tushare_token: ""             # Tushare Pro token (200 RMB/year)
+  # AKShare needs no key — it's free web scraping
+
+runtime:
+  timezone: "Asia/Shanghai"
+  random_seed: 42
+
+# ── UNIVERSE ─────────────────────────────────────────────────────────────────
+universe:
+  benchmark: "000300.SH"        # CSI 300 (沪深300)
+
+  # Index constituents to scan — fetched from Tushare
+  scan:
+    csi300: true                # 沪深300 — main large cap
+    csi500: false               # 中证500 — mid cap
+    csi1000: false              # 中证1000 — small cap (expensive to scan)
+    sse50: true                 # 上证50 — mega cap
+
+  # Sector / thematic ETFs
+  asset_classes:
+    sector_etfs: true           # 申万一级行业ETF
+    bond_etfs: true             # 国债ETF、企业债ETF
+    commodity_etfs: true        # 黄金ETF、豆粕ETF
+    cross_border: true          # 纳指ETF、标普ETF、恒生ETF
+
+  # Manual watchlist
+  watchlist:
+    # ── AI / 半导体 ──
+    - "688981.SH"   # 中芯国际
+    - "002049.SZ"   # 紫光国微
+    - "688396.SH"   # 华峰测控
+    - "300661.SZ"   # 圣邦股份
+    # ── 新能源 ──
+    - "300750.SZ"   # 宁德时代
+    - "002594.SZ"   # 比亚迪
+    - "601012.SH"   # 隆基绿能
+    # ── 消费 ──
+    - "600519.SH"   # 贵州茅台
+    - "000858.SZ"   # 五粮液
+    # ── 医药 ──
+    - "300760.SZ"   # 迈瑞医疗
+    - "688235.SH"   # 百济神州
+
+  filters:
+    min_avg_volume_shares: 500000
+    min_price: 3.0
+
+# ── OUTPUT ───────────────────────────────────────────────────────────────────
+output:
+  max_notable_items: 30
+  min_notable_items: 8
+
+# ── STORAGE ──────────────────────────────────────────────────────────────────
+data:
+  db_path: "data/quant_cn.duckdb"
+  constituent_refresh_days: 7
+
+# ── TUSHARE SERIES ───────────────────────────────────────────────────────────
+# Macro indicators from Tushare (CN equivalent of FRED)
+macro:
+  series:
+    - id: "M0001227"
+      name: "CPI 同比 (%)"
+    - id: "M0001228"
+      name: "PPI 同比 (%)"
+    - id: "M0017126"
+      name: "社会融资规模 (亿元)"
+    - id: "M0001383"
+      name: "PMI 制造业"
+    - id: "M0009970"
+      name: "Shibor 隔夜 (%)"
+    - id: "M0009971"
+      name: "Shibor 1周 (%)"
+    - id: "M0062063"
+      name: "LPR 1年 (%)"
+
+# ── SIGNALS ──────────────────────────────────────────────────────────────────
+signals:
+  momentum_windows: [5, 20, 60]
+  atr_period: 14
+  ma_filter_window: 120
+  flow_ewma_halflife: 10        # 北向/融资 EWMA halflife (days)
+  unlock_lookahead_days: 30     # 限售解禁前瞻窗口
+
+# ── REPORTING ────────────────────────────────────────────────────────────────
+reporting:
+  anthropic_model: "claude-sonnet-4-6"
+  anthropic_temperature: 0.15
+  max_tokens: 3000
+  recipients: []

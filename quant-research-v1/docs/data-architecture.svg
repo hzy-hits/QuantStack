@@ -1,0 +1,222 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 680" font-family="'Segoe UI',system-ui,sans-serif">
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="#64748b"/>
+    </marker>
+    <filter id="s">
+      <feDropShadow dx="1" dy="2" stdDeviation="2" flood-opacity="0.08"/>
+    </filter>
+    <linearGradient id="bg2" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#f1f5f9"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1100" height="680" fill="url(#bg2)" rx="12"/>
+
+  <text x="550" y="38" text-anchor="middle" font-size="20" font-weight="700" fill="#0f172a">Data Architecture</text>
+  <text x="550" y="58" text-anchor="middle" font-size="12" fill="#64748b">External APIs &#8594; Rust/Python Ingestion &#8594; DuckDB &#8594; Analytics Modules</text>
+
+  <!-- ═══ Left: External Data Sources ═══ -->
+  <rect x="20" y="80" width="220" height="530" rx="10" fill="#fff7ed" stroke="#fed7aa" stroke-width="1"/>
+  <text x="130" y="102" text-anchor="middle" font-size="13" font-weight="700" fill="#c2410c">External Data Sources</text>
+
+  <!-- Rust sources -->
+  <rect x="35" y="118" width="190" height="40" rx="5" fill="#fff" stroke="#f97316" stroke-width="1.2" filter="url(#s)"/>
+  <text x="130" y="136" text-anchor="middle" font-size="10" font-weight="600" fill="#c2410c">Finnhub API</text>
+  <text x="130" y="150" text-anchor="middle" font-size="8" fill="#78716c">Company News + Earnings Cal</text>
+
+  <rect x="35" y="168" width="190" height="40" rx="5" fill="#fff" stroke="#f97316" stroke-width="1.2" filter="url(#s)"/>
+  <text x="130" y="186" text-anchor="middle" font-size="10" font-weight="600" fill="#c2410c">FRED API</text>
+  <text x="130" y="200" text-anchor="middle" font-size="8" fill="#78716c">7 Macro Series (rates, CPI, VIX)</text>
+
+  <rect x="35" y="218" width="190" height="40" rx="5" fill="#fff" stroke="#f97316" stroke-width="1.2" filter="url(#s)"/>
+  <text x="130" y="236" text-anchor="middle" font-size="10" font-weight="600" fill="#c2410c">SEC EDGAR</text>
+  <text x="130" y="250" text-anchor="middle" font-size="8" fill="#78716c">8-K Filings (CIK lookup)</text>
+
+  <rect x="35" y="268" width="190" height="40" rx="5" fill="#fff" stroke="#f97316" stroke-width="1.2" filter="url(#s)"/>
+  <text x="130" y="286" text-anchor="middle" font-size="10" font-weight="600" fill="#c2410c">Polymarket</text>
+  <text x="130" y="300" text-anchor="middle" font-size="8" fill="#78716c">Crowd Probabilities (Gamma)</text>
+
+  <!-- Python sources -->
+  <rect x="35" y="328" width="190" height="40" rx="5" fill="#fff" stroke="#3b82f6" stroke-width="1.2" filter="url(#s)"/>
+  <text x="130" y="346" text-anchor="middle" font-size="10" font-weight="600" fill="#1e40af">yfinance</text>
+  <text x="130" y="360" text-anchor="middle" font-size="8" fill="#78716c">OHLCV Prices (batch)</text>
+
+  <rect x="35" y="378" width="190" height="40" rx="5" fill="#fff" stroke="#3b82f6" stroke-width="1.2" filter="url(#s)"/>
+  <text x="130" y="396" text-anchor="middle" font-size="10" font-weight="600" fill="#1e40af">CBOE CDN</text>
+  <text x="130" y="410" text-anchor="middle" font-size="8" fill="#78716c">Options: IV, P/C, Exp Move</text>
+
+  <rect x="35" y="428" width="190" height="40" rx="5" fill="#fff" stroke="#3b82f6" stroke-width="1.2" filter="url(#s)"/>
+  <text x="130" y="446" text-anchor="middle" font-size="10" font-weight="600" fill="#1e40af">Finnhub Profile</text>
+  <text x="130" y="460" text-anchor="middle" font-size="8" fill="#78716c">Fundamentals (PE, PB, mktCap)</text>
+
+  <rect x="35" y="478" width="190" height="40" rx="5" fill="#fff" stroke="#3b82f6" stroke-width="1.2" filter="url(#s)"/>
+  <text x="130" y="496" text-anchor="middle" font-size="10" font-weight="600" fill="#1e40af">Wikipedia</text>
+  <text x="130" y="510" text-anchor="middle" font-size="8" fill="#78716c">S&amp;P 500 Constituents</text>
+
+  <!-- Legend -->
+  <rect x="40" y="540" width="12" height="12" rx="2" fill="#fff" stroke="#f97316" stroke-width="1.2"/>
+  <text x="58" y="551" font-size="9" fill="#78716c">Rust (rate-limited HTTP)</text>
+  <rect x="40" y="560" width="12" height="12" rx="2" fill="#fff" stroke="#3b82f6" stroke-width="1.2"/>
+  <text x="58" y="571" font-size="9" fill="#78716c">Python (yfinance/CBOE)</text>
+
+  <!-- ═══ Middle: Ingestion Layer ═══ -->
+  <rect x="270" y="80" width="180" height="250" rx="10" fill="#f0fdf4" stroke="#bbf7d0" stroke-width="1"/>
+  <text x="360" y="102" text-anchor="middle" font-size="13" font-weight="700" fill="#166534">Ingestion</text>
+
+  <rect x="285" y="118" width="150" height="36" rx="5" fill="#fff" stroke="#22c55e" stroke-width="1" filter="url(#s)"/>
+  <text x="360" y="136" text-anchor="middle" font-size="9.5" font-weight="500" fill="#166534">Rust quant-fetcher</text>
+  <text x="360" y="148" text-anchor="middle" font-size="8" fill="#78716c">tokio async + retry</text>
+
+  <rect x="285" y="164" width="150" height="36" rx="5" fill="#fff" stroke="#22c55e" stroke-width="1" filter="url(#s)"/>
+  <text x="360" y="182" text-anchor="middle" font-size="9.5" font-weight="500" fill="#166534">prices.py</text>
+  <text x="360" y="194" text-anchor="middle" font-size="8" fill="#78716c">yfinance batch (250/batch)</text>
+
+  <rect x="285" y="210" width="150" height="36" rx="5" fill="#fff" stroke="#22c55e" stroke-width="1" filter="url(#s)"/>
+  <text x="360" y="228" text-anchor="middle" font-size="9.5" font-weight="500" fill="#166534">options.py</text>
+  <text x="360" y="240" text-anchor="middle" font-size="8" fill="#78716c">CBOE ThreadPool(5)</text>
+
+  <rect x="285" y="256" width="150" height="36" rx="5" fill="#fff" stroke="#22c55e" stroke-width="1" filter="url(#s)"/>
+  <text x="360" y="274" text-anchor="middle" font-size="9.5" font-weight="500" fill="#166534">fundamentals.py</text>
+  <text x="360" y="286" text-anchor="middle" font-size="8" fill="#78716c">1.05s rate limit</text>
+
+  <!-- Arrows from sources to ingestion -->
+  <line x1="225" y1="140" x2="283" y2="136" stroke="#64748b" stroke-width="1" marker-end="url(#a)"/>
+  <line x1="225" y1="190" x2="283" y2="136" stroke="#64748b" stroke-width="1" marker-end="url(#a)"/>
+  <line x1="225" y1="240" x2="283" y2="136" stroke="#64748b" stroke-width="1" marker-end="url(#a)"/>
+  <line x1="225" y1="290" x2="283" y2="136" stroke="#64748b" stroke-width="1" marker-end="url(#a)"/>
+  <line x1="225" y1="346" x2="283" y2="182" stroke="#64748b" stroke-width="1" marker-end="url(#a)"/>
+  <line x1="225" y1="396" x2="283" y2="228" stroke="#64748b" stroke-width="1" marker-end="url(#a)"/>
+  <line x1="225" y1="446" x2="283" y2="274" stroke="#64748b" stroke-width="1" marker-end="url(#a)"/>
+
+  <!-- ═══ Center: DuckDB ═══ -->
+  <rect x="490" y="80" width="200" height="380" rx="10" fill="#fefce8" stroke="#fde68a" stroke-width="1.5"/>
+  <text x="590" y="104" text-anchor="middle" font-size="14" font-weight="700" fill="#92400e">DuckDB</text>
+  <text x="590" y="120" text-anchor="middle" font-size="9" fill="#78716c">data/quant.duckdb</text>
+
+  <!-- Tables -->
+  <rect x="505" y="134" width="170" height="26" rx="4" fill="#fff" stroke="#eab308" stroke-width="1"/>
+  <text x="590" y="152" text-anchor="middle" font-size="9" font-weight="500" fill="#713f12">prices_daily</text>
+
+  <rect x="505" y="166" width="170" height="26" rx="4" fill="#fff" stroke="#eab308" stroke-width="1"/>
+  <text x="590" y="184" text-anchor="middle" font-size="9" font-weight="500" fill="#713f12">analysis_daily</text>
+
+  <rect x="505" y="198" width="170" height="26" rx="4" fill="#fff" stroke="#eab308" stroke-width="1"/>
+  <text x="590" y="216" text-anchor="middle" font-size="9" font-weight="500" fill="#713f12">news_items</text>
+
+  <rect x="505" y="230" width="170" height="26" rx="4" fill="#fff" stroke="#eab308" stroke-width="1"/>
+  <text x="590" y="248" text-anchor="middle" font-size="9" font-weight="500" fill="#713f12">macro_daily</text>
+
+  <rect x="505" y="262" width="170" height="26" rx="4" fill="#fff" stroke="#eab308" stroke-width="1"/>
+  <text x="590" y="280" text-anchor="middle" font-size="9" font-weight="500" fill="#713f12">earnings_calendar</text>
+
+  <rect x="505" y="294" width="170" height="26" rx="4" fill="#fff" stroke="#eab308" stroke-width="1"/>
+  <text x="590" y="312" text-anchor="middle" font-size="9" font-weight="500" fill="#713f12">sec_filings</text>
+
+  <rect x="505" y="326" width="170" height="26" rx="4" fill="#fff" stroke="#eab308" stroke-width="1"/>
+  <text x="590" y="344" text-anchor="middle" font-size="9" font-weight="500" fill="#713f12">options_snapshot</text>
+
+  <rect x="505" y="358" width="170" height="26" rx="4" fill="#fff" stroke="#eab308" stroke-width="1"/>
+  <text x="590" y="376" text-anchor="middle" font-size="9" font-weight="500" fill="#713f12">polymarket_markets</text>
+
+  <rect x="505" y="390" width="170" height="26" rx="4" fill="#fff" stroke="#eab308" stroke-width="1"/>
+  <text x="590" y="408" text-anchor="middle" font-size="9" font-weight="500" fill="#713f12">fundamentals / universe / ...</text>
+
+  <!-- Arrow ingestion → DuckDB -->
+  <line x1="450" y1="200" x2="498" y2="200" stroke="#64748b" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- ═══ Right: Analytics Modules ═══ -->
+  <rect x="730" y="80" width="350" height="530" rx="10" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="905" y="104" text-anchor="middle" font-size="13" font-weight="700" fill="#1e40af">Analytics Engine</text>
+
+  <!-- Probability Core -->
+  <text x="750" y="130" font-size="10" font-weight="600" fill="#1e40af">Probability Core</text>
+
+  <rect x="750" y="138" width="160" height="40" rx="5" fill="#fff" stroke="#6366f1" stroke-width="1.2" filter="url(#s)"/>
+  <text x="830" y="156" text-anchor="middle" font-size="9.5" font-weight="500" fill="#4338ca">momentum_risk.py</text>
+  <text x="830" y="170" text-anchor="middle" font-size="7.5" fill="#64748b">CPT 9-cell + Beta-Binomial</text>
+
+  <rect x="750" y="186" width="160" height="40" rx="5" fill="#fff" stroke="#6366f1" stroke-width="1.2" filter="url(#s)"/>
+  <text x="830" y="204" text-anchor="middle" font-size="9.5" font-weight="500" fill="#4338ca">earnings_risk.py</text>
+  <text x="830" y="218" text-anchor="middle" font-size="7.5" fill="#64748b">Surprise quintile + Bayes</text>
+
+  <rect x="750" y="234" width="160" height="40" rx="5" fill="#fff" stroke="#6366f1" stroke-width="1.2" filter="url(#s)"/>
+  <text x="830" y="252" text-anchor="middle" font-size="9.5" font-weight="500" fill="#4338ca">bayes.py</text>
+  <text x="830" y="266" text-anchor="middle" font-size="7.5" fill="#64748b">Beta(2,2) prior updater</text>
+
+  <!-- Signal Layer -->
+  <text x="750" y="295" font-size="10" font-weight="600" fill="#1e40af">Signal Layer</text>
+
+  <rect x="750" y="303" width="160" height="32" rx="5" fill="#fff" stroke="#818cf8" stroke-width="1" filter="url(#s)"/>
+  <text x="830" y="324" text-anchor="middle" font-size="9" font-weight="500" fill="#4338ca">variance_premium (VRP)</text>
+
+  <rect x="750" y="341" width="160" height="32" rx="5" fill="#fff" stroke="#818cf8" stroke-width="1" filter="url(#s)"/>
+  <text x="830" y="362" text-anchor="middle" font-size="9" font-weight="500" fill="#4338ca">sentiment_ewma</text>
+
+  <rect x="750" y="379" width="160" height="32" rx="5" fill="#fff" stroke="#818cf8" stroke-width="1" filter="url(#s)"/>
+  <text x="830" y="400" text-anchor="middle" font-size="9" font-weight="500" fill="#4338ca">value_score</text>
+
+  <!-- Structural -->
+  <text x="920" y="130" font-size="10" font-weight="600" fill="#1e40af">Structural</text>
+
+  <rect x="920" y="138" width="145" height="32" rx="5" fill="#fff" stroke="#818cf8" stroke-width="1" filter="url(#s)"/>
+  <text x="993" y="159" text-anchor="middle" font-size="9" font-weight="500" fill="#4338ca">covariance (L-W)</text>
+
+  <rect x="920" y="176" width="145" height="32" rx="5" fill="#fff" stroke="#818cf8" stroke-width="1" filter="url(#s)"/>
+  <text x="993" y="197" text-anchor="middle" font-size="9" font-weight="500" fill="#4338ca">pairs (Engle-Granger)</text>
+
+  <rect x="920" y="214" width="145" height="32" rx="5" fill="#fff" stroke="#818cf8" stroke-width="1" filter="url(#s)"/>
+  <text x="993" y="235" text-anchor="middle" font-size="9" font-weight="500" fill="#4338ca">granger causality</text>
+
+  <rect x="920" y="252" width="145" height="32" rx="5" fill="#fff" stroke="#818cf8" stroke-width="1" filter="url(#s)"/>
+  <text x="993" y="273" text-anchor="middle" font-size="9" font-weight="500" fill="#4338ca">kalman_beta</text>
+
+  <rect x="920" y="303" width="145" height="32" rx="5" fill="#fff" stroke="#818cf8" stroke-width="1" filter="url(#s)"/>
+  <text x="993" y="324" text-anchor="middle" font-size="9" font-weight="500" fill="#4338ca">hmm_regime (2-state)</text>
+
+  <rect x="920" y="341" width="145" height="32" rx="5" fill="#fff" stroke="#818cf8" stroke-width="1" filter="url(#s)"/>
+  <text x="993" y="362" text-anchor="middle" font-size="9" font-weight="500" fill="#4338ca">event_study</text>
+
+  <!-- Meta / Risk -->
+  <text x="750" y="435" font-size="10" font-weight="600" fill="#1e40af">Meta / Risk</text>
+
+  <rect x="750" y="443" width="145" height="32" rx="5" fill="#fce7f3" stroke="#ec4899" stroke-width="1" filter="url(#s)"/>
+  <text x="823" y="464" text-anchor="middle" font-size="9" font-weight="500" fill="#9d174d">macro_gate (3x3)</text>
+
+  <rect x="750" y="481" width="145" height="32" rx="5" fill="#fce7f3" stroke="#ec4899" stroke-width="1" filter="url(#s)"/>
+  <text x="823" y="502" text-anchor="middle" font-size="9" font-weight="500" fill="#9d174d">portfolio_risk</text>
+
+  <rect x="750" y="519" width="145" height="32" rx="5" fill="#fce7f3" stroke="#ec4899" stroke-width="1" filter="url(#s)"/>
+  <text x="823" y="540" text-anchor="middle" font-size="9" font-weight="500" fill="#9d174d">contradictions</text>
+
+  <rect x="750" y="557" width="145" height="32" rx="5" fill="#fce7f3" stroke="#ec4899" stroke-width="1" filter="url(#s)"/>
+  <text x="823" y="578" text-anchor="middle" font-size="9" font-weight="500" fill="#9d174d">news_quality</text>
+
+  <rect x="920" y="443" width="145" height="32" rx="5" fill="#fce7f3" stroke="#ec4899" stroke-width="1" filter="url(#s)"/>
+  <text x="993" y="464" text-anchor="middle" font-size="9" font-weight="500" fill="#9d174d">scorecard</text>
+
+  <rect x="920" y="481" width="145" height="32" rx="5" fill="#fce7f3" stroke="#ec4899" stroke-width="1" filter="url(#s)"/>
+  <text x="993" y="502" text-anchor="middle" font-size="9" font-weight="500" fill="#9d174d">clustering</text>
+
+  <rect x="920" y="519" width="145" height="32" rx="5" fill="#fce7f3" stroke="#ec4899" stroke-width="1" filter="url(#s)"/>
+  <text x="993" y="540" text-anchor="middle" font-size="9" font-weight="500" fill="#9d174d">risk_params</text>
+
+  <!-- Arrow DuckDB → Analytics -->
+  <line x1="690" y1="300" x2="740" y2="300" stroke="#64748b" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Output section -->
+  <rect x="270" y="500" width="350" height="100" rx="10" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1" filter="url(#s)"/>
+  <text x="445" y="524" text-anchor="middle" font-size="12" font-weight="700" fill="#5b21b6">Output</text>
+
+  <text x="290" y="546" font-size="9" fill="#64748b">&#8226; reports/{date}_payload.md (~136KB)</text>
+  <text x="290" y="562" font-size="9" fill="#64748b">&#8226; reports/charts/{date}/ (7 PNG)</text>
+  <text x="290" y="578" font-size="9" fill="#64748b">&#8226; reports/{date}_report_zh_{session}.md</text>
+  <text x="290" y="594" font-size="9" fill="#64748b">&#8226; Email: HTML + inline charts &#8594; 7 recipients</text>
+
+  <!-- Arrow analytics → output -->
+  <line x1="590" y1="460" x2="590" y2="498" stroke="#64748b" stroke-width="1.5" marker-end="url(#a)"/>
+
+  <!-- Tech stack footer -->
+  <text x="550" y="650" text-anchor="middle" font-size="10" fill="#94a3b8">Tech: Rust (tokio/reqwest/duckdb) | Python (polars/yfinance/hmmlearn/scipy) | DuckDB | Claude API | Gmail OAuth</text>
+</svg>

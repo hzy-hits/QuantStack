@@ -1,0 +1,79 @@
+# Quant Research Bot — Configuration
+# Copy to config.yaml and fill in API keys. Never commit config.yaml.
+#
+# PHILOSOPHY: You define the SCOPE to scan. The program decides what's compelling.
+# Do not hardcode specific tickers here — that's the program's job.
+
+api:
+  finnhub_key: "YOUR_FINNHUB_KEY"      # https://finnhub.io/register (free)
+  fred_key: "YOUR_FRED_KEY"            # https://fred.stlouisfed.org/docs/api/api_key.html (free)
+  anthropic_key: "YOUR_ANTHROPIC_KEY"  # https://console.anthropic.com
+  sec_user_agent: "YourName your@email.com"  # required by SEC EDGAR (no key needed)
+
+runtime:
+  timezone: "America/New_York"
+  random_seed: 42
+
+# ── UNIVERSE SCOPE ────────────────────────────────────────────────────────────
+# Define WHAT to scan, not WHICH specific symbols.
+# The program fetches the actual constituent lists dynamically.
+universe:
+  benchmark: "SPY"
+
+  # Equity indices to scan — constituents fetched automatically
+  scan:
+    sp500: true          # S&P 500 (~500 US large caps) — main scan
+    nasdaq100: false     # Nasdaq 100 (heavy tech overlap with S&P 500, off by default)
+    russell2000: false   # Small caps — 2000 stocks, expensive to scan, use carefully
+
+  # Asset classes to include alongside equities
+  # These are fixed sets — a handful of representative ETFs/futures per class
+  asset_classes:
+    sector_etfs: true    # XLK XLF XLE XLV XLI XLU XLRE XLY XLP XLB XLC
+                         # → tells Claude which sectors are moving, not individual stocks
+    bond_etfs: true      # TLT IEF HYG LQD SHY
+                         # → rate sensitivity, credit stress, yield curve context
+    commodities: true    # GLD SLV GC=F CL=F NG=F
+                         # → gold/oil/gas: cross-asset regime signals
+    international: true  # EEM EFA FXI VWO
+                         # → EM vs DM divergence, dollar strength context
+    volatility: true     # ^VIX, UVXY — fear gauges
+    crypto_etfs: false   # IBIT ETHA — Bitcoin/ETH spot ETFs (off by default)
+
+  # Minimum quality filters — keep junk out of the scan
+  filters:
+    min_avg_volume_shares: 500000   # ignore illiquid names (500K shares/day avg)
+    min_price: 5.0                  # ignore penny stocks
+
+# ── OUTPUT ───────────────────────────────────────────────────────────────────
+output:
+  max_notable_items: 20   # cap on items sent to Claude
+  min_notable_items: 8    # minimum — if fewer pass filters, warn
+
+# ── DATA SOURCES ─────────────────────────────────────────────────────────────
+data:
+  db_path: "data/quant.duckdb"
+  # How often to refresh S&P 500 constituent list (days)
+  constituent_refresh_days: 7
+
+fred:
+  # FRED series to track — label them here for Claude readability
+  series:
+    FEDFUNDS:     "Fed Funds Rate (%)"
+    DGS10:        "10Y Treasury Yield (%)"
+    BAMLH0A0HYM2: "HY Credit Spread"
+    VIXCLS:       "VIX — Market Fear Index"
+    T10Y2Y:       "10Y-2Y Yield Spread (recession indicator)"
+    UNRATE:       "Unemployment Rate (%)"
+    CPIAUCSL:     "CPI (inflation proxy)"
+
+signals:
+  momentum_windows: [20, 60]
+  atr_period: 14
+
+reporting:
+  anthropic_model: "claude-sonnet-4-6"
+  anthropic_temperature: 0.15
+  max_tokens: 3000
+  recipients:
+    - "you@example.com"

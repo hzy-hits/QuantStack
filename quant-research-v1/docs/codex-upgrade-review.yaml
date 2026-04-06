@@ -1,0 +1,112 @@
+tasks:
+  - name: feasibility-review
+    cwd: .
+    prompt: |
+      Read UPGRADE_PLAN.md carefully. This is a plan to upgrade our quant research system with:
+      1. Broader universe (5000 stocks → 200 active via screening)
+      2. Fundamental data (yfinance .info for valuation/quality)
+      3. Granger causality + cointegration for lead-lag detection
+      4. Options signal upgrade (VRP, OU on P/C ratio, implied density)
+      5. Algorithmic pre-processing to compress payload from 170KB to 35KB
+      6. HMM regime detection
+
+      Also read the existing codebase to understand current architecture:
+      - src/quant_bot/universe/builder.py (current universe)
+      - src/quant_bot/analytics/momentum_risk.py (current regime/momentum)
+      - src/quant_bot/filtering/notable.py (current scoring)
+      - src/quant_bot/signals/classify.py (current signal classification)
+      - src/quant_bot/data_ingestion/options.py (current options pipeline)
+      - src/quant_bot/reporting/bundle.py (current payload assembly)
+      - scripts/run_daily.py (current pipeline orchestration)
+
+      Review the plan for:
+      1. FEASIBILITY: Are the proposed algorithms correct? Any mathematical errors?
+      2. DATA GAPS: Can yfinance/Finnhub actually provide the data claimed? Any rate limit issues with 5000 stocks?
+      3. ARCHITECTURE FIT: Does the plan integrate cleanly with the existing codebase?
+      4. RISKS: What could go wrong? Edge cases? Performance bottlenecks?
+      5. MISSING PIECES: What important details are not addressed?
+      6. PHASE ORDERING: Is the dependency chain correct? Any phases that should be reordered?
+
+      Be critical and specific. Point out concrete problems, not vague concerns.
+
+  - name: math-review
+    cwd: .
+    prompt: |
+      Read UPGRADE_PLAN.md. Focus ONLY on the mathematical methods section.
+
+      For each proposed technique, assess:
+
+      1. COINTEGRATION (Engle-Granger + Johansen):
+         - With T=60 days and ~100 stocks per sector, is the sample size sufficient?
+         - Multiple testing problem: testing C(100,2)=4950 pairs per sector, what's the false discovery rate?
+         - How stable are cointegration relationships? What's the typical breakdown rate?
+
+      2. RMT NOISE FILTERING:
+         - With N=500, T=60, the ratio N/T=8.3 is very high. Does Marchenko-Pastur still apply?
+         - How many "real" factors should we expect to survive the threshold?
+         - Is eigenvalue truncation the right denoising method, or should we use shrinkage (Ledoit-Wolf)?
+
+      3. OU PROCESS:
+         - AR(1) estimation of OU parameters: what's the bias with small samples (60 obs)?
+         - Half-life estimation uncertainty: what confidence interval on half_life with T=60?
+         - Is OU even the right model for P/C ratio? It might have jumps/regime switches.
+
+      4. GRANGER CAUSALITY:
+         - Granger causality ≠ true causality. What's the false positive rate in financial data?
+         - Lag selection: AIC vs BIC? How sensitive are results to lag choice?
+         - Non-stationarity: do we need to difference the series first?
+
+      5. KALMAN FILTER:
+         - Q/R tuning: any principled way to set these, or is it trial-and-error?
+         - With daily data, how responsive vs smooth should the beta estimate be?
+
+      6. VRP (Variance Risk Premium):
+         - IV² - RV²: which IV (ATM? weighted?) and which RV (close-to-close? Yang-Zhang?)
+         - VRP is known to be negative on average. Is the signal in its deviation from mean?
+
+      7. BREEDEN-LITZENBERGER:
+         - Requires dense strike coverage. Do most stocks have enough liquid strikes?
+         - Numerical differentiation is noisy. What smoothing is needed?
+
+      Be specific about sample size requirements and statistical power for each method.
+
+  - name: implementation-review
+    cwd: .
+    prompt: |
+      Read UPGRADE_PLAN.md and the existing codebase (especially scripts/run_daily.py,
+      src/quant_bot/data_ingestion/options.py, src/quant_bot/filtering/notable.py).
+
+      Review the implementation plan specifically for:
+
+      1. YFINANCE SCALING:
+         - yfinance .info for 5000 stocks: actual rate limits? Does threading help or trigger bans?
+         - yfinance .download() for 5000 stocks daily: realistic timing?
+         - Any better bulk data alternatives (e.g. Yahoo bulk API, Polygon.io free tier)?
+
+      2. FINNHUB SCALING:
+         - /stock/symbol endpoint: does it return all US stocks? How many?
+         - With 60 req/s limit, what's the total fetch time for news/filings on 750 symbols?
+         - Any endpoints we're not using that could help (e.g. /stock/peers, /stock/metric)?
+
+      3. DUCKDB PERFORMANCE:
+         - 6 new tables. Current DB size? Projected size with 5000 stocks × 60 days?
+         - Covariance matrix computation on 500×60 in DuckDB vs pandas? Which is faster?
+         - Any indexing needs for the new query patterns?
+
+      4. PIPELINE TIMING:
+         - Current run_daily.py takes how long? (check logs if available)
+         - Adding Phase 1+2 modules: estimated total runtime?
+         - Will it still fit in the 20-minute DATA_TIMEOUT in run_full.sh?
+
+      5. OPTIONS HISTORY EXPANSION:
+         - Current options.py stores 7-day snapshots. What schema changes needed for 60D rolling?
+         - How much additional yfinance load per day?
+         - Pruning strategy: DELETE WHERE as_of < today - 60?
+
+      6. PYTHON LIBRARIES:
+         - statsmodels (Granger, ADF, cointegration): already in deps?
+         - hmmlearn: compatible with current Python/numpy?
+         - scipy.cluster.hierarchy: already available?
+         - cvxpy: needed now or later?
+
+      Give specific answers with numbers where possible.

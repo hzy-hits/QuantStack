@@ -1,4 +1,23 @@
-# Sub-project symlinks (private repos)
-factor-lab
-quant-research-v1
-quant-research-cn
+# Secrets
+config.yaml
+credentials.json
+token.json
+token.pickle
+.env
+
+# Data & runtime
+*.duckdb
+*.duckdb.wal
+data/
+logs/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ruff_cache/
+.pytest_cache/
+target/
+run-*/
+codex-*/
+.codex-runs/
+runs/
