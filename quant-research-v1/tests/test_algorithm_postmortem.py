@@ -33,8 +33,10 @@ class AlgorithmPostmortemTests(unittest.TestCase):
         symbol: str,
         *,
         selection_status: str = "selected",
+        report_bucket: str = "core",
         direction: str = "long",
         execution_mode: str | None = "executable_now",
+        headline_mode: str = "normal",
         rr_ratio: float | None = 2.0,
         expected_move_pct: float = 4.0,
     ) -> None:
@@ -42,12 +44,21 @@ class AlgorithmPostmortemTests(unittest.TestCase):
             """
             INSERT INTO report_decisions (
                 report_date, session, symbol, selection_status, rank_order,
-                signal_direction, signal_confidence, headline_mode, execution_mode,
+                report_bucket, signal_direction, signal_confidence, headline_mode, execution_mode,
                 entry_price, reference_price, rr_ratio, expected_move_pct, details_json
             )
-            VALUES ('2026-04-20', 'pre', ?, ?, 1, ?, 'HIGH', 'normal', ?, 100, 100, ?, ?, '{}')
+            VALUES ('2026-04-20', 'pre', ?, ?, 1, ?, ?, 'HIGH', ?, ?, 100, 100, ?, ?, '{}')
             """,
-            [symbol, selection_status, direction, execution_mode, rr_ratio, expected_move_pct],
+            [
+                symbol,
+                selection_status,
+                report_bucket,
+                direction,
+                headline_mode,
+                execution_mode,
+                rr_ratio,
+                expected_move_pct,
+            ],
         )
 
     def _insert_outcome(
@@ -96,12 +107,12 @@ class AlgorithmPostmortemTests(unittest.TestCase):
         self.assertEqual(inserted, 1)
         row = self.con.execute(
             """
-            SELECT action_label, executable, ROUND(realized_pnl_pct, 3), label
+            SELECT action_label, action_intent, executable, ROUND(realized_pnl_pct, 3), label, fill_quality
             FROM algorithm_postmortem
             WHERE symbol = 'AAA'
             """
         ).fetchone()
-        self.assertEqual(row, ("TRADE_NOW", True, 4.95, "won_and_executable"))
+        self.assertEqual(row, ("TRADE_NOW", "TRADE", True, 4.95, "won_and_executable", "captured"))
 
     def test_do_not_chase_is_not_counted_as_executable_capture(self) -> None:
         self._insert_decision("LATE", execution_mode="do_not_chase")
@@ -118,6 +129,47 @@ class AlgorithmPostmortemTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row, ("DO_NOT_CHASE", False, True, "do_not_chase", "stale_chase"))
 
+    def test_non_core_selected_item_is_observation_not_trade_feedback(self) -> None:
+        self._insert_decision("OBS", report_bucket="event_tape", execution_mode="executable_now")
+        self._insert_outcome("OBS", hold_3d_ret_pct=6.0, move_consumed_ratio=1.2)
+
+        materialize_algorithm_postmortem(self.con, date(2026, 4, 24))
+
+        row = self.con.execute(
+            """
+            SELECT action_label, action_intent, executable, stale_chase, no_fill_reason, label, feedback_action
+            FROM algorithm_postmortem
+            WHERE symbol = 'OBS'
+            """
+        ).fetchone()
+        self.assertEqual(
+            row,
+            (
+                "OBSERVE",
+                "OBSERVE",
+                False,
+                False,
+                "report_bucket_observation",
+                "observed_alpha",
+                None,
+            ),
+        )
+
+    def test_uncertain_headline_core_item_is_observation(self) -> None:
+        self._insert_decision("UNC", report_bucket="core", headline_mode="uncertain")
+        self._insert_outcome("UNC", hold_3d_ret_pct=6.0)
+
+        materialize_algorithm_postmortem(self.con, date(2026, 4, 24))
+
+        row = self.con.execute(
+            """
+            SELECT action_label, action_intent, label, feedback_action
+            FROM algorithm_postmortem
+            WHERE symbol = 'UNC'
+            """
+        ).fetchone()
+        self.assertEqual(row, ("OBSERVE", "OBSERVE", "observed_alpha", None))
+
     def test_ignored_follow_through_becomes_missed_alpha(self) -> None:
         self._insert_decision("MISS", selection_status="ignored")
         self._insert_outcome("MISS", selection_status="ignored", hold_3d_ret_pct=5.0)
@@ -130,6 +182,7 @@ class AlgorithmPostmortemTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(row, ("WAIT", "missed_alpha", "boost_recall"))
         self.assertEqual(summary["missed_alpha_count"], 1)
+        self.assertTrue(summary["calibration_buckets"])
 
 
 if __name__ == "__main__":

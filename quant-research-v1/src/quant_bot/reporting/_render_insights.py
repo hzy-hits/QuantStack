@@ -74,14 +74,28 @@ def render_report_postmortem(bundle: dict) -> list[str]:
             f"{algorithm_review.get('right_but_no_fill_count', 0)} | "
             f"{algorithm_review.get('missed_alpha_count', 0)} |",
             "",
-            "| Won executable | False executable | Correct avoid | Flat / no edge |",
-            "|----------------|------------------|---------------|----------------|",
+            "| Won executable | False executable | Correct avoid | Observed alpha | Flat / no edge |",
+            "|----------------|------------------|---------------|----------------|----------------|",
             f"| {algorithm_counts.get('won_and_executable', 0)} | "
             f"{algorithm_counts.get('false_positive_executable', 0)} | "
             f"{algorithm_counts.get('correct_avoid', 0)} | "
+            f"{algorithm_counts.get('observed_alpha', 0)} | "
             f"{algorithm_counts.get('flat_no_edge', 0)} |",
             "",
         ]
+        calibration_rows = algorithm_review.get("calibration_buckets") or []
+        if calibration_rows:
+            lines += [
+                "| Calibration bucket | N | Trade N | Trade win | Stale | Missed |",
+                "|--------------------|---|---------|-----------|-------|--------|",
+            ]
+            for row in calibration_rows[:5]:
+                lines.append(
+                    f"| {row.get('bucket') or 'unknown'} | {row.get('n', 0)} | "
+                    f"{row.get('trade_n', 0)} | {_fmt_val(row.get('trade_win_rate'), 2)} | "
+                    f"{_fmt_val(row.get('stale_rate'), 2)} | {_fmt_val(row.get('missed_rate'), 2)} |"
+                )
+            lines.append("")
 
     if feedback_counts:
         lines += [

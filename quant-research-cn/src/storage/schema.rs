@@ -551,6 +551,10 @@ pub const CREATE_TABLES: &str = "
         label                  VARCHAR NOT NULL,
         feedback_action        VARCHAR,
         feedback_weight        DOUBLE,
+        action_intent          VARCHAR,
+        calibration_bucket     VARCHAR,
+        regime_bucket          VARCHAR,
+        fill_quality           VARCHAR,
         detail_json            VARCHAR,
         PRIMARY KEY (report_date, session, symbol, selection_status)
     );

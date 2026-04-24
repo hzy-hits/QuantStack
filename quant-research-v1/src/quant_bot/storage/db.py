@@ -356,6 +356,12 @@ CREATE TABLE IF NOT EXISTS algorithm_postmortem (
     label                    VARCHAR NOT NULL,
     feedback_action          VARCHAR,
     feedback_weight          DOUBLE,
+    report_bucket            VARCHAR,
+    headline_mode            VARCHAR,
+    action_intent            VARCHAR,
+    calibration_bucket       VARCHAR,
+    regime_bucket            VARCHAR,
+    fill_quality             VARCHAR,
     detail_json              VARCHAR,
     PRIMARY KEY (report_date, session, symbol, selection_status)
 );

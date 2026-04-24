@@ -26,6 +26,7 @@ struct ReviewRow {
     gap_vs_chase_limit: Option<f64>,
     data_ready: bool,
     alpha_label: Option<String>,
+    decision_detail: Option<String>,
 }
 
 pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
@@ -33,6 +34,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
 }
 
 pub fn materialize_algorithm_postmortem(db: &Connection, as_of: NaiveDate) -> Result<usize> {
+    ensure_schema(db)?;
     let cutoff = as_of - Duration::days(LOOKBACK_DAYS);
     db.execute(
         "DELETE FROM algorithm_postmortem
@@ -53,8 +55,9 @@ pub fn materialize_algorithm_postmortem(db: &Connection, as_of: NaiveDate) -> Re
             action_label, action_source, direction, direction_right, executable,
             fill_price, exit_price, realized_pnl_pct, best_possible_ret_pct,
             stale_chase, no_fill_reason, label, feedback_action, feedback_weight,
+            action_intent, calibration_bucket, regime_bucket, fill_quality,
             detail_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
 
     let mut inserted = 0usize;
@@ -79,11 +82,32 @@ pub fn materialize_algorithm_postmortem(db: &Connection, as_of: NaiveDate) -> Re
             best_possible,
         );
         let (feedback_action, feedback_weight) = feedback(label);
+        let action_intent = action_intent(action_label);
+        let regime_bucket = regime_bucket(&row);
+        let calibration_bucket = calibration_bucket(
+            &row.report_bucket,
+            &row.signal_confidence,
+            &row.execution_mode,
+            action_intent,
+            &regime_bucket,
+        );
+        let fill_quality = fill_quality(
+            action_intent,
+            row.data_ready,
+            executable,
+            stale_chase,
+            realized_pnl_pct,
+            no_fill_reason,
+        );
         let detail = json!({
             "alpha_postmortem_label": row.alpha_label,
             "report_bucket": row.report_bucket,
             "signal_confidence": row.signal_confidence,
             "execution_mode": row.execution_mode,
+            "action_intent": action_intent,
+            "calibration_bucket": calibration_bucket,
+            "regime_bucket": regime_bucket,
+            "fill_quality": fill_quality,
             "max_chase_gap_pct": row.max_chase_gap_pct,
             "gap_vs_chase_limit": row.gap_vs_chase_limit,
             "direction_threshold_pct": DIRECTION_THRESHOLD_PCT,
@@ -110,6 +134,10 @@ pub fn materialize_algorithm_postmortem(db: &Connection, as_of: NaiveDate) -> Re
             label,
             feedback_action,
             feedback_weight,
+            action_intent,
+            calibration_bucket,
+            regime_bucket,
+            fill_quality,
             detail,
         ])?;
         inserted += 1;
@@ -137,7 +165,8 @@ fn load_rows(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Result<Vec
             o.best_down_2d_pct,
             o.gap_vs_chase_limit,
             o.data_ready,
-            p.label
+            p.label,
+            d.details_json
          FROM report_decisions d
          INNER JOIN report_outcomes o
            ON o.report_date = d.report_date
@@ -174,6 +203,7 @@ fn load_rows(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Result<Vec
                 row.get::<_, Option<f64>>(13)?,
                 row.get::<_, bool>(14).unwrap_or(false),
                 row.get::<_, Option<String>>(15).ok().flatten(),
+                row.get::<_, Option<String>>(16).ok().flatten(),
             ))
         },
     )?;
@@ -197,6 +227,7 @@ fn load_rows(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Result<Vec
             gap_vs_chase_limit,
             data_ready,
             alpha_label,
+            decision_detail,
         ) = row?;
         out.push(ReviewRow {
             report_date: parse_sql_date(&report_date)?,
@@ -215,9 +246,104 @@ fn load_rows(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Result<Vec
             gap_vs_chase_limit,
             data_ready,
             alpha_label,
+            decision_detail,
         });
     }
     Ok(out)
+}
+
+fn ensure_schema(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "ALTER TABLE algorithm_postmortem ADD COLUMN IF NOT EXISTS action_intent VARCHAR;
+         ALTER TABLE algorithm_postmortem ADD COLUMN IF NOT EXISTS calibration_bucket VARCHAR;
+         ALTER TABLE algorithm_postmortem ADD COLUMN IF NOT EXISTS regime_bucket VARCHAR;
+         ALTER TABLE algorithm_postmortem ADD COLUMN IF NOT EXISTS fill_quality VARCHAR;",
+    )?;
+    Ok(())
+}
+
+fn action_intent(action_label: &str) -> &'static str {
+    match action_label {
+        "TRADE_NOW" => "TRADE",
+        "OBSERVE" => "OBSERVE",
+        "DO_NOT_CHASE" | "RISK_AVOID" => "AVOID",
+        _ => "WAIT",
+    }
+}
+
+fn parse_detail_json(raw: &Option<String>) -> Option<serde_json::Value> {
+    raw.as_ref()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+}
+
+fn regime_bucket(row: &ReviewRow) -> String {
+    let parsed = parse_detail_json(&row.decision_detail);
+    if let Some(value) = parsed.as_ref() {
+        for key in ["regime", "trend_regime", "headline_mode"] {
+            if let Some(text) = value.get(key).and_then(|v| v.as_str()) {
+                if !text.trim().is_empty() {
+                    return text.trim().to_lowercase();
+                }
+            }
+        }
+        for key in ["execution_gate", "headline_gate"] {
+            if let Some(obj) = value.get(key).and_then(|v| v.as_object()) {
+                for nested_key in ["trend_regime", "regime", "mode"] {
+                    if let Some(text) = obj.get(nested_key).and_then(|v| v.as_str()) {
+                        if !text.trim().is_empty() {
+                            return text.trim().to_lowercase();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    "unknown".to_string()
+}
+
+fn calibration_bucket(
+    report_bucket: &str,
+    signal_confidence: &str,
+    execution_mode: &str,
+    action_intent: &str,
+    regime_bucket: &str,
+) -> String {
+    format!(
+        "lane={}|confidence={}|regime={}|execution={}|intent={}",
+        report_bucket.trim().to_lowercase(),
+        signal_confidence.trim().to_lowercase(),
+        regime_bucket.trim().to_lowercase(),
+        execution_mode.trim().to_lowercase(),
+        action_intent.trim().to_lowercase()
+    )
+}
+
+fn fill_quality(
+    action_intent: &str,
+    data_ready: bool,
+    executable: bool,
+    stale_chase: bool,
+    realized_pnl_pct: Option<f64>,
+    no_fill_reason: Option<&'static str>,
+) -> &'static str {
+    if action_intent != "TRADE" {
+        return no_fill_reason.unwrap_or("not_trade");
+    }
+    if !data_ready {
+        return "unresolved";
+    }
+    if stale_chase {
+        return "stale_chase";
+    }
+    if !executable {
+        return no_fill_reason.unwrap_or("no_fill");
+    }
+    match realized_pnl_pct {
+        Some(v) if v >= 0.5 => "captured",
+        Some(v) if v <= -1.0 => "bad_fill",
+        Some(_) => "flat_fill",
+        None => "no_pnl",
+    }
 }
 
 fn infer_action(row: &ReviewRow) -> (&'static str, &'static str) {
@@ -497,9 +623,9 @@ mod tests {
 
         compute(&db, NaiveDate::from_ymd_opt(2026, 4, 24).unwrap()).unwrap();
 
-        let row: (String, bool, bool, String, Option<String>) = db
+        let row: (String, String, bool, bool, String, Option<String>, String) = db
             .query_row(
-                "SELECT action_label, executable, stale_chase, label, feedback_action
+                "SELECT action_label, action_intent, executable, stale_chase, label, feedback_action, fill_quality
                  FROM algorithm_postmortem WHERE symbol = '000004.SZ'",
                 [],
                 |row| {
@@ -509,6 +635,8 @@ mod tests {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
                     ))
                 },
             )
@@ -517,10 +645,12 @@ mod tests {
             row,
             (
                 "OBSERVE".to_string(),
+                "OBSERVE".to_string(),
                 false,
                 false,
                 "observed_alpha".to_string(),
                 None,
+                "report_bucket_observation".to_string(),
             )
         );
     }

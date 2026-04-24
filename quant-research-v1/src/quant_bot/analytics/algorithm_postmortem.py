@@ -36,10 +36,34 @@ CREATE TABLE IF NOT EXISTS algorithm_postmortem (
     label                    VARCHAR NOT NULL,
     feedback_action          VARCHAR,
     feedback_weight          DOUBLE,
+    report_bucket            VARCHAR,
+    headline_mode            VARCHAR,
+    action_intent            VARCHAR,
+    calibration_bucket       VARCHAR,
+    regime_bucket            VARCHAR,
+    fill_quality             VARCHAR,
     detail_json              VARCHAR,
     PRIMARY KEY (report_date, session, symbol, selection_status)
 );
 """
+
+_EXTRA_COLUMNS = {
+    "report_bucket": "VARCHAR",
+    "headline_mode": "VARCHAR",
+    "action_intent": "VARCHAR",
+    "calibration_bucket": "VARCHAR",
+    "regime_bucket": "VARCHAR",
+    "fill_quality": "VARCHAR",
+}
+
+
+def _ensure_schema(con: duckdb.DuckDBPyConnection) -> None:
+    con.execute(DDL)
+    for column, col_type in _EXTRA_COLUMNS.items():
+        try:
+            con.execute(f"ALTER TABLE algorithm_postmortem ADD COLUMN IF NOT EXISTS {column} {col_type}")
+        except duckdb.Error:
+            pass
 
 
 def _safe_float(v: Any) -> float | None:
@@ -97,9 +121,89 @@ def _load_details(raw: Any) -> dict[str, Any]:
     return out if isinstance(out, dict) else {}
 
 
+def _is_actionable_lane(report_bucket: Any, headline_mode: Any) -> bool:
+    lane = str(report_bucket or "").strip().lower().replace("_", " ")
+    headline = str(headline_mode or "").strip().lower()
+    if lane and lane not in {"core", "core book"}:
+        return False
+    if headline in {"range", "uncertain"}:
+        return False
+    return True
+
+
+def _action_intent(action_label: str) -> str:
+    if action_label == "TRADE_NOW":
+        return "TRADE"
+    if action_label == "OBSERVE":
+        return "OBSERVE"
+    if action_label in {"DO_NOT_CHASE", "RISK_AVOID"}:
+        return "AVOID"
+    return "WAIT"
+
+
+def _regime_bucket(details: dict[str, Any], headline_mode: Any) -> str:
+    gate = details.get("execution_gate") if isinstance(details.get("execution_gate"), dict) else {}
+    overnight_alpha = (
+        details.get("overnight_alpha") if isinstance(details.get("overnight_alpha"), dict) else {}
+    )
+    for value in (
+        gate.get("trend_regime"),
+        gate.get("regime"),
+        overnight_alpha.get("regime"),
+        headline_mode,
+    ):
+        text = str(value or "").strip().lower()
+        if text:
+            return text
+    return "unknown"
+
+
+def _calibration_bucket(
+    *,
+    report_bucket: Any,
+    headline_mode: Any,
+    regime_bucket: str,
+    execution_mode: Any,
+    action_intent: str,
+) -> str:
+    lane = str(report_bucket or "unknown").strip().lower().replace("_", " ")
+    headline = str(headline_mode or "unknown").strip().lower()
+    execution = str(execution_mode or "unknown").strip().lower()
+    return (
+        f"headline={headline}|lane={lane}|regime={regime_bucket}|"
+        f"execution={execution}|intent={action_intent.lower()}"
+    )
+
+
+def _fill_quality(
+    *,
+    action_intent: str,
+    data_ready: bool,
+    executable: bool,
+    stale_chase: bool,
+    realized_pnl_pct: float | None,
+    threshold: float,
+    no_fill_reason: str | None,
+) -> str:
+    if action_intent != "TRADE":
+        return no_fill_reason or "not_trade"
+    if not data_ready:
+        return "unresolved"
+    if stale_chase:
+        return "stale_chase"
+    if not executable:
+        return no_fill_reason or "no_fill"
+    if realized_pnl_pct is not None and realized_pnl_pct >= max(0.35, threshold * 0.35):
+        return "captured"
+    if realized_pnl_pct is not None and realized_pnl_pct <= -max(0.50, threshold * 0.35):
+        return "bad_fill"
+    return "flat_fill"
+
+
 def _action_from_row(
     *,
     selection_status: str,
+    report_bucket: str | None,
     direction: str,
     execution_mode: str | None,
     rr_ratio: float | None,
@@ -112,6 +216,8 @@ def _action_from_row(
         return "WAIT", "not_selected"
     if direction == "neutral":
         return "WAIT", "neutral_signal"
+    if not _is_actionable_lane(report_bucket, headline_mode):
+        return "OBSERVE", "report_layer"
 
     mode = str(execution_mode or "").strip().lower()
     gate = details.get("execution_gate") if isinstance(details.get("execution_gate"), dict) else {}
@@ -169,6 +275,11 @@ def _classify(
             return "missed_alpha"
         return "correct_ignore"
 
+    if action_label == "OBSERVE":
+        if direction_right and best is not None and best >= threshold:
+            return "observed_alpha"
+        return "correct_observe"
+
     if action_label == "TRADE_NOW":
         if stale_chase:
             return "stale_chase"
@@ -194,7 +305,7 @@ def materialize_algorithm_postmortem(
     lookback_days: int = 20,
 ) -> int:
     """Persist execution-aware algorithm outcomes for recent report decisions."""
-    con.execute(DDL)
+    _ensure_schema(con)
     cutoff = as_of - timedelta(days=lookback_days * 3)
     cutoff_str = cutoff.strftime("%Y-%m-%d")
     as_of_str = as_of.strftime("%Y-%m-%d")
@@ -214,6 +325,7 @@ def materialize_algorithm_postmortem(
             d.session,
             d.symbol,
             d.selection_status,
+            d.report_bucket,
             d.signal_direction,
             d.signal_confidence,
             d.headline_mode,
@@ -263,6 +375,7 @@ def materialize_algorithm_postmortem(
             session,
             symbol,
             selection_status,
+            report_bucket,
             signal_direction,
             signal_confidence,
             headline_mode,
@@ -295,6 +408,7 @@ def materialize_algorithm_postmortem(
         move_consumed = _safe_float(move_consumed_ratio)
         action_label, action_source = _action_from_row(
             selection_status=str(selection_status or ""),
+            report_bucket=report_bucket,
             direction=direction,
             execution_mode=execution_mode,
             rr_ratio=_safe_float(rr_ratio),
@@ -313,10 +427,15 @@ def materialize_algorithm_postmortem(
             and _direction_sign(direction) != 0
             and best_possible >= threshold
         )
-        stale_chase = (
-            action_label == "DO_NOT_CHASE"
-            or (move_consumed is not None and move_consumed >= 0.75)
-            or (_safe_float(alpha_remaining_pct) is not None and _safe_float(alpha_remaining_pct) <= 0)
+        stale_chase = action_label == "DO_NOT_CHASE" or (
+            action_label in {"TRADE_NOW", "WAIT_PULLBACK"}
+            and (
+                (move_consumed is not None and move_consumed >= 0.75)
+                or (
+                    _safe_float(alpha_remaining_pct) is not None
+                    and _safe_float(alpha_remaining_pct) <= 0
+                )
+            )
         )
 
         executable = False
@@ -338,6 +457,8 @@ def materialize_algorithm_postmortem(
             no_fill_reason = "do_not_chase"
         elif action_label == "RISK_AVOID":
             no_fill_reason = "risk_reward_rejected"
+        elif action_label == "OBSERVE":
+            no_fill_reason = "report_bucket_observation"
         else:
             no_fill_reason = "not_actionable"
 
@@ -352,11 +473,34 @@ def materialize_algorithm_postmortem(
             threshold=threshold,
         )
         feedback_action, feedback_weight = _feedback(label)
+        intent = _action_intent(action_label)
+        regime_bucket = _regime_bucket(details, headline_mode)
+        calibration_bucket = _calibration_bucket(
+            report_bucket=report_bucket,
+            headline_mode=headline_mode,
+            regime_bucket=regime_bucket,
+            execution_mode=execution_mode,
+            action_intent=intent,
+        )
+        fill_quality = _fill_quality(
+            action_intent=intent,
+            data_ready=bool(data_ready),
+            executable=executable,
+            stale_chase=stale_chase,
+            realized_pnl_pct=realized_pnl,
+            threshold=threshold,
+            no_fill_reason=no_fill_reason,
+        )
         detail = {
             "alpha_postmortem_label": alpha_label,
+            "report_bucket": report_bucket,
             "signal_confidence": signal_confidence,
             "headline_mode": headline_mode,
             "execution_mode": execution_mode,
+            "action_intent": intent,
+            "calibration_bucket": calibration_bucket,
+            "regime_bucket": regime_bucket,
+            "fill_quality": fill_quality,
             "rr_ratio": _safe_float(rr_ratio),
             "expected_move_pct": expected_move,
             "gap_pct": _safe_float(gap_pct),
@@ -385,6 +529,12 @@ def materialize_algorithm_postmortem(
             label,
             feedback_action,
             feedback_weight,
+            report_bucket,
+            headline_mode,
+            intent,
+            calibration_bucket,
+            regime_bucket,
+            fill_quality,
             json.dumps(detail, ensure_ascii=True, default=str),
         ])
 
@@ -395,9 +545,11 @@ def materialize_algorithm_postmortem(
             action_label, action_source, direction, direction_right, executable,
             fill_price, exit_price, realized_pnl_pct, best_possible_ret_pct,
             stale_chase, no_fill_reason, label, feedback_action, feedback_weight,
+            report_bucket, headline_mode, action_intent, calibration_bucket,
+            regime_bucket, fill_quality,
             detail_json
         )
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """,
         inserts,
     )
@@ -411,7 +563,7 @@ def build_algorithm_postmortem_summary(
     lookback_days: int = 20,
 ) -> dict[str, Any]:
     """Build a compact report-ready summary of algorithm action outcomes."""
-    con.execute(DDL)
+    _ensure_schema(con)
     cutoff = as_of - timedelta(days=lookback_days * 3)
     rows = con.execute(
         """
@@ -425,7 +577,11 @@ def build_algorithm_postmortem_summary(
             best_possible_ret_pct,
             stale_chase,
             label,
-            no_fill_reason
+            no_fill_reason,
+            action_intent,
+            calibration_bucket,
+            regime_bucket,
+            fill_quality
         FROM algorithm_postmortem
         WHERE session = ?
           AND report_date >= ?
@@ -450,6 +606,10 @@ def build_algorithm_postmortem_summary(
             "stale_chase": bool(r[7]),
             "label": r[8],
             "no_fill_reason": r[9],
+            "action_intent": r[10],
+            "calibration_bucket": r[11],
+            "regime_bucket": r[12],
+            "fill_quality": r[13],
         }
         for r in rows
     ]
@@ -468,6 +628,31 @@ def build_algorithm_postmortem_summary(
         ranked = sorted(items, key=lambda r: (r.get(score_field) or 0.0, r["date"]), reverse=True)
         return ranked[:n]
 
+    def _calibration_rows() -> list[dict[str, Any]]:
+        buckets: dict[str, list[dict[str, Any]]] = {}
+        for row in entries:
+            key = row.get("calibration_bucket") or "unknown"
+            buckets.setdefault(str(key), []).append(row)
+        out: list[dict[str, Any]] = []
+        for key, bucket_rows in buckets.items():
+            trade_rows = [r for r in bucket_rows if r.get("action_intent") == "TRADE"]
+            trade_wins = [r for r in trade_rows if r["label"] == "won_and_executable"]
+            stale_rows = [r for r in bucket_rows if r["label"] == "stale_chase"]
+            missed_rows = [r for r in bucket_rows if r["label"] == "missed_alpha"]
+            out.append(
+                {
+                    "bucket": key,
+                    "n": len(bucket_rows),
+                    "trade_n": len(trade_rows),
+                    "trade_win_rate": round(len(trade_wins) / len(trade_rows), 3)
+                    if trade_rows
+                    else None,
+                    "stale_rate": round(len(stale_rows) / len(bucket_rows), 3),
+                    "missed_rate": round(len(missed_rows) / len(bucket_rows), 3),
+                }
+            )
+        return sorted(out, key=lambda r: (r["n"], r["trade_n"]), reverse=True)[:8]
+
     return {
         "lookback_days": lookback_days,
         "reviewed": len(entries),
@@ -485,8 +670,11 @@ def build_algorithm_postmortem_summary(
             "stale_chase": _count("stale_chase"),
             "missed_alpha": _count("missed_alpha"),
             "correct_avoid": _count("correct_avoid"),
+            "observed_alpha": _count("observed_alpha"),
+            "correct_observe": _count("correct_observe"),
             "flat_no_edge": _count("flat_no_edge"),
         },
+        "calibration_buckets": _calibration_rows(),
         "recent_stale_or_no_fill": _examples(stale + no_fill_right, "best_possible_ret_pct"),
         "recent_executable_losses": _examples(
             [r for r in executable if (r["realized_pnl_pct"] or 0.0) < 0],

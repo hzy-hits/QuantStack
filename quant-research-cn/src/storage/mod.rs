@@ -92,6 +92,10 @@ pub fn restore_report_review_history(src: &str, dst: &str) -> Result<()> {
             label                  VARCHAR NOT NULL,
             feedback_action        VARCHAR,
             feedback_weight        DOUBLE,
+            action_intent          VARCHAR,
+            calibration_bucket     VARCHAR,
+            regime_bucket          VARCHAR,
+            fill_quality           VARCHAR,
             detail_json            VARCHAR,
             PRIMARY KEY (report_date, session, symbol, selection_status)
          );
