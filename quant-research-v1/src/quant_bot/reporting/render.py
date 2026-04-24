@@ -129,10 +129,11 @@ def _render_notable_items(bundle: dict) -> list[str]:
             compact = bucket == "appendix" or item.get("signal", {}).get("confidence") in ("LOW", "NO_SIGNAL", None)
             lines += render_item_header(item_idx, item, compact=compact)
             if not compact:
-                if headline_mode == "trend":
+                main_gate = _main_signal_gate(item)
+                if headline_mode == "trend" and (main_gate or {}).get("status") == "pass":
                     lines += render_item_risk_params(item)
                 else:
-                    lines += _render_nontrend_execution_guard(item, headline_mode)
+                    lines += _render_execution_guard(item, headline_mode)
                 lines += render_item_contradictions(item)
             lines += render_item_data(item, compact=compact)
             if not compact:
@@ -173,16 +174,28 @@ def _sort_bucket_items(items: list[dict], *, bucket: str) -> list[dict]:
     )
 
 
-def _render_nontrend_execution_guard(item: dict, headline_mode: str) -> list[str]:
+def _main_signal_gate(item: dict) -> dict[str, Any] | None:
+    gate = item.get("main_signal_gate") or (item.get("signal") or {}).get("main_signal_gate")
+    return gate if isinstance(gate, dict) else None
+
+
+def _render_execution_guard(item: dict, headline_mode: str) -> list[str]:
     """Render execution discipline without order-shaped risk parameters."""
     gate = item.get("execution_gate") or {}
     risk = item.get("risk_params") or {}
+    main_gate = _main_signal_gate(item) or {}
     pullback = gate.get("pullback_price") or risk.get("entry")
     action = gate.get("action") or risk.get("execution_mode") or "unknown"
+    status = str(main_gate.get("status") or "missing").upper()
+    role = main_gate.get("role") or "unknown"
+    intent = main_gate.get("action_intent") or "OBSERVE"
+    blockers = main_gate.get("blockers") or []
+    blocker_text = ", ".join(blockers[:3]) if blockers else "none"
     lines = [
-        "**Execution guard (non-trend gate):**",
+        "**Execution guard:**",
         "",
-        f"- Headline Gate `{headline_mode.upper()}`: this item is a review candidate, not an order surface.",
+        f"- Headline Gate `{headline_mode.upper()}` and Main Signal Gate `{status}`: this item is a review candidate, not an order surface.",
+        f"- Role: {role}; intent: {intent}; blockers: {blocker_text}.",
         f"- Execution state: {action}; pullback/review reference: {_fmt_price(pullback)}.",
         "- Final report must not print Entry/Stop/Target, 'today only do', or max-chase instructions for this item.",
         "",

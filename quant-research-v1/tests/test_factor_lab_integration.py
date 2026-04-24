@@ -444,6 +444,55 @@ class RenderPayloadTests(unittest.TestCase):
         self.assertNotIn("| Target |", rendered)
         self.assertNotIn("still actionable at current levels", rendered)
 
+    def test_blocked_main_signal_gate_suppresses_order_shaped_risk_params(self) -> None:
+        from quant_bot.reporting.render import _render_notable_items
+
+        bundle = {
+            "headline_gate": {"mode": "trend"},
+            "notable_items": [
+                {
+                    "symbol": "AAA",
+                    "report_bucket": "core",
+                    "report_score": 0.92,
+                    "score": 0.92,
+                    "price": 100.0,
+                    "primary_reason": "core setup",
+                    "sub_scores": {},
+                    "signal": {
+                        "confidence": "HIGH",
+                        "direction": "bullish",
+                        "signal_type": "trend",
+                        "direction_score": 0.41,
+                    },
+                    "main_signal_gate": {
+                        "status": "blocked",
+                        "role": "directional_observation",
+                        "action_intent": "OBSERVE",
+                        "blockers": ["execution_wait_pullback"],
+                    },
+                    "execution_gate": {
+                        "action": "wait_pullback",
+                        "pullback_price": 98.0,
+                    },
+                    "risk_params": {
+                        "entry": 100.0,
+                        "stop": 95.0,
+                        "target": 112.0,
+                        "rr_ratio": 2.4,
+                        "execution_mode": "wait_pullback",
+                    },
+                }
+            ],
+        }
+
+        rendered = "\n".join(_render_notable_items(bundle))
+
+        self.assertIn("Main Signal Gate `BLOCKED`", rendered)
+        self.assertIn("not an order surface", rendered)
+        self.assertNotIn("| Entry |", rendered)
+        self.assertNotIn("| Stop (2-ATR) |", rendered)
+        self.assertNotIn("| Target |", rendered)
+
     def test_polymarket_context_warns_against_categorical_probability_language(self) -> None:
         from quant_bot.reporting._render_context import render_header_and_context
 

@@ -1251,14 +1251,18 @@ fn render_notable_item(
     writeln!(md, "- **层级定位**: {}", item.report_reason,)?;
 
     let detail = &item.detail;
-    if let Some(gate) = detail.get("main_signal_gate").and_then(|v| v.as_object()) {
+    let main_gate = detail.get("main_signal_gate").and_then(|v| v.as_object());
+    let mut main_gate_pass = false;
+    let mut main_gate_blockers = "none".to_string();
+    if let Some(gate) = main_gate {
         let status = gate.get("status").and_then(|v| v.as_str()).unwrap_or("-");
         let role = gate.get("role").and_then(|v| v.as_str()).unwrap_or("-");
         let intent = gate
             .get("action_intent")
             .and_then(|v| v.as_str())
             .unwrap_or("OBSERVE");
-        let blockers = gate
+        main_gate_pass = status == "pass";
+        main_gate_blockers = gate
             .get("blockers")
             .and_then(|v| v.as_array())
             .map(|items| {
@@ -1277,7 +1281,7 @@ fn render_notable_item(
             status.to_uppercase(),
             role,
             intent,
-            blockers,
+            main_gate_blockers,
         )?;
     }
 
@@ -1506,7 +1510,9 @@ fn render_notable_item(
                 execution_score,
                 max_chase_gap_pct,
                 pullback_trigger_pct,
-                pullback_price
+                pullback_price,
+                main_gate_pass,
+                &main_gate_blockers,
             )
         )?;
     }
@@ -1576,7 +1582,28 @@ fn execution_summary_sentence(
     max_chase_gap_pct: Option<f64>,
     pullback_trigger_pct: Option<f64>,
     pullback_price: Option<f64>,
+    main_gate_pass: bool,
+    main_gate_blockers: &str,
 ) -> String {
+    if !main_gate_pass {
+        let lane = match report_bucket {
+            "CORE BOOK" => "主书候选",
+            "RANGE CORE" => "区间复核",
+            "TACTICAL CONTINUATION" => "战术观察",
+            "THEME ROTATION" => "主题轮动观察",
+            "RADAR" => "雷达观察",
+            _ => "复核",
+        };
+        return format!(
+            "主信号门槛未通过（blockers={}），{}层不输出买入/追价指令；执行得分={}，仅记录回踩复核约 {}%，参考复核价={}。最终研报只写观察与失效条件，不写入场、止盈或T1/T2。",
+            main_gate_blockers,
+            lane,
+            fmt_opt_f64(execution_score, 3),
+            fmt_opt_f64(pullback_trigger_pct, 2),
+            fmt_opt_f64(pullback_price, 2)
+        );
+    }
+
     if headline_mode != "trend" {
         let lane = match report_bucket {
             "RANGE CORE" => "区间复核",
@@ -2979,10 +3006,32 @@ mod tests {
             Some(2.20),
             Some(0.99),
             Some(3.81),
+            true,
+            "none",
         );
 
         assert!(summary.contains("不输出买入/追价指令"));
         assert!(summary.contains("参考复核价=3.81"));
+        assert!(summary.contains("不写入场、止盈或T1/T2"));
+        assert!(!summary.contains("可接受追价上限"));
+    }
+
+    #[test]
+    fn blocked_main_signal_gate_suppresses_trade_instructions() {
+        let summary = execution_summary_sentence(
+            "CORE BOOK",
+            "trend",
+            Some("executable"),
+            Some(0.708),
+            Some(2.20),
+            Some(0.99),
+            Some(3.81),
+            false,
+            "execution_score_below_core",
+        );
+
+        assert!(summary.contains("主信号门槛未通过"));
+        assert!(summary.contains("不输出买入/追价指令"));
         assert!(summary.contains("不写入场、止盈或T1/T2"));
         assert!(!summary.contains("可接受追价上限"));
     }
