@@ -351,6 +351,34 @@ class RenderPayloadTests(unittest.TestCase):
         self.assertNotIn("| Target |", rendered)
         self.assertNotIn("still actionable at current levels", rendered)
 
+    def test_polymarket_context_warns_against_categorical_probability_language(self) -> None:
+        from quant_bot.reporting._render_context import render_header_and_context
+
+        bundle = {
+            "meta": {"trade_date": "2026-04-24"},
+            "market_context": {
+                "regime": {},
+                "major_indices": {},
+                "polymarket_events": [
+                    {
+                        "question": "Will rates fall?",
+                        "yes_prob": 0.944,
+                        "no_prob": 0.056,
+                        "prob_change_24h": 0.01,
+                        "volume_usd": 100000,
+                        "end_date": "2026-12-31",
+                        "fetched_at": "2026-04-24T00:00:00Z",
+                    }
+                ],
+            },
+        }
+
+        rendered = "\n".join(render_header_and_context(bundle))
+
+        self.assertIn("Do not convert a probability snapshot into categorical language", rendered)
+        self.assertIn("priced in", rendered)
+        self.assertIn("certain", rendered)
+
 
 class FactorLabReportSyncTests(unittest.TestCase):
     def test_sync_replaces_placeholder_factor_lab_section_with_signal_block(self) -> None:

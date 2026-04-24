@@ -267,6 +267,8 @@ def _render_polymarket(ctx: dict) -> list[str]:
         "",
         "*Minimum $10K volume, fetched within last 2 days. "
         "Probabilities are snapshots — prices change continuously.*",
+        "*Do not convert a probability snapshot into categorical language such as "
+        "'priced in', 'dead', or 'certain' unless independent market/price evidence confirms it.*",
         "",
         "| Question | P(Yes) | Δ | P(No) | Volume USD | End Date | Fetched (UTC) |",
         "|----------|--------|---|-------|------------|----------|---------------|",
