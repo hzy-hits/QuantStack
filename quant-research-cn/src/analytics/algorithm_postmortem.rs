@@ -13,6 +13,7 @@ struct ReviewRow {
     report_date: NaiveDate,
     symbol: String,
     selection_status: String,
+    report_bucket: String,
     evaluation_date: NaiveDate,
     direction: String,
     signal_confidence: String,
@@ -63,7 +64,8 @@ pub fn materialize_algorithm_postmortem(db: &Connection, as_of: NaiveDate) -> Re
         let direction_right = is_direction_right(best_possible);
         let (action_label, action_source) = infer_action(&row);
         let gap_ratio = row.gap_vs_chase_limit.unwrap_or(0.0);
-        let stale_chase = action_label == "DO_NOT_CHASE" || gap_ratio >= 1.0;
+        let stale_chase = action_label == "DO_NOT_CHASE"
+            || matches!(action_label, "TRADE_NOW" | "WAIT_PULLBACK") && gap_ratio >= 1.0;
 
         let (executable, fill_price, exit_price, realized_pnl_pct, no_fill_reason) =
             fill_result(&row, action_label, stale_chase);
@@ -79,6 +81,7 @@ pub fn materialize_algorithm_postmortem(db: &Connection, as_of: NaiveDate) -> Re
         let (feedback_action, feedback_weight) = feedback(label);
         let detail = json!({
             "alpha_postmortem_label": row.alpha_label,
+            "report_bucket": row.report_bucket,
             "signal_confidence": row.signal_confidence,
             "execution_mode": row.execution_mode,
             "max_chase_gap_pct": row.max_chase_gap_pct,
@@ -122,6 +125,7 @@ fn load_rows(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Result<Vec
             CAST(d.report_date AS VARCHAR),
             d.symbol,
             d.selection_status,
+            COALESCE(d.report_bucket, 'CORE BOOK'),
             CAST(o.evaluation_date AS VARCHAR),
             d.signal_direction,
             d.signal_confidence,
@@ -159,16 +163,17 @@ fn load_rows(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Result<Vec
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
-                row.get::<_, String>(5).unwrap_or_default(),
+                row.get::<_, String>(5)?,
                 row.get::<_, String>(6).unwrap_or_default(),
-                row.get::<_, Option<f64>>(7)?,
+                row.get::<_, String>(7).unwrap_or_default(),
                 row.get::<_, Option<f64>>(8)?,
                 row.get::<_, Option<f64>>(9)?,
                 row.get::<_, Option<f64>>(10)?,
                 row.get::<_, Option<f64>>(11)?,
                 row.get::<_, Option<f64>>(12)?,
-                row.get::<_, bool>(13).unwrap_or(false),
-                row.get::<_, Option<String>>(14).ok().flatten(),
+                row.get::<_, Option<f64>>(13)?,
+                row.get::<_, bool>(14).unwrap_or(false),
+                row.get::<_, Option<String>>(15).ok().flatten(),
             ))
         },
     )?;
@@ -179,6 +184,7 @@ fn load_rows(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Result<Vec
             report_date,
             symbol,
             selection_status,
+            report_bucket,
             evaluation_date,
             direction,
             signal_confidence,
@@ -196,6 +202,7 @@ fn load_rows(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Result<Vec
             report_date: parse_sql_date(&report_date)?,
             symbol,
             selection_status,
+            report_bucket,
             evaluation_date: parse_sql_date(&evaluation_date)?,
             direction,
             signal_confidence,
@@ -216,6 +223,9 @@ fn load_rows(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Result<Vec
 fn infer_action(row: &ReviewRow) -> (&'static str, &'static str) {
     if row.selection_status != "selected" {
         return ("WAIT", "not_selected");
+    }
+    if row.report_bucket != "CORE BOOK" {
+        return ("OBSERVE", "report_bucket");
     }
     if row.direction == "bearish" {
         return ("RISK_AVOID", "long_only_bearish");
@@ -248,6 +258,7 @@ fn fill_result(
 ) {
     if action_label != "TRADE_NOW" {
         let reason = match action_label {
+            "OBSERVE" => "report_bucket_observation",
             "WAIT_PULLBACK" => "pullback_not_observable",
             "DO_NOT_CHASE" => "do_not_chase",
             "RISK_AVOID" => "risk_avoid",
@@ -291,6 +302,13 @@ fn classify(
             return "missed_alpha";
         }
         return "correct_ignore";
+    }
+
+    if action_label == "OBSERVE" {
+        if direction_right {
+            return "observed_alpha";
+        }
+        return "correct_observe";
     }
 
     if action_label == "TRADE_NOW" && executable {
@@ -367,13 +385,23 @@ mod tests {
     }
 
     fn insert_decision(db: &Connection, symbol: &str, selection_status: &str, mode: &str) {
+        insert_decision_with_bucket(db, symbol, selection_status, mode, "CORE BOOK");
+    }
+
+    fn insert_decision_with_bucket(
+        db: &Connection,
+        symbol: &str,
+        selection_status: &str,
+        mode: &str,
+        report_bucket: &str,
+    ) {
         db.execute(
             "INSERT INTO report_decisions (
                 report_date, session, symbol, selection_status, rank_order,
-                signal_direction, signal_confidence, composite_score, execution_mode,
+                report_bucket, signal_direction, signal_confidence, composite_score, execution_mode,
                 max_chase_gap_pct, reference_close, details_json
-            ) VALUES ('2026-04-20', 'daily', ?, ?, 1, 'bullish', 'HIGH', 0.7, ?, 2.0, 10.0, '{}')",
-            duckdb::params![symbol, selection_status, mode],
+            ) VALUES ('2026-04-20', 'daily', ?, ?, 1, ?, 'bullish', 'HIGH', 0.7, ?, 2.0, 10.0, '{}')",
+            duckdb::params![symbol, selection_status, report_bucket, mode],
         )
         .unwrap();
     }
@@ -457,6 +485,42 @@ mod tests {
                 false,
                 true,
                 "stale_chase".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn non_core_selected_bucket_is_observation_not_trade_instruction() {
+        let db = setup_db();
+        insert_decision_with_bucket(&db, "000004.SZ", "selected", "executable", "THEME ROTATION");
+        insert_outcome(&db, "000004.SZ", "selected", 10.0, 10.5, 6.0, 1.3);
+
+        compute(&db, NaiveDate::from_ymd_opt(2026, 4, 24).unwrap()).unwrap();
+
+        let row: (String, bool, bool, String, Option<String>) = db
+            .query_row(
+                "SELECT action_label, executable, stale_chase, label, feedback_action
+                 FROM algorithm_postmortem WHERE symbol = '000004.SZ'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "OBSERVE".to_string(),
+                false,
+                false,
+                "observed_alpha".to_string(),
+                None,
             )
         );
     }

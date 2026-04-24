@@ -119,6 +119,64 @@ class BuildAgentContextTests(unittest.TestCase):
 
 
 class TacticalContinuationSelectionTests(unittest.TestCase):
+    def test_selection_metadata_does_not_treat_bearish_lab_factor_as_long_confirmation(self) -> None:
+        from quant_bot.filtering.notable import _selection_metadata
+
+        item = {
+            "symbol": "BEARLAB",
+            "score": 0.42,
+            "price": 22.0,
+            "avg_dollar_volume_20d": 35_000_000.0,
+            "fundamentals": {"market_cap_musd": 3_000.0},
+            "options": {"liquidity_score": "poor"},
+            "lab_factor": {"is_confirming": True, "lab_composite": -0.74},
+            "sub_scores": {"event": 0.10, "magnitude": 0.20},
+            "execution_gate": {"action": "executable_now"},
+        }
+
+        selection = _selection_metadata(
+            item,
+            core_symbols=set(),
+            selection_policy={
+                "core_min_market_cap_musd": 2_000.0,
+                "core_min_price": 5.0,
+                "core_min_dollar_volume_20d": 20_000_000.0,
+            },
+        )
+
+        self.assertFalse(selection["has_lab_factor"])
+        self.assertNotEqual(selection["lane"], "core")
+        self.assertIn("weak_secondary_confirmation", selection["penalties"])
+
+    def test_selection_metadata_uses_positive_lab_factor_as_long_confirmation(self) -> None:
+        from quant_bot.filtering.notable import _selection_metadata
+
+        item = {
+            "symbol": "BULLLAB",
+            "score": 0.42,
+            "price": 22.0,
+            "avg_dollar_volume_20d": 35_000_000.0,
+            "fundamentals": {"market_cap_musd": 3_000.0},
+            "options": {"liquidity_score": "poor"},
+            "lab_factor": {"is_confirming": True, "lab_composite": 0.74},
+            "sub_scores": {"event": 0.10, "magnitude": 0.20},
+            "execution_gate": {"action": "executable_now"},
+        }
+
+        selection = _selection_metadata(
+            item,
+            core_symbols=set(),
+            selection_policy={
+                "core_min_market_cap_musd": 2_000.0,
+                "core_min_price": 5.0,
+                "core_min_dollar_volume_20d": 20_000_000.0,
+            },
+        )
+
+        self.assertTrue(selection["has_lab_factor"])
+        self.assertEqual(selection["lane"], "core")
+        self.assertNotIn("weak_secondary_confirmation", selection["penalties"])
+
     def test_selection_metadata_creates_tactical_continuation_lane(self) -> None:
         from quant_bot.filtering.notable import _selection_metadata
 

@@ -161,6 +161,14 @@ def _direction_sign(value: Any) -> float:
     return 0.0
 
 
+def _lab_composite_value(lab_factor: dict[str, Any] | None) -> float:
+    return float(_safe((lab_factor or {}).get("lab_composite"), 0.0) or 0.0)
+
+
+def _lab_supports_long(lab_factor: dict[str, Any] | None) -> bool:
+    return _lab_composite_value(lab_factor) >= 0.10
+
+
 def _is_tactical_continuation_candidate(
     item: dict[str, Any],
     *,
@@ -192,7 +200,7 @@ def _is_tactical_continuation_candidate(
     breakout_score = float(_safe(breakout.get("breakout_score"), 0.0) or 0.0)
     breakout_direction = _direction_sign(breakout.get("breakout_direction"))
     event_score = float(((item.get("sub_scores") or {}).get("event") or 0.0))
-    lab_confirming = bool((item.get("lab_factor") or {}).get("is_confirming"))
+    lab_confirming = _lab_supports_long(item.get("lab_factor"))
 
     pullback_valid = (
         execution_action == "wait_pullback"
@@ -281,7 +289,7 @@ def _selection_metadata(
     options_liquidity = options.get("liquidity_score")
     has_liquid_options = options_liquidity in {"good", "fair"}
     lab_factor = item.get("lab_factor") or {}
-    has_lab_factor = bool(lab_factor.get("is_confirming"))
+    has_lab_factor = _lab_supports_long(lab_factor)
     named_core = item["symbol"] in core_symbols
     execution_gate = item.get("execution_gate") or {}
     execution_action = execution_gate.get("action", "executable_now")
@@ -489,9 +497,9 @@ def build_notable_items(
         )
         cross_sc = score_cross_asset(ret_1d, bench_ret_1d)
 
-        # Lab factor score: abs(composite) as notability signal (strong signal in either direction = notable)
+        # Lab factor score: only directionally supportive Factor Lab signals can boost the long-only book.
         lab_payload_for_score: dict = lab_map.get(sym, {})
-        lab_sc = min(abs(lab_payload_for_score.get("lab_composite", 0.0)), 1.0)
+        lab_sc = min(max(_lab_composite_value(lab_payload_for_score), 0.0), 1.0)
 
         score = composite_score(magnitude_sc, event_sc, momentum_sc, options_sc, cross_sc, lab_sc)
 
