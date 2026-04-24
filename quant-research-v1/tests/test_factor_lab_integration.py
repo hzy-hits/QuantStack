@@ -359,6 +359,43 @@ class FactorLabReportSyncTests(unittest.TestCase):
         self.assertNotIn("怎么操作:", synced)
         self.assertNotIn("本期为因子研究实验报告，非个股选股清单。", synced)
 
+    def test_unavailable_factor_lab_block_does_not_render_candidate_table(self) -> None:
+        from quant_bot.reporting.factor_lab import sync_factor_lab_signal_section
+
+        report_text = textwrap.dedent(
+            """
+            # 市场日报 — 2026-04-23
+
+            **Factor Lab 选股**
+
+            旧内容
+
+            ---
+
+            **接下来看什么**
+            """
+        ).strip()
+        structural_text = textwrap.dedent(
+            """
+            ## Factor Lab Research Candidates
+
+            状态: UNAVAILABLE。候选输出失败或缺少交易日信息，忽略其方向性结论。
+
+            怎么操作:
+              1. 明天开盘买入下面 2 只
+
+              # 代码           名称              买入价       止损       止盈     仓位
+              1 AAA          ALPHA         10.00     9.00    12.00  18.2%
+            """
+        ).strip()
+
+        synced = sync_factor_lab_signal_section(report_text, structural_text)
+
+        self.assertIn("状态: UNAVAILABLE", synced)
+        self.assertIn("本期不展示 Factor Lab 候选表", synced)
+        self.assertNotIn("| `AAA` |", synced)
+        self.assertNotIn("怎么操作:", synced)
+
 
 class RunFullOrderingTests(unittest.TestCase):
     def test_run_full_refreshes_us_factor_lab_before_import(self) -> None:

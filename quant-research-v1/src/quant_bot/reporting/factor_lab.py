@@ -18,6 +18,7 @@ MERGE_FACTOR_SECTION_RE = re.compile(
 ROW_RE = re.compile(
     r"^\s*(\d+)\s+([A-Z0-9._-]+)\s+(.+?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)%\s*$"
 )
+UNAVAILABLE_RE = re.compile(r"(?mi)^\s*状态:\s*UNAVAILABLE\b.*$")
 
 
 def extract_factor_lab_signal(structural_text: str) -> str | None:
@@ -78,6 +79,14 @@ def _parse_factor_lab_signal(signal_block: str) -> dict[str, Any] | None:
 
 
 def render_factor_lab_report_section(signal_block: str) -> str:
+    unavailable_match = UNAVAILABLE_RE.search(signal_block)
+    if unavailable_match:
+        return (
+            f"{REPORT_HEADING}\n\n"
+            f"{unavailable_match.group(0).strip()} "
+            "本期不展示 Factor Lab 候选表，也不把其方向性结论写入正文。"
+        ).strip()
+
     parsed = _parse_factor_lab_signal(signal_block)
     if parsed:
         summary_bits = ["研究附录，不改变主系统结论；未通过主系统 gate 的票只能观察。"]
