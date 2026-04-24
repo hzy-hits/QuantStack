@@ -147,6 +147,7 @@ def _selection_lines(item: dict) -> list[str]:
     market_cap = fundamentals.get("market_cap_musd")
     avg_dollar_volume = item.get("avg_dollar_volume_20d")
     execution_gate = item.get("execution_gate") or {}
+    headline_mode = str(item.get("_headline_mode") or "unknown").lower()
 
     confirmations = []
     if selection.get("named_core"):
@@ -168,7 +169,7 @@ def _selection_lines(item: dict) -> list[str]:
         action = execution_gate.get("action", "executable_now")
         gap_vs_move = execution_gate.get("gap_vs_expected_move")
         lines.append(
-            f"**Execution read:** {_execution_sentence(action)}"
+            f"**Execution read:** {_execution_sentence(action, headline_mode=headline_mode)}"
             f" | **Gap / implied move:** {_fmt_val(gap_vs_move, 2)}x"
         )
     if confirmations:
@@ -233,7 +234,9 @@ def _execution_label(action: str | None) -> str:
     return mapping.get(action or "", "NEUTRAL")
 
 
-def _execution_sentence(action: str | None) -> str:
+def _execution_sentence(action: str | None, *, headline_mode: str = "unknown") -> str:
+    if headline_mode != "trend":
+        return "non-trend gate: observation only; do not convert this into an order"
     mapping = {
         "executable_now": "still actionable at current levels",
         "wait_pullback": "conditional only; do not enter at the current gap, wait for pullback",

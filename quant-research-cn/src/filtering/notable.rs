@@ -1531,7 +1531,7 @@ fn apply_uncertain_headline_policy(
     if tactical_candidate && *tactical_slots_remaining > 0 {
         *report_bucket = TACTICAL_CONTINUATION_BUCKET.to_string();
         *report_reason = format!(
-            "Headline Gate=uncertain：{}；市场不 headline 单边，但该标的 continuation/执行评分仍过线，仅保留战术续涨名额（小仓位、硬止损、不得机械追高）",
+            "Headline Gate=uncertain：{}；市场不 headline 单边，仅保留为战术续涨复核对象（不作为买入清单；只记录回踩复核与失效条件）",
             headline_reason
         );
         *tactical_slots_remaining -= 1;
@@ -1542,7 +1542,7 @@ fn apply_uncertain_headline_policy(
         if range_core_candidate && *range_core_slots_remaining > 0 {
             *report_bucket = RANGE_CORE_BUCKET.to_string();
             *report_reason = format!(
-                "Headline Gate=uncertain：{}；市场未到趋势主书，但该标的综合/执行仍过线，保留为区间主书（条件式做多、轻仓、等确认，不代表全面转多）",
+                "Headline Gate=uncertain：{}；市场未到趋势主书，仅保留为区间复核对象（不代表开仓；只记录确认/回踩条件与失效条件）",
                 headline_reason
             );
             *range_core_slots_remaining -= 1;
@@ -1557,7 +1557,7 @@ fn apply_uncertain_headline_policy(
             )
         } else if range_core_candidate {
             format!(
-                "Headline Gate=uncertain：{}；该标的本可保留区间主书，但 range-core 名额已满，回退为主题轮动观察",
+                "Headline Gate=uncertain：{}；该标的本可保留区间复核，但 range-core 名额已满，回退为主题轮动观察",
                 headline_reason
             )
         } else {
@@ -1569,7 +1569,7 @@ fn apply_uncertain_headline_policy(
     } else if *report_bucket == "THEME ROTATION" {
         *report_reason = if tactical_candidate {
             format!(
-                "Headline Gate=uncertain：{}；该标的续涨逻辑成立，但战术名额已满，只保留条件式观察",
+                "Headline Gate=uncertain：{}；该标的续涨逻辑成立但战术名额已满，只保留观察与失效复核",
                 headline_reason
             )
         } else {
@@ -2454,7 +2454,8 @@ mod tests {
         );
         assert_eq!(bucket, RANGE_CORE_BUCKET);
         assert_eq!(range_slots, 0);
-        assert!(reason.contains("区间主书"));
+        assert!(reason.contains("区间复核"));
+        assert!(reason.contains("不代表开仓"));
     }
 
     #[test]

@@ -1167,11 +1167,11 @@ fn render_structural(
     )?;
     writeln!(
         md,
-        "- `RANGE CORE` = Headline Gate 不够强时仍可保留的区间主书；条件式做多、轻仓、等待确认，不得偷换成趋势主线。"
+        "- `RANGE CORE` = Headline Gate 不够强时的区间复核层；不得写成买入清单，只能记录回踩复核、确认条件和失效条件。"
     )?;
     writeln!(
         md,
-        "- `TACTICAL CONTINUATION` = 市场 headline 不够清晰时仍可保留的战术续涨名单；名额少、仓位轻、必须配硬止损。"
+        "- `TACTICAL CONTINUATION` = 市场 headline 不够清晰时的战术观察层；不得给开仓/追价指令，只能保留少量复核对象。"
     )?;
     writeln!(
         md,
@@ -1184,7 +1184,7 @@ fn render_structural(
     if headline_gate.mode != "trend" {
         writeln!(
             md,
-            "- 当前 Headline Gate = `{}`，禁止把主报告写成牛/熊单边主线；更适合区间、轮动和触发条件表述。",
+            "- 当前 Headline Gate = `{}`，禁止把主报告写成牛/熊单边主线；RANGE CORE / TACTICAL 在最终研报中只能写观察、回踩复核和失效条件，不得写入场、追价、T1/T2。",
             headline_gate.mode.to_uppercase(),
         )?;
     }
@@ -1214,7 +1214,7 @@ fn render_structural(
         writeln!(md)?;
 
         for item in bucket_items {
-            render_notable_item(&mut md, db, date_str, item)?;
+            render_notable_item(&mut md, db, date_str, item, &headline_gate)?;
         }
     }
 
@@ -1235,6 +1235,7 @@ fn render_notable_item(
     db: &Connection,
     date_str: &str,
     item: &NotableItem,
+    headline_gate: &HeadlineGateSummary,
 ) -> Result<()> {
     writeln!(
         md,
@@ -1470,6 +1471,8 @@ fn render_notable_item(
             md,
             "- **次日执行**: {}",
             execution_summary_sentence(
+                &item.report_bucket,
+                &headline_gate.mode,
                 execution_mode,
                 execution_score,
                 max_chase_gap_pct,
@@ -1537,12 +1540,32 @@ fn execution_mode_sentence(mode: Option<&str>) -> &'static str {
 }
 
 fn execution_summary_sentence(
+    report_bucket: &str,
+    headline_mode: &str,
     mode: Option<&str>,
     execution_score: Option<f64>,
     max_chase_gap_pct: Option<f64>,
     pullback_trigger_pct: Option<f64>,
     pullback_price: Option<f64>,
 ) -> String {
+    if headline_mode != "trend" {
+        let lane = match report_bucket {
+            "RANGE CORE" => "区间复核",
+            "TACTICAL CONTINUATION" => "战术观察",
+            "THEME ROTATION" => "主题轮动观察",
+            "RADAR" => "雷达观察",
+            _ => "非趋势复核",
+        };
+        return format!(
+            "Headline Gate={}，{}层不输出买入/追价指令；执行得分={}，仅记录回踩复核约 {}%，参考复核价={}。最终研报只写观察与失效条件，不写入场、止盈或T1/T2。",
+            headline_mode.to_uppercase(),
+            lane,
+            fmt_opt_f64(execution_score, 3),
+            fmt_opt_f64(pullback_trigger_pct, 2),
+            fmt_opt_f64(pullback_price, 2)
+        );
+    }
+
     match mode.unwrap_or("executable") {
         "do_not_chase" => format!(
             "{}；执行得分={}，当前不建议新开仓，至少等待约 {}% 的回踩后再评估，参考回踩价={}",
@@ -2117,10 +2140,10 @@ fn report_bucket_description(bucket: &str) -> &'static str {
     match bucket {
         "CORE BOOK" => "主报告正文层。优先看这里来形成 house view。",
         "RANGE CORE" => {
-            "区间主书层。headline 仍偏 uncertain，但综合/执行足够强，可作为条件式做多的主书保留层。"
+            "区间复核层。headline 仍偏 uncertain，只能记录回踩复核、确认条件和失效条件；不得作为买入清单。"
         }
         "TACTICAL CONTINUATION" => {
-            "战术续涨层。只保留少量 continuation 名额，默认轻仓、硬止损、不得机械追高。"
+            "战术观察层。只保留少量 continuation 复核对象；不得给开仓/追价指令。"
         }
         "THEME ROTATION" => "主题轮动层。更适合写成行业/概念/资金主线，而不是单一主书押注。",
         _ => "雷达层。用于保留边缘但仍值得持续跟踪的信号。",
@@ -2910,5 +2933,36 @@ fn macro_cadence(series_id: &str) -> &'static str {
         // Quarterly
         "GDP" => "季度, 滞后~45天",
         _ => "-",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{execution_summary_sentence, report_bucket_description};
+
+    #[test]
+    fn uncertain_gate_execution_summary_suppresses_trade_instructions() {
+        let summary = execution_summary_sentence(
+            "TACTICAL CONTINUATION",
+            "uncertain",
+            Some("executable"),
+            Some(0.708),
+            Some(2.20),
+            Some(0.99),
+            Some(3.81),
+        );
+
+        assert!(summary.contains("不输出买入/追价指令"));
+        assert!(summary.contains("参考复核价=3.81"));
+        assert!(summary.contains("不写入场、止盈或T1/T2"));
+        assert!(!summary.contains("可接受追价上限"));
+    }
+
+    #[test]
+    fn range_core_description_is_review_not_buy_list() {
+        let description = report_bucket_description("RANGE CORE");
+
+        assert!(description.contains("复核层"));
+        assert!(description.contains("不得作为买入清单"));
     }
 }

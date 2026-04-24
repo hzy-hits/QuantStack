@@ -60,6 +60,7 @@ def render_payload_md(bundle: dict, output_path: Path, chart_paths: list | None 
 def _render_notable_items(bundle: dict) -> list[str]:
     """Render the full notable-items section with report-lane grouping."""
     all_items = bundle.get("notable_items", [])
+    headline_mode = str((bundle.get("headline_gate") or {}).get("mode") or "unknown").lower()
 
     lines: list[str] = [
         "## Notable Items",
@@ -70,6 +71,12 @@ def _render_notable_items(bundle: dict) -> list[str]:
         "*Signal direction uses weighted multi-source scoring (options + momentum + events), while report lane reflects tradability and confirmation quality.*",
         "",
     ]
+    if headline_mode != "trend":
+        lines += [
+            f"**Execution guard:** Headline Gate is `{headline_mode.upper()}`. Do not turn any lane below into a buy list.",
+            "For final reports, use observation / pullback-review / invalidation language only; do not write Entry/Stop/Target tables, 'today only do', or chase instructions.",
+            "",
+        ]
 
     bucket_specs = [
         (
@@ -118,10 +125,14 @@ def _render_notable_items(bundle: dict) -> list[str]:
         ]
 
         for item in bucket_items:
+            item = {**item, "_headline_mode": headline_mode}
             compact = bucket == "appendix" or item.get("signal", {}).get("confidence") in ("LOW", "NO_SIGNAL", None)
             lines += render_item_header(item_idx, item, compact=compact)
             if not compact:
-                lines += render_item_risk_params(item)
+                if headline_mode == "trend":
+                    lines += render_item_risk_params(item)
+                else:
+                    lines += _render_nontrend_execution_guard(item, headline_mode)
                 lines += render_item_contradictions(item)
             lines += render_item_data(item, compact=compact)
             if not compact:
@@ -160,3 +171,27 @@ def _sort_bucket_items(items: list[dict], *, bucket: str) -> list[dict]:
             item.get("symbol", ""),
         ),
     )
+
+
+def _render_nontrend_execution_guard(item: dict, headline_mode: str) -> list[str]:
+    """Render execution discipline without order-shaped risk parameters."""
+    gate = item.get("execution_gate") or {}
+    risk = item.get("risk_params") or {}
+    pullback = gate.get("pullback_price") or risk.get("entry")
+    action = gate.get("action") or risk.get("execution_mode") or "unknown"
+    lines = [
+        "**Execution guard (non-trend gate):**",
+        "",
+        f"- Headline Gate `{headline_mode.upper()}`: this item is a review candidate, not an order surface.",
+        f"- Execution state: {action}; pullback/review reference: {_fmt_price(pullback)}.",
+        "- Final report must not print Entry/Stop/Target, 'today only do', or max-chase instructions for this item.",
+        "",
+    ]
+    return lines
+
+
+def _fmt_price(value: Any) -> str:
+    try:
+        return f"${float(value):.2f}"
+    except (TypeError, ValueError):
+        return "N/A"

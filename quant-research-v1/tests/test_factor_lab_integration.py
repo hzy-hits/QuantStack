@@ -305,6 +305,52 @@ class RenderPayloadTests(unittest.TestCase):
         )
         self.assertIn("BBB", rendered)
 
+    def test_nontrend_headline_gate_suppresses_order_shaped_risk_params(self) -> None:
+        from quant_bot.reporting.render import _render_notable_items
+
+        bundle = {
+            "headline_gate": {"mode": "uncertain"},
+            "notable_items": [
+                {
+                    "symbol": "AAA",
+                    "report_bucket": "core",
+                    "report_score": 0.92,
+                    "score": 0.92,
+                    "price": 100.0,
+                    "primary_reason": "core setup",
+                    "sub_scores": {},
+                    "signal": {
+                        "confidence": "HIGH",
+                        "direction": "bullish",
+                        "signal_type": "trend",
+                        "direction_score": 0.41,
+                    },
+                    "execution_gate": {
+                        "action": "executable_now",
+                        "gap_vs_expected_move": 0.12,
+                        "pullback_price": 98.0,
+                    },
+                    "risk_params": {
+                        "entry": 100.0,
+                        "stop": 95.0,
+                        "target": 112.0,
+                        "rr_ratio": 2.4,
+                        "execution_mode": "executable_now",
+                    },
+                }
+            ],
+        }
+
+        rendered = "\n".join(_render_notable_items(bundle))
+
+        self.assertIn("Execution guard", rendered)
+        self.assertIn("Do not turn any lane below into a buy list", rendered)
+        self.assertIn("observation only", rendered)
+        self.assertNotIn("| Entry |", rendered)
+        self.assertNotIn("| Stop (2-ATR) |", rendered)
+        self.assertNotIn("| Target |", rendered)
+        self.assertNotIn("still actionable at current levels", rendered)
+
 
 class FactorLabReportSyncTests(unittest.TestCase):
     def test_sync_replaces_placeholder_factor_lab_section_with_signal_block(self) -> None:

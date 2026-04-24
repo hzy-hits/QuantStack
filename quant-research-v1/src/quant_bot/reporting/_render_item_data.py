@@ -52,6 +52,7 @@ def _price_momentum_table(item: dict) -> list[str]:
     mom = item.get("momentum") or {}
     gate = item.get("execution_gate") or {}
     overnight_alpha = item.get("overnight_alpha") or {}
+    headline_mode = str(item.get("_headline_mode") or "unknown").lower()
     lines = [
         "**Price & Momentum:**",
         "",
@@ -70,7 +71,7 @@ def _price_momentum_table(item: dict) -> list[str]:
             f"| Live reference price | ${_fmt_val(gate.get('ref_price'), 2)} |",
             f"| Overnight gap vs last close | {_fmt_pct(gate.get('gap_pct'), 2)} |",
             f"| Stretch vs implied move | {_fmt_val(gate.get('gap_vs_expected_move'), 2)}\u00d7 |",
-            f"| Execution read | {_execution_phrase(gate.get('action'))} |",
+            f"| Execution read | {_execution_phrase(gate.get('action'), headline_mode=headline_mode)} |",
         ]
     if overnight_alpha:
         calibration = overnight_alpha.get("calibration") or {}
@@ -108,7 +109,9 @@ def _price_momentum_table(item: dict) -> list[str]:
     return lines
 
 
-def _execution_phrase(action: str | None) -> str:
+def _execution_phrase(action: str | None, *, headline_mode: str = "unknown") -> str:
+    if headline_mode != "trend":
+        return "Non-trend gate: observation/pullback review only, not an order"
     mapping = {
         "executable_now": "Still actionable at current levels",
         "wait_pullback": "Not actionable at current price; wait for a pullback reset",
