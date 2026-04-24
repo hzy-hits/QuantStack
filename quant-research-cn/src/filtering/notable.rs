@@ -696,7 +696,7 @@ fn prepare_candidates(
             + w_brk * c.breakout_s
             + W_EVENT * c.event_score
             + W_CROSS_ASSET * c.cross_asset_score
-            + W_LAB * c.lab_factor.abs().min(1.0)
+            + W_LAB * lab_composite_score(c.lab_factor)
             + shadow_calibration.recommended_weight * c.shadow_rank_score
             + 0.08 * c.setup_score
             + 0.06 * c.continuation_score
@@ -2095,6 +2095,10 @@ fn compute_shadow_alpha_score(c: &Candidate) -> f64 {
         .clamp(0.0, 1.0)
 }
 
+fn lab_composite_score(lab_factor: f64) -> f64 {
+    lab_factor.clamp(0.0, 1.0)
+}
+
 fn compute_shadow_rank_score(c: &Candidate) -> f64 {
     let directional_context = if c.setup_direction != 0.0 {
         c.setup_direction
@@ -2146,9 +2150,9 @@ mod tests {
     use super::{
         apply_uncertain_headline_policy, classify_convergence, classify_report_lane,
         effective_pass1_cutoff, effective_report_limit, expanded_report_pool_limit,
-        is_tactical_continuation_candidate, plan_uncertain_headline_candidates,
-        select_uncertain_tactical_symbols_from_candidates, Candidate, RANGE_CORE_BUCKET,
-        TACTICAL_CONTINUATION_BUCKET, UNCERTAIN_TACTICAL_LIMIT_MAX,
+        is_tactical_continuation_candidate, lab_composite_score,
+        plan_uncertain_headline_candidates, select_uncertain_tactical_symbols_from_candidates,
+        Candidate, RANGE_CORE_BUCKET, TACTICAL_CONTINUATION_BUCKET, UNCERTAIN_TACTICAL_LIMIT_MAX,
     };
     use crate::analytics::shadow_calibration::ShadowCalibrationSummary;
 
@@ -2250,6 +2254,14 @@ mod tests {
             "MODERATE",
             "bullish"
         ));
+    }
+
+    #[test]
+    fn bearish_lab_factor_does_not_boost_long_only_composite() {
+        assert_eq!(lab_composite_score(-0.80), 0.0);
+        assert_eq!(lab_composite_score(0.0), 0.0);
+        assert_eq!(lab_composite_score(0.35), 0.35);
+        assert_eq!(lab_composite_score(1.80), 1.0);
     }
 
     #[test]
