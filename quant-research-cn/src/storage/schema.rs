@@ -530,4 +530,28 @@ pub const CREATE_TABLES: &str = "
         gap_vs_chase_limit     DOUBLE,
         PRIMARY KEY (report_date, session, symbol, selection_status)
     );
+
+    CREATE TABLE IF NOT EXISTS algorithm_postmortem (
+        report_date            DATE NOT NULL,
+        session                VARCHAR NOT NULL,
+        symbol                 VARCHAR NOT NULL,
+        selection_status       VARCHAR NOT NULL,
+        evaluation_date        DATE NOT NULL,
+        action_label           VARCHAR NOT NULL,
+        action_source          VARCHAR,
+        direction              VARCHAR,
+        direction_right        BOOLEAN,
+        executable             BOOLEAN,
+        fill_price             DOUBLE,
+        exit_price             DOUBLE,
+        realized_pnl_pct       DOUBLE,
+        best_possible_ret_pct  DOUBLE,
+        stale_chase            BOOLEAN,
+        no_fill_reason         VARCHAR,
+        label                  VARCHAR NOT NULL,
+        feedback_action        VARCHAR,
+        feedback_weight        DOUBLE,
+        detail_json            VARCHAR,
+        PRIMARY KEY (report_date, session, symbol, selection_status)
+    );
 ";

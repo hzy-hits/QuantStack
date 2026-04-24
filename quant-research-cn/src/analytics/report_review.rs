@@ -56,11 +56,14 @@ pub fn materialize_report_review(
     let stored = store_report_decisions(db, as_of, &decisions)?;
     let outcomes = compute_report_outcomes(db, as_of)?;
     let postmortem = compute_alpha_postmortem(db, as_of)?;
+    let algorithm_postmortem =
+        crate::analytics::algorithm_postmortem::materialize_algorithm_postmortem(db, as_of)?;
     info!(
         %as_of,
         stored,
         outcomes,
         postmortem,
+        algorithm_postmortem,
         "report review refreshed"
     );
     Ok(stored)

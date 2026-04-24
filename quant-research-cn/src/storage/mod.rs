@@ -72,7 +72,31 @@ pub fn restore_report_review_history(src: &str, dst: &str) -> Result<()> {
     let escaped = src.replace('\'', "''");
     con.execute_batch(&format!("ATTACH '{}' AS report_history;", escaped))?;
     let result = con.execute_batch(
-        "INSERT OR REPLACE INTO report_decisions
+        "CREATE TABLE IF NOT EXISTS report_history.algorithm_postmortem (
+            report_date            DATE NOT NULL,
+            session                VARCHAR NOT NULL,
+            symbol                 VARCHAR NOT NULL,
+            selection_status       VARCHAR NOT NULL,
+            evaluation_date        DATE NOT NULL,
+            action_label           VARCHAR NOT NULL,
+            action_source          VARCHAR,
+            direction              VARCHAR,
+            direction_right        BOOLEAN,
+            executable             BOOLEAN,
+            fill_price             DOUBLE,
+            exit_price             DOUBLE,
+            realized_pnl_pct       DOUBLE,
+            best_possible_ret_pct  DOUBLE,
+            stale_chase            BOOLEAN,
+            no_fill_reason         VARCHAR,
+            label                  VARCHAR NOT NULL,
+            feedback_action        VARCHAR,
+            feedback_weight        DOUBLE,
+            detail_json            VARCHAR,
+            PRIMARY KEY (report_date, session, symbol, selection_status)
+         );
+
+         INSERT OR REPLACE INTO report_decisions
          SELECT * FROM report_history.report_decisions;
 
          INSERT OR REPLACE INTO report_outcomes
@@ -80,6 +104,9 @@ pub fn restore_report_review_history(src: &str, dst: &str) -> Result<()> {
 
          INSERT OR REPLACE INTO alpha_postmortem
          SELECT * FROM report_history.alpha_postmortem;
+
+         INSERT OR REPLACE INTO algorithm_postmortem
+         SELECT * FROM report_history.algorithm_postmortem;
 
          DETACH report_history;",
     );

@@ -1225,6 +1225,7 @@ fn render_structural(
 
     // ── Alpha Postmortem ────────────────────────────────────────────────
     render_postmortem_summary(&mut md, db, date_str)?;
+    render_algorithm_postmortem_summary(&mut md, db, date_str)?;
 
     Ok(md)
 }
@@ -1724,6 +1725,112 @@ fn render_postmortem_summary(md: &mut String, db: &Connection, date_str: &str) -
     if !recent_stale.is_empty() {
         writeln!(md, "- 最近时点偏晚的例子：{}", recent_stale.join("；"))?;
     }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_algorithm_postmortem_summary(
+    md: &mut String,
+    db: &Connection,
+    date_str: &str,
+) -> Result<()> {
+    let as_of = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .unwrap_or_else(|_| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+    let cutoff = (as_of - chrono::Duration::days(20)).to_string();
+
+    let mut stmt = db.prepare(
+        "SELECT selection_status, label, executable, realized_pnl_pct, best_possible_ret_pct
+         FROM algorithm_postmortem
+         WHERE session = 'daily'
+           AND evaluation_date >= CAST(? AS DATE)
+           AND evaluation_date < CAST(? AS DATE)
+           AND symbol NOT LIKE '300%'
+           AND symbol NOT LIKE '301%'",
+    )?;
+    let rows = stmt.query_map(duckdb::params![cutoff, date_str], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, bool>(2).unwrap_or(false),
+            row.get::<_, Option<f64>>(3)?,
+            row.get::<_, Option<f64>>(4)?,
+        ))
+    })?;
+
+    let mut reviewed = 0usize;
+    let mut selected = 0usize;
+    let mut executable = 0usize;
+    let mut executable_wins = 0usize;
+    let mut stale = 0usize;
+    let mut right_no_fill = 0usize;
+    let mut missed = 0usize;
+    let mut false_executable = 0usize;
+    let mut realized_sum = 0.0;
+    let mut realized_n = 0usize;
+
+    for row in rows {
+        let (selection_status, label, is_executable, realized, _best) = row?;
+        reviewed += 1;
+        if selection_status == "selected" {
+            selected += 1;
+        }
+        if is_executable {
+            executable += 1;
+            if realized.unwrap_or(0.0) > 0.0 {
+                executable_wins += 1;
+            }
+        }
+        if let Some(v) = realized {
+            realized_sum += v;
+            realized_n += 1;
+        }
+        match label.as_str() {
+            "stale_chase" => stale += 1,
+            "right_but_no_fill" => right_no_fill += 1,
+            "missed_alpha" => missed += 1,
+            "false_positive_executable" => false_executable += 1,
+            _ => {}
+        }
+    }
+
+    if reviewed == 0 {
+        return Ok(());
+    }
+
+    let win_rate = if executable > 0 {
+        executable_wins as f64 / executable as f64 * 100.0
+    } else {
+        0.0
+    };
+    let avg_realized = if realized_n > 0 {
+        Some(realized_sum / realized_n as f64)
+    } else {
+        None
+    };
+
+    writeln!(md, "### Algorithm Postmortem")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "- 近20天算法动作复盘 {} 条：selected {} 条，其中实际按次日开盘可执行 {} 条。",
+        reviewed, selected, executable
+    )?;
+    writeln!(
+        md,
+        "- 可执行动作胜率 {:.1}%，平均次日收盘近似收益 {}%；误报可执行 {} 条。",
+        win_rate,
+        fmt_opt_f64(avg_realized, 2),
+        false_executable
+    )?;
+    writeln!(
+        md,
+        "- 执行层问题：追价失效 {} 条，方向对但无可观测回踩成交 {} 条；未入选后继续走强 {} 条。",
+        stale, right_no_fill, missed
+    )?;
+    writeln!(
+        md,
+        "- 这层复盘按“报告动作是否可成交”计分，避免把 `do_not_chase/wait_pullback` 的方向正确误记成已捕获交易收益。"
+    )?;
     writeln!(md)?;
     Ok(())
 }

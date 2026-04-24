@@ -71,6 +71,7 @@ SOURCE_VIEWS = [
     "report_decisions",
     "report_outcomes",
     "alpha_postmortem",
+    "algorithm_postmortem",
 ]
 
 SANITY_WINDOWS = {

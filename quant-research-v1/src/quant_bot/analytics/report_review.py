@@ -21,6 +21,11 @@ from typing import Any
 import duckdb
 import structlog
 
+from quant_bot.analytics.algorithm_postmortem import (
+    build_algorithm_postmortem_summary,
+    materialize_algorithm_postmortem,
+)
+
 log = structlog.get_logger()
 
 
@@ -799,12 +804,26 @@ def refresh_report_review(
     """Resolve outcomes, classify them, and build the render-ready review block."""
     n_outcomes = compute_report_outcomes(con, as_of, lookback_days=lookback_days)
     n_postmortem = compute_alpha_postmortem(con, as_of, lookback_days=lookback_days)
+    n_algorithm_postmortem = materialize_algorithm_postmortem(
+        con,
+        as_of,
+        lookback_days=lookback_days,
+    )
     review = build_report_review(con, as_of, session, lookback_days=lookback_days)
+    algorithm_summary = build_algorithm_postmortem_summary(
+        con,
+        as_of,
+        session,
+        lookback_days=lookback_days,
+    )
+    if algorithm_summary:
+        review["algorithm_postmortem"] = algorithm_summary
     log.info(
         "report_review_refreshed",
         session=session,
         outcomes=n_outcomes,
         postmortem=n_postmortem,
+        algorithm_postmortem=n_algorithm_postmortem,
         selected_reviewed=review.get("selected_reviewed", 0),
         ignored_reviewed=review.get("ignored_reviewed", 0),
     )

@@ -227,6 +227,14 @@ async fn main() -> Result<()> {
         Command::Analyze { date, module } => {
             let as_of = config::resolve_date(date.as_deref())?;
             if let Some(module_name) = module.as_deref() {
+                if matches!(module_name, "algorithm_postmortem" | "algorithm_review") {
+                    ensure_report_snapshot(&cfg)?;
+                    let report_db = storage::open(cfg.data.report_path())?;
+                    analytics::run_module(&report_db, &cfg, as_of, module_name)?;
+                    report_db.execute_batch("CHECKPOINT")?;
+                    info!("analytics complete");
+                    return Ok(());
+                }
                 prepare_incremental_research(&cfg)?;
                 let research_db = storage::open(cfg.data.research_path())?;
                 let shadow_full_rows = if matches!(

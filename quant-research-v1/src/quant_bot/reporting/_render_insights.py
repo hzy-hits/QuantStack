@@ -59,6 +59,30 @@ def render_report_postmortem(bundle: dict) -> list[str]:
         "",
     ]
 
+    algorithm_review = review.get("algorithm_postmortem") or {}
+    if algorithm_review:
+        algorithm_counts = algorithm_review.get("label_counts", {})
+        lines += [
+            "**Algorithm action review:**",
+            "",
+            "| Executable ideas | Win rate | Avg realized PnL | Stale chase | Right but no fill | Missed alpha |",
+            "|------------------|----------|------------------|-------------|-------------------|--------------|",
+            f"| {algorithm_review.get('executable_reviewed', 0)} | "
+            f"{_fmt_val(algorithm_review.get('executable_win_rate'), 2)} | "
+            f"{_fmt_pct(algorithm_review.get('avg_realized_pnl_pct'))} | "
+            f"{algorithm_review.get('stale_chase_count', 0)} | "
+            f"{algorithm_review.get('right_but_no_fill_count', 0)} | "
+            f"{algorithm_review.get('missed_alpha_count', 0)} |",
+            "",
+            "| Won executable | False executable | Correct avoid | Flat / no edge |",
+            "|----------------|------------------|---------------|----------------|",
+            f"| {algorithm_counts.get('won_and_executable', 0)} | "
+            f"{algorithm_counts.get('false_positive_executable', 0)} | "
+            f"{algorithm_counts.get('correct_avoid', 0)} | "
+            f"{algorithm_counts.get('flat_no_edge', 0)} |",
+            "",
+        ]
+
     if feedback_counts:
         lines += [
             "**Factor Lab feedback hooks:**",

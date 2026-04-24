@@ -1,3 +1,4 @@
+pub mod algorithm_postmortem;
 pub mod announcement;
 pub mod bayes;
 pub mod breakout;
@@ -124,13 +125,17 @@ fn run_module_inner(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &
             let n = shadow_option_alpha_calibration::compute(db, as_of)?;
             info!(rows = n, "shadow_option_alpha calibration complete");
         }
+        "algorithm_postmortem" | "algorithm_review" => {
+            let n = algorithm_postmortem::compute(db, as_of)?;
+            info!(rows = n, "algorithm_postmortem complete");
+        }
         "macro_gate" => {
             let n = macro_gate::compute(db, cfg, as_of)?;
             info!(rows = n, "macro_gate complete");
         }
         other => {
             return Err(anyhow!(
-                "unknown analytics module `{}`. supported: momentum, announcement, flow, unlock, shadow_option, hmm, vol_hmm, mean_reversion, breakout, sector_rotation, setup_alpha, continuation_vs_fade, open_execution_gate, shadow_option_alpha_calibration, macro_gate",
+                "unknown analytics module `{}`. supported: momentum, announcement, flow, unlock, shadow_option, hmm, vol_hmm, mean_reversion, breakout, sector_rotation, setup_alpha, continuation_vs_fade, open_execution_gate, shadow_option_alpha_calibration, algorithm_postmortem, macro_gate",
                 other
             ));
         }
