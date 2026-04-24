@@ -18,8 +18,8 @@ universe:
   # Index constituents to scan — fetched from Tushare
   scan:
     csi300: true                # 沪深300 — main large cap
-    csi500: false               # 中证500 — mid cap
-    csi1000: false              # 中证1000 — small cap (expensive to scan)
+    csi500: true                # 中证500 — mid cap alpha pool
+    csi1000: true               # 中证1000 — small cap alpha pool (exclude 688* at fetch/filter)
     sse50: true                 # 上证50 — mega cap
 
   # Sector / thematic ETFs
@@ -32,9 +32,7 @@ universe:
   # Manual watchlist
   watchlist:
     # ── AI / 半导体 ──
-    - "688981.SH"   # 中芯国际
     - "002049.SZ"   # 紫光国微
-    - "688396.SH"   # 华峰测控
     - "300661.SZ"   # 圣邦股份
     # ── 新能源 ──
     - "300750.SZ"   # 宁德时代
@@ -45,7 +43,6 @@ universe:
     - "000858.SZ"   # 五粮液
     # ── 医药 ──
     - "300760.SZ"   # 迈瑞医疗
-    - "688235.SH"   # 百济神州
 
   filters:
     min_avg_volume_shares: 500000
@@ -58,7 +55,12 @@ output:
 
 # ── STORAGE ──────────────────────────────────────────────────────────────────
 data:
-  db_path: "data/quant_cn.duckdb"
+  db_path: "data/quant_cn.duckdb"            # legacy single-db fallback
+  raw_db_path: "data/quant_cn_raw.duckdb"
+  research_db_path: "data/quant_cn_research.duckdb"
+  report_db_path: "data/quant_cn_report.duckdb"
+  dev_db_path: "data/quant_cn_dev.duckdb"
+  use_dev_for_research: false
   constituent_refresh_days: 7
 
 # ── TUSHARE SERIES ───────────────────────────────────────────────────────────

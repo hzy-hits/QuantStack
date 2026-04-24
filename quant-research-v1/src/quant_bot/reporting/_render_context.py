@@ -38,6 +38,7 @@ def render_header_and_context(bundle: dict) -> list[str]:
         "## Meta",
         "",
         f"- **Trade date:** {trade_date}",
+        f"- **Session:** {meta.get('session_label') or meta.get('session') or 'unknown'}",
         f"- **Generated at:** {generated_at}",
         f"- **Benchmark:** {meta.get('benchmark', 'SPY')}",
         f"- **Universe scanned:** {meta.get('total_universe_size', '?')} symbols",
@@ -74,6 +75,9 @@ def render_header_and_context(bundle: dict) -> list[str]:
         f"**SPY today:** {_fmt_pct(spy_ret_1d)}",
         "",
     ]
+
+    # Headline gate
+    lines += _render_headline_gate(bundle)
 
     # HMM regime overlay
     lines += _render_hmm_regime(bundle)
@@ -168,6 +172,44 @@ def _render_hmm_regime(bundle: dict) -> list[str]:
         "Posterior probabilities carry estimation error — do not treat as exact.*",
         "",
     ]
+    return lines
+
+
+def _render_headline_gate(bundle: dict) -> list[str]:
+    gate = bundle.get("headline_gate") or {}
+    if not gate:
+        return []
+
+    inputs = gate.get("inputs") or {}
+    mode = str(gate.get("mode") or "unknown").upper()
+    bias = str(gate.get("bias") or "neutral").upper()
+    p_ret = inputs.get("p_ret_positive_tomorrow")
+    edge = inputs.get("edge_vs_coinflip")
+    brier = inputs.get("brier_score")
+    bss = inputs.get("brier_skill_score")
+    cal_n = inputs.get("calibration_n")
+    regime_days = inputs.get("regime_days")
+    hmm_regime = inputs.get("hmm_regime") or "unknown"
+
+    lines = [
+        "### Headline Gate",
+        "",
+        f"Headline mode: **{mode}** (bias={bias}, directional_regime_allowed={gate.get('allow_directional_regime', False)})",
+        f"Inputs: hmm_regime={hmm_regime}, P(SPY up tomorrow)={_fmt_val(p_ret, 4)}, "
+        f"edge_vs_coinflip={_fmt_val(edge, 4)}, Brier={_fmt_val(brier, 4)}, "
+        f"Brier skill={_fmt_val(bss, 4)}, calibration_n={cal_n}, regime_days={regime_days}",
+        f"Reporting rule: {gate.get('reporting_rule', 'N/A')}",
+    ]
+    reasons = gate.get("reasons") or []
+    if reasons:
+        lines.append("Reasons:")
+        for reason in reasons:
+            lines.append(f"- {reason}")
+    if gate.get("mode") != "trend":
+        lines.append(
+            "- Treat HMM as background context only; do not lead the report with a bull/bear claim."
+        )
+    lines += ["", ""]
     return lines
 
 

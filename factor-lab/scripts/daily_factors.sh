@@ -14,6 +14,7 @@ PYTHON="${PYTHON_BIN:-python3}"
 export FACTOR_LAB_AGENT_BACKEND="${FACTOR_LAB_AGENT_BACKEND:-codex}"
 export FACTOR_LAB_CODEX_MODEL="${FACTOR_LAB_CODEX_MODEL:-gpt-5.4}"
 export FACTOR_LAB_CODEX_REASONING_EFFORT="${FACTOR_LAB_CODEX_REASONING_EFFORT:-xhigh}"
+CN_EXPECTED_DATE="${FACTOR_LAB_CN_EXPECTED_DATE:-$(TZ=Asia/Shanghai date +%Y-%m-%d)}"
 US_EXPECTED_DATE="${FACTOR_LAB_US_EXPECTED_DATE:-$(TZ=America/New_York date +%Y-%m-%d)}"
 MARKET="all"
 
@@ -53,6 +54,8 @@ echo "  Agent backend: $FACTOR_LAB_AGENT_BACKEND"
 echo "  Codex model:   $FACTOR_LAB_CODEX_MODEL"
 echo "  Reasoning:     $FACTOR_LAB_CODEX_REASONING_EFFORT"
 echo "  Market scope:  $MARKET"
+echo "  CN as-of:      $CN_EXPECTED_DATE"
+echo "  US as-of:      $US_EXPECTED_DATE"
 
 US_READY=false
 if [[ "$RUN_US" == true ]]; then
@@ -76,14 +79,14 @@ fi
 if [[ "$RUN_CN" == true ]]; then
     echo ""
     echo "=== A-Share Factors ==="
-    $PYTHON -m src.mining.daily_pipeline --market cn --max-factors 500
+    $PYTHON -m src.mining.daily_pipeline --market cn --max-factors 500 --date "$CN_EXPECTED_DATE"
 fi
 
 # US factors
 if [[ "$RUN_US" == true && "$US_READY" == true ]]; then
     echo ""
     echo "=== US Factors ==="
-    $PYTHON -m src.mining.daily_pipeline --market us --max-factors 500
+    $PYTHON -m src.mining.daily_pipeline --market us --max-factors 500 --date "$US_EXPECTED_DATE"
 fi
 
 # SigReg diagnostics
@@ -100,17 +103,17 @@ if [[ "$RUN_US" == true && "$US_READY" == true ]]; then
 fi
 
 # ═══════════════════════════════════════════════════════
-# Trading Signals (independent from pipeline reports)
+# Research candidates (subordinate to pipeline reports/execution gates)
 # ═══════════════════════════════════════════════════════
 if [[ "$RUN_CN" == true ]]; then
     echo ""
-    echo "=== A-Share Trading Signal ==="
-    $PYTHON scripts/run_strategy.py --market cn --today || echo "CN failed"
+    echo "=== A-Share Factor Lab Research Candidates ==="
+    $PYTHON scripts/run_strategy.py --market cn --today --date "$CN_EXPECTED_DATE" || echo "CN failed"
 fi
 
 if [[ "$RUN_US" == true && "$US_READY" == true ]]; then
     echo ""
-    echo "=== US Trading Signal ==="
+    echo "=== US Factor Lab Research Candidates ==="
     $PYTHON scripts/run_strategy.py --market us --today --date "$US_EXPECTED_DATE" || echo "US failed"
 fi
 

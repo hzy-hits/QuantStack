@@ -22,7 +22,10 @@ pub struct Posterior {
 impl BetaBinomial {
     /// Default prior: Beta(2, 2) — mildly informative
     pub fn new() -> Self {
-        Self { alpha: 2.0, beta: 2.0 }
+        Self {
+            alpha: 2.0,
+            beta: 2.0,
+        }
     }
 
     pub fn with_prior(alpha: f64, beta: f64) -> Self {

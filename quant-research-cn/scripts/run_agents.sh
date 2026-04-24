@@ -5,10 +5,12 @@
 #   ./scripts/run_agents.sh                                                 # today (Shanghai time)
 #   ./scripts/run_agents.sh 2026-03-13                                      # specific date
 #   ./scripts/run_agents.sh 2026-03-13 reports/2026-03-12_report_zh.md      # with previous report
+#   ./scripts/run_agents.sh 2026-03-13 morning reports/2026-03-12_report_zh_evening.md
 #
 # Args:
 #   $1 = date (optional, defaults to today Shanghai time)
-#   $2 = previous report path (optional, for hypothesis validation)
+#   $2 = optional slot (morning/evening) or previous report path
+#   $3 = previous report path when slot is supplied
 #
 # Environment:
 #   SEND_EMAIL=1  — trigger email delivery after report generation
@@ -17,7 +19,21 @@ set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
 DATE="${1:-$(TZ=Asia/Shanghai date +%Y-%m-%d)}"
-PREV_REPORT="${2:-}"
+SLOT="${REPORT_SLOT:-daily}"
+PREV_REPORT=""
+if [[ "${2:-}" == "morning" || "${2:-}" == "evening" ]]; then
+    SLOT="$2"
+    PREV_REPORT="${3:-}"
+else
+    PREV_REPORT="${2:-}"
+fi
+if [[ "$SLOT" == "morning" ]]; then
+    SLOT_LABEL_CN="盘前"
+elif [[ "$SLOT" == "evening" ]]; then
+    SLOT_LABEL_CN="盘后"
+else
+    SLOT_LABEL_CN="日报"
+fi
 
 AGENT_TIMEOUT=600   # 10 min per specialist agent (quant prompt 44KB needs more time)
 MERGE_TIMEOUT=1200  # 20 min for merge agent
@@ -31,7 +47,11 @@ TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"
 PROJ_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REPORTS_DIR="$PROJ_DIR/reports"
 PROMPTS_DIR="$PROJ_DIR/prompts"
-OUT_DIR="$REPORTS_DIR/agents-${DATE}"
+if [[ "$SLOT" == "daily" ]]; then
+    OUT_DIR="$REPORTS_DIR/agents-${DATE}"
+else
+    OUT_DIR="$REPORTS_DIR/agents-${DATE}-${SLOT}"
+fi
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 resolve_repo_dir() {
@@ -84,6 +104,10 @@ fi
 
 for f in macro structural events; do
     payload="$REPORTS_DIR/${DATE}_payload_${f}.md"
+    slot_payload="$REPORTS_DIR/${DATE}_payload_${f}_${SLOT}.md"
+    if [[ "$SLOT" != "daily" && -s "$slot_payload" ]]; then
+        continue
+    fi
     if [[ ! -s "$payload" ]]; then
         echo "ERROR: Missing or empty: $payload"
         exit 1
@@ -153,15 +177,21 @@ run_agent_with_fallback() {
 
 echo "=== A-Share Agent Pipeline ==="
 echo "  Date:    $DATE"
+echo "  Slot:    $SLOT ($SLOT_LABEL_CN)"
 echo "  Project: $PROJ_DIR"
 echo "  Output:  $OUT_DIR"
 [[ -n "$PREV_REPORT" ]] && echo "  Prev:    $PREV_REPORT"
 echo ""
 
-python3 "$PROJ_DIR/scripts/build_agent_context.py" \
-    --date "$DATE" \
-    --reports-dir "$REPORTS_DIR" \
+BUILD_CONTEXT_ARGS=(
+    --date "$DATE"
+    --reports-dir "$REPORTS_DIR"
     --out-dir "$OUT_DIR/context"
+)
+if [[ "$SLOT" != "daily" ]]; then
+    BUILD_CONTEXT_ARGS+=(--slot "$SLOT")
+fi
+python3 "$PROJ_DIR/scripts/build_agent_context.py" "${BUILD_CONTEXT_ARGS[@]}"
 
 # ── Build previous report context ────────────────────────────────────────────
 PREV_CONTEXT=""
@@ -173,6 +203,9 @@ $(cat "$PREV_REPORT")
 --- 上期报告结束 ---
 
 如果上期报告存在，先用2-3句话简述上期预测的兑现情况，再进行今日分析。"
+    PREV_CONTEXT="${PREV_CONTEXT}
+
+请只把上期报告用于记分卡和假设验证，不要默认继承它的方向叙事。"
 fi
 
 # ── Assemble prompts using Python (handles large payloads safely) ────────────
@@ -184,50 +217,126 @@ from pathlib import Path
 date = sys.argv[1] if len(sys.argv) > 1 else ""
 PYEOF
 
-python3 - "$DATE" "$PREV_REPORT" "$PROJ_DIR" "$OUT_DIR" "$QUANT_US_ROOT" << 'BUILDEOF'
+python3 - "$DATE" "$SLOT" "$SLOT_LABEL_CN" "$PREV_REPORT" "$PROJ_DIR" "$OUT_DIR" "$QUANT_US_ROOT" << 'BUILDEOF'
 import sys
+import re
 from pathlib import Path
 
 date = sys.argv[1]
-prev_report = sys.argv[2]
-proj_dir = Path(sys.argv[3])
-out_dir = Path(sys.argv[4])
-us_root = Path(sys.argv[5])
+slot = sys.argv[2]
+slot_label = sys.argv[3]
+prev_report = sys.argv[4]
+proj_dir = Path(sys.argv[5])
+out_dir = Path(sys.argv[6])
+us_root = Path(sys.argv[7])
 
 reports_dir = proj_dir / "reports"
 prompts_dir = proj_dir / "prompts"
 
 # Read compacted agent contexts
-macro_payload = (out_dir / "context" / "macro.md").read_text()
-structural_payload = (out_dir / "context" / "structural.md").read_text()
-events_payload = (out_dir / "context" / "events.md").read_text()
+macro_payload = (out_dir / "context" / "macro.md").read_text(encoding="utf-8")
+structural_payload = (out_dir / "context" / "structural.md").read_text(encoding="utf-8")
+events_payload = (out_dir / "context" / "events.md").read_text(encoding="utf-8")
+
+
+def find_us_macro_payload(us_root: Path, report_date: str) -> Path | None:
+    reports = us_root / "reports"
+    legacy = reports / f"{report_date}_payload_macro.md"
+    if legacy.exists():
+        return legacy
+
+    candidates: list[tuple[str, int, Path]] = []
+    for path in reports.glob("*_payload_macro_*.md"):
+        name = path.name
+        if len(name) < 27:
+            continue
+        candidate_date = name[:10]
+        if candidate_date > report_date:
+            continue
+        session_rank = 2 if name.endswith("_post.md") else 1
+        candidates.append((candidate_date, session_rank, path))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda row: (row[0], row[1], row[2].stat().st_mtime), reverse=True)
+    return candidates[0][2]
+
 
 # Read US macro payload for cross-reference (if available)
-us_macro_path = us_root / "reports" / f"{date}_payload_macro.md"
+us_macro_path = find_us_macro_payload(us_root, date)
 us_macro_payload = ""
-if us_macro_path.exists():
-    us_text = us_macro_path.read_text()
+if us_macro_path and us_macro_path.exists():
+    us_text = us_macro_path.read_text(encoding="utf-8", errors="replace")
     # Truncate to key sections (first ~3000 chars to avoid bloat)
     lines = us_text.split("\n")
     truncated = "\n".join(lines[:120])
     us_macro_payload = f"""--- 美股宏观数据（同日，仅供跨市场参考）---
 {truncated}
 --- 美股宏观数据结束 ---"""
-    print(f"  US macro payload found ({len(us_macro_payload)} chars)")
+    print(f"  US macro payload found: {us_macro_path} ({len(us_macro_payload)} chars)")
 else:
     us_macro_payload = "(美股宏观数据不可用)"
-    print(f"  US macro payload not found at {us_macro_path}")
+    print(f"  US macro payload not found for report date {date}")
 
 # Read previous report if provided
-prev_context = ""
+def build_carry_forward_context(report_text: str) -> str:
+    section_re = re.compile(r"(?ms)^###\s+(.+?)\n(.*?)(?=^###\s+|\n##\s+|\Z)")
+    symbol_re = re.compile(r"\*\*(\d{6}\.(?:SZ|SH))")
+    wanted_sections = ["做多", "战术延续", "风险回避", "观望"]
+    groups = {name: [] for name in wanted_sections}
+    for title, body in section_re.findall(report_text):
+        matched = next((name for name in wanted_sections if name in title), None)
+        if not matched:
+            continue
+        for symbol in symbol_re.findall(body):
+            if symbol not in groups[matched]:
+                groups[matched].append(symbol)
+
+    lines = []
+    for name in wanted_sections:
+        symbols = groups.get(name) or []
+        if symbols:
+            lines.append(f"- {name}: {', '.join(symbols[:12])}")
+    if not lines:
+        return ""
+
+    return (
+        "--- 延续跟踪清单（从上一份日报自动提取，必须交代去向）---\n"
+        + "\n".join(lines)
+        + "\n--- 延续跟踪清单结束 ---\n"
+        + "写作要求：上述股票不能在本期静默消失。若今日仍有新证据，写入对应栏目；"
+        + "若今日 payload 未保留或证据转弱，也要在信号记分卡、风险回避或观望中用一句话说明“移除/降级/等待”的原因。"
+    )
+
+if slot == "morning":
+    slot_context = """--- 本期报告时段 ---
+Slot: morning / A股盘前。
+写作要求：本期必须写成开盘前计划，重点是上一交易日收盘后的隔夜变化、今日触发条件、哪些名字只能等开盘确认。不要写成盘后复盘。
+--- 本期报告时段结束 ---"""
+elif slot == "evening":
+    slot_context = """--- 本期报告时段 ---
+Slot: evening / A股盘后。
+写作要求：本期必须写成收盘后复盘，重点是今日收盘、资金流、事件兑现、早盘假设哪些触发/作废/升级/降级。不要把早盘触发条件原样复制。
+--- 本期报告时段结束 ---"""
+else:
+    slot_context = """--- 本期报告时段 ---
+Slot: daily / A股日报。
+--- 本期报告时段结束 ---"""
+
+prev_context = slot_context
 if prev_report and Path(prev_report).exists():
     prev_text = Path(prev_report).read_text()
+    carry_forward = build_carry_forward_context(prev_text)
     prev_context = f"""
+{slot_context}
 --- 上期报告（用于假设验证）---
 {prev_text}
 --- 上期报告结束 ---
 
+{carry_forward}
+
 如果上期报告存在，先用2-3句话简述上期预测的兑现情况，再进行今日分析。"""
+    prev_context += "\n上一份日报也用于保持连续跟踪：昨天列入做多、战术延续、风险回避、观望的名字，今天必须交代去向；只有出现更硬的新证据才允许改口。"
 
 # Read prompt templates
 templates = {}
@@ -381,14 +490,17 @@ echo "  All 4 agents completed successfully."
 echo "  Building merge prompt..."
 
 # Assemble merge prompt using Python for safe substitution
-python3 - "$DATE" "$PREV_REPORT" "$PROJ_DIR" "$OUT_DIR" << 'MERGEEOF'
+python3 - "$DATE" "$SLOT" "$SLOT_LABEL_CN" "$PREV_REPORT" "$PROJ_DIR" "$OUT_DIR" << 'MERGEEOF'
 import sys
+import re
 from pathlib import Path
 
 date = sys.argv[1]
-prev_report = sys.argv[2]
-proj_dir = Path(sys.argv[3])
-out_dir = Path(sys.argv[4])
+slot = sys.argv[2]
+slot_label = sys.argv[3]
+prev_report = sys.argv[4]
+proj_dir = Path(sys.argv[5])
+out_dir = Path(sys.argv[6])
 
 reports_dir = proj_dir / "reports"
 prompts_dir = proj_dir / "prompts"
@@ -405,15 +517,64 @@ risk_output = (out_dir / "outputs" / "risk-analyst.md").read_text()
 full_payload = (out_dir / "context" / "merge_crosscheck.md").read_text()
 
 # Build previous report context for merge
-prev_context = ""
+def build_carry_forward_context(report_text: str) -> str:
+    section_re = re.compile(r"(?ms)^###\s+(.+?)\n(.*?)(?=^###\s+|\n##\s+|\Z)")
+    symbol_re = re.compile(r"\*\*(\d{6}\.(?:SZ|SH))")
+    wanted_sections = ["做多", "战术延续", "风险回避", "观望"]
+    groups = {name: [] for name in wanted_sections}
+    for title, body in section_re.findall(report_text):
+        matched = next((name for name in wanted_sections if name in title), None)
+        if not matched:
+            continue
+        for symbol in symbol_re.findall(body):
+            if symbol not in groups[matched]:
+                groups[matched].append(symbol)
+
+    lines = []
+    for name in wanted_sections:
+        symbols = groups.get(name) or []
+        if symbols:
+            lines.append(f"- {name}: {', '.join(symbols[:12])}")
+    if not lines:
+        return ""
+
+    return (
+        "--- 延续跟踪清单（从上一份日报自动提取，必须交代去向）---\n"
+        + "\n".join(lines)
+        + "\n--- 延续跟踪清单结束 ---\n"
+        + "写作要求：上述股票不能在本期静默消失。若今日仍有新证据，写入对应栏目；"
+        + "若今日 payload 未保留或证据转弱，也要在信号记分卡、风险回避或观望中用一句话说明“移除/降级/等待”的原因。"
+    )
+
+if slot == "morning":
+    slot_context = """--- 本期报告时段 ---
+Slot: morning / A股盘前。
+写作要求：本期必须写成开盘前计划，重点是上一交易日收盘后的隔夜变化、今日触发条件、哪些名字只能等开盘确认。不要写成盘后复盘。
+--- 本期报告时段结束 ---"""
+elif slot == "evening":
+    slot_context = """--- 本期报告时段 ---
+Slot: evening / A股盘后。
+写作要求：本期必须写成收盘后复盘，重点是今日收盘、资金流、事件兑现、早盘假设哪些触发/作废/升级/降级。不要把早盘触发条件原样复制。
+--- 本期报告时段结束 ---"""
+else:
+    slot_context = """--- 本期报告时段 ---
+Slot: daily / A股日报。
+--- 本期报告时段结束 ---"""
+
+prev_context = slot_context
 if prev_report and Path(prev_report).exists():
     prev_text = Path(prev_report).read_text()
+    carry_forward = build_carry_forward_context(prev_text)
     prev_context = f"""
+{slot_context}
 --- 上一份日报 ---
 {prev_text}
 --- 上一份日报结束 ---
 
+{carry_forward}
+
 请在「上期信号记分卡」部分严格评判：每个上期HIGH信号的预测方向与实际走势。信号错就是错，不要包装成"风险警告验证"。"""
+    prev_context += "\n上一份日报也用于保持连续跟踪：昨天列入做多、战术延续、风险回避、观望的名字，今天必须交代去向；只有出现更硬的新证据才允许改口。"
 
 replacements = {
     "{macro_output}": macro_output,
@@ -422,7 +583,7 @@ replacements = {
     "{risk_output}": risk_output,
     "{full_payload}": full_payload,
     "{prev_context}": prev_context,
-    "{date}": date,
+    "{date}": f"{date}（{slot_label}）" if slot != "daily" else date,
 }
 
 for k, v in replacements.items():
@@ -444,7 +605,11 @@ run_agent_with_fallback \
     "$MIN_MERGE_BYTES"
 
 # ── Copy final report ────────────────────────────────────────────────────────
-FINAL_REPORT="$REPORTS_DIR/${DATE}_report_zh.md"
+if [[ "$SLOT" == "daily" ]]; then
+    FINAL_REPORT="$REPORTS_DIR/${DATE}_report_zh.md"
+else
+    FINAL_REPORT="$REPORTS_DIR/${DATE}_report_zh_${SLOT}.md"
+fi
 if [[ -s "$OUT_DIR/outputs/merge-report.md" ]]; then
     cp "$OUT_DIR/outputs/merge-report.md" "$FINAL_REPORT"
     echo ""
@@ -460,6 +625,9 @@ if [[ -s "$OUT_DIR/outputs/merge-report.md" ]]; then
         --append-to "$FINAL_REPORT"; then
         echo "  Factor Lab section append failed (non-fatal)"
     fi
+    if [[ "$SLOT" != "daily" ]]; then
+        cp "$FINAL_REPORT" "$REPORTS_DIR/${DATE}_report_zh.md"
+    fi
     cd "$PROJ_DIR"
 else
     echo ""
@@ -472,10 +640,17 @@ if [[ "${SEND_EMAIL:-}" == "1" ]]; then
     echo ""
     echo "  Sending email (with charts if available)..."
     CHART_DIR="$REPORTS_DIR/charts/$DATE"
+    if [[ "$SLOT" != "daily" && -d "$REPORTS_DIR/charts/$DATE/$SLOT" ]]; then
+        CHART_DIR="$REPORTS_DIR/charts/$DATE/$SLOT"
+    fi
+    SUBJECT="A股量化研究日报"
+    if [[ "$SLOT" != "daily" ]]; then
+        SUBJECT="A股量化研究${SLOT_LABEL_CN}日报 — $DATE"
+    fi
     if [[ -d "$CHART_DIR" ]]; then
-        python3 "$PROJ_DIR/scripts/send_email.py" "$FINAL_REPORT" --charts "$CHART_DIR"
+        python3 "$PROJ_DIR/scripts/send_email.py" "$FINAL_REPORT" --charts "$CHART_DIR" --subject "$SUBJECT"
     else
-        python3 "$PROJ_DIR/scripts/send_email.py" "$FINAL_REPORT"
+        python3 "$PROJ_DIR/scripts/send_email.py" "$FINAL_REPORT" --subject "$SUBJECT"
     fi
     echo "  Email sent."
 fi

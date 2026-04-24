@@ -110,13 +110,13 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
         // Previous bug: unsigned score mixed oversold+overbought → IC was negative
         // because "extreme stocks continue their direction" (momentum at tails).
         // Fix: score the REVERSAL direction, so IC should be positive.
-        let rsi_signal = (50.0 - rsi) / 50.0;       // +1 when RSI=0 (oversold), -1 when RSI=100
-        let bb_signal = 0.5 - bb_position;            // +0.5 at lower band, -0.5 at upper band
-        let ma_signal = -ma20_z / 3.0;                // positive when below MA (oversold)
+        let rsi_signal = (50.0 - rsi) / 50.0; // +1 when RSI=0 (oversold), -1 when RSI=100
+        let bb_signal = 0.5 - bb_position; // +0.5 at lower band, -0.5 at upper band
+        let ma_signal = -ma20_z / 3.0; // positive when below MA (oversold)
 
         // Weighted signed combination: [-1, +1]
-        let reversion_score = (0.35 * rsi_signal + 0.35 * bb_signal * 2.0 + 0.30 * ma_signal)
-            .clamp(-1.0, 1.0);
+        let reversion_score =
+            (0.35 * rsi_signal + 0.35 * bb_signal * 2.0 + 0.30 * ma_signal).clamp(-1.0, 1.0);
 
         // Direction from sign
         let reversion_direction = if reversion_score > 0.2 {
@@ -139,15 +139,39 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
         });
         let detail_str = detail.to_string();
 
-        insert_stmt.execute(duckdb::params![ts_code, date_str, "reversion_score", reversion_score, detail_str])?;
-        insert_stmt.execute(duckdb::params![ts_code, date_str, "rsi_14", rsi, detail_str])?;
-        insert_stmt.execute(duckdb::params![ts_code, date_str, "bb_position", bb_position, detail_str])?;
-        insert_stmt.execute(duckdb::params![ts_code, date_str, "ma20_z", ma20_z, detail_str])?;
-        insert_stmt.execute(duckdb::params![ts_code, date_str, "reversion_direction",
-            if reversion_direction == "bullish_reversion" { 1.0 }
-            else if reversion_direction == "bearish_reversion" { -1.0 }
-            else { 0.0 },
-            detail_str])?;
+        insert_stmt.execute(duckdb::params![
+            ts_code,
+            date_str,
+            "reversion_score",
+            reversion_score,
+            detail_str
+        ])?;
+        insert_stmt.execute(duckdb::params![
+            ts_code, date_str, "rsi_14", rsi, detail_str
+        ])?;
+        insert_stmt.execute(duckdb::params![
+            ts_code,
+            date_str,
+            "bb_position",
+            bb_position,
+            detail_str
+        ])?;
+        insert_stmt.execute(duckdb::params![
+            ts_code, date_str, "ma20_z", ma20_z, detail_str
+        ])?;
+        insert_stmt.execute(duckdb::params![
+            ts_code,
+            date_str,
+            "reversion_direction",
+            if reversion_direction == "bullish_reversion" {
+                1.0
+            } else if reversion_direction == "bearish_reversion" {
+                -1.0
+            } else {
+                0.0
+            },
+            detail_str
+        ])?;
 
         count += 1;
     }
@@ -207,14 +231,15 @@ fn compute_rsi_batch(
         }
         // Use last `period` changes (already ordered by rn ASC = most recent first → reversed)
         // changes are ordered rn ASC (most recent first), take the most recent `period`
-        let recent: Vec<f64> = changes
-            .iter()
-            .take(period)
-            .map(|(c, p)| c - p)
-            .collect();
+        let recent: Vec<f64> = changes.iter().take(period).map(|(c, p)| c - p).collect();
 
         let avg_gain = recent.iter().filter(|&&d| d > 0.0).sum::<f64>() / period as f64;
-        let avg_loss = recent.iter().filter(|&&d| d < 0.0).map(|d| d.abs()).sum::<f64>() / period as f64;
+        let avg_loss = recent
+            .iter()
+            .filter(|&&d| d < 0.0)
+            .map(|d| d.abs())
+            .sum::<f64>()
+            / period as f64;
 
         let rsi = if avg_loss < 1e-10 {
             100.0
@@ -239,5 +264,9 @@ fn cross_stats(values: &[f64]) -> (f64, f64) {
     (mean, variance.sqrt().max(1e-10))
 }
 
-fn round3(v: f64) -> f64 { (v * 1000.0).round() / 1000.0 }
-fn round1(v: f64) -> f64 { (v * 10.0).round() / 10.0 }
+fn round3(v: f64) -> f64 {
+    (v * 1000.0).round() / 1000.0
+}
+fn round1(v: f64) -> f64 {
+    (v * 10.0).round() / 10.0
+}

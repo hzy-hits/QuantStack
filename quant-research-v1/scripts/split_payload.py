@@ -5,11 +5,12 @@ Split the daily payload into 3 focused files for parallel agent analysis.
 Usage:
     python scripts/split_payload.py                      # today's date
     python scripts/split_payload.py --date 2026-03-09
+    python scripts/split_payload.py --date 2026-03-09 --session pre
 
 Output:
-    reports/{date}_payload_macro.md      (~30KB)
-    reports/{date}_payload_structural.md (~90KB)
-    reports/{date}_payload_news.md       (~65KB)
+    reports/{date}_payload_macro_{session}.md
+    reports/{date}_payload_structural_{session}.md
+    reports/{date}_payload_news_{session}.md
 """
 from __future__ import annotations
 
@@ -20,12 +21,11 @@ from datetime import date
 from pathlib import Path
 
 
-def split_payload(payload_path: Path, output_dir: Path) -> dict[str, Path]:
+def split_payload(payload_path: Path, output_dir: Path, as_of: str, session: str) -> dict[str, Path]:
     """Split a payload file into macro, structural, and news components."""
     text = payload_path.read_text(encoding="utf-8")
     lines = text.split("\n")
-    stem = payload_path.stem.replace("_payload", "")
-
+    stem = payload_path.stem
     # --- Validate required sections ---
     notable_start = None
     universe_start = None
@@ -42,6 +42,7 @@ def split_payload(payload_path: Path, output_dir: Path) -> dict[str, Path]:
         raise ValueError(f"Missing '## Universe Summary' section in {payload_path}")
 
     # --- Detect additional section boundaries for routing ---
+    report_postmortem_start = None
     scorecard_start = None
     portfolio_risk_start = None
     shared_catalysts_start = None
@@ -51,7 +52,9 @@ def split_payload(payload_path: Path, output_dir: Path) -> dict[str, Path]:
     charts_start = None
 
     for i, line in enumerate(lines):
-        if line.startswith("## Algorithm Scorecard"):
+        if line.startswith("## Report Postmortem"):
+            report_postmortem_start = i
+        elif line.startswith("## Algorithm Scorecard"):
             scorecard_start = i
         elif line.startswith("## Portfolio Risk Summary"):
             portfolio_risk_start = i
@@ -86,6 +89,21 @@ def split_payload(payload_path: Path, output_dir: Path) -> dict[str, Path]:
         f"# Structural Analysis Data — {stem}\n",
         "Per-item quantitative data: regime, momentum, options, probability cones.\n",
     ]
+    if report_postmortem_start is not None:
+        review_end_candidates = [
+            idx
+            for idx in [
+                scorecard_start,
+                portfolio_risk_start,
+                shared_catalysts_start,
+                options_extremes_start,
+                notable_start,
+            ]
+            if idx is not None and idx > report_postmortem_start
+        ]
+        review_end = min(review_end_candidates) if review_end_candidates else notable_start
+        structural_lines.extend(lines[report_postmortem_start:review_end])
+        structural_lines.append("\n---\n")
     news_lines = [
         f"# News & Events Data — {stem}\n",
         "Per-item news headlines, SEC filings, earnings events.\n",
@@ -173,7 +191,7 @@ def split_payload(payload_path: Path, output_dir: Path) -> dict[str, Path]:
         ("structural", structural_lines),
         ("news", news_lines),
     ]:
-        out_path = output_dir / f"{stem}_payload_{suffix}.md"
+        out_path = output_dir / f"{as_of}_payload_{suffix}_{session}.md"
         # Write to temp file in same directory (ensures same filesystem for rename)
         fd, tmp = tempfile.mkstemp(dir=output_dir, suffix=f"_{suffix}.tmp")
         os.close(fd)  # close fd immediately; write_text opens its own handle
@@ -199,6 +217,7 @@ def split_payload(payload_path: Path, output_dir: Path) -> dict[str, Path]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Split payload for parallel agents")
     parser.add_argument("--date", type=str, default=None)
+    parser.add_argument("--session", choices=["post", "pre"], default="post")
     args = parser.parse_args()
 
     if args.date:
@@ -207,14 +226,19 @@ def main() -> None:
         from datetime import datetime
         from zoneinfo import ZoneInfo
         as_of = str(datetime.now(ZoneInfo("America/New_York")).date())
-    payload_path = Path("reports") / f"{as_of}_payload.md"
+    session = args.session
+    payload_path = Path("reports") / f"{as_of}_payload_{session}.md"
+    if not payload_path.exists():
+        legacy_payload_path = Path("reports") / f"{as_of}_payload.md"
+        if legacy_payload_path.exists():
+            payload_path = legacy_payload_path
 
     if not payload_path.exists():
         print(f"Error: {payload_path} not found", file=sys.stderr)
         sys.exit(1)
 
     print(f"Splitting {payload_path}:")
-    split_payload(payload_path, payload_path.parent)
+    split_payload(payload_path, payload_path.parent, as_of, session)
     print("Done.")
 
 

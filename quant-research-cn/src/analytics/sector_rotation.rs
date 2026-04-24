@@ -113,29 +113,54 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
 
         // Sector 20D return
         insert_stmt.execute(duckdb::params![
-            &ts_code, date_str, MODULE, "ret_20d", ret_20d, None::<String>,
+            &ts_code,
+            date_str,
+            MODULE,
+            "ret_20d",
+            ret_20d,
+            None::<String>,
         ])?;
 
         // Sector momentum z-score
         insert_stmt.execute(duckdb::params![
-            &ts_code, date_str, MODULE, "momentum_z", mom_z, None::<String>,
+            &ts_code,
+            date_str,
+            MODULE,
+            "momentum_z",
+            mom_z,
+            None::<String>,
         ])?;
 
         // Sector avg flow score
         insert_stmt.execute(duckdb::params![
-            &ts_code, date_str, MODULE, "flow_score", flow, None::<String>,
+            &ts_code,
+            date_str,
+            MODULE,
+            "flow_score",
+            flow,
+            None::<String>,
         ])?;
 
         // Rotation score: 0.5*momentum_z + 0.3*flow + 0.2*reversal_penalty
         // Reversal penalty: sectors with extreme 5D gains have mean-reversion risk
-        let reversal_penalty = if *ret_5d > 10.0 { -0.3 } else if *ret_5d < -10.0 { 0.3 } else { 0.0 };
-        let rotation_score = (0.5 * mom_z.clamp(-3.0, 3.0) / 3.0
-            + 0.3 * flow
-            + 0.2 * reversal_penalty)
-            .clamp(-1.0, 1.0);
+        let reversal_penalty = if *ret_5d > 10.0 {
+            -0.3
+        } else if *ret_5d < -10.0 {
+            0.3
+        } else {
+            0.0
+        };
+        let rotation_score =
+            (0.5 * mom_z.clamp(-3.0, 3.0) / 3.0 + 0.3 * flow + 0.2 * reversal_penalty)
+                .clamp(-1.0, 1.0);
 
         insert_stmt.execute(duckdb::params![
-            &ts_code, date_str, MODULE, "rotation_score", rotation_score, None::<String>,
+            &ts_code,
+            date_str,
+            MODULE,
+            "rotation_score",
+            rotation_score,
+            None::<String>,
         ])?;
 
         count += 1;
@@ -143,14 +168,29 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
 
     // Also store the top-5 and bottom-5 sectors as a market-level summary
     let n = rows.len();
-    let top5: Vec<String> = rows.iter().take(5).map(|r| format!("{}({:.1}%)", r.0, r.2)).collect();
-    let bot5: Vec<String> = rows.iter().rev().take(5).map(|r| format!("{}({:.1}%)", r.0, r.2)).collect();
+    let top5: Vec<String> = rows
+        .iter()
+        .take(5)
+        .map(|r| format!("{}({:.1}%)", r.0, r.2))
+        .collect();
+    let bot5: Vec<String> = rows
+        .iter()
+        .rev()
+        .take(5)
+        .map(|r| format!("{}({:.1}%)", r.0, r.2))
+        .collect();
 
     let summary = format!(
         r#"{{"n_sectors":{},"top5":[{}],"bottom5":[{}]}}"#,
         n,
-        top5.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(","),
-        bot5.iter().map(|s| format!("\"{}\"", s)).collect::<Vec<_>>().join(","),
+        top5.iter()
+            .map(|s| format!("\"{}\"", s))
+            .collect::<Vec<_>>()
+            .join(","),
+        bot5.iter()
+            .map(|s| format!("\"{}\"", s))
+            .collect::<Vec<_>>()
+            .join(","),
     );
 
     insert_stmt.execute(duckdb::params![

@@ -1,17 +1,25 @@
-pub mod bayes;
-pub mod momentum;
 pub mod announcement;
-pub mod flow;
-pub mod hmm;
-pub mod rv;
-pub mod vol_hmm;
-pub mod unlock;
-pub mod macro_gate;
-pub mod sector_rotation;
-pub mod mean_reversion;
+pub mod bayes;
 pub mod breakout;
+pub mod continuation_vs_fade;
+pub mod flow;
+pub mod headline_gate;
+pub mod hmm;
+pub mod macro_gate;
+pub mod mean_reversion;
+pub mod momentum;
+pub mod open_execution_gate;
+pub mod report_review;
+pub mod rv;
+pub mod sector_rotation;
+pub mod setup_alpha;
+pub mod shadow_calibration;
+pub mod shadow_option;
+pub mod shadow_option_alpha_calibration;
+pub mod unlock;
+pub mod vol_hmm;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
 use duckdb::Connection;
 use tracing::info;
@@ -21,47 +29,129 @@ use crate::config::Settings;
 /// Run all analytics modules. Order matters: some modules depend on others.
 pub fn run_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<()> {
     info!("analytics start");
-
-    // Axiom 1+2: Conditional probability + Bayesian updating
-    let n_mom = momentum::compute(db, cfg, as_of)?;
-    info!(rows = n_mom, "momentum complete");
-
-    // A-share specific: 业绩预告 risk
-    let n_ann = announcement::compute(db, as_of)?;
-    info!(rows = n_ann, "announcement_risk complete");
-
-    // A-share specific: flow score (北向 + 融资 + 大宗 + 龙虎)
-    let n_flow = flow::compute(db, cfg, as_of)?;
-    info!(rows = n_flow, "flow_score complete");
-
-    // A-share specific: 限售解禁 risk
-    let n_unlock = unlock::compute(db, cfg, as_of)?;
-    info!(rows = n_unlock, "unlock_risk complete");
-
-    // Axiom 3: Latent states (HMM on benchmark returns)
-    let n_hmm = hmm::compute(db, cfg, as_of)?;
-    info!(rows = n_hmm, "hmm_regime complete");
-
-    // Axiom 3b: Volatility regime HMM (on OHLC log-variance)
-    let n_vol_hmm = vol_hmm::compute(db, cfg, as_of)?;
-    info!(rows = n_vol_hmm, "vol_hmm complete");
-
-    // Mean-reversion signals (RSI, MA distance, Bollinger position)
-    let n_mr = mean_reversion::compute(db, as_of)?;
-    info!(rows = n_mr, "mean_reversion complete");
-
-    // Breakout detection (squeeze + volume + range break)
-    let n_bo = breakout::compute(db, as_of)?;
-    info!(rows = n_bo, "breakout complete");
-
-    // Sector rotation (industry-level momentum + flow)
-    let n_sector = sector_rotation::compute(db, as_of)?;
-    info!(rows = n_sector, "sector_rotation complete");
-
-    // Macro gate (Axiom 4 overlay)
-    let n_macro = macro_gate::compute(db, cfg, as_of)?;
-    info!(rows = n_macro, "macro_gate complete");
+    for module in [
+        "momentum",
+        "announcement",
+        "flow",
+        "unlock",
+        "shadow_option",
+        "hmm",
+        "vol_hmm",
+        "mean_reversion",
+        "breakout",
+        "sector_rotation",
+        "setup_alpha",
+        "continuation_vs_fade",
+        "open_execution_gate",
+        "shadow_option_alpha_calibration",
+        "macro_gate",
+    ] {
+        with_transaction(db, &format!("analytics::{module}"), |db| {
+            run_module_inner(db, cfg, as_of, module)?;
+            Ok(())
+        })?;
+    }
 
     info!("analytics complete");
     Ok(())
+}
+
+pub fn run_module(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &str) -> Result<()> {
+    info!(module, %as_of, "analytics module start");
+    with_transaction(db, &format!("analytics::{module}"), |db| {
+        run_module_inner(db, cfg, as_of, module)?;
+        Ok(())
+    })?;
+    info!(module, %as_of, "analytics module complete");
+    Ok(())
+}
+
+fn run_module_inner(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &str) -> Result<()> {
+    match module {
+        "momentum" => {
+            let n = momentum::compute(db, cfg, as_of)?;
+            info!(rows = n, "momentum complete");
+        }
+        "announcement" | "announcement_risk" => {
+            let n = announcement::compute(db, as_of)?;
+            info!(rows = n, "announcement_risk complete");
+        }
+        "flow" | "flow_score" => {
+            let n = flow::compute(db, cfg, as_of)?;
+            info!(rows = n, "flow_score complete");
+        }
+        "unlock" | "unlock_risk" => {
+            let n = unlock::compute(db, cfg, as_of)?;
+            info!(rows = n, "unlock_risk complete");
+        }
+        "shadow_option" | "shadow_fast" => {
+            let n = shadow_option::compute_fast(db, cfg, as_of)?;
+            info!(rows = n, "shadow_fast complete");
+        }
+        "hmm" | "hmm_regime" => {
+            let n = hmm::compute(db, cfg, as_of)?;
+            info!(rows = n, "hmm_regime complete");
+        }
+        "vol_hmm" => {
+            let n = vol_hmm::compute(db, cfg, as_of)?;
+            info!(rows = n, "vol_hmm complete");
+        }
+        "mean_reversion" => {
+            let n = mean_reversion::compute(db, as_of)?;
+            info!(rows = n, "mean_reversion complete");
+        }
+        "breakout" => {
+            let n = breakout::compute(db, as_of)?;
+            info!(rows = n, "breakout complete");
+        }
+        "sector_rotation" => {
+            let n = sector_rotation::compute(db, as_of)?;
+            info!(rows = n, "sector_rotation complete");
+        }
+        "setup_alpha" => {
+            let n = setup_alpha::compute(db, as_of)?;
+            info!(rows = n, "setup_alpha complete");
+        }
+        "continuation_vs_fade" => {
+            let n = continuation_vs_fade::compute(db, as_of)?;
+            info!(rows = n, "continuation_vs_fade complete");
+        }
+        "open_execution_gate" => {
+            let n = open_execution_gate::compute(db, as_of)?;
+            info!(rows = n, "open_execution_gate complete");
+        }
+        "shadow_option_alpha_calibration" | "shadow_option_alpha" => {
+            let n = shadow_option_alpha_calibration::compute(db, as_of)?;
+            info!(rows = n, "shadow_option_alpha calibration complete");
+        }
+        "macro_gate" => {
+            let n = macro_gate::compute(db, cfg, as_of)?;
+            info!(rows = n, "macro_gate complete");
+        }
+        other => {
+            return Err(anyhow!(
+                "unknown analytics module `{}`. supported: momentum, announcement, flow, unlock, shadow_option, hmm, vol_hmm, mean_reversion, breakout, sector_rotation, setup_alpha, continuation_vs_fade, open_execution_gate, shadow_option_alpha_calibration, macro_gate",
+                other
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn with_transaction<T, F>(db: &Connection, label: &str, f: F) -> Result<T>
+where
+    F: FnOnce(&Connection) -> Result<T>,
+{
+    db.execute_batch("BEGIN TRANSACTION")?;
+    match f(db) {
+        Ok(value) => {
+            db.execute_batch("COMMIT")?;
+            info!(transaction = label, "analytics transaction committed");
+            Ok(value)
+        }
+        Err(err) => {
+            let _ = db.execute_batch("ROLLBACK");
+            Err(err)
+        }
+    }
 }

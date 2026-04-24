@@ -200,7 +200,11 @@ pub async fn backfill_margin(
         .filter(|d| !existing.contains(&d.format("%Y-%m-%d").to_string()))
         .collect();
 
-    info!(to_fetch = to_fetch.len(), already_have = existing.len(), "margin backfill plan");
+    info!(
+        to_fetch = to_fetch.len(),
+        already_have = existing.len(),
+        "margin backfill plan"
+    );
 
     let mut total = 0usize;
     let n = to_fetch.len();
@@ -214,7 +218,11 @@ pub async fn backfill_margin(
         total += n1;
 
         if (i + 1) % 20 == 0 || i + 1 == n {
-            info!(progress = format!("{}/{}", i + 1, n), rows = total, "margin backfill");
+            info!(
+                progress = format!("{}/{}", i + 1, n),
+                rows = total,
+                "margin backfill"
+            );
         }
     }
 
@@ -425,7 +433,11 @@ pub async fn backfill_moneyflow(
         .filter(|d| !existing.contains(&d.format("%Y-%m-%d").to_string()))
         .collect();
 
-    info!(to_fetch = to_fetch.len(), already_have = existing.len(), "moneyflow backfill plan");
+    info!(
+        to_fetch = to_fetch.len(),
+        already_have = existing.len(),
+        "moneyflow backfill plan"
+    );
 
     let mut total = 0usize;
     let n = to_fetch.len();
@@ -439,7 +451,11 @@ pub async fn backfill_moneyflow(
         total += n1;
 
         if (i + 1) % 20 == 0 || i + 1 == n {
-            info!(progress = format!("{}/{}", i + 1, n), rows = total, "moneyflow backfill");
+            info!(
+                progress = format!("{}/{}", i + 1, n),
+                rows = total,
+                "moneyflow backfill"
+            );
         }
     }
 

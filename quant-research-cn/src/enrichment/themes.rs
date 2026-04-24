@@ -10,8 +10,8 @@ use duckdb::Connection;
 use serde::Deserialize;
 use tracing::{info, warn};
 
-use crate::config::Settings;
 use super::llm::DeepSeekClient;
+use crate::config::Settings;
 
 const SYSTEM_PROMPT: &str = r#"你是A股概念板块主题归类工具。将下面的概念板块按投资主题分组。
 不要推理、分析或预测。只按名称和相关性进行分组。
@@ -47,11 +47,7 @@ struct ThemeItem {
 }
 
 /// Enrich concept boards with theme clustering.
-pub async fn enrich_themes(
-    db: &Connection,
-    cfg: &Settings,
-    as_of: NaiveDate,
-) -> Result<usize> {
+pub async fn enrich_themes(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usize> {
     if !cfg.enrichment.enabled || cfg.api.deepseek_key.is_empty() {
         info!("theme enrichment disabled or no deepseek key");
         return Ok(0);
@@ -69,7 +65,10 @@ pub async fn enrich_themes(
         .unwrap_or(0);
 
     if already > 0 {
-        info!(existing = already, "theme_clusters already enriched today, skipping");
+        info!(
+            existing = already,
+            "theme_clusters already enriched today, skipping"
+        );
         return Ok(already as usize);
     }
 
@@ -113,7 +112,13 @@ pub async fn enrich_themes(
     for (i, (name, pct, up, down, lead, lead_pct)) in boards.iter().enumerate() {
         user_msg.push_str(&format!(
             "{}. {} 涨跌幅:{:+.2}% 上涨:{} 下跌:{} 领涨:{} {:+.2}%\n",
-            i + 1, name, pct, up, down, lead, lead_pct,
+            i + 1,
+            name,
+            pct,
+            up,
+            down,
+            lead,
+            lead_pct,
         ));
     }
 
@@ -133,7 +138,8 @@ pub async fn enrich_themes(
     };
 
     // Ensure table exists
-    db.execute_batch("
+    db.execute_batch(
+        "
         CREATE TABLE IF NOT EXISTS theme_clusters (
             trade_date    DATE NOT NULL,
             theme_name    VARCHAR NOT NULL,
@@ -143,7 +149,8 @@ pub async fn enrich_themes(
             enriched_at   TIMESTAMP DEFAULT current_timestamp,
             PRIMARY KEY (trade_date, theme_name)
         );
-    ")?;
+    ",
+    )?;
 
     let mut total = 0;
     for theme in &result.themes {

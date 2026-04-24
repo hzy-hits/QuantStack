@@ -11,8 +11,8 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 use tracing::{info, warn};
 
-use crate::config::Settings;
 use super::rv;
+use crate::config::Settings;
 
 const MODULE: &str = "vol_hmm";
 const MARKET_CODE: &str = "_MARKET";
@@ -37,7 +37,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
          FROM prices
          WHERE ts_code = ? AND trade_date <= ?
          ORDER BY trade_date DESC
-         LIMIT 500"
+         LIMIT 500",
     )?;
 
     let mut data: Vec<(String, f64, f64, f64, f64)> = stmt
@@ -57,12 +57,16 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     data.reverse();
 
     if data.len() < 100 {
-        info!(n = data.len(), "insufficient OHLC data for vol_hmm, skipping");
+        info!(
+            n = data.len(),
+            "insufficient OHLC data for vol_hmm, skipping"
+        );
         return Ok(0);
     }
 
     // Build OHLC bars and log-variance observations
-    let bars: Vec<(f64, f64, f64, f64)> = data.iter()
+    let bars: Vec<(f64, f64, f64, f64)> = data
+        .iter()
         .map(|(_, o, h, l, c)| (*o, *h, *l, *c))
         .filter(|(o, h, l, c)| *o > 0.0 && *h > 0.0 && *l > 0.0 && *c > 0.0)
         .collect();
@@ -91,7 +95,11 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
 
         if (ll - prev_ll).abs() < CONVERGENCE_EPS {
             converged = true;
-            info!(iterations = iter + 1, log_likelihood = format!("{:.4}", ll), "vol_hmm converged");
+            info!(
+                iterations = iter + 1,
+                log_likelihood = format!("{:.4}", ll),
+                "vol_hmm converged"
+            );
             break;
         }
         prev_ll = ll;
@@ -119,7 +127,11 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     let (_, alpha) = forward(&log_vars, &hmm);
     let t = log_vars.len() - 1;
     let alpha_sum: f64 = alpha[t].iter().sum();
-    let p_low_vol = if alpha_sum > 0.0 { alpha[t][0] / alpha_sum } else { 0.5 };
+    let p_low_vol = if alpha_sum > 0.0 {
+        alpha[t][0] / alpha_sum
+    } else {
+        0.5
+    };
     let p_high_vol = 1.0 - p_low_vol;
 
     // 1-step-ahead: P(high_vol tomorrow)
@@ -127,7 +139,11 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
 
     // Regime duration via Viterbi
     let regime_duration = compute_regime_duration(&log_vars, &hmm);
-    let current_regime = if p_high_vol > 0.5 { "high_vol" } else { "low_vol" };
+    let current_regime = if p_high_vol > 0.5 {
+        "high_vol"
+    } else {
+        "low_vol"
+    };
 
     // Convert log-var means to approximate annualized vol for interpretability
     let vol_state0 = (hmm.mu[0].exp() * 252.0).sqrt() * 100.0; // low_vol regime typical vol
@@ -156,31 +172,54 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         benchmark,
         log_vars.len(),
         converged,
-        hmm.mu[0], hmm.mu[1],
-        hmm.sigma[0], hmm.sigma[1],
-        vol_state0, vol_state1,
+        hmm.mu[0],
+        hmm.mu[1],
+        hmm.sigma[0],
+        hmm.sigma[1],
+        vol_state0,
+        vol_state1,
         current_regime,
         regime_duration,
     );
 
     // p_high_vol — current probability of being in high-vol regime
     insert.execute(duckdb::params![
-        MARKET_CODE, date_str, MODULE, "p_high_vol", p_high_vol, &detail,
+        MARKET_CODE,
+        date_str,
+        MODULE,
+        "p_high_vol",
+        p_high_vol,
+        &detail,
     ])?;
 
     // p_high_vol_tomorrow — 1-step-ahead forecast
     insert.execute(duckdb::params![
-        MARKET_CODE, date_str, MODULE, "p_high_vol_tomorrow", p_high_vol_tomorrow, None::<String>,
+        MARKET_CODE,
+        date_str,
+        MODULE,
+        "p_high_vol_tomorrow",
+        p_high_vol_tomorrow,
+        None::<String>,
     ])?;
 
     // rv_gk_20d — current 20-day realized vol (GK, annualized %)
     insert.execute(duckdb::params![
-        MARKET_CODE, date_str, MODULE, "rv_gk_20d", rv_gk_20d, None::<String>,
+        MARKET_CODE,
+        date_str,
+        MODULE,
+        "rv_gk_20d",
+        rv_gk_20d,
+        None::<String>,
     ])?;
 
     // vol_regime_duration
     insert.execute(duckdb::params![
-        MARKET_CODE, date_str, MODULE, "vol_regime_duration", regime_duration as f64, None::<String>,
+        MARKET_CODE,
+        date_str,
+        MODULE,
+        "vol_regime_duration",
+        regime_duration as f64,
+        None::<String>,
     ])?;
 
     info!("vol_hmm analytics written");
@@ -202,12 +241,16 @@ fn initialize_percentile(observations: &[f64]) -> GaussianHMM {
     let sigma_low = if low.len() > 1 {
         let var = low.iter().map(|x| (x - mu_low).powi(2)).sum::<f64>() / (low.len() - 1) as f64;
         var.sqrt().max(0.01)
-    } else { 1.0 };
+    } else {
+        1.0
+    };
 
     let sigma_high = if high.len() > 1 {
         let var = high.iter().map(|x| (x - mu_high).powi(2)).sum::<f64>() / (high.len() - 1) as f64;
         var.sqrt().max(0.01)
-    } else { 1.0 };
+    } else {
+        1.0
+    };
 
     GaussianHMM {
         pi: [0.6, 0.4],
@@ -236,7 +279,9 @@ fn forward(observations: &[f64], hmm: &GaussianHMM) -> (f64, Vec<[f64; 2]>) {
     }
     let scale: f64 = alpha[0].iter().sum();
     if scale > 0.0 {
-        for k in 0..2 { alpha[0][k] /= scale; }
+        for k in 0..2 {
+            alpha[0][k] /= scale;
+        }
         log_likelihood += scale.ln();
     }
 
@@ -251,7 +296,9 @@ fn forward(observations: &[f64], hmm: &GaussianHMM) -> (f64, Vec<[f64; 2]>) {
             scale_t += alpha[t][j];
         }
         if scale_t > 0.0 {
-            for k in 0..2 { alpha[t][k] /= scale_t; }
+            for k in 0..2 {
+                alpha[t][k] /= scale_t;
+            }
             log_likelihood += scale_t.ln();
         }
     }
@@ -277,7 +324,9 @@ fn backward(observations: &[f64], hmm: &GaussianHMM) -> Vec<[f64; 2]> {
             scale_t += beta[t][i];
         }
         if scale_t > 0.0 {
-            for k in 0..2 { beta[t][k] /= scale_t; }
+            for k in 0..2 {
+                beta[t][k] /= scale_t;
+            }
         }
     }
 
@@ -301,7 +350,9 @@ fn compute_gamma_xi(
             denom += gamma[t][k];
         }
         if denom > 0.0 {
-            for k in 0..2 { gamma[t][k] /= denom; }
+            for k in 0..2 {
+                gamma[t][k] /= denom;
+            }
         }
     }
 
@@ -328,12 +379,7 @@ fn compute_gamma_xi(
     (gamma, xi)
 }
 
-fn m_step(
-    hmm: &mut GaussianHMM,
-    observations: &[f64],
-    gamma: &[[f64; 2]],
-    xi: &[[[f64; 2]; 2]],
-) {
+fn m_step(hmm: &mut GaussianHMM, observations: &[f64], gamma: &[[f64; 2]], xi: &[[[f64; 2]; 2]]) {
     let n = observations.len();
 
     let g0_sum: f64 = gamma[0].iter().sum();
@@ -352,7 +398,9 @@ fn m_step(
             }
             let row_sum: f64 = hmm.trans[i].iter().sum();
             if row_sum > 0.0 {
-                for j in 0..2 { hmm.trans[i][j] /= row_sum; }
+                for j in 0..2 {
+                    hmm.trans[i][j] /= row_sum;
+                }
             }
         }
     }
@@ -360,12 +408,16 @@ fn m_step(
     for k in 0..2 {
         let gamma_sum: f64 = gamma.iter().map(|g| g[k]).sum();
         if gamma_sum > 1e-10 {
-            let weighted_sum: f64 = gamma.iter().zip(observations.iter())
+            let weighted_sum: f64 = gamma
+                .iter()
+                .zip(observations.iter())
                 .map(|(g, &x)| g[k] * x)
                 .sum();
             hmm.mu[k] = weighted_sum / gamma_sum;
 
-            let weighted_var: f64 = gamma.iter().zip(observations.iter())
+            let weighted_var: f64 = gamma
+                .iter()
+                .zip(observations.iter())
                 .map(|(g, &x)| g[k] * (x - hmm.mu[k]).powi(2))
                 .sum();
             hmm.sigma[k] = (weighted_var / gamma_sum).sqrt().max(0.01);
@@ -375,21 +427,27 @@ fn m_step(
 
 fn compute_regime_duration(observations: &[f64], hmm: &GaussianHMM) -> u32 {
     let n = observations.len();
-    if n == 0 { return 0; }
+    if n == 0 {
+        return 0;
+    }
 
     let mut viterbi = vec![[0.0f64; 2]; n];
     let mut path = vec![[0usize; 2]; n];
 
     for k in 0..2 {
         viterbi[0][k] = hmm.pi[k].ln()
-            + gaussian_pdf(observations[0], hmm.mu[k], hmm.sigma[k]).max(1e-300).ln();
+            + gaussian_pdf(observations[0], hmm.mu[k], hmm.sigma[k])
+                .max(1e-300)
+                .ln();
     }
 
     for t in 1..n {
         for j in 0..2 {
-            let emission = gaussian_pdf(observations[t], hmm.mu[j], hmm.sigma[j]).max(1e-300).ln();
+            let emission = gaussian_pdf(observations[t], hmm.mu[j], hmm.sigma[j])
+                .max(1e-300)
+                .ln();
             let (best_i, best_val) = (0..2)
-                .map(|i| (i, viterbi[t-1][i] + hmm.trans[i][j].max(1e-300).ln()))
+                .map(|i| (i, viterbi[t - 1][i] + hmm.trans[i][j].max(1e-300).ln()))
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                 .unwrap();
             viterbi[t][j] = best_val + emission;
@@ -398,12 +456,16 @@ fn compute_regime_duration(observations: &[f64], hmm: &GaussianHMM) -> u32 {
     }
 
     let mut states = vec![0usize; n];
-    states[n-1] = if viterbi[n-1][0] > viterbi[n-1][1] { 0 } else { 1 };
-    for t in (0..n-1).rev() {
-        states[t] = path[t+1][states[t+1]];
+    states[n - 1] = if viterbi[n - 1][0] > viterbi[n - 1][1] {
+        0
+    } else {
+        1
+    };
+    for t in (0..n - 1).rev() {
+        states[t] = path[t + 1][states[t + 1]];
     }
 
-    let current = states[n-1];
+    let current = states[n - 1];
     let mut duration = 0u32;
     for t in (0..n).rev() {
         if states[t] == current {

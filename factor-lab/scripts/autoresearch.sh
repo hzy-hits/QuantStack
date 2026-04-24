@@ -122,14 +122,16 @@ if [ "$HOUR" -ge 9 ] && [ "$HOUR" -lt 13 ]; then
 else
     # Night/afternoon session: factor mining
     echo "  Mode: Factor Mining"
-    BUDGET=30  # 30 experiments × ~30s = ~15min per market, fits in 1hr
+    BUDGET=30  # hard cap, but time budget is now the primary stop condition
+    TIME_BUDGET_MINUTES=55
 
     if [[ "$RUN_CN" == true ]]; then
         echo ""
         echo "=== [$(date '+%H:%M:%S')] A-Share Factor Mining ==="
-        timeout 3600 $PYTHON -m src.agent.loop \
+        timeout 3600 $PYTHON scripts/run_autoresearch_session.py \
             --market cn \
             --budget $BUDGET \
+            --time-budget-minutes $TIME_BUDGET_MINUTES \
             --output "reports/autoresearch_cn_${DATE}_${HOUR}.md" \
             || echo "CN ended (exit $?)"
     fi
@@ -137,9 +139,10 @@ else
     if [[ "$RUN_US" == true && "$US_READY" == true ]]; then
         echo ""
         echo "=== [$(date '+%H:%M:%S')] US Factor Mining ==="
-        timeout 3600 $PYTHON -m src.agent.loop \
+        timeout 3600 $PYTHON scripts/run_autoresearch_session.py \
             --market us \
             --budget $BUDGET \
+            --time-budget-minutes $TIME_BUDGET_MINUTES \
             --output "reports/autoresearch_us_${DATE}_${HOUR}.md" \
             || echo "US ended (exit $?)"
     fi

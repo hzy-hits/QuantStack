@@ -2,13 +2,13 @@
 # Weekly report pipeline: aggregate week's data → payload → agent → email
 #
 # Usage:
-#   ./scripts/run_weekly.sh                    # current week
+#   ./scripts/run_weekly.sh                    # completed trading week containing today
 #   ./scripts/run_weekly.sh 2026-03-15         # week ending on this date
 #
-# Cron: Saturday 07:00 CST (UTC+8)
-#   0 7 * * 6 cd $PROJ && ./scripts/run_weekly.sh >> logs/cron_weekly.log 2>&1
+# Cron: Saturday 09:30 CST (UTC+8), after Friday post-market daily report exists
+#   30 9 * * 6 cd $PROJ && ./scripts/run_weekly.sh >> logs/cron_weekly.log 2>&1
 
-set -uo pipefail
+set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
@@ -25,7 +25,7 @@ echo "=========================================="
 # ── 1. Generate weekly payload ────────────────────────────────────────────
 echo ""
 echo "[1/3] Generating weekly payload..."
-if ! uv run python scripts/weekly_payload.py --date "$DATE"; then
+if ! uv run python scripts/weekly_payload.py --date "$DATE" --reports-dir reports; then
     echo "ERROR: Weekly payload generation failed"
     exit 1
 fi
@@ -42,44 +42,30 @@ echo ""
 echo "[2/3] Running weekly synthesis agent..."
 
 WEEKLY_REPORT="reports/${DATE}_report_weekly_zh.md"
+PROMPT_FILE="logs/weekly_prompt_${DATE}.txt"
 
-# Find most recent daily report for context
-PREV_DAILY=""
-for f in $(ls -t reports/*_report_zh_*.md 2>/dev/null | head -5); do
-    echo "$f" | grep -q '_weekly_' && continue
-    PREV_DAILY="$f"
-    break
-done
-
-CONTEXT=""
-if [ -n "$PREV_DAILY" ]; then
-    echo "  Using latest daily report for context: $PREV_DAILY"
-    CONTEXT="
-
---- LATEST DAILY REPORT (for reference) ---
-$(head -100 "$PREV_DAILY")
-"
-fi
-
-# Single agent: weekly synthesis (no need for 4-agent split)
-PROMPT="$(cat "$PAYLOAD")
-$CONTEXT
+{
+    cat "$PAYLOAD"
+    cat <<'EOF'
 
 ---
 
-请基于以上周度数据撰写一份A股/美股周度研究总结。
+请基于以上周度数据和「本周日报摘要」撰写一份美股周度研究总结。
 
 要求：
-1. 开头3句话概括本周市场（指数表现、主线逻辑、关键变化）
-2. 市场回顾：指数、板块轮动、资金流向
-3. 宏观环境：本周发布的宏观数据、利率变化、Polymarket概率变化
-4. 个股亮点：本周涨跌幅前5，简述原因
-5. 风险提示：下周关注的风险事件
-6. 下周展望：预期关注点、潜在催化剂
+1. 周报必须建立在本周所有 trading-day 的 post-market 日报都已纳入的前提上；不要忽略周内最后一个交易日。
+2. 开头3句话概括本周市场（指数表现、主线逻辑、关键变化）。
+3. 市场回顾：指数、板块轮动、资金流向，并明确哪些判断来自周内日报连续验证。
+4. 宏观环境：本周发布的宏观数据、利率变化、Polymarket 概率变化。
+5. 个股亮点：本周涨跌幅前5，简述原因；必要时引用本周日报里反复出现的主线名字。
+6. 风险提示：下周关注的风险事件。
+7. 下周展望：预期关注点、潜在催化剂。
 
-输出中文，约2000-3000字。语气专业但易读。"
+输出中文，约2000-3000字。语气专业但易读。
+EOF
+} > "$PROMPT_FILE"
 
-echo "$PROMPT" | timeout "$AGENT_TIMEOUT" claude -p --output-format text > "$WEEKLY_REPORT" 2>/dev/null
+timeout "$AGENT_TIMEOUT" claude -p --output-format text < "$PROMPT_FILE" > "$WEEKLY_REPORT" 2>/dev/null
 
 if [ ! -s "$WEEKLY_REPORT" ]; then
     echo "ERROR: Weekly report generation failed"
