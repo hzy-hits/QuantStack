@@ -60,12 +60,88 @@ def load_breakout(
         return {}
 
 
+def load_overnight_gate(
+    con: duckdb.DuckDBPyConnection,
+    as_of: date,
+) -> dict[str, dict]:
+    """Load overnight execution gate rows as {symbol: parsed_dict}."""
+    as_of_str = as_of.strftime("%Y-%m-%d")
+    try:
+        df = con.execute(
+            """
+            SELECT symbol, trend_prob, p_upside, p_downside,
+                   daily_risk_usd, expected_move_pct, z_score,
+                   strength_bucket, regime, details
+            FROM analysis_daily
+            WHERE date = ? AND module_name = 'overnight_gate'
+            """,
+            [as_of_str],
+        ).fetchdf()
+        if df.empty:
+            return {}
+
+        out: dict[str, dict] = {}
+        for _, r in df.iterrows():
+            details = json.loads(r["details"]) if r.get("details") else {}
+            out[r["symbol"]] = {
+                "p_continue": r.get("trend_prob"),
+                "p_fade": r.get("p_downside"),
+                "stretch_usd": r.get("daily_risk_usd"),
+                "max_chase_gap_pct": r.get("expected_move_pct"),
+                "gap_vs_expected_move": r.get("z_score"),
+                "strength_bucket": r.get("strength_bucket"),
+                "regime": r.get("regime"),
+                **details,
+            }
+        return out
+    except Exception:
+        return {}
+
+
+def load_overnight_continuation_alpha(
+    con: duckdb.DuckDBPyConnection,
+    as_of: date,
+) -> dict[str, dict]:
+    """Load diagnostic overnight continuation alpha rows as {symbol: parsed_dict}."""
+    as_of_str = as_of.strftime("%Y-%m-%d")
+    try:
+        df = con.execute(
+            """
+            SELECT symbol, trend_prob, p_upside, p_downside,
+                   expected_move_pct, z_score, strength_bucket, regime, details
+            FROM analysis_daily
+            WHERE date = ? AND module_name = 'overnight_continuation_alpha'
+            """,
+            [as_of_str],
+        ).fetchdf()
+        if df.empty:
+            return {}
+
+        out: dict[str, dict] = {}
+        for _, r in df.iterrows():
+            details = json.loads(r["details"]) if r.get("details") else {}
+            out[r["symbol"]] = {
+                "continuation_score": r.get("trend_prob"),
+                "entry_quality": r.get("p_upside"),
+                "fade_or_paid_risk": r.get("p_downside"),
+                "max_chase_gap_pct": r.get("expected_move_pct"),
+                "gap_vs_expected_move": r.get("z_score"),
+                "strength_bucket": r.get("strength_bucket"),
+                "regime": r.get("regime"),
+                **details,
+            }
+        return out
+    except Exception:
+        return {}
+
+
 def load_lab_factor(
     con: duckdb.DuckDBPyConnection,
     as_of: date,
 ) -> dict[str, dict]:
     """Load Factor Lab composite as {symbol: row_dict}."""
     as_of_str = as_of.strftime("%Y-%m-%d")
+    max_age_days = 3
     try:
         df = con.execute("""
             SELECT symbol, trend_prob, details
@@ -75,13 +151,36 @@ def load_lab_factor(
         if df.empty:
             return {}
         result = {}
+        fresh = 0
+        stale = 0
         for _, r in df.iterrows():
             details = json.loads(r["details"]) if r["details"] else {}
+            trade_date_str = details.get("trade_date")
+            trade_date = None
+            if isinstance(trade_date_str, str):
+                try:
+                    trade_date = date.fromisoformat(trade_date_str[:10])
+                except ValueError:
+                    trade_date = None
+            age_days = (as_of - trade_date).days if trade_date else None
+            is_fresh = age_days is not None and age_days <= max_age_days
+            raw_composite = float(r["trend_prob"] or 0.0)
+            effective_composite = raw_composite if is_fresh else 0.0
+            is_confirming = is_fresh and abs(raw_composite) >= 0.1
+            if is_fresh:
+                fresh += 1
+            else:
+                stale += 1
             result[r["symbol"]] = {
-                "lab_composite": r["trend_prob"],  # stored in trend_prob column
+                "lab_composite": effective_composite,  # stored in trend_prob column
+                "lab_composite_raw": raw_composite,
+                "trade_date": trade_date_str,
+                "age_days": age_days,
+                "is_fresh": is_fresh,
+                "is_confirming": is_confirming,
                 "details": details,
             }
-        log.info("lab_factor_loaded", symbols=len(result))
+        log.info("lab_factor_loaded", symbols=len(result), fresh=fresh, stale=stale)
         return result
     except Exception:
         return {}

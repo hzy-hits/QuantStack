@@ -9,7 +9,7 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 use tracing::info;
 
-use super::{fetch_and_store, ts_date_val, str_val};
+use super::{fetch_and_store, str_val, ts_date_val};
 
 /// Fetch daily Shibor rates and store as macro_cn rows.
 /// Each tenor becomes a separate series_id: SHIBOR_ON, SHIBOR_1W, etc.
@@ -19,7 +19,9 @@ pub async fn fetch_shibor(
     db: &Connection,
     as_of: NaiveDate,
 ) -> Result<usize> {
-    let start = (as_of - chrono::Duration::days(5)).format("%Y%m%d").to_string();
+    let start = (as_of - chrono::Duration::days(5))
+        .format("%Y%m%d")
+        .to_string();
     let end = as_of.format("%Y%m%d").to_string();
 
     let tenors = ["on", "1w", "2w", "1m", "3m", "6m", "9m", "1y"];
@@ -27,7 +29,9 @@ pub async fn fetch_shibor(
 
     let mut all = 0usize;
     let total = fetch_and_store(
-        client, token, "shibor",
+        client,
+        token,
+        "shibor",
         serde_json::json!({ "start_date": &start, "end_date": &end }),
         &fields_str,
         tenors.len() + 1, // date + N tenors
@@ -47,7 +51,8 @@ pub async fn fetch_shibor(
             }
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
     let _ = total;
     info!(rows = all, "shibor (银行间拆放利率) fetched");
     Ok(all)
@@ -61,12 +66,16 @@ pub async fn fetch_lpr(
     as_of: NaiveDate,
 ) -> Result<usize> {
     // LPR updates monthly, look back 60 days to catch the latest
-    let start = (as_of - chrono::Duration::days(60)).format("%Y%m%d").to_string();
+    let start = (as_of - chrono::Duration::days(60))
+        .format("%Y%m%d")
+        .to_string();
     let end = as_of.format("%Y%m%d").to_string();
 
     let mut all = 0usize;
     let total = fetch_and_store(
-        client, token, "shibor_lpr",
+        client,
+        token,
+        "shibor_lpr",
         serde_json::json!({ "start_date": &start, "end_date": &end }),
         "date,1y",
         2,
@@ -82,7 +91,8 @@ pub async fn fetch_lpr(
             }
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
     let _ = total;
     info!(rows = all, "shibor_lpr (LPR) fetched");
     Ok(all)
@@ -103,7 +113,9 @@ pub async fn fetch_macro_indicators(
 
     // ── CPI ──
     let _ = fetch_and_store(
-        client, token, "cn_cpi",
+        client,
+        token,
+        "cn_cpi",
         serde_json::json!({}),
         "month,nt_yoy",
         2,
@@ -121,11 +133,14 @@ pub async fn fetch_macro_indicators(
             }
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
 
     // ── PPI ──
     let _ = fetch_and_store(
-        client, token, "cn_ppi",
+        client,
+        token,
+        "cn_ppi",
         serde_json::json!({}),
         "month,ppi_yoy",
         2,
@@ -143,11 +158,14 @@ pub async fn fetch_macro_indicators(
             }
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
 
     // ── PMI (manufacturing) — field MONTH (uppercase!) + PMI010000 ──
     let _ = fetch_and_store(
-        client, token, "cn_pmi",
+        client,
+        token,
+        "cn_pmi",
         serde_json::json!({}),
         "MONTH,PMI010000",
         2,
@@ -165,11 +183,14 @@ pub async fn fetch_macro_indicators(
             }
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
 
     // ── M2 money supply ──
     let _ = fetch_and_store(
-        client, token, "cn_m",
+        client,
+        token,
+        "cn_m",
         serde_json::json!({}),
         "month,m2_yoy",
         2,
@@ -187,7 +208,8 @@ pub async fn fetch_macro_indicators(
             }
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
 
     info!(rows = all, "macro indicators (CPI/PPI/PMI/M2) fetched");
     Ok(all)
@@ -220,7 +242,9 @@ pub async fn backfill_shibor(
 
     let mut all = 0usize;
     let total = fetch_and_store(
-        client, token, "shibor",
+        client,
+        token,
+        "shibor",
         serde_json::json!({ "start_date": &start_str, "end_date": &end_str }),
         &fields_str,
         tenors.len() + 1,
@@ -240,7 +264,8 @@ pub async fn backfill_shibor(
             }
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
     let _ = total;
     info!(rows = all, "shibor backfill complete");
     Ok(all)

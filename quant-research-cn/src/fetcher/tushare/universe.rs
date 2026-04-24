@@ -3,8 +3,12 @@ use chrono::{Datelike, NaiveDate};
 use duckdb::Connection;
 use tracing::info;
 
+use super::{fetch_and_store, query, str_val, ts_date_val};
 use crate::config::Settings;
-use super::{fetch_and_store, query, ts_date_val, str_val};
+
+fn is_tradable_a_share(code: &str) -> bool {
+    !code.starts_with("688")
+}
 
 pub async fn fetch_universe(
     client: &reqwest::Client,
@@ -25,22 +29,31 @@ pub async fn fetch_universe(
             continue;
         }
         let rows = query(
-            client, token, "index_weight",
+            client,
+            token,
+            "index_weight",
             serde_json::json!({ "index_code": index_code }),
             "con_code",
-        ).await?;
+        )
+        .await?;
 
         for row in &rows {
             if let Some(code) = row.first().and_then(|v| v.as_str()) {
-                symbols.push(code.to_string());
+                if is_tradable_a_share(code) {
+                    symbols.push(code.to_string());
+                }
             }
         }
-        info!(index = index_code, constituents = rows.len(), "index loaded");
+        info!(
+            index = index_code,
+            constituents = rows.len(),
+            "index loaded"
+        );
     }
 
     // Add watchlist
     for sym in &cfg.universe.watchlist {
-        if !symbols.contains(sym) {
+        if is_tradable_a_share(sym) && !symbols.contains(sym) {
             symbols.push(sym.clone());
         }
     }
@@ -58,7 +71,9 @@ pub async fn fetch_stock_basic(
     db: &Connection,
 ) -> Result<usize> {
     let total = fetch_and_store(
-        client, token, "stock_basic",
+        client,
+        token,
+        "stock_basic",
         serde_json::json!({ "list_status": "L" }),
         "ts_code,symbol,name,area,industry,market,list_date,list_status",
         8,
@@ -68,14 +83,20 @@ pub async fn fetch_stock_basic(
                     (ts_code, symbol, name, area, industry, market, list_date, list_status)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 duckdb::params![
-                    str_val(&row[0]), str_val(&row[1]), str_val(&row[2]),
-                    str_val(&row[3]), str_val(&row[4]), str_val(&row[5]),
-                    str_val(&row[6]), str_val(&row[7]),
+                    str_val(&row[0]),
+                    str_val(&row[1]),
+                    str_val(&row[2]),
+                    str_val(&row[3]),
+                    str_val(&row[4]),
+                    str_val(&row[5]),
+                    str_val(&row[6]),
+                    str_val(&row[7]),
                 ],
             )?;
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
     info!(rows = total, "stock_basic (股票名称/行业) fetched");
     Ok(total)
 }
@@ -87,7 +108,9 @@ pub async fn fetch_industry_classify(
 ) -> Result<usize> {
     // Shenwan L1 industry classification
     let total = fetch_and_store(
-        client, token, "index_classify",
+        client,
+        token,
+        "index_classify",
         serde_json::json!({ "level": "L1", "src": "SW2021" }),
         "index_code,industry_name,level,is_pub,parent_code",
         5,
@@ -97,12 +120,16 @@ pub async fn fetch_industry_classify(
                     (index_code, industry_name, level, is_pub)
                  VALUES (?, ?, ?, ?)",
                 duckdb::params![
-                    str_val(&row[0]), str_val(&row[1]), str_val(&row[2]), str_val(&row[3]),
+                    str_val(&row[0]),
+                    str_val(&row[1]),
+                    str_val(&row[2]),
+                    str_val(&row[3]),
                 ],
             )?;
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
     info!(rows = total, "industry_classify (申万行业) fetched");
     Ok(total)
 }
@@ -121,11 +148,24 @@ pub async fn fetch_fund_portfolio(
         7..=9 => (y, 6),
         _ => (y, 9),
     };
-    let end_date = NaiveDate::from_ymd_opt(qy, qm, if qm == 12 { 31 } else if qm == 6 { 30 } else { 30 }).unwrap();
+    let end_date = NaiveDate::from_ymd_opt(
+        qy,
+        qm,
+        if qm == 12 {
+            31
+        } else if qm == 6 {
+            30
+        } else {
+            30
+        },
+    )
+    .unwrap();
     let end_str = end_date.format("%Y%m%d").to_string();
 
     let total = fetch_and_store(
-        client, token, "fund_portfolio",
+        client,
+        token,
+        "fund_portfolio",
         serde_json::json!({ "end_date": &end_str }),
         "ts_code,ann_date,end_date,symbol,mkv,amount,stk_mkv_ratio",
         7,
@@ -135,14 +175,19 @@ pub async fn fetch_fund_portfolio(
                     (ts_code, ann_date, end_date, symbol, mkv, amount, stk_mkv_ratio)
                  VALUES (?, ?, ?, ?, ?, ?, ?)",
                 duckdb::params![
-                    str_val(&row[0]), ts_date_val(&row[1]), ts_date_val(&row[2]),
+                    str_val(&row[0]),
+                    ts_date_val(&row[1]),
+                    ts_date_val(&row[2]),
                     str_val(&row[3]),
-                    row[4].as_f64(), row[5].as_f64(), row[6].as_f64(),
+                    row[4].as_f64(),
+                    row[5].as_f64(),
+                    row[6].as_f64(),
                 ],
             )?;
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
     info!(rows = total, end_date = %end_date, "fund_portfolio (公募持仓) fetched");
     Ok(total)
 }

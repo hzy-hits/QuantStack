@@ -46,6 +46,12 @@ Cron (2x/day) → Data Ingestion → Analytics → Agent Analysis → Email
                             Email (Gmail API)
 ```
 
+For the current `raw / research / report / dev` snapshot model and command semantics, see
+[PIPELINE_STORAGE.md](./PIPELINE_STORAGE.md).
+
+For the new setup/execution-aware alpha layer, see
+[EXECUTION_ALPHA.md](./EXECUTION_ALPHA.md).
+
 ## Key Difference from US Pipeline
 
 The US pipeline is Python + Rust (fetcher only). This pipeline is **pure Rust** — all analytics

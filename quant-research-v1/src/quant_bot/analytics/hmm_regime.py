@@ -1,7 +1,13 @@
 """
 Hidden Markov Model for market-level regime detection.
 
-2-state Gaussian HMM fitted on [SPY daily return, VIX level].
+2-state Gaussian HMM fitted on a market feature set led by:
+  - SPY daily log return
+  - VIX level
+  - S&P 500 breadth (daily advancer share)
+  - HY credit spread (BAMLH0A0HYM2)
+  - realized vol term structure (5d / 20d SPY realized vol)
+
 Baum-Welch estimation via hmmlearn.
 
 This is a MARKET-LEVEL overlay -- it runs parallel to the existing
@@ -18,6 +24,7 @@ from datetime import date, timedelta
 
 import duckdb
 import numpy as np
+import pandas as pd
 import structlog
 
 log = structlog.get_logger()
@@ -29,7 +36,7 @@ def fit_hmm_regime(
     lookback: int = 500,
 ) -> dict | None:
     """
-    Fit a 2-state Gaussian HMM on [SPY log return, VIX level].
+    Fit a 2-state Gaussian HMM on a broader market feature set.
 
     Returns dict with regime label, probabilities, transition matrix,
     state means, 1-step-ahead forecast, and P(ret>0|state) estimates,
@@ -43,6 +50,8 @@ def fit_hmm_regime(
 
     as_of_str = as_of.strftime("%Y-%m-%d")
 
+    history_buffer = 40
+
     # ── Load SPY adj_close ────────────────────────────────────────────────
     spy_df = con.execute("""
         SELECT date, adj_close
@@ -50,18 +59,28 @@ def fit_hmm_regime(
         WHERE symbol = 'SPY' AND date <= ?
         ORDER BY date DESC
         LIMIT ?
-    """, [as_of_str, lookback + 1]).fetchdf()
+    """, [as_of_str, lookback + history_buffer + 1]).fetchdf()
 
     if spy_df.empty or len(spy_df) < 60:
         log.warning("hmm_insufficient_spy_data", rows=len(spy_df))
         return None
 
-    # Reverse to chronological order
     spy_df = spy_df.sort_values("date").reset_index(drop=True)
-    spy_close = spy_df["adj_close"].values.astype(float)
+    spy_df["date"] = pd.to_datetime(spy_df["date"])
+    spy_df["adj_close"] = spy_df["adj_close"].astype(float)
+    spy_df["log_return"] = np.log(np.maximum(spy_df["adj_close"], 1e-9)).diff()
+    spy_df["rv_5d"] = spy_df["log_return"].rolling(5).std() * np.sqrt(252.0)
+    spy_df["rv_20d"] = spy_df["log_return"].rolling(20).std() * np.sqrt(252.0)
+    spy_df["rv_term_ratio"] = spy_df["rv_5d"] / spy_df["rv_20d"].replace(0.0, np.nan)
 
-    # Log returns (skip first row — need prior close)
-    log_returns = np.diff(np.log(np.maximum(spy_close, 1e-9)))
+    spy_features = spy_df[["date", "log_return", "rv_term_ratio"]].copy()
+    spy_features = spy_features.replace([np.inf, -np.inf], np.nan).dropna().reset_index(drop=True)
+    if len(spy_features) < 60:
+        log.warning("hmm_insufficient_spy_features", rows=len(spy_features))
+        return None
+
+    start_date = spy_features["date"].iloc[-lookback] if len(spy_features) > lookback else spy_features["date"].iloc[0]
+    spy_features = spy_features[spy_features["date"] >= start_date].reset_index(drop=True)
 
     # ── Load VIX levels (^VIX from prices_daily, close column) ────────────
     vix_df = con.execute("""
@@ -70,41 +89,94 @@ def fit_hmm_regime(
         WHERE symbol = '^VIX' AND date <= ?
         ORDER BY date DESC
         LIMIT ?
-    """, [as_of_str, lookback + 1]).fetchdf()
+    """, [as_of_str, lookback + history_buffer + 1]).fetchdf()
 
     if vix_df.empty or len(vix_df) < 60:
         log.warning("hmm_insufficient_vix_data", rows=len(vix_df))
         return None
 
     vix_df = vix_df.sort_values("date").reset_index(drop=True)
+    vix_df["date"] = pd.to_datetime(vix_df["date"])
+    vix_df["vix_level"] = vix_df["close"].astype(float)
+    vix_df = vix_df[["date", "vix_level"]]
 
-    # Align dates: inner join on SPY return dates (shifted by 1 due to diff)
-    spy_dates = spy_df["date"].values[1:]  # dates corresponding to log_returns
-    vix_dates = set(vix_df["date"].values)
-    vix_map = dict(zip(vix_df["date"].values, vix_df["close"].values.astype(float)))
+    # ── Load breadth: S&P 500 daily advancer share ────────────────────────
+    breadth_df = con.execute("""
+        WITH sp AS (
+            SELECT symbol
+            FROM universe_constituents
+            WHERE index_name = 'sp500'
+        ),
+        hist AS (
+            SELECT p.symbol, p.date, p.adj_close,
+                   LAG(p.adj_close) OVER (PARTITION BY p.symbol ORDER BY p.date) AS prev_close
+            FROM prices_daily p
+            INNER JOIN sp ON p.symbol = sp.symbol
+            WHERE p.date <= ?
+        )
+        SELECT date,
+               AVG(CASE WHEN prev_close > 0 AND adj_close > prev_close THEN 1.0 ELSE 0.0 END) AS breadth_adv_share
+        FROM hist
+        WHERE prev_close IS NOT NULL
+        GROUP BY date
+        ORDER BY date
+    """, [as_of_str]).fetchdf()
+    if breadth_df.empty or len(breadth_df) < 60:
+        log.warning("hmm_insufficient_breadth_data", rows=len(breadth_df))
+        return None
+    breadth_df["date"] = pd.to_datetime(breadth_df["date"])
 
-    aligned_returns = []
-    aligned_vix = []
-    for i, d in enumerate(spy_dates):
-        if d in vix_dates:
-            aligned_returns.append(log_returns[i])
-            aligned_vix.append(vix_map[d])
+    # ── Load HY credit spread (daily FRED) ────────────────────────────────
+    hy_df = con.execute("""
+        SELECT date, value
+        FROM macro_daily
+        WHERE series_id = 'BAMLH0A0HYM2' AND date <= ?
+        ORDER BY date
+    """, [as_of_str]).fetchdf()
+    if hy_df.empty or len(hy_df) < 60:
+        log.warning("hmm_insufficient_hy_data", rows=len(hy_df))
+        return None
+    hy_df["date"] = pd.to_datetime(hy_df["date"])
+    hy_df["hy_spread"] = hy_df["value"].astype(float)
+    hy_df = hy_df[["date", "hy_spread"]]
 
-    if len(aligned_returns) < 60:
-        log.warning("hmm_insufficient_aligned_data", n=len(aligned_returns))
+    # ── Align all features on SPY feature dates ───────────────────────────
+    features_df = spy_features.merge(vix_df, on="date", how="inner")
+    features_df = features_df.merge(breadth_df, on="date", how="inner")
+    features_df = pd.merge_asof(
+        features_df.sort_values("date"),
+        hy_df.sort_values("date"),
+        on="date",
+        direction="backward",
+        tolerance=pd.Timedelta(days=5),
+    )
+    features_df = features_df.dropna().reset_index(drop=True)
+
+    if len(features_df) < 60:
+        log.warning("hmm_insufficient_aligned_data", n=len(features_df))
         return None
 
-    returns_arr = np.array(aligned_returns)
-    vix_arr = np.array(aligned_vix)
+    returns_arr = features_df["log_return"].to_numpy(dtype=float)
+    vix_arr = features_df["vix_level"].to_numpy(dtype=float)
+    breadth_arr = features_df["breadth_adv_share"].to_numpy(dtype=float)
+    hy_arr = features_df["hy_spread"].to_numpy(dtype=float)
+    rv_term_arr = features_df["rv_term_ratio"].to_numpy(dtype=float)
 
-    # ── Standardize features ──────────────────────────────────────────────
-    ret_mean, ret_std = returns_arr.mean(), returns_arr.std() + 1e-9
-    vix_mean, vix_std = vix_arr.mean(), vix_arr.std() + 1e-9
-
-    features = np.column_stack([
-        (returns_arr - ret_mean) / ret_std,
-        (vix_arr - vix_mean) / vix_std,
-    ])
+    raw_feature_map = {
+        "spy_log_return": returns_arr,
+        "vix_level": vix_arr,
+        "breadth_adv_share": breadth_arr,
+        "hy_spread": hy_arr,
+        "rv_term_ratio": rv_term_arr,
+    }
+    stats: dict[str, tuple[float, float]] = {}
+    standardized = []
+    for name, arr in raw_feature_map.items():
+        mean = float(arr.mean())
+        std = float(arr.std()) + 1e-9
+        stats[name] = (mean, std)
+        standardized.append((arr - mean) / std)
+    features = np.column_stack(standardized)
 
     # ── Fit 2-state GaussianHMM ──────────────────────────────────────────
     model = GaussianHMM(
@@ -128,8 +200,15 @@ def fit_hmm_regime(
 
     # ── Map states to bull/bear ───────────────────────────────────────────
     # Un-standardize the means to get interpretable values
-    state_ret_means = model.means_[:, 0] * ret_std + ret_mean
-    state_vix_means = model.means_[:, 1] * vix_std + vix_mean
+    state_ret_means = model.means_[:, 0] * stats["spy_log_return"][1] + stats["spy_log_return"][0]
+    state_vix_means = model.means_[:, 1] * stats["vix_level"][1] + stats["vix_level"][0]
+    state_breadth_means = (
+        model.means_[:, 2] * stats["breadth_adv_share"][1] + stats["breadth_adv_share"][0]
+    )
+    state_hy_means = model.means_[:, 3] * stats["hy_spread"][1] + stats["hy_spread"][0]
+    state_rv_term_means = (
+        model.means_[:, 4] * stats["rv_term_ratio"][1] + stats["rv_term_ratio"][0]
+    )
 
     # Bull state = higher mean return
     if state_ret_means[0] >= state_ret_means[1]:
@@ -191,10 +270,16 @@ def fit_hmm_regime(
         "bull": {
             "ret_mean_pct": round(float(state_ret_means[bull_idx]) * 100, 4),
             "vix_mean": round(float(state_vix_means[bull_idx]), 1),
+            "breadth_mean_pct": round(float(state_breadth_means[bull_idx]) * 100, 1),
+            "hy_spread_mean": round(float(state_hy_means[bull_idx]), 2),
+            "rv_term_ratio": round(float(state_rv_term_means[bull_idx]), 3),
         },
         "bear": {
             "ret_mean_pct": round(float(state_ret_means[bear_idx]) * 100, 4),
             "vix_mean": round(float(state_vix_means[bear_idx]), 1),
+            "breadth_mean_pct": round(float(state_breadth_means[bear_idx]) * 100, 1),
+            "hy_spread_mean": round(float(state_hy_means[bear_idx]), 2),
+            "rv_term_ratio": round(float(state_rv_term_means[bear_idx]), 3),
         },
     }
 
@@ -207,6 +292,7 @@ def fit_hmm_regime(
         days_in_current=days_in_current,
         converged=converged,
         n_obs=len(features),
+        feature_set=["SPY", "VIX", "breadth", "HY", "rv_term"],
     )
 
     return {
@@ -227,6 +313,13 @@ def fit_hmm_regime(
         "n_observations": len(features),
         "n_bull_days": n_bull,
         "n_bear_days": n_bear,
+        "feature_set": [
+            "spy_log_return",
+            "vix_level",
+            "breadth_adv_share",
+            "hy_spread",
+            "rv_term_ratio",
+        ],
     }
 
 

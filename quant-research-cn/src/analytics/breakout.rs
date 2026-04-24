@@ -72,14 +72,14 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     let rows: Vec<_> = stmt
         .query_map(duckdb::params![date_str], |row| {
             Ok((
-                row.get::<_, String>(0)?,   // ts_code
-                row.get::<_, f64>(1)?,      // close_now
-                row.get::<_, f64>(2)?,      // vol_now
-                row.get::<_, f64>(3)?,      // high_now
-                row.get::<_, f64>(4)?,      // low_now
-                row.get::<_, f64>(5)?,      // sma20
-                row.get::<_, f64>(6)?,      // std20
-                row.get::<_, f64>(7)?,      // avg_vol_20
+                row.get::<_, String>(0)?,             // ts_code
+                row.get::<_, f64>(1)?,                // close_now
+                row.get::<_, f64>(2)?,                // vol_now
+                row.get::<_, f64>(3)?,                // high_now
+                row.get::<_, f64>(4)?,                // low_now
+                row.get::<_, f64>(5)?,                // sma20
+                row.get::<_, f64>(6)?,                // std20
+                row.get::<_, f64>(7)?,                // avg_vol_20
                 row.get::<_, f64>(8).unwrap_or(0.0),  // std5
                 row.get::<_, f64>(9).unwrap_or(0.0),  // sma5
                 row.get::<_, f64>(10).unwrap_or(0.0), // high_20d
@@ -98,9 +98,25 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     let mut insert_stmt = db.prepare(insert_sql)?;
     let mut count = 0usize;
 
-    for (ts_code, close, vol, high, _low, sma20, std20_ret, avg_vol_20,
-         std5_ret, _sma5, high_20d, low_20d, high_10d, low_10d,
-         _sma60, std60_ret, n60) in &rows
+    for (
+        ts_code,
+        close,
+        vol,
+        high,
+        _low,
+        sma20,
+        std20_ret,
+        avg_vol_20,
+        std5_ret,
+        _sma5,
+        high_20d,
+        low_20d,
+        high_10d,
+        low_10d,
+        _sma60,
+        std60_ret,
+        n60,
+    ) in &rows
     {
         // ── 1. Squeeze: return volatility compression (not close-level std)
         // squeeze_ratio = recent 20D return vol / historical 60D return vol
@@ -115,16 +131,36 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
         let squeeze_score = (1.0 - squeeze_ratio).clamp(0.0, 1.0);
 
         // ── 2. Volume surge: today vs 20D average
-        let vol_ratio = if *avg_vol_20 > 0.0 { vol / avg_vol_20 } else { 1.0 };
+        let vol_ratio = if *avg_vol_20 > 0.0 {
+            vol / avg_vol_20
+        } else {
+            1.0
+        };
         // vol_ratio > 2.0 → strong surge (score 1.0)
         // vol_ratio = 1.0 → normal (score 0.0)
         let volume_score = ((vol_ratio - 1.0) / 1.5).clamp(0.0, 1.0);
 
         // ── 3. Range breakout: close vs recent high/low (symmetric: both use close)
-        let break_high_20 = if *high_20d > 0.0 { *close > *high_20d } else { false };
-        let break_low_20 = if *low_20d > 0.0 { *close < *low_20d } else { false };
-        let break_high_10 = if *high_10d > 0.0 { *close > *high_10d } else { false };
-        let break_low_10 = if *low_10d > 0.0 { *close < *low_10d } else { false };
+        let break_high_20 = if *high_20d > 0.0 {
+            *close > *high_20d
+        } else {
+            false
+        };
+        let break_low_20 = if *low_20d > 0.0 {
+            *close < *low_20d
+        } else {
+            false
+        };
+        let break_high_10 = if *high_10d > 0.0 {
+            *close > *high_10d
+        } else {
+            false
+        };
+        let break_low_10 = if *low_10d > 0.0 {
+            *close < *low_10d
+        } else {
+            false
+        };
 
         let range_score = if break_high_20 || break_low_20 {
             1.0
@@ -180,12 +216,26 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
         });
         let detail_str = detail.to_string();
 
-        insert_stmt.execute(duckdb::params![ts_code, date_str, "breakout_score", breakout_score, detail_str])?;
-        insert_stmt.execute(duckdb::params![ts_code, date_str, "breakout_direction",
-            if breakout_direction == "bullish_breakout" { 1.0 }
-            else if breakout_direction == "bearish_breakout" { -1.0 }
-            else { 0.0 },
-            detail_str])?;
+        insert_stmt.execute(duckdb::params![
+            ts_code,
+            date_str,
+            "breakout_score",
+            breakout_score,
+            detail_str
+        ])?;
+        insert_stmt.execute(duckdb::params![
+            ts_code,
+            date_str,
+            "breakout_direction",
+            if breakout_direction == "bullish_breakout" {
+                1.0
+            } else if breakout_direction == "bearish_breakout" {
+                -1.0
+            } else {
+                0.0
+            },
+            detail_str
+        ])?;
 
         count += 1;
     }
@@ -194,5 +244,9 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     Ok(count)
 }
 
-fn round3(v: f64) -> f64 { (v * 1000.0).round() / 1000.0 }
-fn round2(v: f64) -> f64 { (v * 100.0).round() / 100.0 }
+fn round3(v: f64) -> f64 {
+    (v * 1000.0).round() / 1000.0
+}
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}

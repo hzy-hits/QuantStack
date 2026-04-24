@@ -98,6 +98,7 @@ def build_system_prompt(
     market: str,
     regime_dist: dict[str, float] | None = None,
     existing_factors: list[dict] | None = None,
+    session_context: str | None = None,
 ) -> str:
     """Build the system prompt with DSL reference, market context, and constraints.
 
@@ -159,6 +160,11 @@ def build_system_prompt(
                 note = f.get("note", "")
                 existing_section += f"- {f['name']}: `{f['formula']}` — {note}\n"
 
+    session_section = ""
+    if session_context:
+        session_section = "\n## Resumable Session Context\n"
+        session_section += session_context.strip() + "\n"
+
     return f"""\
 You are a quantitative researcher mining alpha factors for {market_label}.
 
@@ -181,6 +187,7 @@ and iterate based on IS backtest feedback. You have a limited experiment budget 
 {feature_reminder}
 {regime_section}
 {existing_section}
+{session_section}
 
 ## Response Format (STRICT — always use this exact format)
 HYPOTHESIS: <1-2 sentences explaining the economic logic>

@@ -12,8 +12,8 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 use tracing::{info, warn};
 
-use crate::config::Settings;
 use super::bayes::BetaBinomial;
+use crate::config::Settings;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -104,10 +104,7 @@ fn lag1_autocorrelation(series: &[f64]) -> f64 {
 
 /// Compute daily log-returns from a close-price series.
 fn log_returns(closes: &[f64]) -> Vec<f64> {
-    closes
-        .windows(2)
-        .map(|w| (w[1] / w[0]).ln())
-        .collect()
+    closes.windows(2).map(|w| (w[1] / w[0]).ln()).collect()
 }
 
 /// Compute 5-day forward log-return starting at index `i`.
@@ -137,12 +134,7 @@ fn terciles(values: &[f64]) -> (f64, f64) {
 // ---------------------------------------------------------------------------
 
 pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usize> {
-    let fwd_horizon = cfg
-        .signals
-        .momentum_windows
-        .first()
-        .copied()
-        .unwrap_or(5) as usize;
+    let fwd_horizon = cfg.signals.momentum_windows.first().copied().unwrap_or(5) as usize;
     let date_str = as_of.to_string();
 
     // ------------------------------------------------------------------
@@ -181,10 +173,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         }
     }
 
-    info!(
-        symbols = stock_map.len(),
-        "momentum: loaded price history"
-    );
+    info!(symbols = stock_map.len(), "momentum: loaded price history");
 
     // ------------------------------------------------------------------
     // 2. Per-stock: compute regime and vol_ratio
@@ -215,7 +204,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     //
     // For today's classification we use true cross-sectional terciles.
 
-    const MIN_BARS: usize = 10;     // minimum bars for feature classification
+    const MIN_BARS: usize = 10; // minimum bars for feature classification
     const MIN_HISTORY: usize = 120; // minimum bars for CPT training contribution
 
     for (ts_code, bars) in &stock_map {
@@ -403,13 +392,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         ];
 
         for (metric, value, det) in &metrics {
-            insert_stmt.execute(duckdb::params![
-                feat.ts_code,
-                as_of_str,
-                metric,
-                value,
-                det,
-            ])?;
+            insert_stmt.execute(duckdb::params![feat.ts_code, as_of_str, metric, value, det,])?;
             rows_written += 1;
         }
     }
@@ -447,14 +430,8 @@ mod tests {
 
     #[test]
     fn test_classify_vol_bucket() {
-        assert!(matches!(
-            classify_vol_bucket(0.5, 0.8, 1.2),
-            VolBucket::Low
-        ));
-        assert!(matches!(
-            classify_vol_bucket(1.0, 0.8, 1.2),
-            VolBucket::Mid
-        ));
+        assert!(matches!(classify_vol_bucket(0.5, 0.8, 1.2), VolBucket::Low));
+        assert!(matches!(classify_vol_bucket(1.0, 0.8, 1.2), VolBucket::Mid));
         assert!(matches!(
             classify_vol_bucket(1.5, 0.8, 1.2),
             VolBucket::High
@@ -473,9 +450,14 @@ mod tests {
         assert_eq!(lag1_autocorrelation(&[]), 0.0);
 
         // Alternating series: strong negative autocorrelation
-        let alt: Vec<f64> = (0..30).map(|i| if i % 2 == 0 { 1.0 } else { -1.0 }).collect();
+        let alt: Vec<f64> = (0..30)
+            .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+            .collect();
         let ac_alt = lag1_autocorrelation(&alt);
-        assert!(ac_alt < -0.85, "alternating should be strongly negative, got {ac_alt}");
+        assert!(
+            ac_alt < -0.85,
+            "alternating should be strongly negative, got {ac_alt}"
+        );
     }
 
     #[test]

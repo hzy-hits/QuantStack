@@ -45,6 +45,10 @@ def _lane(section: str) -> str:
     upper = section.upper()
     if "CORE BOOK" in upper:
         return "CORE"
+    if "RANGE CORE" in upper:
+        return "RANGE_CORE"
+    if "TACTICAL CONTINUATION" in upper:
+        return "TACTICAL_CONTINUATION"
     if "THEME ROTATION" in upper:
         return "THEME_ROTATION"
     if "RADAR" in upper:
@@ -65,8 +69,8 @@ def _compact_items(
     chosen: list[str] = []
     used: set[str] = set()
     symbol_lanes: dict[str, str] = {}
-    lane_caps = {"CORE": 6, "THEME_ROTATION": 4, "RADAR": 2}
-    lane_order = ["CORE", "THEME_ROTATION", "RADAR", "OTHER"]
+    lane_caps = {"CORE": 4, "RANGE_CORE": 4, "TACTICAL_CONTINUATION": 6, "THEME_ROTATION": 6, "RADAR": 2}
+    lane_order = ["CORE", "RANGE_CORE", "TACTICAL_CONTINUATION", "THEME_ROTATION", "RADAR", "OTHER"]
     bucket_order = ["HIGH", "MODERATE", "WATCH", "LOW", "OTHER", "NO_SIGNAL"]
     selected_lane_counts: Counter[str] = Counter()
 
@@ -115,9 +119,9 @@ def _compact_items(
     summary = "\n".join([
         f"## {title}摘要",
         f"- 总条目: {len(sections)}",
-        f"- 报告层级: CORE {lane_counts.get('CORE', 0)} | THEME_ROTATION {lane_counts.get('THEME_ROTATION', 0)} | RADAR {lane_counts.get('RADAR', 0)} | OTHER {lane_counts.get('OTHER', 0)}",
+        f"- 报告层级: CORE {lane_counts.get('CORE', 0)} | RANGE_CORE {lane_counts.get('RANGE_CORE', 0)} | TACTICAL_CONTINUATION {lane_counts.get('TACTICAL_CONTINUATION', 0)} | THEME_ROTATION {lane_counts.get('THEME_ROTATION', 0)} | RADAR {lane_counts.get('RADAR', 0)} | OTHER {lane_counts.get('OTHER', 0)}",
         f"- HIGH: {counts.get('HIGH', 0)} | MODERATE: {counts.get('MODERATE', 0)} | WATCH: {counts.get('WATCH', 0)} | LOW: {counts.get('LOW', 0)} | no-signal: {counts.get('NO_SIGNAL', 0)}",
-        f"- 保留: {len(chosen)} 条，优先级为 CORE -> THEME_ROTATION -> RADAR；其余 {omitted} 条只保留在统计摘要中",
+        f"- 保留: {len(chosen)} 条，优先级为 CORE -> RANGE_CORE -> TACTICAL_CONTINUATION -> THEME_ROTATION -> RADAR；其余 {omitted} 条只保留在统计摘要中",
         f"- 保留代码: {', '.join(_symbol(section) for section in chosen)}",
     ])
 
@@ -125,19 +129,30 @@ def _compact_items(
     return compact.strip(), [_symbol(section) for section in chosen], symbol_lanes
 
 
-def build_contexts(reports_dir: Path, date: str, out_dir: Path) -> None:
+def _payload_path(reports_dir: Path, date: str, section: str, slot: str | None) -> Path:
+    candidates = []
+    if slot:
+        candidates.append(reports_dir / f"{date}_payload_{section}_{slot}.md")
+    candidates.append(reports_dir / f"{date}_payload_{section}.md")
+    for path in candidates:
+        if path.exists():
+            return path
+    return candidates[0]
+
+
+def build_contexts(reports_dir: Path, date: str, out_dir: Path, slot: str | None = None) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    macro_text = _read(reports_dir / f"{date}_payload_macro.md")
-    structural_text = _read(reports_dir / f"{date}_payload_structural.md")
-    events_text = _read(reports_dir / f"{date}_payload_events.md")
+    macro_text = _read(_payload_path(reports_dir, date, "macro", slot))
+    structural_text = _read(_payload_path(reports_dir, date, "structural", slot))
+    events_text = _read(_payload_path(reports_dir, date, "events", slot))
 
     (out_dir / "macro.md").write_text(macro_text + "\n", encoding="utf-8")
 
     structural_compact, selected_symbols, symbol_lanes = _compact_items(
         structural_text,
         title="结构信号",
-        max_items=12,
+        max_items=18,
     )
     (out_dir / "structural.md").write_text(structural_compact + "\n", encoding="utf-8")
 
@@ -155,12 +170,16 @@ def build_contexts(reports_dir: Path, date: str, out_dir: Path) -> None:
     event_counts = Counter(_bucket(section) for section in event_sections)
     omitted_events = len(event_sections) - len(selected_events)
     core_syms = [sym for sym, lane in symbol_lanes.items() if lane == "CORE"]
+    range_core_syms = [sym for sym, lane in symbol_lanes.items() if lane == "RANGE_CORE"]
+    tactical_syms = [sym for sym, lane in symbol_lanes.items() if lane == "TACTICAL_CONTINUATION"]
     theme_syms = [sym for sym, lane in symbol_lanes.items() if lane == "THEME_ROTATION"]
     radar_syms = [sym for sym, lane in symbol_lanes.items() if lane == "RADAR"]
     event_summary = "\n".join([
         "## 事件催化摘要",
         f"- 总条目: {len(event_sections)}",
         f"- 结构优先级: CORE {', '.join(core_syms) if core_syms else '(无)'}",
+        f"- 结构优先级: RANGE_CORE {', '.join(range_core_syms) if range_core_syms else '(无)'}",
+        f"- 结构优先级: TACTICAL_CONTINUATION {', '.join(tactical_syms) if tactical_syms else '(无)'}",
         f"- 结构优先级: THEME_ROTATION {', '.join(theme_syms) if theme_syms else '(无)'}",
         f"- 结构优先级: RADAR {', '.join(radar_syms) if radar_syms else '(无)'}",
         f"- HIGH: {event_counts.get('HIGH', 0)} | MODERATE: {event_counts.get('MODERATE', 0)} | WATCH: {event_counts.get('WATCH', 0)} | LOW: {event_counts.get('LOW', 0)} | no-signal: {event_counts.get('NO_SIGNAL', 0)}",
@@ -177,10 +196,11 @@ def build_contexts(reports_dir: Path, date: str, out_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", required=True)
+    parser.add_argument("--slot", choices=["morning", "evening"], default=None)
     parser.add_argument("--reports-dir", default="reports")
     parser.add_argument("--out-dir", required=True)
     args = parser.parse_args()
-    build_contexts(Path(args.reports_dir), args.date, Path(args.out_dir))
+    build_contexts(Path(args.reports_dir), args.date, Path(args.out_dir), args.slot)
 
 
 if __name__ == "__main__":

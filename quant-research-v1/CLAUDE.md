@@ -43,9 +43,9 @@ python scripts/run_daily.py --skip-rust
 python scripts/run_daily.py --date 2026-03-07
 ```
 
-Output: `reports/{date}_payload.md` — feed to any agent:
+Output: `reports/{date}_payload_{session}.md` — feed to any agent:
 ```bash
-claude < reports/2026-03-07_payload.md
+claude < reports/2026-03-07_payload_post.md
 ```
 
 ## Tests and Lint
@@ -78,7 +78,7 @@ cd rust && cargo clippy
    run_earnings_risk()       → P(upside drift | surprise quintile)
 6. build_notable_items()     → composite score → top 10-20
 7. build_report_bundle()     → assemble all data
-8. render_payload_md()       → reports/{date}_payload.md
+8. render_payload_md()       → reports/{date}_payload_{session}.md
 ```
 
 ### Rust / Python Split
@@ -100,7 +100,16 @@ cd rust && cargo clippy
 - `reporting/bundle.py` — assemble payload data
 - `reporting/render.py` — write Markdown payload file
 
-### Storage (DuckDB at `data/quant.duckdb`)
+### Storage
+
+See [docs/PIPELINE_STORAGE.md](docs/PIPELINE_STORAGE.md) for the current `raw / research / report / dev`
+snapshot model and session-aware artifact naming.
+
+Execution timing and post-gap handling are documented in
+[docs/EXECUTION_ALPHA.md](docs/EXECUTION_ALPHA.md).
+
+Canonical latest DB remains `data/quant.duckdb`, but daily report work now stages session-specific
+research/report snapshots.
 
 Key tables:
 - `prices_daily` — OHLCV + adj_close, PK (symbol, date)
@@ -134,7 +143,7 @@ Determined at runtime by config scope flags — never hardcode symbols:
 
 See **[docs/Agents.md](docs/Agents.md)** for the full agent philosophy, how to read the payload, and the recommended system prompt to prepend when feeding the payload to any LLM.
 
-The short version: the program computes, the agent narrates. The agent reads `reports/{date}_payload.md` and explains the facts in plain English. It never invents numbers, never fetches data, and never makes buy/sell decisions.
+The short version: the program computes, the agent narrates. The agent reads `reports/{date}_payload_{session}.md` and explains the facts in plain English. It never invents numbers, never fetches data, and never makes buy/sell decisions.
 
 ## Mandatory Market Context (Tier 1)
 

@@ -53,6 +53,11 @@ output:
 # ── DATA SOURCES ─────────────────────────────────────────────────────────────
 data:
   db_path: "data/quant.duckdb"
+  raw_db_path: "data/quant.duckdb"
+  research_db_path: "data/quant_research.duckdb"
+  report_db_path: "data/quant_report.duckdb"
+  dev_db_path: "data/quant_dev.duckdb"
+  use_dev_for_research: false
   # How often to refresh S&P 500 constituent list (days)
   constituent_refresh_days: 7
 

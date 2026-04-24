@@ -58,6 +58,7 @@ class OutputConfig(BaseModel):
 
 class SelectionConfig(BaseModel):
     core_max_items: int = 18
+    tactical_continuation_max_items: int = 2
     event_tape_max_items: int = 6
     appendix_max_items: int = 6
     core_min_market_cap_musd: float = 2_000.0
@@ -66,7 +67,13 @@ class SelectionConfig(BaseModel):
 
 
 class DataConfig(BaseModel):
+    # Legacy single-DB fallback used by older callers.
     db_path: str = "data/quant.duckdb"
+    raw_db_path: str = ""
+    research_db_path: str = ""
+    report_db_path: str = ""
+    dev_db_path: str = ""
+    use_dev_for_research: bool = False
     constituent_refresh_days: int = 7
 
 
@@ -155,3 +162,25 @@ class Settings(BaseModel):
     @property
     def db_path_abs(self) -> Path:
         return Path(self.data.db_path)
+
+    @property
+    def raw_db_path_abs(self) -> Path:
+        return Path(self.data.raw_db_path or self.data.db_path)
+
+    @property
+    def research_db_path_abs(self) -> Path:
+        return Path(self.data.research_db_path or self.data.db_path)
+
+    @property
+    def report_db_path_abs(self) -> Path:
+        return Path(self.data.report_db_path or self.data.research_db_path or self.data.db_path)
+
+    @property
+    def dev_db_path_abs(self) -> Path:
+        return Path(self.data.dev_db_path or self.data.research_db_path or self.data.db_path)
+
+    @property
+    def active_research_db_path_abs(self) -> Path:
+        if self.data.use_dev_for_research:
+            return self.dev_db_path_abs
+        return self.research_db_path_abs

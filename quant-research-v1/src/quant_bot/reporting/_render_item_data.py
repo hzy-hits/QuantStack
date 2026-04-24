@@ -50,6 +50,8 @@ def _price_summary(item: dict) -> list[str]:
 def _price_momentum_table(item: dict) -> list[str]:
     """Merged price + momentum table (saves one table header)."""
     mom = item.get("momentum") or {}
+    gate = item.get("execution_gate") or {}
+    overnight_alpha = item.get("overnight_alpha") or {}
     lines = [
         "**Price & Momentum:**",
         "",
@@ -63,6 +65,28 @@ def _price_momentum_table(item: dict) -> list[str]:
         f"| Relative Volume | {_fmt_val(item.get('rel_volume'), 2)}\u00d7 avg |",
         f"| ATR (14D) | ${_fmt_val(item.get('atr'), 2)} |",
     ]
+    if gate:
+        lines += [
+            f"| Live reference price | ${_fmt_val(gate.get('ref_price'), 2)} |",
+            f"| Overnight gap vs last close | {_fmt_pct(gate.get('gap_pct'), 2)} |",
+            f"| Stretch vs implied move | {_fmt_val(gate.get('gap_vs_expected_move'), 2)}\u00d7 |",
+            f"| Execution read | {_execution_phrase(gate.get('action'))} |",
+        ]
+    if overnight_alpha:
+        calibration = overnight_alpha.get("calibration") or {}
+        interval = calibration.get("continuation_hit_rate_interval")
+        interval_text = (
+            f"{interval[0]:.2f}-{interval[1]:.2f}"
+            if isinstance(interval, list) and len(interval) == 2
+            else _DASH
+        )
+        lines += [
+            (
+                f"| 隔夜延续判断 | {_overnight_alpha_phrase(overnight_alpha.get('advice'))}"
+                f" (n={calibration.get('sample_count', 0)}, hit CI={interval_text},"
+                f" latest={calibration.get('latest_sample_date') or _DASH}) |"
+            ),
+        ]
     if mom:
         regime = mom.get("regime", _DASH)
         strength = mom.get("strength_bucket", _DASH)
@@ -82,6 +106,24 @@ def _price_momentum_table(item: dict) -> list[str]:
         ]
     lines.append("")
     return lines
+
+
+def _execution_phrase(action: str | None) -> str:
+    mapping = {
+        "executable_now": "Still actionable at current levels",
+        "wait_pullback": "Not actionable at current price; wait for a pullback reset",
+        "do_not_chase": "Move looks spent here; stand down and do not chase",
+    }
+    return mapping.get(action or "", "No execution read")
+
+
+def _overnight_alpha_phrase(advice: str | None) -> str:
+    mapping = {
+        "continue": "继续，但只作为延续诊断",
+        "wait_pullback": "等回落，不追当前价",
+        "do_not_chase": "不追，疑似 alpha 已兑现",
+    }
+    return mapping.get(advice or "", "等回落，样本不足")
 
 
 def _options_section(item: dict) -> list[str]:

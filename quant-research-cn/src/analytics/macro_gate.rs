@@ -46,9 +46,9 @@ impl VolRegime {
 /// Yield curve regime
 #[derive(Debug, Clone, Copy)]
 pub enum YieldCurve {
-    Normal,   // LPR - Shibor > 1.5  (positive spread, normal)
-    Flat,     // 0.5 - 1.5           (converging)
-    Steep,    // < 0.5               (Shibor very low → easing)
+    Normal, // LPR - Shibor > 1.5  (positive spread, normal)
+    Flat,   // 0.5 - 1.5           (converging)
+    Steep,  // < 0.5               (Shibor very low → easing)
 }
 
 impl YieldCurve {
@@ -74,27 +74,27 @@ impl YieldCurve {
 /// Steep curve (easing) is favorable for equities; Panic vol is unfavorable.
 pub fn gate_multiplier(vol: VolRegime, curve: YieldCurve) -> f64 {
     match (vol, curve) {
-        (VolRegime::Calm, YieldCurve::Steep)    => 1.1,
-        (VolRegime::Calm, YieldCurve::Normal)    => 1.0,
-        (VolRegime::Calm, YieldCurve::Flat)      => 0.9,
+        (VolRegime::Calm, YieldCurve::Steep) => 1.1,
+        (VolRegime::Calm, YieldCurve::Normal) => 1.0,
+        (VolRegime::Calm, YieldCurve::Flat) => 0.9,
         (VolRegime::Elevated, YieldCurve::Steep) => 1.0,
         (VolRegime::Elevated, YieldCurve::Normal) => 0.9,
-        (VolRegime::Elevated, YieldCurve::Flat)  => 0.8,
-        (VolRegime::Panic, YieldCurve::Steep)    => 0.8,
-        (VolRegime::Panic, YieldCurve::Normal)   => 0.7,
-        (VolRegime::Panic, YieldCurve::Flat)     => 0.6,
+        (VolRegime::Elevated, YieldCurve::Flat) => 0.8,
+        (VolRegime::Panic, YieldCurve::Steep) => 0.8,
+        (VolRegime::Panic, YieldCurve::Normal) => 0.7,
+        (VolRegime::Panic, YieldCurve::Flat) => 0.6,
     }
 }
 
 /// Asset class multipliers in different vol regimes
 pub fn asset_class_multiplier(asset_class: &str, vol: VolRegime) -> f64 {
     match (asset_class, vol) {
-        ("tech" | "growth", VolRegime::Calm)     => 1.2,
+        ("tech" | "growth", VolRegime::Calm) => 1.2,
         ("tech" | "growth", VolRegime::Elevated) => 0.9,
-        ("tech" | "growth", VolRegime::Panic)    => 0.7,
-        ("consumer" | "dividend", VolRegime::Calm)     => 0.9,
+        ("tech" | "growth", VolRegime::Panic) => 0.7,
+        ("consumer" | "dividend", VolRegime::Calm) => 0.9,
         ("consumer" | "dividend", VolRegime::Elevated) => 1.0,
-        ("consumer" | "dividend", VolRegime::Panic)    => 1.1,
+        ("consumer" | "dividend", VolRegime::Panic) => 1.1,
         _ => 1.0,
     }
 }
@@ -187,7 +187,12 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     let (spread, yield_curve) = match (lpr, shibor) {
         (Some(l), Some(s)) => {
             let sp = l - s;
-            info!(lpr = l, shibor = s, spread = format!("{:.3}", sp), "yield spread");
+            info!(
+                lpr = l,
+                shibor = s,
+                spread = format!("{:.3}", sp),
+                "yield spread"
+            );
             (sp, classify_yield_curve(sp))
         }
         _ => {
@@ -331,17 +336,17 @@ fn compute_opt_stress(db: &Connection, as_of: &str) -> Option<f64> {
 
     let rows: Vec<(String, f64)> = stmt
         .query_map(duckdb::params![as_of], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })
         .ok()?
         .filter_map(|r| r.ok())
         .collect();
 
     if rows.len() < 5 {
-        warn!(n = rows.len(), "insufficient opt_daily data for stress z-score");
+        warn!(
+            n = rows.len(),
+            "insufficient opt_daily data for stress z-score"
+        );
         return None;
     }
 

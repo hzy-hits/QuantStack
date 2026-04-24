@@ -6,6 +6,124 @@ from typing import Any
 from ._render_fmt import _fmt_pct, _fmt_val, _plural
 
 
+def render_report_postmortem(bundle: dict) -> list[str]:
+    """Render the execution-aware report review loop."""
+    review = bundle.get("report_review")
+    if not review or not review.get("selected_reviewed"):
+        return []
+
+    selected_counts = review.get("selected_counts", {})
+    ignored_counts = review.get("ignored_counts", {})
+    feedback_counts = review.get("factor_feedback_counts", {})
+
+    lines = [
+        "## Report Postmortem (last 20 trading days)",
+        "",
+        "*Did the report publish while alpha was still available, or after the move was already paid? Which ignored names kept running anyway?*",
+        "",
+        f"- **Primary issue:** {review.get('primary_issue_label') or 'N/A'}"
+        + (
+            f" | secondary: {review.get('secondary_issue_label')}"
+            if review.get("secondary_issue_label")
+            else ""
+        ),
+        f"- **Verdict:** {review.get('verdict') or 'N/A'}",
+        f"- **Implication for today:** {review.get('today_implication') or 'N/A'}",
+        "",
+        "| Quick read | Value |",
+        "|------------|-------|",
+        f"| Capture rate | {_fmt_val(review.get('capture_rate'), 2) if review.get('capture_rate') is not None else 'N/A'} |",
+        f"| Ignored-alpha rate | {_fmt_val(review.get('ignored_alpha_rate'), 2) if review.get('ignored_alpha_rate') is not None else 'N/A'} |",
+        f"| Stale-chase rate | {_fmt_val(review.get('stale_chase_rate'), 2) if review.get('stale_chase_rate') is not None else 'N/A'} |",
+        f"| False-positive rate | {_fmt_val(review.get('false_positive_rate'), 2) if review.get('false_positive_rate') is not None else 'N/A'} |",
+        f"| Flat-edge rate | {_fmt_val(review.get('flat_edge_rate'), 2) if review.get('flat_edge_rate') is not None else 'N/A'} |",
+        "",
+        "| Metric | Value |",
+        "|--------|-------|",
+        f"| Selected ideas reviewed | {review.get('selected_reviewed', 0)} |",
+        f"| Ignored candidates reviewed | {review.get('ignored_reviewed', 0)} |",
+        f"| Avg move already consumed at next open | {_fmt_val(review.get('avg_move_consumed_ratio'), 3)}x expected move |",
+        f"| Avg remaining move to target | {_fmt_pct(review.get('avg_alpha_remaining_pct'))} |",
+        "",
+        "**Selected ideas:**",
+        "",
+        "| Captured | Already paid | Good signal, bad timing | False positive | Flat / mixed |",
+        "|----------|--------------|-------------------------|----------------|--------------|",
+        f"| {selected_counts.get('captured', 0)} | {selected_counts.get('alpha_already_paid', 0)} | {selected_counts.get('good_signal_bad_timing', 0)} | {selected_counts.get('false_positive', 0)} | {selected_counts.get('flat_edge', 0)} |",
+        "",
+        "**Ignored candidates:**",
+        "",
+        "| Missed alpha | Ignored OK |",
+        "|--------------|------------|",
+        f"| {ignored_counts.get('missed_alpha', 0)} | {ignored_counts.get('ignored_ok', 0)} |",
+        "",
+    ]
+
+    if feedback_counts:
+        lines += [
+            "**Factor Lab feedback hooks:**",
+            "",
+            "| Action | Count |",
+            "|--------|-------|",
+        ]
+        safe_feedback_counts = {
+            str(action): count
+            for action, count in feedback_counts.items()
+            if action not in (None, "")
+        }
+        for action, count in sorted(safe_feedback_counts.items(), key=lambda kv: kv[0]):
+            lines.append(f"| {action} | {count} |")
+        lines.append("")
+
+    recent_stale = review.get("recent_stale", [])
+    if recent_stale:
+        lines += [
+            "**Recent timing failures:**",
+            "",
+            "| Date | Symbol | Execution | Move consumed | 3D follow-through |",
+            "|------|--------|-----------|---------------|------------------|",
+        ]
+        for row in recent_stale[:3]:
+            lines.append(
+                f"| {row['date']} | {row['symbol']} | {row.get('execution_mode') or '—'} | "
+                f"{_fmt_val(row.get('move_consumed_ratio'), 3)}x | {_fmt_pct(row.get('best_ret_pct'))} |"
+            )
+        lines.append("")
+
+    recent_missed = review.get("recent_missed", [])
+    if recent_missed:
+        lines += [
+            "**Recent ignored names that kept running:**",
+            "",
+            "| Date | Symbol | Confidence | 3D follow-through | Feedback |",
+            "|------|--------|------------|------------------|----------|",
+        ]
+        for row in recent_missed[:3]:
+            lines.append(
+                f"| {row['date']} | {row['symbol']} | {row.get('confidence') or '—'} | "
+                f"{_fmt_pct(row.get('best_ret_pct'))} | {row.get('feedback_action') or '—'} |"
+            )
+        lines.append("")
+
+    recent_captured = review.get("recent_captured", [])
+    if recent_captured:
+        lines += [
+            "**Recent captured names:**",
+            "",
+            "| Date | Symbol | Confidence | 3D follow-through |",
+            "|------|--------|------------|------------------|",
+        ]
+        for row in recent_captured[:3]:
+            lines.append(
+                f"| {row['date']} | {row['symbol']} | {row.get('confidence') or '—'} | "
+                f"{_fmt_pct(row.get('best_ret_pct'))} |"
+            )
+        lines.append("")
+
+    lines += ["---", ""]
+    return lines
+
+
 def render_scorecard(bundle: dict) -> list[str]:
     """Render the algorithm scorecard section."""
     scorecard = bundle.get("scorecard")
@@ -202,12 +320,26 @@ def render_item_risk_params(item: dict) -> list[str]:
         f"| Target | ${_fmt_val(rp.get('target'), 2)} |",
         f"| R:R Ratio | {_fmt_val(rp.get('rr_ratio'), 2)} |",
         f"| Expected move | {_fmt_pct(rp.get('expected_move_pct'))} |",
+        f"| Execution plan | {_execution_plan_phrase(rp.get('execution_mode'))} |",
     ]
+    if rp.get("reference_price") is not None:
+        lines.append(f"| Reference price | ${_fmt_val(rp.get('reference_price'), 2)} |")
+    if rp.get("gap_pct") is not None:
+        lines.append(f"| Ref gap vs close | {_fmt_pct(rp.get('gap_pct'))} |")
     if rp.get("half_life"):
         lines.append(f"| Mean-reversion half-life | {_fmt_val(rp['half_life'], 1)} days |")
     lines += [""]
 
     return lines
+
+
+def _execution_plan_phrase(mode: str | None) -> str:
+    mapping = {
+        "executable_now": "Entry can still be framed near current levels",
+        "wait_pullback": "Use pullback levels rather than chasing the gap",
+        "do_not_chase": "Treat the move as stretched; stand down unless price resets",
+    }
+    return mapping.get(mode or "", "No execution plan")
 
 
 def render_item_news_quality(item: dict) -> list[str]:

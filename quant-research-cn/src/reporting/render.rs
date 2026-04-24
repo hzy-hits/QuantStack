@@ -13,6 +13,10 @@ use duckdb::Connection;
 use std::fmt::Write;
 use tracing::{info, warn};
 
+use crate::analytics::headline_gate::{
+    summarize_headline_gate, HeadlineGateSummary, HeadlineSignalSummary,
+};
+use crate::analytics::shadow_calibration::summarize_shadow_calibration;
 use crate::config::Settings;
 use crate::filtering::notable::NotableItem;
 
@@ -45,7 +49,7 @@ pub fn render_payload(
     std::fs::create_dir_all("reports")?;
 
     // ── File 1: Macro ─────────────────────────────────────────────────────
-    let macro_md = render_macro(db, &date_str, &generated_at)?;
+    let macro_md = render_macro(db, &date_str, &generated_at, notable)?;
     let macro_path = format!("reports/{}_payload_macro.md", as_of);
     std::fs::write(&macro_path, &macro_md)?;
     info!(path = %macro_path, bytes = macro_md.len(), "macro payload written");
@@ -70,8 +74,14 @@ pub fn render_payload(
 // File 1: Macro — 宏观环境
 // ═════════════════════════════════════════════════════════════════════════════
 
-fn render_macro(db: &Connection, date_str: &str, generated_at: &str) -> Result<String> {
+fn render_macro(
+    db: &Connection,
+    date_str: &str,
+    generated_at: &str,
+    notable: &[NotableItem],
+) -> Result<String> {
     let mut md = String::with_capacity(32 * 1024);
+    let headline_gate = compute_headline_gate(db, date_str, notable);
 
     writeln!(md, "# A股量化研究 Payload — 宏观环境")?;
     writeln!(md, "## 生成时间: {}", generated_at)?;
@@ -81,6 +91,9 @@ fn render_macro(db: &Connection, date_str: &str, generated_at: &str) -> Result<S
 
     // ── 大盘概览 ──────────────────────────────────────────────────────────
     render_benchmark_overview(&mut md, db, date_str)?;
+
+    // ── Headline Gate ────────────────────────────────────────────────────
+    render_headline_gate(&mut md, &headline_gate)?;
 
     // ── HMM 市场状态 ──────────────────────────────────────────────────────
     render_hmm_state(&mut md, db, date_str)?;
@@ -172,7 +185,14 @@ fn render_hmm_state(md: &mut String, db: &Connection, date_str: &str) -> Result<
     // Query all HMM metrics from analytics
     let sql = "SELECT metric, value, detail
                FROM analytics
-               WHERE ts_code = '_MARKET' AND as_of = ? AND module = 'hmm'
+               WHERE ts_code = '_MARKET'
+                 AND module = 'hmm'
+                 AND as_of = (
+                     SELECT MAX(as_of) FROM analytics
+                     WHERE ts_code = '_MARKET'
+                       AND as_of <= CAST(? AS DATE)
+                       AND module = 'hmm'
+                 )
                ORDER BY metric";
 
     match db.prepare(sql) {
@@ -204,7 +224,8 @@ fn render_hmm_state(md: &mut String, db: &Connection, date_str: &str) -> Result<
                     }
                     if let Some(start) = detail.find("\"n\":") {
                         let rest = &detail[start + 4..];
-                        let num_str: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                        let num_str: String =
+                            rest.chars().take_while(|c| c.is_ascii_digit()).collect();
                         n_samples = num_str.parse().unwrap_or(0);
                     }
                 }
@@ -248,7 +269,14 @@ fn render_vol_hmm(md: &mut String, db: &Connection, date_str: &str) -> Result<()
 
     let sql = "SELECT metric, value, detail
                FROM analytics
-               WHERE ts_code = '_MARKET' AND as_of = ? AND module = 'vol_hmm'
+               WHERE ts_code = '_MARKET'
+                 AND module = 'vol_hmm'
+                 AND as_of = (
+                     SELECT MAX(as_of) FROM analytics
+                     WHERE ts_code = '_MARKET'
+                       AND as_of <= CAST(? AS DATE)
+                       AND module = 'vol_hmm'
+                 )
                ORDER BY metric";
 
     match db.prepare(sql) {
@@ -272,10 +300,14 @@ fn render_vol_hmm(md: &mut String, db: &Connection, date_str: &str) -> Result<()
                 let mut vol_low = 0.0;
                 let mut vol_high = 0.0;
                 let mut n_samples = 0u64;
-                if let Some((_, _, Some(detail))) = rows.iter().find(|(m, _, _)| m == "p_high_vol") {
+                if let Some((_, _, Some(detail))) = rows.iter().find(|(m, _, _)| m == "p_high_vol")
+                {
                     if let Ok(obj) = serde_json::from_str::<serde_json::Value>(detail) {
-                        regime_label = obj.get("regime").and_then(|v| v.as_str())
-                            .unwrap_or("").to_string();
+                        regime_label = obj
+                            .get("regime")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         if let Some(arr) = obj.get("vol_approx").and_then(|v| v.as_array()) {
                             vol_low = arr.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
                             vol_high = arr.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -292,7 +324,11 @@ fn render_vol_hmm(md: &mut String, db: &Connection, date_str: &str) -> Result<()
                                 writeln!(md, "- vol_regime = {}", regime_label)?;
                             }
                             if vol_low > 0.0 || vol_high > 0.0 {
-                                writeln!(md, "- 典型波动率: low={:.1}%, high={:.1}%", vol_low, vol_high)?;
+                                writeln!(
+                                    md,
+                                    "- 典型波动率: low={:.1}%, high={:.1}%",
+                                    vol_low, vol_high
+                                )?;
                             }
                         }
                         "p_high_vol_tomorrow" => {
@@ -323,7 +359,14 @@ fn render_macro_gate(md: &mut String, db: &Connection, date_str: &str) -> Result
 
     let sql = "SELECT metric, value, detail
                FROM analytics
-               WHERE ts_code = '_MARKET' AND as_of = ? AND module = 'macro_gate'
+               WHERE ts_code = '_MARKET'
+                 AND module = 'macro_gate'
+                 AND as_of = (
+                     SELECT MAX(as_of) FROM analytics
+                     WHERE ts_code = '_MARKET'
+                       AND as_of <= CAST(? AS DATE)
+                       AND module = 'macro_gate'
+                 )
                ORDER BY metric";
 
     match db.prepare(sql) {
@@ -409,10 +452,7 @@ fn render_macro_gate(md: &mut String, db: &Connection, date_str: &str) -> Result
 fn render_macro_data(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
     writeln!(md, "### 宏观数据")?;
     writeln!(md)?;
-    writeln!(
-        md,
-        "| 指标 | 系列ID | 最新值 | 日期 | 说明 |"
-    )?;
+    writeln!(md, "| 指标 | 系列ID | 最新值 | 日期 | 说明 |")?;
     writeln!(md, "|------|--------|--------|------|------|")?;
 
     // Query the most recent value for each series on or before as_of.
@@ -466,7 +506,10 @@ fn render_macro_data(md: &mut String, db: &Connection, date_str: &str) -> Result
         }
     }
     writeln!(md)?;
-    writeln!(md, "> 注: 月度指标 (CPI, PPI, PMI, 社融) 通常滞后15-30天发布")?;
+    writeln!(
+        md,
+        "> 注: 月度指标 (CPI, PPI, PMI, 社融) 通常滞后15-30天发布"
+    )?;
     writeln!(md)?;
     Ok(())
 }
@@ -474,10 +517,7 @@ fn render_macro_data(md: &mut String, db: &Connection, date_str: &str) -> Result
 fn render_northbound_flow(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
     writeln!(md, "### 北向资金 (近5日) — 仅供叙事参考，非量化信号")?;
     writeln!(md)?;
-    writeln!(
-        md,
-        "| 交易日 | 买入(亿) | 卖出(亿) | 净流入(亿) | 来源 |"
-    )?;
+    writeln!(md, "| 交易日 | 买入(亿) | 卖出(亿) | 净流入(亿) | 来源 |")?;
     writeln!(md, "|--------|----------|----------|------------|------|")?;
 
     let sql = "SELECT CAST(trade_date AS VARCHAR), buy_amount, sell_amount, net_amount, source
@@ -488,7 +528,13 @@ fn render_northbound_flow(md: &mut String, db: &Connection, date_str: &str) -> R
 
     match db.prepare(sql) {
         Ok(mut stmt) => {
-            let rows: Vec<(String, Option<f64>, Option<f64>, Option<f64>, Option<String>)> = stmt
+            let rows: Vec<(
+                String,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<String>,
+            )> = stmt
                 .query_map(duckdb::params![date_str], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -505,7 +551,8 @@ fn render_northbound_flow(md: &mut String, db: &Connection, date_str: &str) -> R
                 writeln!(md, "| (无数据) | - | - | - | - |")?;
             } else {
                 // Check if all 'total' rows have null net_amount
-                let totals_all_null = rows.iter()
+                let totals_all_null = rows
+                    .iter()
                     .filter(|(_, _, _, _, src)| src.as_deref() == Some("total"))
                     .all(|(_, _, _, net, _)| net.is_none());
                 for (date, buy, sell, net, source) in &rows {
@@ -521,7 +568,10 @@ fn render_northbound_flow(md: &mut String, db: &Connection, date_str: &str) -> R
                 }
                 if totals_all_null {
                     writeln!(md)?;
-                    writeln!(md, "> ⚠ 北向资金净流入数据为空 — Tushare moneyflow_hsgt 返回null")?;
+                    writeln!(
+                        md,
+                        "> ⚠ 北向资金净流入数据为空 — Tushare moneyflow_hsgt 返回null"
+                    )?;
                 }
             }
         }
@@ -537,10 +587,7 @@ fn render_northbound_flow(md: &mut String, db: &Connection, date_str: &str) -> R
 fn render_sector_fund_flow(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
     writeln!(md, "### 行业资金流向 (AKShare)")?;
     writeln!(md)?;
-    writeln!(
-        md,
-        "| 行业 | 涨跌幅% | 主力净流入(亿) | 主力净占比% |"
-    )?;
+    writeln!(md, "| 行业 | 涨跌幅% | 主力净流入(亿) | 主力净占比% |")?;
     writeln!(md, "|------|---------|---------------|------------|")?;
 
     let sql = "SELECT sector_name, pct_chg, main_net_in, main_net_pct
@@ -593,10 +640,7 @@ fn render_sector_fund_flow(md: &mut String, db: &Connection, date_str: &str) -> 
 fn render_concept_board(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
     writeln!(md, "### 概念板块热点 (AKShare)")?;
     writeln!(md)?;
-    writeln!(
-        md,
-        "| 概念 | 涨跌幅% | 上涨/下跌 | 领涨股 |"
-    )?;
+    writeln!(md, "| 概念 | 涨跌幅% | 上涨/下跌 | 领涨股 |")?;
     writeln!(md, "|------|---------|-----------|--------|")?;
 
     let sql = "SELECT board_name, pct_chg, up_count, down_count, lead_stock
@@ -610,7 +654,13 @@ fn render_concept_board(md: &mut String, db: &Connection, date_str: &str) -> Res
 
     match db.prepare(sql) {
         Ok(mut stmt) => {
-            let rows: Vec<(String, Option<f64>, Option<i32>, Option<i32>, Option<String>)> = stmt
+            let rows: Vec<(
+                String,
+                Option<f64>,
+                Option<i32>,
+                Option<i32>,
+                Option<String>,
+            )> = stmt
                 .query_map(duckdb::params![date_str], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -678,12 +728,7 @@ fn render_theme_clusters(md: &mut String, db: &Connection, date_str: &str) -> Re
                 writeln!(md, "- (未生成主题聚类)")?;
             } else {
                 for (name, desc, boards_json, avg_pct) in &rows {
-                    writeln!(
-                        md,
-                        "**{} ({:+.2}%)**",
-                        name,
-                        avg_pct.unwrap_or(0.0),
-                    )?;
+                    writeln!(md, "**{} ({:+.2}%)**", name, avg_pct.unwrap_or(0.0),)?;
                     if let Some(d) = desc {
                         writeln!(md, "  {}", d)?;
                     }
@@ -744,6 +789,68 @@ fn render_etf_options(md: &mut String, db: &Connection, date_str: &str) -> Resul
             writeln!(md, "- ETF期权数据缺失")?;
         }
     }
+
+    let curve_sql = "SELECT ts_code, metric, value, detail
+                     FROM analytics
+                     WHERE as_of = ? AND module = 'shadow_fast'
+                       AND ts_code LIKE '_SHADOW_CURVE_%'
+                     ORDER BY ts_code, metric";
+    if let Ok(mut stmt) = db.prepare(curve_sql) {
+        let rows: Vec<(String, String, f64, Option<String>)> = stmt
+            .query_map(duckdb::params![date_str], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        if !rows.is_empty() {
+            writeln!(md)?;
+            writeln!(md, "**影子波动市场曲线 (model-free IV)**")?;
+            writeln!(md)?;
+            writeln!(md, "| 代理 | 30D | 60D | 90D | 数据日期 |")?;
+            writeln!(md, "|------|-----|-----|-----|----------|")?;
+
+            let mut grouped: std::collections::BTreeMap<String, (String, String, f64, f64, f64)> =
+                std::collections::BTreeMap::new();
+            for (ts_code, metric, value, detail) in rows {
+                let entry = grouped
+                    .entry(ts_code)
+                    .or_insert_with(|| ("-".to_string(), "-".to_string(), 0.0, 0.0, 0.0));
+                if let Some(d) = detail.as_deref() {
+                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(d) {
+                        entry.0 = obj
+                            .get("label")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-")
+                            .to_string();
+                        entry.1 = obj
+                            .get("source_trade_date")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-")
+                            .to_string();
+                    }
+                }
+                match metric.as_str() {
+                    "shadow_iv_30d" => entry.2 = value,
+                    "shadow_iv_60d" => entry.3 = value,
+                    "shadow_iv_90d" => entry.4 = value,
+                    _ => {}
+                }
+            }
+
+            for (_, (label, source_date, iv30, iv60, iv90)) in grouped {
+                writeln!(
+                    md,
+                    "| {} | {:.1}% | {:.1}% | {:.1}% | {} |",
+                    label, iv30, iv60, iv90, source_date
+                )?;
+            }
+        }
+    }
     writeln!(md)?;
     Ok(())
 }
@@ -759,20 +866,24 @@ fn render_sector_rotation(md: &mut String, db: &Connection, date_str: &str) -> R
 
     let mut stmt = match db.prepare(sql) {
         Ok(s) => s,
-        Err(_) => { writeln!(md, "无板块轮动数据")?; writeln!(md)?; return Ok(()); }
+        Err(_) => {
+            writeln!(md, "无板块轮动数据")?;
+            writeln!(md)?;
+            return Ok(());
+        }
     };
 
-    let rows: Vec<(String, f64, Option<String>)> = match stmt
-        .query_map(duckdb::params![date_str], |row| {
+    let rows: Vec<(String, f64, Option<String>)> =
+        match stmt.query_map(duckdb::params![date_str], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, f64>(1).unwrap_or(0.0),
                 row.get::<_, Option<String>>(2).ok().flatten(),
             ))
         }) {
-        Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
-        Err(_) => Vec::new(),
-    };
+            Ok(mapped) => mapped.filter_map(|r| r.ok()).collect(),
+            Err(_) => Vec::new(),
+        };
 
     if rows.is_empty() {
         writeln!(md, "无板块轮动数据（stock_basic.industry 为空？）")?;
@@ -783,8 +894,14 @@ fn render_sector_rotation(md: &mut String, db: &Connection, date_str: &str) -> R
     // Show top-10 (strongest momentum) and bottom-10 (weakest)
     writeln!(md, "**领涨行业 (Top 10)**")?;
     writeln!(md)?;
-    writeln!(md, "| 行业 | 5D均涨幅 | 20D均涨幅 | 资金流分 | 动量z | 轮动分 | 股票数 |")?;
-    writeln!(md, "|------|---------|---------|---------|------|-------|--------|")?;
+    writeln!(
+        md,
+        "| 行业 | 5D均涨幅 | 20D均涨幅 | 资金流分 | 动量z | 轮动分 | 股票数 |"
+    )?;
+    writeln!(
+        md,
+        "|------|---------|---------|---------|------|-------|--------|"
+    )?;
 
     let top10 = rows.iter().take(10);
     for (ts_code, ret_5d, detail) in top10 {
@@ -804,7 +921,8 @@ fn render_sector_rotation(md: &mut String, db: &Connection, date_str: &str) -> R
                 ).unwrap_or(0.0);
 
                 writeln!(
-                    md, "| {} | {:.1}% | {:.1}% | {:.3} | {:.2} | {:.2} | {} |",
+                    md,
+                    "| {} | {:.1}% | {:.1}% | {:.3} | {:.2} | {:.2} | {} |",
                     industry, ret_5d, ret_20d, flow, mom_z, rot, n
                 )?;
             }
@@ -815,7 +933,10 @@ fn render_sector_rotation(md: &mut String, db: &Connection, date_str: &str) -> R
     if rows.len() > 10 {
         writeln!(md, "**领跌行业 (Bottom 5)**")?;
         writeln!(md)?;
-        writeln!(md, "| 行业 | 5D均涨幅 | 20D均涨幅 | 资金流分 | 动量z | 股票数 |")?;
+        writeln!(
+            md,
+            "| 行业 | 5D均涨幅 | 20D均涨幅 | 资金流分 | 动量z | 股票数 |"
+        )?;
         writeln!(md, "|------|---------|---------|---------|------|--------|")?;
 
         let bot5 = rows.iter().rev().take(5);
@@ -828,7 +949,8 @@ fn render_sector_rotation(md: &mut String, db: &Connection, date_str: &str) -> R
                     let mom_z = j.get("momentum_z").and_then(|v| v.as_f64()).unwrap_or(0.0);
                     let n = j.get("n_stocks").and_then(|v| v.as_i64()).unwrap_or(0);
                     writeln!(
-                        md, "| {} | {:.1}% | {:.1}% | {:.3} | {:.2} | {} |",
+                        md,
+                        "| {} | {:.1}% | {:.1}% | {:.3} | {:.2} | {} |",
                         industry, ret_5d, ret_20d, flow, mom_z, n
                     )?;
                 }
@@ -965,7 +1087,14 @@ fn render_cross_market(md: &mut String, db: &Connection, date_str: &str) -> Resu
 
     match db.prepare(fut_sql) {
         Ok(mut stmt) => {
-            let rows: Vec<(String, Option<f64>, Option<f64>, Option<f64>, Option<f64>, Option<f64>)> = stmt
+            let rows: Vec<(
+                String,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+                Option<f64>,
+            )> = stmt
                 .query_map(duckdb::params![date_str], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -1014,6 +1143,7 @@ fn render_structural(
     notable: &[NotableItem],
 ) -> Result<String> {
     let mut md = String::with_capacity(64 * 1024);
+    let headline_gate = compute_headline_gate(db, date_str, notable);
 
     writeln!(md, "# A股量化研究 Payload — 结构化信号")?;
     writeln!(md, "## 生成时间: {}", generated_at)?;
@@ -1021,17 +1151,27 @@ fn render_structural(
     writeln!(md)?;
     writeln!(md, "{}", PRECISION_RULES)?;
 
+    render_headline_gate(&mut md, &headline_gate)?;
+
     // ── Report lanes ──────────────────────────────────────────────────────
     writeln!(md, "### 报告分层总览")?;
     writeln!(md)?;
     writeln!(
         md,
-        "- 共 {} 个结构信号，按 `CORE BOOK / THEME ROTATION / RADAR` 三层组织，避免把主题轮动与主报告主线混在一起。",
+        "- 共 {} 个结构信号，按 `CORE BOOK / RANGE CORE / TACTICAL CONTINUATION / THEME ROTATION / RADAR` 五层组织，避免把区间主书、战术续涨、主题轮动与主报告主线混在一起。",
         notable.len(),
     )?;
     writeln!(
         md,
         "- `CORE BOOK` = 主报告正文，优先承载高置信、方向明确、可代表市场主线的信号。"
+    )?;
+    writeln!(
+        md,
+        "- `RANGE CORE` = Headline Gate 不够强时仍可保留的区间主书；条件式做多、轻仓、等待确认，不得偷换成趋势主线。"
+    )?;
+    writeln!(
+        md,
+        "- `TACTICAL CONTINUATION` = 市场 headline 不够清晰时仍可保留的战术续涨名单；名额少、仓位轻、必须配硬止损。"
     )?;
     writeln!(
         md,
@@ -1041,9 +1181,24 @@ fn render_structural(
         md,
         "- `RADAR` = 边缘信号与持续跟踪名单，只保留最值得复核的残余观察项。"
     )?;
+    if headline_gate.mode != "trend" {
+        writeln!(
+            md,
+            "- 当前 Headline Gate = `{}`，禁止把主报告写成牛/熊单边主线；更适合区间、轮动和触发条件表述。",
+            headline_gate.mode.to_uppercase(),
+        )?;
+    }
     writeln!(md)?;
 
-    for bucket in ["CORE BOOK", "THEME ROTATION", "RADAR"] {
+    render_shadow_calibration(&mut md, db, date_str)?;
+
+    for bucket in [
+        "CORE BOOK",
+        "RANGE CORE",
+        "TACTICAL CONTINUATION",
+        "THEME ROTATION",
+        "RADAR",
+    ] {
         let bucket_items: Vec<&NotableItem> = notable
             .iter()
             .filter(|item| item.report_bucket == bucket)
@@ -1068,6 +1223,9 @@ fn render_structural(
     // ── Confidence Distribution ──────────────────────────────────────────
     render_confidence_distribution(&mut md, notable)?;
 
+    // ── Alpha Postmortem ────────────────────────────────────────────────
+    render_postmortem_summary(&mut md, db, date_str)?;
+
     Ok(md)
 }
 
@@ -1087,16 +1245,8 @@ fn render_notable_item(
         item.report_bucket,
     )?;
     writeln!(md)?;
-    writeln!(
-        md,
-        "- **报告层级**: {}",
-        item.report_bucket,
-    )?;
-    writeln!(
-        md,
-        "- **层级定位**: {}",
-        item.report_reason,
-    )?;
+    writeln!(md, "- **报告层级**: {}", item.report_bucket,)?;
+    writeln!(md, "- **层级定位**: {}", item.report_reason,)?;
 
     let detail = &item.detail;
 
@@ -1127,8 +1277,7 @@ fn render_notable_item(
     let trend_prob_n = detail.get("trend_prob_n").and_then(|v| v.as_f64());
 
     // Query regime and vol_bucket from analytics
-    let (regime, vol_bucket, ci_low, ci_high) =
-        query_momentum_detail(db, &item.ts_code, date_str);
+    let (regime, vol_bucket, ci_low, ci_high) = query_momentum_detail(db, &item.ts_code, date_str);
 
     writeln!(
         md,
@@ -1144,11 +1293,7 @@ fn render_notable_item(
     // ── 信息分 (flow components) ──────────────────────────────────────────
     let flow_components = query_flow_components(db, &item.ts_code, date_str);
 
-    writeln!(
-        md,
-        "- **信息分**: information_score={:.3}",
-        item.flow_score
-    )?;
+    writeln!(md, "- **信息分**: information_score={:.3}", item.flow_score)?;
     for (metric, value) in &flow_components {
         match metric.as_str() {
             "large_flow_z" => writeln!(md, "  - 大单流向 z={:.2}", value)?,
@@ -1222,6 +1367,117 @@ fn render_notable_item(
         )?;
     }
 
+    // ── 影子期权 ──────────────────────────────────────────────────────────
+    let shadow_iv_30d = detail.get("shadow_iv_30d").and_then(|v| v.as_f64());
+    let shadow_iv_60d = detail.get("shadow_iv_60d").and_then(|v| v.as_f64());
+    let shadow_iv_90d = detail.get("shadow_iv_90d").and_then(|v| v.as_f64());
+    let downside_stress = detail.get("downside_stress").and_then(|v| v.as_f64());
+    let shadow_proxy = detail.get("shadow_proxy").and_then(|v| v.as_str());
+    if shadow_iv_30d.is_some() || shadow_iv_60d.is_some() || shadow_iv_90d.is_some() {
+        writeln!(
+            md,
+            "- **影子波动**: 30D={}%, 60D={}%, 90D={}%, downside_stress={}, proxy={}",
+            fmt_opt_f64(shadow_iv_30d, 1),
+            fmt_opt_f64(shadow_iv_60d, 1),
+            fmt_opt_f64(shadow_iv_90d, 1),
+            fmt_opt_f64(downside_stress, 3),
+            shadow_proxy.unwrap_or("-"),
+        )?;
+    }
+
+    let shadow_put_90 = detail.get("shadow_put_90_3m").and_then(|v| v.as_f64());
+    let shadow_touch_90 = detail.get("shadow_touch_90_3m").and_then(|v| v.as_f64());
+    let shadow_floor_1 = detail
+        .get("shadow_floor_1sigma_3m")
+        .and_then(|v| v.as_f64());
+    let shadow_floor_2 = detail
+        .get("shadow_floor_2sigma_3m")
+        .and_then(|v| v.as_f64());
+    let shadow_skew = detail.get("shadow_skew_90_3m").and_then(|v| v.as_f64());
+    if shadow_put_90.is_some() || shadow_touch_90.is_some() {
+        writeln!(
+            md,
+            "- **影子期权**: 3M 90%Put={}, 触及90%概率={}%, 1σ底={}, 2σ底={}, downside_skew={} vol pts",
+            fmt_opt_f64(shadow_put_90, 3),
+            shadow_touch_90.map(|v| v * 100.0).map(|v| format!("{:.1}", v)).unwrap_or_else(|| "-".to_string()),
+            fmt_f64(shadow_floor_1),
+            fmt_f64(shadow_floor_2),
+            fmt_opt_f64(shadow_skew, 2),
+        )?;
+    }
+
+    let shadow_option_alpha = detail.get("shadow_option_alpha");
+    if let Some(alpha) = shadow_option_alpha {
+        let diagnostic_zh = alpha
+            .get("diagnostic_zh")
+            .and_then(|v| v.as_str())
+            .unwrap_or("只等回踩");
+        let sample_count = alpha
+            .get("sample_count")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let latest_sample = alpha
+            .get("latest_sample_date")
+            .and_then(|v| v.as_str())
+            .unwrap_or("-");
+        let capture_ci = alpha
+            .get("capture_rate_interval")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| {
+                let lo = arr.first().and_then(|v| v.as_f64())?;
+                let hi = arr.get(1).and_then(|v| v.as_f64())?;
+                Some(format!("{:.1}-{:.1}%", lo * 100.0, hi * 100.0))
+            })
+            .unwrap_or_else(|| "-".to_string());
+        writeln!(
+            md,
+            "- **影子期权校准**: {}；alpha={}, 追价失效风险={}，样本n={}，命中率区间={}，最近样本={}",
+            diagnostic_zh,
+            fmt_opt_f64(alpha.get("shadow_alpha_prob").and_then(|v| v.as_f64()), 3),
+            fmt_opt_f64(alpha.get("stale_chase_risk").and_then(|v| v.as_f64()), 3),
+            sample_count,
+            capture_ci,
+            latest_sample,
+        )?;
+    }
+
+    // ── 布局结构 / 执行层 ────────────────────────────────────────────────
+    let setup_score = detail.get("setup_score").and_then(|v| v.as_f64());
+    let setup_direction = detail.get("setup_direction").and_then(|v| v.as_str());
+    let continuation_score = detail.get("continuation_score").and_then(|v| v.as_f64());
+    let continuation_direction = detail
+        .get("continuation_direction")
+        .and_then(|v| v.as_str());
+    let fade_risk = detail.get("fade_risk").and_then(|v| v.as_f64());
+    let execution_score = detail.get("execution_score").and_then(|v| v.as_f64());
+    let execution_mode = detail.get("execution_mode").and_then(|v| v.as_str());
+    let max_chase_gap_pct = detail.get("max_chase_gap_pct").and_then(|v| v.as_f64());
+    let pullback_trigger_pct = detail.get("pullback_trigger_pct").and_then(|v| v.as_f64());
+    let pullback_price = detail.get("pullback_price").and_then(|v| v.as_f64());
+
+    if setup_score.is_some() || continuation_score.is_some() || execution_score.is_some() {
+        writeln!(
+            md,
+            "- **布局结构**: 蓄势得分={}（{}），延续倾向={}（{}），回吐风险={}",
+            fmt_opt_f64(setup_score, 3),
+            direction_zh(setup_direction),
+            fmt_opt_f64(continuation_score, 3),
+            direction_zh(continuation_direction),
+            fmt_opt_f64(fade_risk, 3)
+        )?;
+        writeln!(
+            md,
+            "- **次日执行**: {}",
+            execution_summary_sentence(
+                execution_mode,
+                execution_score,
+                max_chase_gap_pct,
+                pullback_trigger_pct,
+                pullback_price
+            )
+        )?;
+    }
+
     writeln!(md)?;
     Ok(())
 }
@@ -1233,16 +1489,24 @@ fn render_report_bucket_distribution(md: &mut String, notable: &[NotableItem]) -
     writeln!(md, "|------|------|------|")?;
 
     let total = notable.len() as f64;
-    let mut counts = [0usize; 3]; // CORE BOOK, THEME ROTATION, RADAR
+    let mut counts = [0usize; 5]; // CORE BOOK, RANGE CORE, TACTICAL CONTINUATION, THEME ROTATION, RADAR
     for item in notable {
         match item.report_bucket.as_str() {
             "CORE BOOK" => counts[0] += 1,
-            "THEME ROTATION" => counts[1] += 1,
-            _ => counts[2] += 1,
+            "RANGE CORE" => counts[1] += 1,
+            "TACTICAL CONTINUATION" => counts[2] += 1,
+            "THEME ROTATION" => counts[3] += 1,
+            _ => counts[4] += 1,
         }
     }
 
-    let labels = ["CORE BOOK", "THEME ROTATION", "RADAR"];
+    let labels = [
+        "CORE BOOK",
+        "RANGE CORE",
+        "TACTICAL CONTINUATION",
+        "THEME ROTATION",
+        "RADAR",
+    ];
     for (i, label) in labels.iter().enumerate() {
         let pct = if total > 0.0 {
             counts[i] as f64 / total * 100.0
@@ -1253,6 +1517,55 @@ fn render_report_bucket_distribution(md: &mut String, notable: &[NotableItem]) -
     }
     writeln!(md)?;
     Ok(())
+}
+
+fn direction_zh(direction: Option<&str>) -> &'static str {
+    match direction.unwrap_or("neutral") {
+        "bullish" => "偏多",
+        "bearish" => "偏空",
+        _ => "中性",
+    }
+}
+
+fn execution_mode_sentence(mode: Option<&str>) -> &'static str {
+    match mode.unwrap_or("executable") {
+        "do_not_chase" => "当前更像情绪拉伸后的高波区，不适合机械追价",
+        "wait_pullback" => "方向和结构还在，但更适合等回踩后再评估",
+        _ => "当前价位仍有一定可执行性，可结合主线强弱择机跟进",
+    }
+}
+
+fn execution_summary_sentence(
+    mode: Option<&str>,
+    execution_score: Option<f64>,
+    max_chase_gap_pct: Option<f64>,
+    pullback_trigger_pct: Option<f64>,
+    pullback_price: Option<f64>,
+) -> String {
+    match mode.unwrap_or("executable") {
+        "do_not_chase" => format!(
+            "{}；执行得分={}，当前不建议新开仓，至少等待约 {}% 的回踩后再评估，参考回踩价={}",
+            execution_mode_sentence(mode),
+            fmt_opt_f64(execution_score, 3),
+            fmt_opt_f64(pullback_trigger_pct, 2),
+            fmt_opt_f64(pullback_price, 2)
+        ),
+        "wait_pullback" => format!(
+            "{}；执行得分={}，当前不宜直接追价，优先观察约 {}% 的回踩，参考回踩价={}",
+            execution_mode_sentence(mode),
+            fmt_opt_f64(execution_score, 3),
+            fmt_opt_f64(pullback_trigger_pct, 2),
+            fmt_opt_f64(pullback_price, 2)
+        ),
+        _ => format!(
+            "{}；执行得分={}，可接受追价上限约 {}%，更理想的回踩触发约 {}%，参考回踩价={}",
+            execution_mode_sentence(mode),
+            fmt_opt_f64(execution_score, 3),
+            fmt_opt_f64(max_chase_gap_pct, 2),
+            fmt_opt_f64(pullback_trigger_pct, 2),
+            fmt_opt_f64(pullback_price, 2)
+        ),
+    }
 }
 
 fn render_confidence_distribution(md: &mut String, notable: &[NotableItem]) -> Result<()> {
@@ -1285,9 +1598,423 @@ fn render_confidence_distribution(md: &mut String, notable: &[NotableItem]) -> R
     Ok(())
 }
 
+fn render_postmortem_summary(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    let as_of = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .unwrap_or_else(|_| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+    let cutoff = (as_of - chrono::Duration::days(20)).to_string();
+
+    let mut count_stmt = db.prepare(
+        "SELECT selection_status, label, COUNT(*)
+         FROM alpha_postmortem
+         WHERE session = 'daily'
+           AND evaluation_date >= CAST(? AS DATE)
+           AND evaluation_date < CAST(? AS DATE)
+           AND symbol NOT LIKE '300%'
+           AND symbol NOT LIKE '301%'
+         GROUP BY selection_status, label",
+    )?;
+
+    let rows = count_stmt.query_map(duckdb::params![cutoff, date_str], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+
+    let mut selected_total = 0i64;
+    let mut ignored_total = 0i64;
+    let mut captured = 0i64;
+    let mut stale = 0i64;
+    let mut false_positive = 0i64;
+    let mut missed = 0i64;
+
+    for row in rows {
+        let (selection_status, label, count) = row?;
+        match selection_status.as_str() {
+            "selected" => selected_total += count,
+            "ignored" => ignored_total += count,
+            _ => {}
+        }
+        match label.as_str() {
+            "captured" => captured += count,
+            "alpha_already_paid" | "good_signal_bad_timing" => stale += count,
+            "false_positive" => false_positive += count,
+            "missed_alpha" => missed += count,
+            _ => {}
+        }
+    }
+
+    if selected_total + ignored_total == 0 {
+        return Ok(());
+    }
+
+    let recent_hits = load_postmortem_examples(
+        db,
+        "label = 'captured' AND symbol NOT LIKE '300%' AND symbol NOT LIKE '301%'",
+        duckdb::params![cutoff, date_str],
+    )?;
+    let recent_missed = load_postmortem_examples(
+        db,
+        "label = 'missed_alpha' AND symbol NOT LIKE '300%' AND symbol NOT LIKE '301%'",
+        duckdb::params![cutoff, date_str],
+    )?;
+    let recent_stale = load_postmortem_examples(
+        db,
+        "label IN ('alpha_already_paid', 'good_signal_bad_timing') AND symbol NOT LIKE '300%' AND symbol NOT LIKE '301%'",
+        duckdb::params![cutoff, date_str],
+    )?;
+    let (actionable_missed_count, actionable_missed_examples) =
+        load_actionable_missed_examples(db, &cutoff, date_str)?;
+
+    writeln!(md, "### Alpha Postmortem")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "- 近20天已复盘信号共 {} 条，其中入选 {} 条、忽略 {} 条。",
+        selected_total + ignored_total,
+        selected_total,
+        ignored_total
+    )?;
+    writeln!(
+        md,
+        "- 当前复盘口径**暂不纳入创业板/301 系列**，避免把策略明确不做的样本混进主策略召回率。"
+    )?;
+    writeln!(
+        md,
+        "- 结果分布：抓到 alpha {} 条，时点偏晚/alpha 已兑现 {} 条，误报 {} 条，忽略后继续走强 {} 条。",
+        captured, stale, false_positive, missed
+    )?;
+    if actionable_missed_count > 0 {
+        writeln!(
+            md,
+            "- 其中 **{} 条** 属于“可执行但被压在观察层”的漏选：非创业板、方向仍为多头、执行模式仍在 `executable/wait_pullback`，但最终留在 `THEME ROTATION`。",
+            actionable_missed_count
+        )?;
+        if !actionable_missed_examples.is_empty() {
+            writeln!(
+                md,
+                "- 这类可执行漏选的代表：{}",
+                actionable_missed_examples.join("；")
+            )?;
+        }
+    }
+    if missed > captured {
+        writeln!(
+            md,
+            "- 当前主要短板是 **漏掉 alpha 多于抓到 alpha**；这一批 `missed_alpha` 已回流到 Factor Lab 反馈层，用来抬高召回和降低错杀。"
+        )?;
+    } else if stale > 0 {
+        writeln!(
+            md,
+            "- 当前更像 **时点偏晚**：方向不一定错，但不少信号在入书时已经接近被市场兑现，次日更应强调不追价和等回踩。"
+        )?;
+    } else {
+        writeln!(
+            md,
+            "- 最近复盘没有显示明显的系统性时滞，但仍要优先看执行门槛，避免把结构性机会写成机械追价。"
+        )?;
+    }
+    if !recent_hits.is_empty() {
+        writeln!(md, "- 最近抓到的例子：{}", recent_hits.join("；"))?;
+    }
+    if !recent_missed.is_empty() {
+        writeln!(md, "- 最近漏掉的例子：{}", recent_missed.join("；"))?;
+    }
+    if !recent_stale.is_empty() {
+        writeln!(md, "- 最近时点偏晚的例子：{}", recent_stale.join("；"))?;
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn render_shadow_calibration(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    let as_of = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .unwrap_or_else(|_| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+    let summary = summarize_shadow_calibration(db, as_of);
+    if summary.total_reviewed == 0 {
+        return Ok(());
+    }
+
+    writeln!(md, "### Shadow Calibration")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "- 回看近{}天已复盘信号 {} 条：selected {} 条，ignored {} 条。",
+        summary.lookback_days,
+        summary.total_reviewed,
+        summary.selected_reviewed,
+        summary.ignored_reviewed,
+    )?;
+    writeln!(
+        md,
+        "- `selected` 的平均 shadow_rank={:.3}，`ignored` 的平均 shadow_rank={:.3}；只看正向 shadow 名字时，selected={:.3}，ignored={:.3}。",
+        summary.selected_avg_shadow_rank,
+        summary.ignored_avg_shadow_rank,
+        summary.selected_positive_avg_shadow_rank,
+        summary.ignored_positive_avg_shadow_rank,
+    )?;
+    writeln!(
+        md,
+        "- 正向 shadow（threshold={:.2}）里：selected 的 capture_rate={:.1}%，false_positive_rate={:.1}%；ignored 的 missed_alpha_rate={:.1}%。",
+        summary.positive_threshold,
+        summary.selected_positive_capture_rate * 100.0,
+        summary.selected_positive_false_positive_rate * 100.0,
+        summary.ignored_positive_missed_rate * 100.0,
+    )?;
+    writeln!(
+        md,
+        "- 标签均值对比：captured={:.3}，missed_alpha={:.3}，false_positive={:.3}，stale={:.3}。",
+        summary.captured_avg_shadow_rank,
+        summary.missed_avg_shadow_rank,
+        summary.false_positive_avg_shadow_rank,
+        summary.stale_avg_shadow_rank,
+    )?;
+    writeln!(
+        md,
+        "- 当前 live 校准：shadow_weight={:.3}（base=0.100），shadow_pass1_reserve={}（base=18），recall_gap={:.3}，quality_gap={:.3}。",
+        summary.recommended_weight,
+        summary.recommended_reserve,
+        summary.recall_gap,
+        summary.quality_gap,
+    )?;
+    if summary.ignored_positive_avg_shadow_rank > summary.selected_positive_avg_shadow_rank {
+        writeln!(
+            md,
+            "- 诊断结论：系统对正向 shadow 支撑的名字仍有 **低配/漏选** 倾向，所以当前权重和 reserve 已按 recall 压力上调。"
+        )?;
+    } else if summary.selected_positive_false_positive_rate > summary.selected_positive_capture_rate
+    {
+        writeln!(
+            md,
+            "- 诊断结论：shadow 支撑的入选名里误报偏多，所以 live 权重会更保守，避免把高波错当 alpha。"
+        )?;
+    } else {
+        writeln!(
+            md,
+            "- 诊断结论：shadow 层当前更像有效的筛选加分项，live 权重维持温和上调而不是激进放大。"
+        )?;
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn load_postmortem_examples<P>(
+    db: &Connection,
+    label_filter: &str,
+    params: P,
+) -> Result<Vec<String>>
+where
+    P: duckdb::Params,
+{
+    let sql = format!(
+        "SELECT symbol, label, best_ret_pct, next_close_ret_pct
+         FROM alpha_postmortem
+         WHERE session = 'daily'
+           AND evaluation_date >= CAST(? AS DATE)
+           AND evaluation_date < CAST(? AS DATE)
+           AND {}
+         ORDER BY COALESCE(best_ret_pct, -999) DESC, evaluation_date DESC
+         LIMIT 3",
+        label_filter
+    );
+    let mut stmt = db.prepare(&sql)?;
+    let rows = stmt.query_map(params, |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, Option<f64>>(2)?,
+            row.get::<_, Option<f64>>(3)?,
+        ))
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        let (symbol, label, best_ret_pct, next_close_ret_pct) = row?;
+        let note = match label.as_str() {
+            "captured" => format!(
+                "{}（2日最佳{}%，次日收盘{}%）",
+                symbol,
+                fmt_opt_f64(best_ret_pct, 1),
+                fmt_opt_f64(next_close_ret_pct, 1)
+            ),
+            "missed_alpha" => format!(
+                "{}（忽略后2日最佳{}%）",
+                symbol,
+                fmt_opt_f64(best_ret_pct, 1)
+            ),
+            _ => format!(
+                "{}（次日收盘{}%，2日最佳{}%）",
+                symbol,
+                fmt_opt_f64(next_close_ret_pct, 1),
+                fmt_opt_f64(best_ret_pct, 1)
+            ),
+        };
+        out.push(note);
+    }
+    Ok(out)
+}
+
+fn load_actionable_missed_examples(
+    db: &Connection,
+    cutoff: &str,
+    date_str: &str,
+) -> Result<(usize, Vec<String>)> {
+    let mut count_stmt = db.prepare(
+        "SELECT COUNT(DISTINCT p.symbol)
+         FROM alpha_postmortem p
+         INNER JOIN report_decisions d
+           ON p.report_date = d.report_date
+          AND p.session = d.session
+          AND p.symbol = d.symbol
+          AND p.selection_status = d.selection_status
+         WHERE p.session = 'daily'
+           AND p.report_date >= CAST(? AS DATE)
+           AND p.report_date < CAST(? AS DATE)
+           AND p.label = 'missed_alpha'
+           AND p.symbol NOT LIKE '300%'
+           AND p.symbol NOT LIKE '301%'
+           AND d.report_bucket = 'THEME ROTATION'
+           AND d.signal_confidence IN ('HIGH', 'MODERATE')
+           AND d.execution_mode IN ('executable', 'wait_pullback')",
+    )?;
+    let actionable_missed_count = count_stmt
+        .query_row(duckdb::params![cutoff, date_str], |row| {
+            row.get::<_, i64>(0)
+        })
+        .unwrap_or(0) as usize;
+
+    let mut stmt = db.prepare(
+        "WITH ranked AS (
+            SELECT
+                p.symbol,
+                MAX(COALESCE(p.best_ret_pct, 0.0)) AS best_ret_pct,
+                ANY_VALUE(d.report_bucket) AS report_bucket,
+                ANY_VALUE(d.signal_confidence) AS signal_confidence,
+                ANY_VALUE(d.execution_mode) AS execution_mode
+            FROM alpha_postmortem p
+            INNER JOIN report_decisions d
+              ON p.report_date = d.report_date
+             AND p.session = d.session
+             AND p.symbol = d.symbol
+             AND p.selection_status = d.selection_status
+            WHERE p.session = 'daily'
+              AND p.report_date >= CAST(? AS DATE)
+              AND p.report_date < CAST(? AS DATE)
+              AND p.label = 'missed_alpha'
+              AND p.symbol NOT LIKE '300%'
+              AND p.symbol NOT LIKE '301%'
+              AND d.report_bucket = 'THEME ROTATION'
+              AND d.signal_confidence IN ('HIGH', 'MODERATE')
+              AND d.execution_mode IN ('executable', 'wait_pullback')
+            GROUP BY p.symbol
+         )
+         SELECT symbol, best_ret_pct, report_bucket, signal_confidence, execution_mode
+         FROM ranked
+         ORDER BY best_ret_pct DESC, symbol
+         LIMIT 3",
+    )?;
+    let rows = stmt.query_map(duckdb::params![cutoff, date_str], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, f64>(1).unwrap_or(0.0),
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, String>(4)?,
+        ))
+    })?;
+
+    let mut examples = Vec::new();
+    for row in rows {
+        let (symbol, best_ret_pct, report_bucket, signal_confidence, execution_mode) = row?;
+        examples.push(format!(
+            "{}（{} / {} / {}，2日最佳{}%）",
+            symbol,
+            report_bucket,
+            signal_confidence,
+            execution_mode,
+            fmt_opt_f64(Some(best_ret_pct), 1)
+        ));
+    }
+    Ok((actionable_missed_count, examples))
+}
+
+fn compute_headline_gate(
+    db: &Connection,
+    date_str: &str,
+    notable: &[NotableItem],
+) -> HeadlineGateSummary {
+    let as_of = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+        .unwrap_or_else(|_| NaiveDate::from_ymd_opt(1970, 1, 1).unwrap());
+    let signals: Vec<HeadlineSignalSummary> = notable
+        .iter()
+        .map(|item| HeadlineSignalSummary {
+            direction: item.signal.direction.clone(),
+            trend_prob: item.detail.get("trend_prob").and_then(|v| v.as_f64()),
+            report_bucket: item.report_bucket.clone(),
+        })
+        .collect();
+    summarize_headline_gate(db, as_of, &signals)
+}
+
+fn render_headline_gate(md: &mut String, gate: &HeadlineGateSummary) -> Result<()> {
+    writeln!(md, "### Headline Gate")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "- mode = {} | bias = {} | directional_regime_allowed = {}",
+        gate.mode, gate.bias, gate.allow_directional_regime,
+    )?;
+    writeln!(md, "- reporting_rule = {}", gate.reporting_rule)?;
+    writeln!(
+        md,
+        "- p_ret_positive = {} | brier_score = {} | calibration_n = {} | regime_duration = {}天",
+        fmt_opt_f64(gate.inputs.p_ret_positive, 4),
+        fmt_opt_f64(gate.inputs.brier_score, 4),
+        gate.inputs.calibration_n,
+        gate.inputs.regime_duration_days,
+    )?;
+    writeln!(
+        md,
+        "- trend_prob_range = {} ~ {} (span={})",
+        fmt_opt_f64(gate.inputs.trend_prob_min, 3),
+        fmt_opt_f64(gate.inputs.trend_prob_max, 3),
+        fmt_opt_f64(gate.inputs.trend_prob_span, 3),
+    )?;
+    writeln!(
+        md,
+        "- direction_concentration = {} | dominant_direction = {}",
+        gate.inputs
+            .direction_concentration
+            .map(|v| format!("{:.1}%", v * 100.0))
+            .unwrap_or_else(|| "-".to_string()),
+        gate.inputs.dominant_direction,
+    )?;
+    writeln!(
+        md,
+        "- vol_hmm = {} | macro_vol_state = {} | gate_multiplier = {} | vol_macro_conflict = {}",
+        gate.inputs.vol_hmm_regime.as_deref().unwrap_or("-"),
+        gate.inputs.macro_vol_state.as_deref().unwrap_or("-"),
+        fmt_opt_f64(gate.inputs.gate_multiplier, 2),
+        gate.inputs.vol_macro_conflict,
+    )?;
+    writeln!(md, "- reasons:")?;
+    for reason in &gate.reasons {
+        writeln!(md, "  - {}", reason)?;
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
 fn report_bucket_description(bucket: &str) -> &'static str {
     match bucket {
         "CORE BOOK" => "主报告正文层。优先看这里来形成 house view。",
+        "RANGE CORE" => {
+            "区间主书层。headline 仍偏 uncertain，但综合/执行足够强，可作为条件式做多的主书保留层。"
+        }
+        "TACTICAL CONTINUATION" => {
+            "战术续涨层。只保留少量 continuation 名额，默认轻仓、硬止损、不得机械追高。"
+        }
         "THEME ROTATION" => "主题轮动层。更适合写成行业/概念/资金主线，而不是单一主书押注。",
         _ => "雷达层。用于保留边缘但仍值得持续跟踪的信号。",
     }
@@ -1333,10 +2060,7 @@ fn render_events(db: &Connection, date_str: &str, generated_at: &str) -> Result<
 fn render_recent_forecasts(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
     writeln!(md, "### 近期业绩预告 (7日内)")?;
     writeln!(md)?;
-    writeln!(
-        md,
-        "| 代码 | 公告日 | 类型 | 变动幅度 | 摘要 |"
-    )?;
+    writeln!(md, "| 代码 | 公告日 | 类型 | 变动幅度 | 摘要 |")?;
     writeln!(md, "|------|--------|------|----------|------|")?;
 
     let sql = "SELECT ts_code, CAST(ann_date AS VARCHAR), forecast_type,
@@ -1396,7 +2120,10 @@ fn render_upcoming_unlocks(md: &mut String, db: &Connection, date_str: &str) -> 
         md,
         "| 代码 | 解禁日 | 解禁比例% | 解禁股数(万股) | 持有人 | 类型 |"
     )?;
-    writeln!(md, "|------|--------|----------|---------------|--------|------|")?;
+    writeln!(
+        md,
+        "|------|--------|----------|---------------|--------|------|"
+    )?;
 
     let sql = "SELECT ts_code, CAST(float_date AS VARCHAR), float_ratio,
                       float_share, holder_name, share_type
@@ -1458,10 +2185,7 @@ fn render_upcoming_unlocks(md: &mut String, db: &Connection, date_str: &str) -> 
 fn render_disclosure_calendar(md: &mut String, db: &Connection, _date_str: &str) -> Result<()> {
     writeln!(md, "### 财报披露日历")?;
     writeln!(md)?;
-    writeln!(
-        md,
-        "| 代码 | 报告期 | 预约日 | 实际日 |"
-    )?;
+    writeln!(md, "| 代码 | 报告期 | 预约日 | 实际日 |")?;
     writeln!(md, "|------|--------|--------|--------|")?;
 
     // Get the latest quarter end date
@@ -1557,7 +2281,9 @@ fn render_enriched_news(md: &mut String, db: &Connection, date_str: &str) -> Res
                     writeln!(
                         md,
                         "  {}",
-                        summary.as_deref().unwrap_or(headline.as_deref().unwrap_or("-")),
+                        summary
+                            .as_deref()
+                            .unwrap_or(headline.as_deref().unwrap_or("-")),
                     )?;
                     writeln!(md, "  时间: {}", pub_at)?;
                 }
@@ -1683,7 +2409,10 @@ fn render_holder_trades(md: &mut String, db: &Connection, date_str: &str) -> Res
         md,
         "| 代码 | 公告日 | 股东 | 类型 | 增减持 | 变动比例% | 变动后持股% |"
     )?;
-    writeln!(md, "|------|--------|------|------|--------|----------|------------|")?;
+    writeln!(
+        md,
+        "|------|--------|------|------|--------|----------|------------|"
+    )?;
 
     let sql = "SELECT ts_code, CAST(ann_date AS VARCHAR), holder_name,
                       COALESCE(holder_type, '-'),
@@ -1757,7 +2486,10 @@ fn render_repurchase(md: &mut String, db: &Connection, date_str: &str) -> Result
         md,
         "| 代码 | 公告日 | 进度 | 到期日 | 数量(万股) | 金额(万) |"
     )?;
-    writeln!(md, "|------|--------|------|--------|-----------|---------|")?;
+    writeln!(
+        md,
+        "|------|--------|------|--------|-----------|---------|"
+    )?;
 
     let sql = "SELECT ts_code, CAST(ann_date AS VARCHAR),
                       COALESCE(proc, '-'),
@@ -1912,11 +2644,7 @@ fn query_momentum_detail(
 }
 
 /// Fetch flow component z-scores from analytics.
-fn query_flow_components(
-    db: &Connection,
-    ts_code: &str,
-    date_str: &str,
-) -> Vec<(String, f64)> {
+fn query_flow_components(db: &Connection, ts_code: &str, date_str: &str) -> Vec<(String, f64)> {
     let sql = "SELECT metric, value
                FROM analytics
                WHERE ts_code = ? AND as_of = ? AND module = 'flow'
@@ -1959,11 +2687,7 @@ fn query_latest_forecast(
 }
 
 /// Fetch latest moneyflow: net_mf_amount, super-large net.
-fn query_moneyflow(
-    db: &Connection,
-    ts_code: &str,
-    date_str: &str,
-) -> Option<(f64, f64)> {
+fn query_moneyflow(db: &Connection, ts_code: &str, date_str: &str) -> Option<(f64, f64)> {
     let sql = "SELECT net_mf_amount,
                       COALESCE(buy_elg_amount, 0) - COALESCE(sell_elg_amount, 0) AS elg_net
                FROM moneyflow
@@ -1985,11 +2709,7 @@ fn query_moneyflow(
 }
 
 /// Fetch margin detail: rzye today + 5D delta.
-fn query_margin_detail(
-    db: &Connection,
-    ts_code: &str,
-    date_str: &str,
-) -> Option<(f64, f64)> {
+fn query_margin_detail(db: &Connection, ts_code: &str, date_str: &str) -> Option<(f64, f64)> {
     let sql = "WITH ranked AS (
                    SELECT rzye,
                           ROW_NUMBER() OVER (ORDER BY trade_date DESC) AS rn

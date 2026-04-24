@@ -14,9 +14,18 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import duckdb
+import exchange_calendars as xcals
 
-DB_PATH = "data/quant.duckdb"
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+from quant_bot.config.settings import Settings
+from quant_bot.storage.db import connect_readonly
+
+
+XNYS_CALENDAR = xcals.get_calendar("XNYS")
+DAILY_REPORT_SESSION = "post"
+DAILY_REPORT_MIN_SIZE = 200
+DAILY_SUMMARY_MAX_LINES = 12
 
 
 def _fmt(v, d=2):
@@ -31,18 +40,121 @@ def _pct(cur, prev):
     return (cur / prev - 1.0) * 100.0
 
 
-def generate_weekly_payload(as_of: date) -> str:
-    """Generate weekly payload markdown for the week ending on as_of."""
-    con = duckdb.connect(DB_PATH, read_only=True)
+def resolve_week_bounds(as_of: date) -> tuple[date, date]:
+    week_start = as_of - timedelta(days=as_of.weekday())
+    week_end = week_start + timedelta(days=4)
+    return week_start, week_end
 
-    # Week boundaries: Monday to Friday (or as_of)
-    # Find the most recent Friday <= as_of
-    weekday = as_of.weekday()  # 0=Mon ... 6=Sun
-    if weekday >= 5:  # weekend
-        week_end = as_of - timedelta(days=weekday - 4)
-    else:
-        week_end = as_of
-    week_start = week_end - timedelta(days=4)  # Monday
+
+def week_trading_dates(as_of: date) -> list[date]:
+    week_start, week_end = resolve_week_bounds(as_of)
+    sessions = XNYS_CALENDAR.sessions_in_range(week_start.isoformat(), week_end.isoformat())
+    return [session.date() for session in sessions]
+
+
+def daily_report_path(reports_dir: Path, report_date: date, session: str = DAILY_REPORT_SESSION) -> Path:
+    return reports_dir / f"{report_date.isoformat()}_report_zh_{session}.md"
+
+
+def collect_weekly_daily_reports(
+    as_of: date,
+    reports_dir: Path,
+    *,
+    session: str = DAILY_REPORT_SESSION,
+    require_complete: bool = True,
+) -> tuple[list[date], list[Path], list[Path]]:
+    trading_days = week_trading_dates(as_of)
+    found: list[Path] = []
+    missing: list[Path] = []
+    for trading_day in trading_days:
+        path = daily_report_path(reports_dir, trading_day, session=session)
+        if path.exists() and path.stat().st_size >= DAILY_REPORT_MIN_SIZE:
+            found.append(path)
+        else:
+            missing.append(path)
+
+    if require_complete and missing:
+        missing_block = "\n".join(f"- {path.name}" for path in missing)
+        raise RuntimeError(
+            "weekly report aborted: not all trading-day daily reports are ready.\n"
+            f"required_session={session}\n"
+            f"expected_reports={len(trading_days)}\n"
+            f"found_reports={len(found)}\n"
+            f"missing_reports:\n{missing_block}"
+        )
+
+    return trading_days, found, missing
+
+
+def _extract_daily_report_summary(report_path: Path, *, max_lines: int = DAILY_SUMMARY_MAX_LINES) -> list[str]:
+    text = report_path.read_text(encoding="utf-8", errors="replace")
+    summary: list[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith(("## Factor Lab", "### Factor Lab", "**Factor Lab")):
+            break
+        if line.startswith("*AI分析"):
+            break
+        if line.startswith("---"):
+            continue
+        summary.append(line)
+        if len(summary) >= max_lines:
+            break
+    return summary
+
+
+def build_weekly_daily_digest(
+    as_of: date,
+    reports_dir: Path,
+    *,
+    session: str = DAILY_REPORT_SESSION,
+    require_complete: bool = True,
+) -> list[str]:
+    trading_days, found_reports, missing_reports = collect_weekly_daily_reports(
+        as_of,
+        reports_dir,
+        session=session,
+        require_complete=require_complete,
+    )
+
+    lines = [
+        "## 0. Daily Report Coverage",
+        "",
+        f"- Required daily reports for this trading week ({session}-market): {len(trading_days)}",
+        f"- Reports found: {len(found_reports)}/{len(trading_days)}",
+        f"- Trading days covered: {', '.join(day.isoformat() for day in trading_days)}",
+    ]
+    if missing_reports:
+        lines.append(
+            "- Missing reports: "
+            + ", ".join(path.name for path in missing_reports)
+        )
+    lines += ["", "## 0a. Daily Report Digest", ""]
+
+    for report_path in found_reports:
+        report_date = report_path.stem.split("_report_zh_")[0]
+        lines.append(f"### {report_date} — {report_path.name}")
+        lines.append("")
+        for summary_line in _extract_daily_report_summary(report_path):
+            lines.append(f"- {summary_line}")
+        lines.append("")
+
+    return lines
+
+
+def generate_weekly_payload(
+    as_of: date,
+    db_path: Path,
+    *,
+    reports_dir: Path,
+    require_daily_reports: bool = True,
+) -> str:
+    """Generate weekly payload markdown for the completed trading week containing as_of."""
+    con = connect_readonly(db_path)
+
+    week_start, week_end = resolve_week_bounds(as_of)
 
     week_start_str = week_start.isoformat()
     week_end_str = week_end.isoformat()
@@ -59,6 +171,13 @@ def generate_weekly_payload(as_of: date) -> str:
         "---",
         "",
     ]
+
+    lines += build_weekly_daily_digest(
+        week_end,
+        reports_dir,
+        require_complete=require_daily_reports,
+    )
+    lines += ["---", ""]
 
     # ── 1. Market Indices Weekly Performance ──────────────────────────────────
     lines += ["## 1. Market Indices — Weekly Performance", ""]
@@ -271,6 +390,14 @@ def generate_weekly_payload(as_of: date) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Generate weekly payload")
     parser.add_argument("--date", default=None, help="Week ending date (default: today)")
+    parser.add_argument("--config", default="config.yaml")
+    parser.add_argument("--db", default=None, help="Override source DB (default: raw canonical DB from config)")
+    parser.add_argument("--reports-dir", default="reports", help="Directory containing daily report markdown files")
+    parser.add_argument(
+        "--allow-missing-daily-reports",
+        action="store_true",
+        help="Allow weekly payload generation even if some trading-day daily reports are missing",
+    )
     args = parser.parse_args()
 
     if args.date:
@@ -279,7 +406,16 @@ def main():
     else:
         as_of = date.today()
 
-    payload = generate_weekly_payload(as_of)
+    cfg = Settings.load(args.config)
+    db_path = Path(args.db) if args.db else cfg.raw_db_path_abs
+    reports_dir = Path(args.reports_dir)
+
+    payload = generate_weekly_payload(
+        as_of,
+        db_path,
+        reports_dir=reports_dir,
+        require_daily_reports=not args.allow_missing_daily_reports,
+    )
     output = Path(f"reports/{as_of}_weekly_payload.md")
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(payload)

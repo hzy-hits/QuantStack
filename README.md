@@ -1,6 +1,30 @@
 # Quant Stack
 
-Production-grade quantitative research platform covering **US equities** and **Chinese A-shares**, with an AI-driven alpha factor discovery lab. ~40k lines of Python + Rust, running daily in production.
+Production-grade quantitative research platform covering **US equities** and **Chinese A-shares**, with an AI-driven alpha factor discovery lab. Its core rule is simple: **the program computes, the agent narrates**. Every output is an explicit `P(event | conditions)` with horizon, conditioning set, and sample size. No black-box scores. No free-form agent arithmetic. The stack now includes shadow-running option alpha diagnostics for both markets and a Factor Lab feedback loop for postmortem-driven factor weighting.
+
+## Production Snapshot
+
+- **US market**: ~748 symbols, twice daily reports (pre-market + post-market)
+- **CN market**: 300+ A-shares from CSI300/SSE50, daily reports
+- **Data layer**: 8 external APIs, async Rust fetchers, DuckDB-backed audit trail
+- **Analysis layer**: US and CN analytics modules under one probability-first framework, including shadow option alpha diagnostics
+- **Agent layer**: LLMs narrate structured payloads but never modify the numbers
+
+## Why This Exists
+
+In quant systems, polished output is cheap and statistical honesty is expensive.
+
+The hard part is not generating a report. The hard part is keeping the whole stack auditable while it runs every day across heterogeneous APIs, market deadlines, and LLM involvement. Quant Stack exists to make that constraint explicit:
+
+- programs compute the numbers
+- models and assumptions stay legible
+- agents narrate facts instead of improvising arithmetic
+
+## Thesis
+
+- **Probability first**: reports are built from conditional probabilities, not opaque "signals"
+- **Agents are narrators, not calculators**: LLMs read structured payloads and write reports, but never change the numbers
+- **Anti-overfit by design**: holdouts stay hidden from agents, sessions are budget-capped, and promotion requires hard gates
 
 ## Architecture
 
@@ -31,19 +55,20 @@ Production-grade quantitative research platform covering **US equities** and **C
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Components
+## System Components
 
 ### Factor Lab — AI-Driven Alpha Factor Discovery
 
-An automated factor mining platform where LLM agents iteratively propose, evaluate, and promote alpha factors through a strict anti-overfit pipeline.
+Factor discovery is where LLM curiosity is most useful and statistical discipline is most necessary. Factor Lab lets agents generate hypotheses quickly, but only inside a search space narrow enough to audit and a validation stack strict enough to reject most ideas.
 
 **Core Design:**
 
-- **Factor DSL** — ~35 operators (time-series, cross-sectional, utility) for expressing alpha factors. Example: `rank(delta(ts_mean(close, 5), 10))`
-- **Walk-Forward Backtest** — Expanding-window validation with separate IS/OOS periods. Agent only sees IS metrics; OOS results are binary PASS/FAIL to prevent reverse-engineering
-- **5-Gate Anti-Overfit System** — IC > 0.02, IC_IR > 0.3, turnover < 40%, monotonicity > 0.8, correlation < 0.7 with existing factors
-- **Agent Loop** — Claude/Codex-driven iterative discovery with budget cap (50 experiments/session)
-- **Factor Registry** — DuckDB-backed repository with daily metrics, auto-retirement (rolling 60-day IC < 0.01), and promotion tracking
+- **Factor DSL** — agents propose formulas, not code. ~35 operators, bounded depth, and whitelisted windows keep search expressive enough for ideas but narrow enough to audit
+- **Walk-Forward Backtest** — validation is expanding-window, not full-sample. Agents see in-sample metrics, but out-of-sample results collapse to PASS/FAIL so the holdout cannot be gamed
+- **5-Gate Anti-Overfit System** — predictive power is necessary but not sufficient; promotion also requires stability, tradeability, monotonicity, and low redundancy
+- **Agent Loop** — Claude/Codex can iterate quickly, but a hard 50-experiment budget prevents brute-force multiple testing
+- **Factor Registry** — promoted factors are tracked like production assets, with daily metrics, promotion history, and auto-retirement on decay
+- **Feedback Loop** — Candidate postmortem details capture captured/missed/stale overlaps and feed shrunken multiplier selection instead of producing a second trade list
 
 **Metrics:** IC, IC_IR, quintile spread, portfolio turnover, Sharpe ratio of long-short basket.
 
@@ -57,7 +82,7 @@ An automated factor mining platform where LLM agents iteratively propose, evalua
 
 ### Quant-Research-V1 — US Equities Pipeline
 
-Automated US equities research pipeline delivering analyst-grade probability reports twice daily.
+Automated US equities research pipeline delivering analyst-grade probability reports twice daily. The operating problem is not just "compute features"; it is to keep reports fresh and auditable despite heterogeneous APIs, market deadlines, and LLM involvement.
 
 **Pipeline (2x daily):**
 
@@ -67,7 +92,7 @@ Automated US equities research pipeline delivering analyst-grade probability rep
 
 **Data Sources:** Finnhub (news/quotes), FRED (macro), SEC Edgar (8-K filings), Polymarket (crowd probabilities), yfinance (OHLCV), CBOE (options)
 
-**15 Analytics Modules:**
+**Core Analytics Modules:**
 
 | Module | Method |
 |---|---|
@@ -75,13 +100,16 @@ Automated US equities research pipeline delivering analyst-grade probability rep
 | Earnings Risk | P(5D excess > 0 \| surprise quintile) with Beta(2,2) prior |
 | HMM Regime | 2-state Gaussian HMM on SPY with Brier calibration |
 | Options | IV ratio, P/C skew, probability cones, unusual activity |
+| Overnight Gate | Open/gap execution gate with event and option context |
+| Overnight Continuation Alpha | Shadow continuation/fade calibration with sample count, hit-rate interval, latest sample date |
+| Report Review | Postmortem storage for report decisions and feedback labels |
 | Variance Premium | IV² - RV² |
 | Macro Gate | 3x3 VIX × yield curve matrix |
 | + 9 more | Kalman beta, Granger causality, sector rotation, pairs, ... |
 
 **Filtering:** 748 symbols → 120 candidates → 30 notable items (HIGH / MOD / WATCH / LOW)
 
-**Agent Synthesis:** 4 specialist analysts (Claude API) read structured payload in parallel, merge agent synthesizes final report.
+**Agent Synthesis:** 4 specialist analysts (Claude API) read structured payloads in parallel, then a merge agent assembles the final report. The agents never compute numbers; they only narrate pre-computed facts.
 
 | | |
 |---|---|
@@ -93,7 +121,7 @@ Automated US equities research pipeline delivering analyst-grade probability rep
 
 ### Quant-Research-CN — A-Share Pipeline
 
-Chinese A-share quantitative research pipeline, fully implemented in Rust.
+Chinese A-share quantitative research pipeline, fully implemented in Rust. The goal was to own the full execution path in one language while handling A-share-specific microstructure, data vendor constraints, and daily production scheduling.
 
 **Pipeline (daily):**
 
@@ -111,6 +139,9 @@ Tushare Pro + AKShare → DuckDB → 10 Analytics → 2-Pass Filter → Payload 
 | iVIX | Model-free implied variance from 300ETF options |
 | Sector Rotation | Industry momentum + flow rotation with CSI300 weighting |
 | Vol HMM | 2-state HMM on log-variance (Parkinson / Garman-Klass / Yang-Zhang) |
+| Open Execution Gate | A-share open/gap chase gate for do-not-chase and entry-quality diagnostics |
+| Continuation/Fade | Shadow postmortem labels for captured, missed, stale, and false-positive setups |
+| Shadow Option Alpha Calibration | Shadow option calibration buckets for report-only stale-chase and entry-quality diagnostics |
 | + 4 more | Momentum, HMM regime, macro gate, realized volatility |
 
 **Flow Score Weights:** large_flow (30%), northbound (18%), margin (15%), block trades (10%), hot money (8%), insider (7%), event_clock (7%), market_vol (5%)
@@ -192,10 +223,11 @@ This system runs daily in production, covering:
 - **US market**: ~748 symbols, 2x daily reports (pre-market + post-market)
 - **CN market**: 300+ A-shares from CSI300/SSE50, daily reports
 - **Factor Lab**: Continuous autonomous research sessions, 30+ experiments per run
+- **Shadow Alpha Feedback**: US overnight continuation and CN shadow option calibration write diagnostics only during the observation window; they do not directly override primary ranking weights
 
 ## Repository Structure
 
-This is the umbrella repository for the Quant Stack platform. The three sub-projects are maintained in separate private repositories.
+This is the umbrella repository for the Quant Stack platform. The three sub-projects are maintained in separate private repositories, and this repository stores synchronized source snapshots for browsing, backup, and migration. Generated reports, runtime databases, local config, and other operational artifacts are excluded.
 
 ## License
 

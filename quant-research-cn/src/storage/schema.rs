@@ -467,4 +467,67 @@ pub const CREATE_TABLES: &str = "
         detail    VARCHAR,
         ts        TIMESTAMP DEFAULT current_timestamp
     );
+
+    -- ── Report review ledger ────────────────────────────────────────────────
+    CREATE TABLE IF NOT EXISTS report_decisions (
+        report_date            DATE NOT NULL,
+        session                VARCHAR NOT NULL,
+        symbol                 VARCHAR NOT NULL,
+        selection_status       VARCHAR NOT NULL,
+        rank_order             INTEGER,
+        report_bucket          VARCHAR,
+        signal_direction       VARCHAR,
+        signal_confidence      VARCHAR,
+        composite_score        DOUBLE,
+        execution_mode         VARCHAR,
+        execution_score        DOUBLE,
+        max_chase_gap_pct      DOUBLE,
+        pullback_trigger_pct   DOUBLE,
+        setup_score            DOUBLE,
+        continuation_score     DOUBLE,
+        fade_risk              DOUBLE,
+        reference_close        DOUBLE,
+        details_json           VARCHAR,
+        created_at             TIMESTAMP DEFAULT current_timestamp,
+        PRIMARY KEY (report_date, session, symbol, selection_status)
+    );
+
+    CREATE TABLE IF NOT EXISTS report_outcomes (
+        report_date            DATE NOT NULL,
+        session                VARCHAR NOT NULL,
+        symbol                 VARCHAR NOT NULL,
+        selection_status       VARCHAR NOT NULL,
+        evaluation_date        DATE NOT NULL,
+        next_trade_date        DATE,
+        second_trade_date      DATE,
+        reference_close        DOUBLE,
+        next_open              DOUBLE,
+        next_close             DOUBLE,
+        best_high_2d           DOUBLE,
+        worst_low_2d           DOUBLE,
+        next_open_ret_pct      DOUBLE,
+        next_close_ret_pct     DOUBLE,
+        best_up_2d_pct         DOUBLE,
+        best_down_2d_pct       DOUBLE,
+        gap_vs_chase_limit     DOUBLE,
+        data_ready             BOOLEAN DEFAULT FALSE,
+        PRIMARY KEY (report_date, session, symbol, selection_status)
+    );
+
+    CREATE TABLE IF NOT EXISTS alpha_postmortem (
+        report_date            DATE NOT NULL,
+        session                VARCHAR NOT NULL,
+        symbol                 VARCHAR NOT NULL,
+        selection_status       VARCHAR NOT NULL,
+        evaluation_date        DATE NOT NULL,
+        label                  VARCHAR NOT NULL,
+        review_note            VARCHAR,
+        factor_feedback_action VARCHAR,
+        factor_feedback_weight DOUBLE,
+        best_ret_pct           DOUBLE,
+        next_open_ret_pct      DOUBLE,
+        next_close_ret_pct     DOUBLE,
+        gap_vs_chase_limit     DOUBLE,
+        PRIMARY KEY (report_date, session, symbol, selection_status)
+    );
 ";

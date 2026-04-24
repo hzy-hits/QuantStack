@@ -88,7 +88,9 @@ def get_gmail_service():
             flow = InstalledAppFlow.from_client_secrets_file(
                 str(CREDENTIALS_FILE), SCOPES
             )
-            creds = flow.run_local_server(port=0)
+            print("\n=== Gmail OAuth 认证 ===")
+            print("请在浏览器中打开下方链接完成授权（授权后页面会自动关闭）：\n")
+            creds = flow.run_local_server(port=0, open_browser=False)
         TOKEN_FILE.write_text(creds.to_json())
 
     return build("gmail", "v1", credentials=creds)

@@ -1,7 +1,9 @@
 """DuckDB connection and schema management."""
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
+import shutil
 
 import duckdb
 
@@ -259,18 +261,89 @@ CREATE TABLE IF NOT EXISTS kalman_betas (
     computed_at     DATE NOT NULL,
     PRIMARY KEY (symbol, computed_at)
 );
+
+-- Report-layer decision ledger for postmortem review
+CREATE TABLE IF NOT EXISTS report_decisions (
+    report_date          DATE NOT NULL,
+    session              VARCHAR NOT NULL,
+    symbol               VARCHAR NOT NULL,
+    selection_status     VARCHAR NOT NULL,   -- selected | ignored
+    rank_order           INTEGER,
+    report_bucket        VARCHAR,
+    signal_direction     VARCHAR,
+    signal_confidence    VARCHAR,
+    headline_mode        VARCHAR,
+    composite_score      DOUBLE,
+    report_score         DOUBLE,
+    tradability_score    DOUBLE,
+    lane_reason          VARCHAR,
+    execution_mode       VARCHAR,
+    entry_price          DOUBLE,
+    reference_price      DOUBLE,
+    stop_price           DOUBLE,
+    target_price         DOUBLE,
+    rr_ratio             DOUBLE,
+    expected_move_pct    DOUBLE,
+    gap_pct              DOUBLE,
+    primary_reason       VARCHAR,
+    details_json         VARCHAR,
+    created_at           TIMESTAMP DEFAULT current_timestamp,
+    PRIMARY KEY (report_date, session, symbol, selection_status)
+);
+
+-- Realized outcomes for prior report decisions
+CREATE TABLE IF NOT EXISTS report_outcomes (
+    report_date              DATE NOT NULL,
+    session                  VARCHAR NOT NULL,
+    symbol                   VARCHAR NOT NULL,
+    selection_status         VARCHAR NOT NULL,
+    evaluation_date          DATE NOT NULL,
+    next_trade_date          DATE,
+    entry_price              DOUBLE,
+    reference_price          DOUBLE,
+    next_open                DOUBLE,
+    next_close               DOUBLE,
+    hold_3d_close            DOUBLE,
+    next_open_ret_pct        DOUBLE,
+    next_close_ret_pct       DOUBLE,
+    hold_3d_ret_pct          DOUBLE,
+    ref_gap_pct              DOUBLE,
+    move_consumed_ratio      DOUBLE,
+    execution_slippage_pct   DOUBLE,
+    alpha_remaining_pct      DOUBLE,
+    data_ready               BOOLEAN DEFAULT FALSE,
+    PRIMARY KEY (report_date, session, symbol, selection_status)
+);
+
+-- Classification layer for report postmortem + Factor Lab feedback hooks
+CREATE TABLE IF NOT EXISTS alpha_postmortem (
+    report_date              DATE NOT NULL,
+    session                  VARCHAR NOT NULL,
+    symbol                   VARCHAR NOT NULL,
+    selection_status         VARCHAR NOT NULL,
+    evaluation_date          DATE NOT NULL,
+    label                    VARCHAR NOT NULL,
+    review_note              VARCHAR,
+    factor_feedback_action   VARCHAR,
+    factor_feedback_weight   DOUBLE,
+    best_ret_pct             DOUBLE,
+    move_consumed_ratio      DOUBLE,
+    execution_slippage_pct   DOUBLE,
+    alpha_remaining_pct      DOUBLE,
+    PRIMARY KEY (report_date, session, symbol, selection_status)
+);
 """
 
 
-class _LockedConnection:
-    """Thin wrapper that holds a file lock alongside a DuckDB connection.
+class _ManagedConnection:
+    """Thin wrapper that optionally holds a file lock alongside DuckDB.
 
     Delegates everything to the underlying ``duckdb.DuckDBPyConnection`` so
     callers don't need to change.  The lock is released when ``close()`` is
     called or the wrapper is used as a context-manager.
     """
 
-    def __init__(self, con: duckdb.DuckDBPyConnection, lock_fd) -> None:  # noqa: ANN001
+    def __init__(self, con: duckdb.DuckDBPyConnection, lock_fd=None) -> None:  # noqa: ANN001
         object.__setattr__(self, "_con", con)
         object.__setattr__(self, "_lock_fd", lock_fd)
 
@@ -285,37 +358,94 @@ class _LockedConnection:
         try:
             self._con.close()
         finally:
-            self._lock_fd.close()
+            if self._lock_fd is not None:
+                self._lock_fd.close()
 
     # --- transparent proxy -------------------------------------------------
     def __getattr__(self, name: str):  # noqa: ANN204
         return getattr(self._con, name)
 
 
-def connect(db_path: str | Path = "data/quant.duckdb") -> duckdb.DuckDBPyConnection:
+def _open_connection(
+    db_path: str | Path = "data/quant.duckdb",
+    *,
+    read_only: bool,
+    take_write_lock: bool,
+) -> duckdb.DuckDBPyConnection:
     path = Path(db_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock_path = path.with_suffix(".lock")
-    # Acquire file lock to prevent concurrent writers (DuckDB single-writer)
-    import fcntl
-    lock_fd = open(lock_path, "w")
+    if not read_only:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    lock_fd = None
+    if take_write_lock:
+        # Writers keep the historical single-writer guard; readers skip it.
+        import fcntl
+
+        lock_path = path.with_suffix(".lock")
+        lock_fd = open(lock_path, "w")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            lock_fd.close()
+            raise RuntimeError(
+                f"DuckDB is locked by another process: {path}\n"
+                "Another pipeline run may be in progress. Check /tmp/quant-research-pipeline.lock"
+            )
+
     try:
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        lock_fd.close()
-        raise RuntimeError(
-            f"DuckDB is locked by another process: {path}\n"
-            "Another pipeline run may be in progress. Check /tmp/quant-research-pipeline.lock"
-        )
-    con = duckdb.connect(str(path))
-    return _LockedConnection(con, lock_fd)  # type: ignore[return-value]
+        con = duckdb.connect(str(path), read_only=read_only)
+    except Exception:
+        if lock_fd is not None:
+            lock_fd.close()
+        raise
+    return _ManagedConnection(con, lock_fd)  # type: ignore[return-value]
+
+
+def connect_write(db_path: str | Path = "data/quant.duckdb") -> duckdb.DuckDBPyConnection:
+    return _open_connection(db_path, read_only=False, take_write_lock=True)
+
+
+def connect_readonly(db_path: str | Path = "data/quant.duckdb") -> duckdb.DuckDBPyConnection:
+    return _open_connection(db_path, read_only=True, take_write_lock=False)
+
+
+def connect(db_path: str | Path = "data/quant.duckdb") -> duckdb.DuckDBPyConnection:
+    return connect_write(db_path)
 
 
 def init_schema(db_path: str | Path = "data/quant.duckdb") -> None:
-    with connect(db_path) as con:
+    with connect_write(db_path) as con:
         con.execute(DDL)
+        con.execute("CHECKPOINT")
         con.commit()
     print(f"Schema initialized at {db_path}")
+
+
+def snapshot_path(base_path: str | Path, as_of: date | str, session: str) -> Path:
+    """Derive a session-aware snapshot filename from a base DuckDB path."""
+    path = Path(base_path)
+    as_of_str = as_of.isoformat() if isinstance(as_of, date) else str(as_of)
+    session = str(session).strip().lower()
+    stem = path.stem or "quant"
+    suffix = path.suffix or ".duckdb"
+    return path.with_name(f"{stem}_{as_of_str}_{session}{suffix}")
+
+
+def copy_database(src: str | Path, dst: str | Path) -> None:
+    src_path = Path(src)
+    dst_path = Path(dst)
+    if not src_path.exists():
+        raise FileNotFoundError(f"database not found: {src_path}")
+
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src_path, dst_path)
+
+    src_wal = src_path.with_suffix(src_path.suffix + ".wal")
+    dst_wal = dst_path.with_suffix(dst_path.suffix + ".wal")
+    if src_wal.exists():
+        shutil.copy2(src_wal, dst_wal)
+    elif dst_wal.exists():
+        dst_wal.unlink()
 
 
 def log_run(

@@ -10,13 +10,14 @@ import numpy as np
 MAX_ITEMS = 30
 MIN_ITEMS = 8
 
-# Composite score weights (sum to 1.0)
+# Composite score weights (sum to 1.0). Factor Lab is a recall/research input,
+# not a second trading system, so options/event structure carries more weight.
 W_MAGNITUDE = 0.15  # big move today vs ATR
-W_EVENT     = 0.18  # earnings / 8-K / FOMC
-W_MOMENTUM  = 0.10  # trend strength
-W_OPTIONS   = 0.12  # options pricing
-W_CROSS     = 0.10  # idiosyncratic vs broad move
-W_LAB       = 0.35  # Factor Lab rolling best-factor signal
+W_EVENT     = 0.20  # earnings / 8-K / FOMC
+W_MOMENTUM  = 0.15  # trend strength
+W_OPTIONS   = 0.20  # options pricing and overnight continuation structure
+W_CROSS     = 0.12  # idiosyncratic vs broad move
+W_LAB       = 0.18  # Factor Lab rolling best-factor signal
 
 
 def _clamp01(x: float) -> float:

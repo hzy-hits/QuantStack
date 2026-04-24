@@ -3,7 +3,7 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 use tracing::info;
 
-use super::{fetch_and_store, ts_date_val, str_val};
+use super::{fetch_and_store, str_val, ts_date_val};
 
 pub async fn fetch_opt_daily(
     client: &reqwest::Client,
@@ -147,7 +147,9 @@ pub async fn fetch_fut_daily(
 ) -> Result<usize> {
     let date = as_of.format("%Y%m%d").to_string();
     let total = fetch_and_store(
-        client, token, "fut_daily",
+        client,
+        token,
+        "fut_daily",
         serde_json::json!({ "trade_date": &date }),
         "ts_code,trade_date,open,high,low,close,settle,vol,amount,oi",
         10,
@@ -157,14 +159,22 @@ pub async fn fetch_fut_daily(
                     (ts_code, trade_date, open, high, low, close, settle, vol, amount, oi)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 duckdb::params![
-                    str_val(&row[0]), ts_date_val(&row[1]),
-                    row[2].as_f64(), row[3].as_f64(), row[4].as_f64(), row[5].as_f64(),
-                    row[6].as_f64(), row[7].as_f64(), row[8].as_f64(), row[9].as_f64(),
+                    str_val(&row[0]),
+                    ts_date_val(&row[1]),
+                    row[2].as_f64(),
+                    row[3].as_f64(),
+                    row[4].as_f64(),
+                    row[5].as_f64(),
+                    row[6].as_f64(),
+                    row[7].as_f64(),
+                    row[8].as_f64(),
+                    row[9].as_f64(),
                 ],
             )?;
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
     info!(rows = total, "fut_daily (期货日线) fetched");
     Ok(total)
 }

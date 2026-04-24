@@ -40,6 +40,33 @@ from ._macro_gate import (
 )
 
 
+# ── Evidence shrinkage ───────────────────────────────────────────────────────
+
+def _effective_source_stats(sources: list[dict[str, Any]]) -> dict[str, float]:
+    """Estimate effective independent evidence count from source contribution concentration."""
+    active = [
+        max(abs(float(src.get("signed_score") or 0.0)) * float(src.get("quality") or 0.0), 0.0)
+        for src in sources
+        if src.get("independent") and abs(float(src.get("signed_score") or 0.0)) >= 0.1
+    ]
+    n_total = len(active)
+    if n_total <= 1:
+        return {"n_total": float(n_total), "n_effective": float(n_total), "shrinkage": 1.0}
+
+    total_weight = sum(active)
+    if total_weight <= 0:
+        return {"n_total": float(n_total), "n_effective": 1.0, "shrinkage": 0.6}
+
+    probs = [w / total_weight for w in active]
+    n_effective = 1.0 / max(sum(p * p for p in probs), 1e-12)
+    shrinkage = max(0.60, min(1.0, (n_effective / n_total) ** 0.5))
+    return {
+        "n_total": float(n_total),
+        "n_effective": round(float(n_effective), 3),
+        "shrinkage": round(float(shrinkage), 3),
+    }
+
+
 # ── Main classifier ─────────────────────────────────────────────────────────
 
 def classify_signal(
@@ -67,7 +94,8 @@ def classify_signal(
     # Factor Lab composite
     lab = item.get("lab_factor", {})
     lab_val = lab.get("lab_composite", 0.0) if lab else 0.0
-    lab_signed = float(lab_val) if abs(lab_val or 0) > 0.1 else 0.0
+    lab_is_confirming = bool(lab.get("is_confirming")) if lab else False
+    lab_signed = float(lab_val) if lab_is_confirming and abs(lab_val or 0) > 0.1 else 0.0
     lab_quality = min(abs(lab_val or 0), 1.0) if lab_signed != 0.0 else 0.0
 
     sources = [
@@ -211,10 +239,14 @@ def classify_signal(
     if cross_div["divergence_detected"]:
         gated_direction_score *= 0.85
 
-    # Final direction from gated score
-    if abs(gated_direction_score) < 0.1:
+    source_stats = _effective_source_stats(active_sources)
+    confidence_shrinkage = float(source_stats.get("shrinkage", 1.0))
+    shrunk_direction_score = gated_direction_score * confidence_shrinkage
+
+    # Final direction from shrunk score
+    if abs(shrunk_direction_score) < 0.1:
         direction = "neutral"
-    elif gated_direction_score > 0:
+    elif shrunk_direction_score > 0:
         direction = "long"
     else:
         direction = "short"
@@ -232,13 +264,13 @@ def classify_signal(
         if src["name"] in conflicting
     )
 
-    if n_independent_aligned >= 2 and n_conflicting == 0 and abs(gated_direction_score) >= 0.25:
+    if n_independent_aligned >= 2 and n_conflicting == 0 and abs(shrunk_direction_score) >= 0.25:
         confidence = "HIGH"
-    elif n_independent_aligned >= 1 and not has_high_quality_conflict and abs(gated_direction_score) > 0.15:
+    elif n_independent_aligned >= 1 and not has_high_quality_conflict and abs(shrunk_direction_score) > 0.15:
         confidence = "MODERATE"
     elif n_conflicting > 0 and has_high_quality_conflict:
         confidence = "LOW"
-    elif abs(gated_direction_score) < 0.1:
+    elif abs(shrunk_direction_score) < 0.1:
         confidence = "NO_SIGNAL"
     else:
         confidence = "LOW"
@@ -251,6 +283,7 @@ def classify_signal(
     if confidence == "HIGH":
         mom = item.get("momentum") or {}
         opts = item.get("options") or {}
+        execution_gate = item.get("execution_gate") or {}
 
         # Momentum deceleration: trend is decaying or reversing
         accel = mom.get("momentum_accel")
@@ -271,6 +304,19 @@ def classify_signal(
         # Cross-asset divergence already detected above
         if cross_div.get("divergence_detected"):
             exhaustion_flags.append("cross_asset_divergence")
+
+        if execution_gate.get("action") == "do_not_chase":
+            exhaustion_flags.append("gap_overshoot")
+        elif execution_gate.get("action") == "wait_pullback":
+            exhaustion_flags.append("needs_pullback")
+
+        gap_vs_expected_move = execution_gate.get("gap_vs_expected_move")
+        if gap_vs_expected_move is not None:
+            try:
+                if float(gap_vs_expected_move) > 1.0:
+                    exhaustion_flags.append("expected_move_consumed")
+            except (TypeError, ValueError):
+                pass
 
         # Mean-reverting regime: momentum-ONLY signals in MR regime are
         # less trustworthy. But if reversion is the aligned source, this is
@@ -323,9 +369,13 @@ def classify_signal(
         "signal_type": signal_type,
         "confidence": confidence,
         "direction": direction,
-        "direction_score": round(gated_direction_score, 3),
+        "direction_score": round(shrunk_direction_score, 3),
+        "direction_score_pre_shrink": round(gated_direction_score, 3),
         "raw_direction_score": round(raw_direction_score, 3),
         "macro_gate": round(applied_gate, 2),
+        "confidence_shrinkage": round(confidence_shrinkage, 3),
+        "effective_independent_sources": source_stats.get("n_effective", 0.0),
+        "total_independent_sources": source_stats.get("n_total", 0.0),
         "macro_regime": gate_map["regime"],
         "macro_matrix_cell": gate_map.get("matrix_cell"),
         "macro_asset_bucket": asset_bucket,

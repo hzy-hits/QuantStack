@@ -9,7 +9,10 @@ from pathlib import Path
 
 
 ITEM_RE = re.compile(r"(?ms)^### \d+\. .*?(?=^### \d+\. |^## |\Z)")
-SPECIAL_SECTION_HEADINGS = ("## Factor Lab Independent Trading Signal",)
+SPECIAL_SECTION_HEADINGS = (
+    "## Factor Lab Research Candidates",
+    "## Factor Lab Independent Trading Signal",
+)
 
 
 def _read(path: Path) -> str:
@@ -67,6 +70,8 @@ def _lane(section: str) -> str:
     upper = section.upper()
     if "CORE BOOK" in upper:
         return "CORE"
+    if "TACTICAL CONTINUATION" in upper:
+        return "TACTICAL_CONTINUATION"
     if "TACTICAL EVENT TAPE" in upper:
         return "EVENT_TAPE"
     if "APPENDIX / RADAR" in upper:
@@ -81,8 +86,8 @@ def _compact_items(text: str, *, max_items: int, title: str) -> tuple[str, list[
 
     chosen: list[str] = []
     used: set[str] = set()
-    lane_caps = {"CORE": 8, "EVENT_TAPE": 3, "APPENDIX": 1}
-    lane_order = ["CORE", "EVENT_TAPE", "APPENDIX", "OTHER"]
+    lane_caps = {"CORE": 7, "TACTICAL_CONTINUATION": 2, "EVENT_TAPE": 2, "APPENDIX": 1}
+    lane_order = ["CORE", "TACTICAL_CONTINUATION", "EVENT_TAPE", "APPENDIX", "OTHER"]
     bucket_order = ["HIGH", "MODERATE", "WATCH", "LOW", "OTHER", "NO_SIGNAL"]
     selected_lane_counts: Counter[str] = Counter()
 
@@ -128,9 +133,9 @@ def _compact_items(text: str, *, max_items: int, title: str) -> tuple[str, list[
     summary_lines = [
         f"## {title}摘要",
         f"- 总条目: {len(sections)}",
-        f"- Report lanes: CORE {lane_counts.get('CORE', 0)} | EVENT_TAPE {lane_counts.get('EVENT_TAPE', 0)} | APPENDIX {lane_counts.get('APPENDIX', 0)} | OTHER {lane_counts.get('OTHER', 0)}",
+        f"- Report lanes: CORE {lane_counts.get('CORE', 0)} | TACTICAL_CONTINUATION {lane_counts.get('TACTICAL_CONTINUATION', 0)} | EVENT_TAPE {lane_counts.get('EVENT_TAPE', 0)} | APPENDIX {lane_counts.get('APPENDIX', 0)} | OTHER {lane_counts.get('OTHER', 0)}",
         f"- HIGH: {counts.get('HIGH', 0)} | MODERATE: {counts.get('MODERATE', 0)} | WATCH: {counts.get('WATCH', 0)} | LOW: {counts.get('LOW', 0)} | no-signal: {counts.get('NO_SIGNAL', 0)}",
-        f"- 本上下文保留: {len(chosen)} 条，按 CORE -> EVENT_TAPE -> APPENDIX 优先；其余 {omitted} 条仅计入摘要，不再逐条展开",
+        f"- 本上下文保留: {len(chosen)} 条，按 CORE -> TACTICAL_CONTINUATION -> EVENT_TAPE -> APPENDIX 优先；其余 {omitted} 条仅计入摘要，不再逐条展开",
         f"- 保留代码: {', '.join(_symbol(section) for section in chosen)}",
     ]
 
@@ -141,12 +146,22 @@ def _compact_items(text: str, *, max_items: int, title: str) -> tuple[str, list[
     return compact.strip(), [_symbol(section) for section in chosen]
 
 
-def build_contexts(reports_dir: Path, date: str, out_dir: Path) -> None:
+def build_contexts(reports_dir: Path, date: str, session: str, out_dir: Path) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    macro_text = _read(reports_dir / f"{date}_payload_macro.md")
-    structural_text = _read(reports_dir / f"{date}_payload_structural.md")
-    news_text = _read(reports_dir / f"{date}_payload_news.md")
+    macro_path = reports_dir / f"{date}_payload_macro_{session}.md"
+    structural_path = reports_dir / f"{date}_payload_structural_{session}.md"
+    news_path = reports_dir / f"{date}_payload_news_{session}.md"
+    if not macro_path.exists():
+        macro_path = reports_dir / f"{date}_payload_macro.md"
+    if not structural_path.exists():
+        structural_path = reports_dir / f"{date}_payload_structural.md"
+    if not news_path.exists():
+        news_path = reports_dir / f"{date}_payload_news.md"
+
+    macro_text = _read(macro_path)
+    structural_text = _read(structural_path)
+    news_text = _read(news_path)
 
     macro_compact = _take_until_heading(
         macro_text,
@@ -178,7 +193,7 @@ def build_contexts(reports_dir: Path, date: str, out_dir: Path) -> None:
     news_summary = "\n".join([
         "## 事件新闻摘要",
         f"- 总条目: {len(news_sections)}",
-        f"- Report lanes: CORE {news_lane_counts.get('CORE', 0)} | EVENT_TAPE {news_lane_counts.get('EVENT_TAPE', 0)} | APPENDIX {news_lane_counts.get('APPENDIX', 0)} | OTHER {news_lane_counts.get('OTHER', 0)}",
+        f"- Report lanes: CORE {news_lane_counts.get('CORE', 0)} | TACTICAL_CONTINUATION {news_lane_counts.get('TACTICAL_CONTINUATION', 0)} | EVENT_TAPE {news_lane_counts.get('EVENT_TAPE', 0)} | APPENDIX {news_lane_counts.get('APPENDIX', 0)} | OTHER {news_lane_counts.get('OTHER', 0)}",
         f"- HIGH: {news_counts.get('HIGH', 0)} | MODERATE: {news_counts.get('MODERATE', 0)} | WATCH: {news_counts.get('WATCH', 0)} | LOW: {news_counts.get('LOW', 0)} | no-signal: {news_counts.get('NO_SIGNAL', 0)}",
         f"- 本上下文保留: {len(selected_news)} 条；其余 {omitted_news} 条仅保留在原始payload中",
         f"- 保留代码: {', '.join(_symbol(section) for section in selected_news)}",
@@ -190,10 +205,11 @@ def build_contexts(reports_dir: Path, date: str, out_dir: Path) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", required=True)
+    parser.add_argument("--session", choices=["post", "pre"], default="post")
     parser.add_argument("--reports-dir", default="reports")
     parser.add_argument("--out-dir", required=True)
     args = parser.parse_args()
-    build_contexts(Path(args.reports_dir), args.date, Path(args.out_dir))
+    build_contexts(Path(args.reports_dir), args.date, args.session, Path(args.out_dir))
 
 
 if __name__ == "__main__":

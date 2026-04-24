@@ -146,6 +146,7 @@ def _selection_lines(item: dict) -> list[str]:
     tradability = selection.get("tradability_score")
     market_cap = fundamentals.get("market_cap_musd")
     avg_dollar_volume = item.get("avg_dollar_volume_20d")
+    execution_gate = item.get("execution_gate") or {}
 
     confirmations = []
     if selection.get("named_core"):
@@ -163,6 +164,13 @@ def _selection_lines(item: dict) -> list[str]:
             f" | **ADV20:** {_fmt_dollar_volume(avg_dollar_volume)}"
         )
     ]
+    if execution_gate:
+        action = execution_gate.get("action", "executable_now")
+        gap_vs_move = execution_gate.get("gap_vs_expected_move")
+        lines.append(
+            f"**Execution read:** {_execution_sentence(action)}"
+            f" | **Gap / implied move:** {_fmt_val(gap_vs_move, 2)}x"
+        )
     if confirmations:
         lines.append(f"**Confirmation quality:** {', '.join(confirmations)}")
     penalties = selection.get("penalties") or []
@@ -174,6 +182,7 @@ def _selection_lines(item: dict) -> list[str]:
 def _lane_label(lane: str | None) -> str:
     labels = {
         "core": "CORE BOOK",
+        "tactical_continuation": "TACTICAL CONTINUATION",
         "event_tape": "TACTICAL EVENT TAPE",
         "appendix": "APPENDIX / RADAR",
     }
@@ -209,5 +218,25 @@ def _humanize_penalty(code: str) -> str:
         "small_cap": "market cap below core floor",
         "poor_options": "poor options liquidity",
         "weak_secondary_confirmation": "weak secondary confirmation",
+        "needs_pullback": "needs pullback after overnight stretch",
+        "overnight_stretch": "overnight move already consumed too much edge",
     }
     return mapping.get(code, code.replace("_", " "))
+
+
+def _execution_label(action: str | None) -> str:
+    mapping = {
+        "executable_now": "EXECUTABLE",
+        "wait_pullback": "WAIT PULLBACK",
+        "do_not_chase": "DO NOT CHASE",
+    }
+    return mapping.get(action or "", "NEUTRAL")
+
+
+def _execution_sentence(action: str | None) -> str:
+    mapping = {
+        "executable_now": "still actionable at current levels",
+        "wait_pullback": "conditional only; do not enter at the current gap, wait for pullback",
+        "do_not_chase": "edge looks spent after the overnight stretch; stand down here",
+    }
+    return mapping.get(action or "", "no execution read")

@@ -29,12 +29,12 @@ use crate::config::Settings;
 // Removed: northbound_z (Tushare northbound_flow returns all NULL),
 //          hot_z (top_list/龙虎榜 needs >2000 Tushare credits, always empty).
 // event_clock is a MULTIPLIER, not a weighted component.
-const W_LARGE_FLOW: f64 = 0.32;   // institutional moneyflow imbalance (81% coverage)
-const W_MARGIN: f64 = 0.23;       // leverage positioning delta (59% coverage)
-const W_BLOCK: f64 = 0.15;        // block-trade premium-weighted flow (sparse but high signal)
-const W_INSIDER: f64 = 0.10;      // shareholder trades + repurchases
-const W_MARKET_VOL: f64 = 0.08;   // iVIX-like option activity * beta
-const W_TAPE: f64 = 0.12;         // realized price/volume abnormality (86% coverage)
+const W_LARGE_FLOW: f64 = 0.32; // institutional moneyflow imbalance (81% coverage)
+const W_MARGIN: f64 = 0.23; // leverage positioning delta (59% coverage)
+const W_BLOCK: f64 = 0.15; // block-trade premium-weighted flow (sparse but high signal)
+const W_INSIDER: f64 = 0.10; // shareholder trades + repurchases
+const W_MARKET_VOL: f64 = 0.08; // iVIX-like option activity * beta
+const W_TAPE: f64 = 0.12; // realized price/volume abnormality (86% coverage)
 
 // Margin
 const MG_W_RZYE: f64 = 0.50;
@@ -97,8 +97,12 @@ fn zscore_map(raw: &HashMap<String, f64>) -> HashMap<String, f64> {
 /// Approximate inverse standard normal (probit) for p in (0, 1).
 /// Abramowitz & Stegun formula 26.2.23, accuracy ~4.5e-4.
 fn probit(p: f64) -> f64 {
-    if p <= 0.0 { return -3.0; }
-    if p >= 1.0 { return 3.0; }
+    if p <= 0.0 {
+        return -3.0;
+    }
+    if p >= 1.0 {
+        return 3.0;
+    }
     if p < 0.5 {
         return -probit(1.0 - p);
     }
@@ -180,14 +184,21 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     // should NOT enter the composite (they'd get raw_composite=0 + arbitrary percentile).
     let mut all_symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
     for map in [
-        &large_flow_z, &margin_z, &block_z,
-        &insider_z, &mkt_vol_z, &tape_z,
+        &large_flow_z,
+        &margin_z,
+        &block_z,
+        &insider_z,
+        &mkt_vol_z,
+        &tape_z,
     ] {
         all_symbols.extend(map.keys().cloned());
     }
 
     if all_symbols.is_empty() {
-        warn!("flow::compute — no symbols with any flow data for {}", as_of);
+        warn!(
+            "flow::compute — no symbols with any flow data for {}",
+            as_of
+        );
         return Ok(0);
     }
 
@@ -206,7 +217,13 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         sym: String,
         raw_composite: f64,
         active_count: u8,
-        lf: f64, tp: f64, mg: f64, bl: f64, ins: f64, ev: f64, mv: f64,
+        lf: f64,
+        tp: f64,
+        mg: f64,
+        bl: f64,
+        ins: f64,
+        ev: f64,
+        mv: f64,
     }
 
     // event_clock is now a multiplier, not in this list
@@ -225,20 +242,30 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         // Adaptive weighting: only include components where the stock has data
         // event_clock is a MULTIPLIER, not a weighted component
         let mut components: Vec<(f64, f64)> = Vec::new(); // (weight, |z|)
-        if large_flow_z.contains_key(sym) { components.push((W_LARGE_FLOW, lf.abs())); }
-        if margin_z.contains_key(sym)     { components.push((W_MARGIN, mg.abs())); }
-        if block_z.contains_key(sym)      { components.push((W_BLOCK, bl.abs())); }
-        if insider_z.contains_key(sym)    { components.push((W_INSIDER, ins.abs())); }
-        if mkt_vol_z.contains_key(sym)    { components.push((W_MARKET_VOL, mv.abs())); }
-        if tape_z.contains_key(sym)       { components.push((W_TAPE, tp.abs())); }
+        if large_flow_z.contains_key(sym) {
+            components.push((W_LARGE_FLOW, lf.abs()));
+        }
+        if margin_z.contains_key(sym) {
+            components.push((W_MARGIN, mg.abs()));
+        }
+        if block_z.contains_key(sym) {
+            components.push((W_BLOCK, bl.abs()));
+        }
+        if insider_z.contains_key(sym) {
+            components.push((W_INSIDER, ins.abs()));
+        }
+        if mkt_vol_z.contains_key(sym) {
+            components.push((W_MARKET_VOL, mv.abs()));
+        }
+        if tape_z.contains_key(sym) {
+            components.push((W_TAPE, tp.abs()));
+        }
 
         let active_count = components.len() as u8;
         let total_weight: f64 = components.iter().map(|(w, _)| w).sum();
 
         let raw_composite = if total_weight > 1e-10 {
-            let normalized: f64 = components.iter()
-                .map(|(w, z)| (w / total_weight) * z)
-                .sum();
+            let normalized: f64 = components.iter().map(|(w, z)| (w / total_weight) * z).sum();
             // Coverage penalty: fewer active components → less reliable
             let coverage_factor = match active_count {
                 0 => 0.0,
@@ -256,19 +283,31 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         };
 
         scored.push(SymScore {
-            sym: sym.clone(), raw_composite, active_count,
-            lf, tp, mg, bl, ins, ev, mv,
+            sym: sym.clone(),
+            raw_composite,
+            active_count,
+            lf,
+            tp,
+            mg,
+            bl,
+            ins,
+            ev,
+            mv,
         });
     }
 
     // Phase 2: percentile rank → information_score in [0, 1]
     // Sort by raw_composite ascending, assign percentile
-    scored.sort_by(|a, b| a.raw_composite.partial_cmp(&b.raw_composite).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| {
+        a.raw_composite
+            .partial_cmp(&b.raw_composite)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     let n_total = scored.len() as f64;
 
     let mut insert = db.prepare(
         "INSERT INTO analytics (ts_code, as_of, module, metric, value, detail)
-         VALUES (?, ?, 'flow', ?, ?, ?)"
+         VALUES (?, ?, 'flow', ?, ?, ?)",
     )?;
 
     let mut n_rows: usize = 0;
@@ -282,17 +321,65 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         );
 
         // Write percentile-ranked information_score
-        insert.execute(duckdb::params![&s.sym, &date_str, "information_score", percentile, &detail])?;
+        insert.execute(duckdb::params![
+            &s.sym,
+            &date_str,
+            "information_score",
+            percentile,
+            &detail
+        ])?;
         n_rows += 1;
 
         // Write component z-scores (no detail needed)
-        insert.execute(duckdb::params![&s.sym, &date_str, "large_flow_z", s.lf, None::<String>])?;
-        insert.execute(duckdb::params![&s.sym, &date_str, "tape_z", s.tp, None::<String>])?;
-        insert.execute(duckdb::params![&s.sym, &date_str, "margin_z", s.mg, None::<String>])?;
-        insert.execute(duckdb::params![&s.sym, &date_str, "block_z", s.bl, None::<String>])?;
-        insert.execute(duckdb::params![&s.sym, &date_str, "insider_z", s.ins, None::<String>])?;
-        insert.execute(duckdb::params![&s.sym, &date_str, "event_clock", s.ev, None::<String>])?;
-        insert.execute(duckdb::params![&s.sym, &date_str, "market_vol_z", s.mv, None::<String>])?;
+        insert.execute(duckdb::params![
+            &s.sym,
+            &date_str,
+            "large_flow_z",
+            s.lf,
+            None::<String>
+        ])?;
+        insert.execute(duckdb::params![
+            &s.sym,
+            &date_str,
+            "tape_z",
+            s.tp,
+            None::<String>
+        ])?;
+        insert.execute(duckdb::params![
+            &s.sym,
+            &date_str,
+            "margin_z",
+            s.mg,
+            None::<String>
+        ])?;
+        insert.execute(duckdb::params![
+            &s.sym,
+            &date_str,
+            "block_z",
+            s.bl,
+            None::<String>
+        ])?;
+        insert.execute(duckdb::params![
+            &s.sym,
+            &date_str,
+            "insider_z",
+            s.ins,
+            None::<String>
+        ])?;
+        insert.execute(duckdb::params![
+            &s.sym,
+            &date_str,
+            "event_clock",
+            s.ev,
+            None::<String>
+        ])?;
+        insert.execute(duckdb::params![
+            &s.sym,
+            &date_str,
+            "market_vol_z",
+            s.mv,
+            None::<String>
+        ])?;
         n_rows += 7;
     }
 
@@ -329,7 +416,7 @@ fn compute_large_flow(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Strin
                 AS total_amount
          FROM moneyflow
          WHERE trade_date >= ? AND trade_date <= ?
-         ORDER BY ts_code, trade_date"
+         ORDER BY ts_code, trade_date",
     )?;
 
     // Collect per-symbol time series of imbalance ratios
@@ -346,7 +433,11 @@ fn compute_large_flow(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Strin
 
     for r in rows {
         let (code, date, large_net, total) = r?;
-        let ratio = if total.abs() < 1e-6 { 0.0 } else { large_net / total };
+        let ratio = if total.abs() < 1e-6 {
+            0.0
+        } else {
+            large_net / total
+        };
         series.entry(code).or_default().push((date, ratio));
     }
 
@@ -403,7 +494,7 @@ fn compute_margin(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, f
                COALESCE(a.rzye_ratio, 0) - COALESCE(b.rzye_ratio, 0) AS delta5
         FROM ranked a
         LEFT JOIN ranked b ON a.ts_code = b.ts_code AND b.rn = 6
-        WHERE a.rn = 1"
+        WHERE a.rn = 1",
     )?;
 
     let mut rzye_delta: HashMap<String, f64> = HashMap::new();
@@ -422,7 +513,7 @@ fn compute_margin(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, f
          JOIN daily_basic d ON m.ts_code = d.ts_code AND m.trade_date = d.trade_date
          WHERE m.trade_date = (
              SELECT MAX(trade_date) FROM margin_detail WHERE trade_date <= ?
-         )"
+         )",
     )?;
 
     let mut margin_net: HashMap<String, f64> = HashMap::new();
@@ -447,7 +538,7 @@ fn compute_margin(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, f
                COALESCE(a.rqye_ratio, 0) - COALESCE(b.rqye_ratio, 0) AS delta5
         FROM ranked a
         LEFT JOIN ranked b ON a.ts_code = b.ts_code AND b.rn = 6
-        WHERE a.rn = 1"
+        WHERE a.rn = 1",
     )?;
 
     let mut rqye_delta: HashMap<String, f64> = HashMap::new();
@@ -508,14 +599,13 @@ fn compute_block(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, f6
             AND d.trade_date = (SELECT MAX(trade_date) FROM daily_basic
                                 WHERE ts_code = bp.ts_code AND trade_date <= ?)
         WHERE bp.trade_date >= ?
-        GROUP BY bp.ts_code, d.circ_mv"
+        GROUP BY bp.ts_code, d.circ_mv",
     )?;
 
     let mut raw: HashMap<String, f64> = HashMap::new();
-    for r in stmt.query_map(
-        [&lookback_30d, &date_str, &date_str, &lookback_5d],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<f64>>(1)?)),
-    )? {
+    for r in stmt.query_map([&lookback_30d, &date_str, &date_str, &lookback_5d], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<f64>>(1)?))
+    })? {
         let (code, v) = r?;
         raw.insert(code, v.unwrap_or(0.0));
     }
@@ -540,7 +630,7 @@ fn compute_insider(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, 
                 SUM(COALESCE(change_ratio, 0)) AS total_change
          FROM stk_holdertrade
          WHERE ann_date >= ? AND ann_date <= ?
-         GROUP BY ts_code"
+         GROUP BY ts_code",
     )?;
 
     let mut holder_raw: HashMap<String, f64> = HashMap::new();
@@ -560,7 +650,7 @@ fn compute_insider(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, 
              AND d.trade_date = (SELECT MAX(trade_date) FROM daily_basic
                                  WHERE ts_code = r.ts_code AND trade_date <= ?)
          WHERE r.ann_date >= ? AND r.ann_date <= ?
-         GROUP BY r.ts_code, d.total_mv"
+         GROUP BY r.ts_code, d.total_mv",
     )?;
 
     let mut repo_raw: HashMap<String, f64> = HashMap::new();
@@ -609,12 +699,11 @@ fn compute_event_clock(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Stri
         "SELECT DISTINCT ts_code
          FROM disclosure_date
          WHERE (actual_date >= ? AND actual_date <= ?)
-            OR (actual_date IS NULL AND pre_date >= ? AND pre_date <= ?)"
+            OR (actual_date IS NULL AND pre_date >= ? AND pre_date <= ?)",
     )?;
-    for r in stmt_a.query_map(
-        [&date_str, &future_5d, &date_str, &future_5d],
-        |row| Ok(row.get::<_, String>(0)?),
-    )? {
+    for r in stmt_a.query_map([&date_str, &future_5d, &date_str, &future_5d], |row| {
+        Ok(row.get::<_, String>(0)?)
+    })? {
         let code = r?;
         *result.entry(code).or_insert(0.0) += EVT_W_DISCLOSURE;
     }
@@ -623,11 +712,9 @@ fn compute_event_clock(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Stri
     let mut stmt_b = db.prepare(
         "SELECT DISTINCT ts_code
          FROM forecast
-         WHERE ann_date >= ? AND ann_date <= ?"
+         WHERE ann_date >= ? AND ann_date <= ?",
     )?;
-    for r in stmt_b.query_map([&past_10d, &date_str], |row| {
-        Ok(row.get::<_, String>(0)?)
-    })? {
+    for r in stmt_b.query_map([&past_10d, &date_str], |row| Ok(row.get::<_, String>(0)?))? {
         let code = r?;
         *result.entry(code).or_insert(0.0) += EVT_W_FORECAST;
     }
@@ -637,11 +724,9 @@ fn compute_event_clock(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Stri
         "SELECT DISTINCT ts_code
          FROM share_unlock
          WHERE float_date >= ? AND float_date <= ?
-           AND COALESCE(float_ratio, 0) > 5.0"
+           AND COALESCE(float_ratio, 0) > 5.0",
     )?;
-    for r in stmt_c.query_map([&date_str, &future_5d], |row| {
-        Ok(row.get::<_, String>(0)?)
-    })? {
+    for r in stmt_c.query_map([&date_str, &future_5d], |row| Ok(row.get::<_, String>(0)?))? {
         let code = r?;
         *result.entry(code).or_insert(0.0) += EVT_W_UNLOCK;
     }
@@ -676,7 +761,7 @@ fn compute_market_vol(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Strin
          FROM opt_daily
          WHERE trade_date >= ? AND trade_date <= ?
          GROUP BY trade_date
-         ORDER BY trade_date"
+         ORDER BY trade_date",
     )?;
 
     let mut opt_series: Vec<f64> = Vec::new();
@@ -695,7 +780,11 @@ fn compute_market_vol(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Strin
     let opt_z = if !opt_series.is_empty() {
         let n = opt_series.len() as f64;
         let opt_mean = opt_series.iter().sum::<f64>() / n;
-        let opt_var = opt_series.iter().map(|v| (v - opt_mean).powi(2)).sum::<f64>() / n.max(1.0);
+        let opt_var = opt_series
+            .iter()
+            .map(|v| (v - opt_mean).powi(2))
+            .sum::<f64>()
+            / n.max(1.0);
         let opt_std = opt_var.sqrt();
         let latest_opt = *opt_series.last().unwrap();
         zscore_clamped(latest_opt, opt_mean, opt_std)
@@ -708,8 +797,12 @@ fn compute_market_vol(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Strin
     let blended_z = if let Some(ivix_val) = ivix {
         // Typical A-share iVIX range: 15-35. Center at 22, scale ~5.
         let ivix_z = zscore_clamped(ivix_val, 22.0, 5.0);
-        info!(ivix = format!("{:.2}", ivix_val), ivix_z = format!("{:.2}", ivix_z),
-              activity_z = format!("{:.2}", opt_z), "iVIX blended");
+        info!(
+            ivix = format!("{:.2}", ivix_val),
+            ivix_z = format!("{:.2}", ivix_z),
+            activity_z = format!("{:.2}", opt_z),
+            "iVIX blended"
+        );
         0.6 * ivix_z + 0.4 * opt_z
     } else {
         opt_z
@@ -725,7 +818,7 @@ fn compute_market_vol(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Strin
         "SELECT CAST(trade_date AS VARCHAR) AS trade_date, pct_chg
          FROM prices
          WHERE ts_code = '000300.SH' AND trade_date >= ? AND trade_date <= ?
-         ORDER BY trade_date"
+         ORDER BY trade_date",
     )?;
     let mut bench_returns: Vec<(String, f64)> = Vec::new();
     for r in stmt_bench.query_map([&lookback_beta, &date_str], |row| {
@@ -756,7 +849,7 @@ fn compute_market_vol(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Strin
          FROM prices
          WHERE trade_date >= ? AND trade_date <= ?
            AND ts_code != '000300.SH'
-         ORDER BY ts_code, trade_date"
+         ORDER BY ts_code, trade_date",
     )?;
 
     let mut stk_returns: HashMap<String, Vec<(String, f64)>> = HashMap::new();
@@ -768,7 +861,10 @@ fn compute_market_vol(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Strin
         ))
     })? {
         let (code, date, pct) = r?;
-        stk_returns.entry(code).or_default().push((date, pct.unwrap_or(0.0)));
+        stk_returns
+            .entry(code)
+            .or_default()
+            .push((date, pct.unwrap_or(0.0)));
     }
 
     // Compute beta for each stock, then scale by opt_z
@@ -800,7 +896,11 @@ fn compute_market_vol(db: &Connection, as_of: NaiveDate) -> Result<HashMap<Strin
             .sum::<f64>()
             / pn;
 
-        let beta = if var_b > 1e-12 { (cov / var_b).clamp(0.0, 3.0) } else { 1.0 };
+        let beta = if var_b > 1e-12 {
+            (cov / var_b).clamp(0.0, 3.0)
+        } else {
+            1.0
+        };
         // Clamp directly — do NOT z-score, because blended_z is a scalar
         // that would be normalized away. beta*blended_z preserves market stress level.
         result.insert(code.clone(), (beta * blended_z).clamp(-3.0, 3.0));
@@ -830,7 +930,7 @@ fn compute_ivix(db: &Connection, date_str: &str) -> Option<f64> {
            AND ob.exercise_price IS NOT NULL
            AND ob.maturity_date IS NOT NULL
            AND od.settle IS NOT NULL AND od.settle > 0
-         ORDER BY ob.maturity_date, ob.exercise_price"
+         ORDER BY ob.maturity_date, ob.exercise_price",
     );
 
     let mut stmt = match result {
@@ -878,8 +978,7 @@ fn compute_ivix(db: &Connection, date_str: &str) -> Option<f64> {
     // Find nearest expiry with T >= 7 days and enough strikes
     let mut best_maturity: Option<(String, i64)> = None;
     for (mat_str, opts) in &by_maturity {
-        let mat_date = chrono::NaiveDate::parse_from_str(mat_str, "%Y-%m-%d")
-            .ok()?;
+        let mat_date = chrono::NaiveDate::parse_from_str(mat_str, "%Y-%m-%d").ok()?;
         let days = (mat_date - today).num_days();
         if days < 7 || opts.len() < 4 {
             continue;
@@ -952,14 +1051,20 @@ fn compute_ivix(db: &Connection, date_str: &str) -> Option<f64> {
     }
 
     // K0 = largest strike <= F (VIX methodology)
-    let mut all_strikes: Vec<f64> = calls.iter().map(|c| c.0)
+    let mut all_strikes: Vec<f64> = calls
+        .iter()
+        .map(|c| c.0)
         .chain(puts.iter().map(|p| p.0))
         .collect();
     all_strikes.sort_by(|a, b| a.partial_cmp(b).unwrap());
     all_strikes.dedup();
 
-    let k0 = all_strikes.iter().filter(|&&k| k <= forward).last()
-        .copied().unwrap_or(forward);
+    let k0 = all_strikes
+        .iter()
+        .filter(|&&k| k <= forward)
+        .last()
+        .copied()
+        .unwrap_or(forward);
 
     // VIX-style variance: σ²(T) = (2/T) × Σ[ΔK/K² × e^(rT) × Q(K)] - (1/T)(F/K₀ - 1)²
     // Q(K) = put price for K < K₀, call price for K > K₀, average for K = K₀
@@ -1031,10 +1136,16 @@ fn query_shibor_rate(db: &Connection, date_str: &str) -> Option<f64> {
     db.prepare(
         "SELECT value FROM macro_cn
          WHERE series_id = 'SHIBOR_1M' AND date <= ?
-         ORDER BY date DESC LIMIT 1"
-    ).ok()?.query_map(duckdb::params![date_str], |row| {
+         ORDER BY date DESC LIMIT 1",
+    )
+    .ok()?
+    .query_map(duckdb::params![date_str], |row| {
         row.get::<_, Option<f64>>(0)
-    }).ok()?.filter_map(|r| r.ok()).next().flatten()
+    })
+    .ok()?
+    .filter_map(|r| r.ok())
+    .next()
+    .flatten()
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1071,7 +1182,7 @@ fn compute_tape(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, f64
                t.turnover_rate / NULLIF(a.avg_tr, 0) AS turnover_ratio
         FROM tr_data t
         JOIN tr_avg a ON t.ts_code = a.ts_code
-        WHERE t.rn = 1"
+        WHERE t.rn = 1",
     )?;
 
     let mut turnover_raw: HashMap<String, f64> = HashMap::new();
@@ -1087,7 +1198,7 @@ fn compute_tape(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, f64
         "SELECT ts_code, volume_ratio
          FROM daily_basic
          WHERE trade_date = (SELECT MAX(trade_date) FROM daily_basic WHERE trade_date <= ?)
-           AND volume_ratio IS NOT NULL AND volume_ratio > 0"
+           AND volume_ratio IS NOT NULL AND volume_ratio > 0",
     )?;
 
     let mut vol_ratio_raw: HashMap<String, f64> = HashMap::new();
@@ -1103,7 +1214,7 @@ fn compute_tape(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, f64
         "SELECT ts_code, ABS(COALESCE(pct_chg, 0)) AS abs_chg
          FROM prices
          WHERE trade_date = (SELECT MAX(trade_date) FROM prices WHERE trade_date <= ?)
-           AND pct_chg IS NOT NULL"
+           AND pct_chg IS NOT NULL",
     )?;
 
     let mut price_shock_raw: HashMap<String, f64> = HashMap::new();
@@ -1185,8 +1296,11 @@ mod tests {
     #[test]
     fn test_weight_sum() {
         // event_clock is now a multiplier, not a weighted component
-        let total = W_LARGE_FLOW + W_MARGIN + W_BLOCK
-            + W_INSIDER + W_MARKET_VOL + W_TAPE;
-        assert!((total - 1.0).abs() < 1e-10, "weights must sum to 1.0, got {}", total);
+        let total = W_LARGE_FLOW + W_MARGIN + W_BLOCK + W_INSIDER + W_MARKET_VOL + W_TAPE;
+        assert!(
+            (total - 1.0).abs() < 1e-10,
+            "weights must sum to 1.0, got {}",
+            total
+        );
     }
 }
