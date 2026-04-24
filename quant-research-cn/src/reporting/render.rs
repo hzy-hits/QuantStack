@@ -1251,6 +1251,35 @@ fn render_notable_item(
     writeln!(md, "- **层级定位**: {}", item.report_reason,)?;
 
     let detail = &item.detail;
+    if let Some(gate) = detail.get("main_signal_gate").and_then(|v| v.as_object()) {
+        let status = gate.get("status").and_then(|v| v.as_str()).unwrap_or("-");
+        let role = gate.get("role").and_then(|v| v.as_str()).unwrap_or("-");
+        let intent = gate
+            .get("action_intent")
+            .and_then(|v| v.as_str())
+            .unwrap_or("OBSERVE");
+        let blockers = gate
+            .get("blockers")
+            .and_then(|v| v.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .take(3)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "none".to_string());
+        writeln!(
+            md,
+            "- **主信号门槛**: {} | role={} | intent={} | blockers={}",
+            status.to_uppercase(),
+            role,
+            intent,
+            blockers,
+        )?;
+    }
 
     // ── 价格 ──────────────────────────────────────────────────────────────
     let ret_5d = detail.get("ret_5d").and_then(|v| v.as_f64());

@@ -401,3 +401,91 @@ def classify_all(
     for item in notable_items:
         item["signal"] = classify_signal(item, market_context)
     return notable_items
+
+
+def _execution_action(item: dict[str, Any]) -> str:
+    risk = item.get("risk_params") or {}
+    gate = item.get("execution_gate") or {}
+    if gate:
+        return str(risk.get("execution_mode") or gate.get("action") or "unknown")
+    return "unknown"
+
+
+def _main_action_intent(action: str, passes: bool) -> str:
+    if passes:
+        return "TRADE"
+    if action == "do_not_chase":
+        return "AVOID"
+    if action == "wait_pullback":
+        return "WAIT"
+    return "OBSERVE"
+
+
+def main_signal_gate(item: dict[str, Any], headline_gate: dict[str, Any] | None) -> dict[str, Any]:
+    """Gate directional evidence into a true main signal.
+
+    ``classify_signal`` answers "is directional evidence aligned?".  This gate
+    answers the stricter question "may this be treated as the report's main
+    signal/actionable book?".
+    """
+    signal = item.get("signal") or {}
+    headline_mode = str((headline_gate or {}).get("mode") or "unknown").lower()
+    report_bucket = str(item.get("report_bucket") or "").lower()
+    action = _execution_action(item)
+    direction = str(signal.get("direction") or "neutral").lower()
+    confidence = str(signal.get("confidence") or "NO_SIGNAL").upper()
+    direction_score = abs(float(signal.get("direction_score") or 0.0))
+    rr_ratio = (item.get("risk_params") or {}).get("rr_ratio")
+
+    blockers: list[str] = []
+    if headline_mode != "trend":
+        blockers.append(f"headline_gate_{headline_mode}")
+    if report_bucket != "core":
+        blockers.append(f"report_lane_{report_bucket or 'unknown'}")
+    if confidence not in {"HIGH", "MODERATE"}:
+        blockers.append(f"confidence_{confidence.lower()}")
+    if direction not in {"long", "short"}:
+        blockers.append("neutral_direction")
+    if direction_score < 0.20:
+        blockers.append("thin_direction_score")
+    if action != "executable_now":
+        blockers.append(f"execution_{action}")
+    if signal.get("exhaustion_downgrade"):
+        blockers.append("exhaustion_downgrade")
+    try:
+        if rr_ratio is not None and float(rr_ratio) < 1.5:
+            blockers.append("rr_below_1_5")
+    except (TypeError, ValueError):
+        pass
+
+    passes = not blockers
+    role = "main_signal" if passes else "directional_observation"
+    if confidence in {"LOW", "NO_SIGNAL"}:
+        role = "notability_only"
+
+    return {
+        "status": "pass" if passes else "blocked",
+        "role": role,
+        "action_intent": _main_action_intent(action, passes),
+        "headline_mode": headline_mode,
+        "report_bucket": report_bucket or None,
+        "execution_action": action,
+        "blockers": blockers,
+    }
+
+
+def apply_main_signal_gate(bundle: dict[str, Any]) -> dict[str, Any]:
+    """Annotate every notable item with the strict main-signal gate result."""
+    headline_gate = bundle.get("headline_gate") or {}
+    counts = {"main_signal": 0, "directional_observation": 0, "notability_only": 0}
+    for item in bundle.get("notable_items", []):
+        gate = main_signal_gate(item, headline_gate)
+        item["main_signal_gate"] = gate
+        item.setdefault("signal", {})["main_signal_gate"] = gate
+        counts[gate["role"]] = counts.get(gate["role"], 0) + 1
+    bundle["main_signal_summary"] = {
+        "headline_mode": headline_gate.get("mode"),
+        "counts": counts,
+        "rule": "Main signal requires trend headline, core lane, HIGH/MODERATE directional evidence, executable_now, and no exhaustion blocker.",
+    }
+    return bundle

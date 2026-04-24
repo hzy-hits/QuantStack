@@ -85,7 +85,7 @@ from quant_bot.analytics.report_review import (
 from quant_bot.analytics.news_quality import assess_news_quality
 from quant_bot.analytics.portfolio_risk import compute_portfolio_risk
 from quant_bot.filtering.notable import build_notable_items
-from quant_bot.signals.classify import classify_all
+from quant_bot.signals.classify import classify_all, apply_main_signal_gate
 from quant_bot.reporting.bundle import (
     build_report_bundle,
     compute_headline_gate,
@@ -623,6 +623,7 @@ def main() -> None:
         if hmm_result:
             bundle["hmm_regime"] = hmm_result
         bundle["headline_gate"] = compute_headline_gate(bundle)
+        apply_main_signal_gate(bundle)
         raw_log_con = connect_write(cfg.raw_db_path_abs)
         log_run(raw_log_con, run_id, "filter", "ok", len(notable))
 
@@ -651,6 +652,7 @@ def main() -> None:
                 item["risk_params"] = compute_risk_params(item)
                 if item["risk_params"]:
                     n_risk += 1
+        apply_main_signal_gate(bundle)
         log_run(raw_log_con, run_id, "risk_params", "ok", n_risk)
 
         # Contradictions
@@ -708,7 +710,7 @@ def main() -> None:
         try:
             high_items = [
                 i for i in bundle["notable_items"]
-                if (i.get("signal") or {}).get("confidence") == "HIGH"
+                if (i.get("main_signal_gate") or {}).get("status") == "pass"
             ]
             portfolio_risk = compute_portfolio_risk(high_items, clusters_result)
             bundle["portfolio_risk"] = portfolio_risk

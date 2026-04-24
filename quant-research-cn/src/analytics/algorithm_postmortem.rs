@@ -276,6 +276,32 @@ fn parse_detail_json(raw: &Option<String>) -> Option<serde_json::Value> {
         .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
 }
 
+fn action_from_main_signal_gate(row: &ReviewRow) -> Option<(&'static str, &'static str)> {
+    let parsed = parse_detail_json(&row.decision_detail)?;
+    let gate = parsed.get("main_signal_gate")?.as_object()?;
+    let status = gate
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let intent = gate
+        .get("action_intent")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_uppercase();
+
+    if status == "pass" {
+        return Some(("TRADE_NOW", "main_signal_gate"));
+    }
+    match intent.as_str() {
+        "AVOID" => Some(("DO_NOT_CHASE", "main_signal_gate")),
+        "WAIT" => Some(("WAIT_PULLBACK", "main_signal_gate")),
+        _ => Some(("OBSERVE", "main_signal_gate")),
+    }
+}
+
 fn regime_bucket(row: &ReviewRow) -> String {
     let parsed = parse_detail_json(&row.decision_detail);
     if let Some(value) = parsed.as_ref() {
@@ -349,6 +375,9 @@ fn fill_quality(
 fn infer_action(row: &ReviewRow) -> (&'static str, &'static str) {
     if row.selection_status != "selected" {
         return ("WAIT", "not_selected");
+    }
+    if let Some(action) = action_from_main_signal_gate(row) {
+        return action;
     }
     if row.report_bucket != "CORE BOOK" {
         return ("OBSERVE", "report_bucket");
@@ -521,13 +550,31 @@ mod tests {
         mode: &str,
         report_bucket: &str,
     ) {
+        insert_decision_with_bucket_and_detail(
+            db,
+            symbol,
+            selection_status,
+            mode,
+            report_bucket,
+            "{}",
+        );
+    }
+
+    fn insert_decision_with_bucket_and_detail(
+        db: &Connection,
+        symbol: &str,
+        selection_status: &str,
+        mode: &str,
+        report_bucket: &str,
+        details_json: &str,
+    ) {
         db.execute(
             "INSERT INTO report_decisions (
                 report_date, session, symbol, selection_status, rank_order,
                 report_bucket, signal_direction, signal_confidence, composite_score, execution_mode,
                 max_chase_gap_pct, reference_close, details_json
-            ) VALUES ('2026-04-20', 'daily', ?, ?, 1, ?, 'bullish', 'HIGH', 0.7, ?, 2.0, 10.0, '{}')",
-            duckdb::params![symbol, selection_status, report_bucket, mode],
+            ) VALUES ('2026-04-20', 'daily', ?, ?, 1, ?, 'bullish', 'HIGH', 0.7, ?, 2.0, 10.0, ?)",
+            duckdb::params![symbol, selection_status, report_bucket, mode, details_json],
         )
         .unwrap();
     }
@@ -651,6 +698,49 @@ mod tests {
                 "observed_alpha".to_string(),
                 None,
                 "report_bucket_observation".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn blocked_main_signal_gate_overrides_trade_default() {
+        let db = setup_db();
+        insert_decision_with_bucket_and_detail(
+            &db,
+            "000005.SZ",
+            "selected",
+            "executable",
+            "CORE BOOK",
+            r#"{"main_signal_gate":{"status":"blocked","role":"directional_observation","action_intent":"OBSERVE","blockers":["headline_gate_uncertain"]}}"#,
+        );
+        insert_outcome(&db, "000005.SZ", "selected", 10.0, 10.5, 6.0, 0.2);
+
+        compute(&db, NaiveDate::from_ymd_opt(2026, 4, 24).unwrap()).unwrap();
+
+        let row: (String, String, String, String, Option<String>) = db
+            .query_row(
+                "SELECT action_label, action_source, action_intent, label, feedback_action
+                 FROM algorithm_postmortem WHERE symbol = '000005.SZ'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "OBSERVE".to_string(),
+                "main_signal_gate".to_string(),
+                "OBSERVE".to_string(),
+                "observed_alpha".to_string(),
+                None,
             )
         );
     }

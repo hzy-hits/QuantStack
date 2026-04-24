@@ -266,6 +266,7 @@ def store_report_decisions(
             "selection_penalties": selection.get("penalties"),
             "execution_gate": gate,
             "overnight_alpha": item.get("overnight_alpha"),
+            "main_signal_gate": item.get("main_signal_gate") or (signal.get("main_signal_gate") if isinstance(signal, dict) else None),
             "headline_gate_reasons": (headline_gate or {}).get("reasons"),
         }
 

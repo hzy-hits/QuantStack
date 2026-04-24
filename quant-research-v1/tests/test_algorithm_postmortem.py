@@ -39,6 +39,7 @@ class AlgorithmPostmortemTests(unittest.TestCase):
         headline_mode: str = "normal",
         rr_ratio: float | None = 2.0,
         expected_move_pct: float = 4.0,
+        details_json: str = "{}",
     ) -> None:
         self.con.execute(
             """
@@ -47,7 +48,7 @@ class AlgorithmPostmortemTests(unittest.TestCase):
                 report_bucket, signal_direction, signal_confidence, headline_mode, execution_mode,
                 entry_price, reference_price, rr_ratio, expected_move_pct, details_json
             )
-            VALUES ('2026-04-20', 'pre', ?, ?, 1, ?, ?, 'HIGH', ?, ?, 100, 100, ?, ?, '{}')
+            VALUES ('2026-04-20', 'pre', ?, ?, 1, ?, ?, 'HIGH', ?, ?, 100, 100, ?, ?, ?)
             """,
             [
                 symbol,
@@ -58,6 +59,7 @@ class AlgorithmPostmortemTests(unittest.TestCase):
                 execution_mode,
                 rr_ratio,
                 expected_move_pct,
+                details_json,
             ],
         )
 
@@ -169,6 +171,27 @@ class AlgorithmPostmortemTests(unittest.TestCase):
             """
         ).fetchone()
         self.assertEqual(row, ("OBSERVE", "OBSERVE", "observed_alpha", None))
+
+    def test_blocked_main_signal_gate_overrides_trade_default(self) -> None:
+        self._insert_decision(
+            "GATED",
+            details_json=(
+                '{"main_signal_gate": {"status": "blocked", "role": "directional_observation", '
+                '"action_intent": "OBSERVE", "blockers": ["headline_gate_range"]}}'
+            ),
+        )
+        self._insert_outcome("GATED", hold_3d_ret_pct=6.0)
+
+        materialize_algorithm_postmortem(self.con, date(2026, 4, 24))
+
+        row = self.con.execute(
+            """
+            SELECT action_label, action_source, action_intent, label, feedback_action
+            FROM algorithm_postmortem
+            WHERE symbol = 'GATED'
+            """
+        ).fetchone()
+        self.assertEqual(row, ("OBSERVE", "main_signal_gate", "OBSERVE", "observed_alpha", None))
 
     def test_ignored_follow_through_becomes_missed_alpha(self) -> None:
         self._insert_decision("MISS", selection_status="ignored")

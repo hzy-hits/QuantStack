@@ -304,6 +304,41 @@ class TacticalContinuationSelectionTests(unittest.TestCase):
 
 
 class RenderPayloadTests(unittest.TestCase):
+    def test_main_signal_gate_requires_trend_headline_core_and_executable(self) -> None:
+        from quant_bot.signals.classify import apply_main_signal_gate
+
+        bundle = {
+            "headline_gate": {"mode": "range"},
+            "notable_items": [
+                {
+                    "symbol": "AAA",
+                    "report_bucket": "core",
+                    "execution_gate": {"action": "executable_now"},
+                    "risk_params": {"rr_ratio": 2.1},
+                    "signal": {
+                        "confidence": "HIGH",
+                        "direction": "long",
+                        "direction_score": 0.34,
+                    },
+                }
+            ],
+        }
+
+        apply_main_signal_gate(bundle)
+
+        gate = bundle["notable_items"][0]["main_signal_gate"]
+        self.assertEqual(gate["status"], "blocked")
+        self.assertEqual(gate["role"], "directional_observation")
+        self.assertEqual(gate["action_intent"], "OBSERVE")
+        self.assertIn("headline_gate_range", gate["blockers"])
+
+        bundle["headline_gate"] = {"mode": "trend"}
+        apply_main_signal_gate(bundle)
+        gate = bundle["notable_items"][0]["main_signal_gate"]
+        self.assertEqual(gate["status"], "pass")
+        self.assertEqual(gate["role"], "main_signal")
+        self.assertEqual(gate["action_intent"], "TRADE")
+
     def test_render_notable_items_includes_tactical_continuation_bucket(self) -> None:
         from quant_bot.reporting.render import _render_notable_items
 

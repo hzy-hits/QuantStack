@@ -141,6 +141,22 @@ def _action_intent(action_label: str) -> str:
     return "WAIT"
 
 
+def _action_from_main_signal_gate(details: dict[str, Any]) -> tuple[str, str] | None:
+    gate = details.get("main_signal_gate")
+    if not isinstance(gate, dict):
+        return None
+
+    status = str(gate.get("status") or "").strip().lower()
+    intent = str(gate.get("action_intent") or "").strip().upper()
+    if status == "pass":
+        return "TRADE_NOW", "main_signal_gate"
+    if intent == "AVOID":
+        return "DO_NOT_CHASE", "main_signal_gate"
+    if intent == "WAIT":
+        return "WAIT_PULLBACK", "main_signal_gate"
+    return "OBSERVE", "main_signal_gate"
+
+
 def _regime_bucket(details: dict[str, Any], headline_mode: Any) -> str:
     gate = details.get("execution_gate") if isinstance(details.get("execution_gate"), dict) else {}
     overnight_alpha = (
@@ -214,6 +230,9 @@ def _action_from_row(
     """Infer the report's actionable intent from persisted report metadata."""
     if selection_status != "selected":
         return "WAIT", "not_selected"
+    gate_action = _action_from_main_signal_gate(details)
+    if gate_action is not None:
+        return gate_action
     if direction == "neutral":
         return "WAIT", "neutral_signal"
     if not _is_actionable_lane(report_bucket, headline_mode):

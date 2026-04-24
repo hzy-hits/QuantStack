@@ -434,6 +434,40 @@ pub fn build_notable_items(
         );
     }
 
+    for item in &mut items {
+        let execution_mode = item
+            .detail
+            .get("execution_mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let execution_score = item
+            .detail
+            .get("execution_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let fade_risk = item
+            .detail
+            .get("fade_risk")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(1.0);
+        let gate = main_signal_gate_value(
+            &item.report_bucket,
+            &item.signal.confidence,
+            &item.signal.direction,
+            &headline_gate.mode,
+            execution_mode,
+            execution_score,
+            fade_risk,
+        );
+        if let Some(obj) = item.detail.as_object_mut() {
+            obj.insert(
+                "headline_mode".to_string(),
+                serde_json::json!(headline_gate.mode),
+            );
+            obj.insert("main_signal_gate".to_string(), gate);
+        }
+    }
+
     items = downselect_report_items(items, report_limit);
 
     tracing::info!(
@@ -528,6 +562,15 @@ pub fn build_review_decisions(
                 &mut range_core_slots_remaining,
             );
         }
+        let main_signal_gate = main_signal_gate_value(
+            &report_bucket,
+            &confidence,
+            &direction,
+            &headline_gate.mode,
+            &c.execution_mode,
+            c.execution_score,
+            c.fade_risk,
+        );
 
         decisions.push(ReviewDecision {
             symbol: c.ts_code.clone(),
@@ -552,6 +595,7 @@ pub fn build_review_decisions(
             details_json: serde_json::json!({
                 "headline_mode": headline_gate.mode,
                 "headline_reason": report_reason,
+                "main_signal_gate": main_signal_gate,
                 "trend_prob": c.trend_prob,
                 "trend_prob_n": c.trend_prob_n,
                 "ret_5d": c.ret_5d,
@@ -1466,6 +1510,71 @@ fn classify_report_lane(c: &Candidate, confidence: &str, direction: &str) -> (St
     )
 }
 
+fn main_signal_gate_value(
+    report_bucket: &str,
+    confidence: &str,
+    direction: &str,
+    headline_mode: &str,
+    execution_mode: &str,
+    execution_score: f64,
+    fade_risk: f64,
+) -> serde_json::Value {
+    let mut blockers: Vec<String> = Vec::new();
+    if headline_mode != "trend" {
+        blockers.push(format!("headline_gate_{}", headline_mode));
+    }
+    if report_bucket != "CORE BOOK" {
+        blockers.push(format!("report_lane_{}", report_bucket.to_lowercase()));
+    }
+    if confidence != "HIGH" && confidence != "MODERATE" {
+        blockers.push(format!("confidence_{}", confidence.to_lowercase()));
+    }
+    if direction != "bullish" {
+        blockers.push(format!("direction_{}", direction));
+    }
+    if execution_mode != "executable" {
+        blockers.push(format!("execution_{}", execution_mode));
+    }
+    if execution_score < RANGE_CORE_EXECUTION_MIN {
+        blockers.push("execution_score_below_core".to_string());
+    }
+    if fade_risk > RANGE_CORE_FADE_MAX {
+        blockers.push("fade_risk_above_core".to_string());
+    }
+
+    let status = if blockers.is_empty() {
+        "pass"
+    } else {
+        "blocked"
+    };
+    let role = if blockers.is_empty() {
+        "main_signal"
+    } else if confidence == "LOW" {
+        "notability_only"
+    } else {
+        "directional_observation"
+    };
+    let action_intent = if blockers.is_empty() {
+        "TRADE"
+    } else if execution_mode == "do_not_chase" {
+        "AVOID"
+    } else if execution_mode == "wait_pullback" {
+        "WAIT"
+    } else {
+        "OBSERVE"
+    };
+
+    serde_json::json!({
+        "status": status,
+        "role": role,
+        "action_intent": action_intent,
+        "headline_mode": headline_mode,
+        "report_bucket": report_bucket,
+        "execution_mode": execution_mode,
+        "blockers": blockers,
+    })
+}
+
 fn is_tactical_continuation_candidate(c: &Candidate, confidence: &str, direction: &str) -> bool {
     if is_chinext_symbol(&c.ts_code) {
         return false;
@@ -2150,7 +2259,7 @@ mod tests {
     use super::{
         apply_uncertain_headline_policy, classify_convergence, classify_report_lane,
         effective_pass1_cutoff, effective_report_limit, expanded_report_pool_limit,
-        is_tactical_continuation_candidate, lab_composite_score,
+        is_tactical_continuation_candidate, lab_composite_score, main_signal_gate_value,
         plan_uncertain_headline_candidates, select_uncertain_tactical_symbols_from_candidates,
         Candidate, RANGE_CORE_BUCKET, TACTICAL_CONTINUATION_BUCKET, UNCERTAIN_TACTICAL_LIMIT_MAX,
     };
@@ -2400,6 +2509,40 @@ mod tests {
         let (bucket, reason) = classify_report_lane(&candidate, "HIGH", "bullish");
         assert_eq!(bucket, "THEME ROTATION");
         assert!(reason.contains("创业板"));
+    }
+
+    #[test]
+    fn main_signal_gate_requires_trend_core_and_executable() {
+        let blocked = main_signal_gate_value(
+            "CORE BOOK",
+            "HIGH",
+            "bullish",
+            "uncertain",
+            "executable",
+            0.68,
+            0.20,
+        );
+        assert_eq!(blocked["status"], "blocked");
+        assert_eq!(blocked["role"], "directional_observation");
+        assert_eq!(blocked["action_intent"], "OBSERVE");
+        assert!(blocked["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v == "headline_gate_uncertain"));
+
+        let passed = main_signal_gate_value(
+            "CORE BOOK",
+            "HIGH",
+            "bullish",
+            "trend",
+            "executable",
+            0.68,
+            0.20,
+        );
+        assert_eq!(passed["status"], "pass");
+        assert_eq!(passed["role"], "main_signal");
+        assert_eq!(passed["action_intent"], "TRADE");
     }
 
     #[test]

@@ -172,6 +172,16 @@ def _selection_lines(item: dict) -> list[str]:
             f"**Execution read:** {_execution_sentence(action, headline_mode=headline_mode)}"
             f" | **Gap / implied move:** {_fmt_val(gap_vs_move, 2)}x"
         )
+    main_gate = item.get("main_signal_gate") or (item.get("signal") or {}).get("main_signal_gate")
+    if main_gate:
+        blockers = main_gate.get("blockers") or []
+        blocker_text = ", ".join(blockers[:3]) if blockers else "none"
+        lines.append(
+            f"**Main signal gate:** {str(main_gate.get('status') or 'unknown').upper()}"
+            f" | **Role:** {main_gate.get('role') or 'unknown'}"
+            f" | **Intent:** {main_gate.get('action_intent') or 'OBSERVE'}"
+            f" | **Blockers:** {blocker_text}"
+        )
     if confirmations:
         lines.append(f"**Confirmation quality:** {', '.join(confirmations)}")
     penalties = selection.get("penalties") or []
