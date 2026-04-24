@@ -24,6 +24,7 @@ from ._render_insights import (
     render_item_news_quality,
     render_item_risk_params,
     render_portfolio_risk,
+    render_report_postmortem,
     render_scorecard,
     render_shared_catalysts,
 )
@@ -41,6 +42,7 @@ def render_payload_md(bundle: dict, output_path: Path, chart_paths: list | None 
     lines: list[str] = []
 
     lines += render_header_and_context(bundle)
+    lines += render_report_postmortem(bundle)
     lines += render_scorecard(bundle)
     lines += render_portfolio_risk(bundle)
     lines += render_shared_catalysts(bundle)
@@ -64,7 +66,7 @@ def _render_notable_items(bundle: dict) -> list[str]:
         "",
         f"Top {len(all_items)} from the full-universe scan.",
         "",
-        "*Items are split into Core Book, Tactical Event Tape, and Appendix / Radar so anomaly detection does not overwhelm the main report.*",
+        "*Items are split into Core Book, Tactical Continuation, Tactical Event Tape, and Appendix / Radar so anomaly detection does not overwhelm the main report.*",
         "*Signal direction uses weighted multi-source scoring (options + momentum + events), while report lane reflects tradability and confirmation quality.*",
         "",
     ]
@@ -74,6 +76,11 @@ def _render_notable_items(bundle: dict) -> list[str]:
             "core",
             "Core Book",
             "Primary report lane: liquid large-cap equities, ETFs, or watchlist names with enough confirmation to matter for the main narrative.",
+        ),
+        (
+            "tactical_continuation",
+            "Tactical Continuation",
+            "Continuation setups that still have edge, but only as smaller tactical positions with hard stops and tighter execution discipline.",
         ),
         (
             "event_tape",
@@ -131,8 +138,18 @@ def _sort_bucket_items(items: list[dict], *, bucket: str) -> list[dict]:
 
     def _primary_score(item: dict) -> float:
         if bucket == "core":
-            return float(item.get("report_score", item.get("score", 0.0)) or 0.0)
-        return float(item.get("score", item.get("report_score", 0.0)) or 0.0)
+            return float(
+                item.get("selection_rank_score")
+                or item.get("report_score")
+                or item.get("score", 0.0)
+                or 0.0
+            )
+        return float(
+            item.get("selection_rank_score")
+            or item.get("report_score")
+            or item.get("score", 0.0)
+            or 0.0
+        )
 
     return sorted(
         items,

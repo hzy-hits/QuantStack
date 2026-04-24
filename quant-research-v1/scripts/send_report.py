@@ -33,8 +33,10 @@ SESSION_LABELS = {
 }
 
 
-def _find_charts(as_of: str) -> list[Path]:
-    charts_dir = Path("reports") / "charts" / as_of
+def _find_charts(as_of: str, session: str) -> list[Path]:
+    charts_dir = Path("reports") / "charts" / as_of / session
+    if not charts_dir.exists():
+        charts_dir = Path("reports") / "charts" / as_of
     if not charts_dir.exists():
         return []
     return sorted(charts_dir.glob("*.png"))
@@ -60,7 +62,7 @@ def main():
         as_of = str(datetime.now(ZoneInfo("America/New_York")).date())
     session = args.session
     session_label = SESSION_LABELS[session]
-    chart_paths = _find_charts(as_of)
+    chart_paths = _find_charts(as_of, session)
 
     reports: list[tuple[Path, str]] = []
 
@@ -104,7 +106,7 @@ def main():
                 to=args.to,
                 subject=subject,
             )
-            print(f"  Sent to {len(msg_ids)} recipients")
+            print(f"  Sent successfully ({len(msg_ids)} message)")
         else:
             draft_id = create_report_draft(
                 report_path=report_path,

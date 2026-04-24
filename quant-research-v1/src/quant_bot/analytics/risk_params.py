@@ -42,17 +42,30 @@ def compute_risk_params(item: dict) -> dict[str, Any]:
 
     expected_move_usd = price * expected_move_pct / 100.0
 
-    # Compute entry, stop, target based on direction
-    entry = round(price, 2)
+    execution_gate = item.get("execution_gate") or {}
+    execution_mode = execution_gate.get("action", "executable_now")
+    pullback_price = execution_gate.get("pullback_price")
+
+    # Compute entry, stop, target based on direction.
+    # If the overnight gate says "wait" or "do not chase", anchor the
+    # entry to the pullback trigger instead of the stale prior close.
+    entry_price = price
+    if execution_mode in {"wait_pullback", "do_not_chase"} and pullback_price:
+        try:
+            entry_price = float(pullback_price)
+        except (TypeError, ValueError):
+            entry_price = price
+
+    entry = round(entry_price, 2)
     stop_distance = 2.0 * atr  # 2-ATR stop
 
     if direction == "short":
-        stop = round(price + stop_distance, 2)
-        target = round(price - expected_move_usd, 2)
+        stop = round(entry_price + stop_distance, 2)
+        target = round(entry_price - expected_move_usd, 2)
     else:
         # Default to long
-        stop = round(price - stop_distance, 2)
-        target = round(price + expected_move_usd, 2)
+        stop = round(entry_price - stop_distance, 2)
+        target = round(entry_price + expected_move_usd, 2)
 
     # R:R ratio = reward / risk
     risk = abs(entry - stop)
@@ -66,6 +79,9 @@ def compute_risk_params(item: dict) -> dict[str, Any]:
         "rr_ratio": rr_ratio,
         "stop_distance_atr": 2.0,
         "expected_move_pct": round(expected_move_pct, 2),
+        "execution_mode": execution_mode,
+        "reference_price": execution_gate.get("ref_price"),
+        "gap_pct": execution_gate.get("gap_pct"),
     }
 
     # Half-life from cointegration if available

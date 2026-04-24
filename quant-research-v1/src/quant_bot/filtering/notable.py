@@ -34,6 +34,8 @@ from ._events_loader import (
     load_momentum_analysis,
     load_mean_reversion,
     load_breakout,
+    load_overnight_gate,
+    load_overnight_continuation_alpha,
     load_lab_factor,
     load_earnings_risk,
     load_earnings_events,
@@ -66,6 +68,38 @@ from ._price_signals_loader import (
 )
 
 log = structlog.get_logger()
+
+TACTICAL_CONTINUATION_MIN_TRADABILITY = 0.55
+TACTICAL_CONTINUATION_PULLBACK_MIN_TRADABILITY = 0.50
+TACTICAL_CONTINUATION_CONTINUE_MIN = 0.58
+TACTICAL_CONTINUATION_SUPPORT_MIN = 0.56
+TACTICAL_CONTINUATION_PULLBACK_CONTINUE_MIN = 0.54
+TACTICAL_CONTINUATION_PULLBACK_SUPPORT_MIN = 0.53
+TACTICAL_CONTINUATION_MEAN_REV_CONTINUE_MIN = 0.50
+TACTICAL_CONTINUATION_MEAN_REV_SUPPORT_MIN = 0.58
+TACTICAL_CONTINUATION_NOISY_CONTINUE_MIN = 0.54
+TACTICAL_CONTINUATION_NOISY_SUPPORT_MIN = 0.60
+TACTICAL_CONTINUATION_STRETCH_MAX = 0.74
+TACTICAL_CONTINUATION_PULLBACK_STRETCH_MAX = 0.82
+TACTICAL_CONTINUATION_RET_5D_MAX = 30.0
+TACTICAL_CONTINUATION_MEAN_REV_RET_5D_MAX = 24.0
+
+
+def _execution_front_rank_penalty(
+    action: str | None,
+    *,
+    gap_vs_move: float | None,
+    tradability_score: float,
+) -> float:
+    """Penalty that keeps stretched overnight moves out of the front of the book."""
+    gap_stretch = max(float(gap_vs_move or 0.0) - 0.6, 0.0)
+    if action == "do_not_chase":
+        return round(min(0.32, 0.18 + 0.07 * gap_stretch + 0.05 * max(0.65 - tradability_score, 0.0)), 4)
+    if action == "wait_pullback":
+        return round(min(0.16, 0.07 + 0.04 * gap_stretch + 0.03 * max(0.70 - tradability_score, 0.0)), 4)
+    if tradability_score < 0.45:
+        return 0.03
+    return 0.0
 
 
 def _load_company_profiles(
@@ -115,6 +149,118 @@ def _liquidity_factor(opts_payload: dict) -> float:
     return 0.55
 
 
+def _direction_sign(value: Any) -> float:
+    parsed = _safe(value)
+    if isinstance(parsed, (int, float)):
+        return 1.0 if parsed > 0 else -1.0 if parsed < 0 else 0.0
+    text = str(value or "").lower()
+    if "bullish" in text:
+        return 1.0
+    if "bearish" in text:
+        return -1.0
+    return 0.0
+
+
+def _is_tactical_continuation_candidate(
+    item: dict[str, Any],
+    *,
+    execution_action: str,
+    tradability_score: float,
+) -> bool:
+    if execution_action == "do_not_chase":
+        return False
+
+    execution_gate = item.get("execution_gate") or {}
+    gap_pct = float(_safe(execution_gate.get("gap_pct"), 0.0) or 0.0)
+    p_continue = float(_safe(execution_gate.get("p_continue"), 0.0) or 0.0)
+    support_score = float(_safe(execution_gate.get("support_score"), 0.0) or 0.0)
+    effective_stretch = _safe(execution_gate.get("effective_stretch_score"))
+    if effective_stretch is None:
+        effective_stretch = _safe(execution_gate.get("stretch_score"), 0.0)
+    effective_stretch = float(effective_stretch or 0.0)
+    max_chase_gap_pct = float(_safe(execution_gate.get("max_chase_gap_pct"), 0.0) or 0.0)
+    pullback_price = float(_safe(execution_gate.get("pullback_price"), 0.0) or 0.0)
+    overnight_regime = execution_gate.get("regime") or ""
+    trend_regime = execution_gate.get("trend_regime") or ""
+    ret_1d = float(item.get("ret_1d_pct") or 0.0)
+    ret_5d = float(item.get("ret_5d_pct") or 0.0)
+
+    reversion = item.get("mean_reversion") or {}
+    breakout = item.get("breakout") or {}
+    reversion_score = float(_safe(reversion.get("reversion_score"), 0.0) or 0.0)
+    reversion_direction = _direction_sign(reversion.get("reversion_direction"))
+    breakout_score = float(_safe(breakout.get("breakout_score"), 0.0) or 0.0)
+    breakout_direction = _direction_sign(breakout.get("breakout_direction"))
+    event_score = float(((item.get("sub_scores") or {}).get("event") or 0.0))
+    lab_confirming = bool((item.get("lab_factor") or {}).get("is_confirming"))
+
+    pullback_valid = (
+        execution_action == "wait_pullback"
+        and pullback_price > 0.0
+        and max_chase_gap_pct > 0.0
+        and effective_stretch <= TACTICAL_CONTINUATION_PULLBACK_STRETCH_MAX
+    )
+    tradability_floor = (
+        TACTICAL_CONTINUATION_PULLBACK_MIN_TRADABILITY
+        if pullback_valid
+        else TACTICAL_CONTINUATION_MIN_TRADABILITY
+    )
+    if tradability_score < tradability_floor:
+        return False
+
+    if gap_pct <= 0 and not (pullback_valid and ret_1d > 0.0 and ret_5d > 0.0):
+        return False
+
+    breakout_follow_through = breakout_direction > 0.0 and breakout_score >= 0.50
+    event_or_factor_support = event_score >= 0.40 or lab_confirming or breakout_follow_through
+    mean_reversion_relaunch = (
+        trend_regime == "mean_reverting"
+        and pullback_valid
+        and reversion_direction > 0.0
+        and reversion_score >= 0.55
+        and p_continue >= TACTICAL_CONTINUATION_MEAN_REV_CONTINUE_MIN
+        and support_score >= TACTICAL_CONTINUATION_MEAN_REV_SUPPORT_MIN
+    )
+    noisy_follow_through = (
+        trend_regime == "noisy"
+        and pullback_valid
+        and breakout_follow_through
+        and p_continue >= TACTICAL_CONTINUATION_NOISY_CONTINUE_MIN
+        and support_score >= TACTICAL_CONTINUATION_NOISY_SUPPORT_MIN
+    )
+    continuation_backing = (
+        p_continue >= TACTICAL_CONTINUATION_CONTINUE_MIN
+        or support_score >= TACTICAL_CONTINUATION_SUPPORT_MIN
+        or (
+            pullback_valid
+            and p_continue >= TACTICAL_CONTINUATION_PULLBACK_CONTINUE_MIN
+            and support_score >= TACTICAL_CONTINUATION_PULLBACK_SUPPORT_MIN
+            and event_or_factor_support
+        )
+        or mean_reversion_relaunch
+        or noisy_follow_through
+    )
+    regime_backing = (
+        overnight_regime == "continue"
+        or (trend_regime == "trending" and p_continue >= TACTICAL_CONTINUATION_PULLBACK_CONTINUE_MIN)
+        or mean_reversion_relaunch
+        or noisy_follow_through
+    )
+    ret_5d_cap = (
+        TACTICAL_CONTINUATION_MEAN_REV_RET_5D_MAX
+        if mean_reversion_relaunch
+        else TACTICAL_CONTINUATION_RET_5D_MAX
+    )
+    stretch_cap = (
+        TACTICAL_CONTINUATION_PULLBACK_STRETCH_MAX
+        if pullback_valid
+        else TACTICAL_CONTINUATION_STRETCH_MAX
+    )
+    not_overstretched = effective_stretch <= stretch_cap and 0.0 < ret_5d <= ret_5d_cap
+
+    return continuation_backing and regime_backing and not_overstretched
+
+
 def _selection_metadata(
     item: dict[str, Any],
     *,
@@ -134,8 +280,12 @@ def _selection_metadata(
     options = item.get("options") or {}
     options_liquidity = options.get("liquidity_score")
     has_liquid_options = options_liquidity in {"good", "fair"}
-    has_lab_factor = bool(item.get("lab_factor"))
+    lab_factor = item.get("lab_factor") or {}
+    has_lab_factor = bool(lab_factor.get("is_confirming"))
     named_core = item["symbol"] in core_symbols
+    execution_gate = item.get("execution_gate") or {}
+    execution_action = execution_gate.get("action", "executable_now")
+    gap_vs_move = execution_gate.get("gap_vs_expected_move")
 
     price_factor = min(max(price / max(min_price, 1.0), 0.15), 1.0)
     dollar_volume_factor = min(max(avg_dollar_volume / max(min_dollar_volume, 1.0), 0.10), 1.0)
@@ -155,15 +305,46 @@ def _selection_metadata(
         3,
     )
 
+    if execution_action == "wait_pullback":
+        tradability_score = round(tradability_score * 0.82, 3)
+    elif execution_action == "do_not_chase":
+        tradability_score = round(tradability_score * 0.55, 3)
+
     passes_core_floor = (
         price >= min_price
         and avg_dollar_volume >= min_dollar_volume
         and (not has_market_cap or float(market_cap) >= min_market_cap)
     )
+    tactical_continuation = _is_tactical_continuation_candidate(
+        item,
+        execution_action=execution_action,
+        tradability_score=tradability_score,
+    )
 
-    if passes_core_floor and (named_core or has_liquid_options or has_lab_factor or (has_market_cap and float(market_cap) >= min_market_cap * 2.5)):
+    if execution_action == "do_not_chase":
+        lane = "appendix"
+        lane_reason = "overnight move already looks stretched; radar only"
+    elif (
+        passes_core_floor
+        and execution_action == "executable_now"
+        and (
+            named_core
+            or has_liquid_options
+            or has_lab_factor
+            or (has_market_cap and float(market_cap) >= min_market_cap * 2.5)
+        )
+    ):
         lane = "core"
         lane_reason = "tradable core-book candidate"
+    elif tactical_continuation:
+        lane = "tactical_continuation"
+        if execution_action == "wait_pullback":
+            lane_reason = "continuation setup still has edge after a reset; keep it tactical and use the pullback level"
+        else:
+            lane_reason = "continuation setup still has edge, but keep it tactical with hard stops"
+    elif execution_action == "wait_pullback":
+        lane = "event_tape"
+        lane_reason = "conditional only; keep it tactical until price resets on pullback"
     elif item["score"] >= 0.45 or item["sub_scores"].get("event", 0.0) >= 0.65 or item["sub_scores"].get("magnitude", 0.0) >= 0.75:
         lane = "event_tape"
         lane_reason = "anomaly/event tape candidate"
@@ -172,6 +353,12 @@ def _selection_metadata(
         lane_reason = "low-priority radar candidate"
 
     report_score = round(item["score"] * (0.35 + 0.65 * tradability_score), 4)
+    front_rank_penalty = _execution_front_rank_penalty(
+        execution_action,
+        gap_vs_move=gap_vs_move,
+        tradability_score=tradability_score,
+    )
+    selection_rank_score = round(max(report_score - front_rank_penalty, 0.0), 4)
 
     penalties = []
     if price < min_price:
@@ -184,16 +371,25 @@ def _selection_metadata(
         penalties.append("poor_options")
     if not has_liquid_options and not has_lab_factor:
         penalties.append("weak_secondary_confirmation")
+    if execution_action == "wait_pullback":
+        penalties.append("needs_pullback")
+    elif execution_action == "do_not_chase":
+        penalties.append("overnight_stretch")
 
     return {
         "lane": lane,
         "lane_reason": lane_reason,
         "tradability_score": tradability_score,
         "report_score": report_score,
+        "selection_rank_score": selection_rank_score,
+        "front_rank_penalty": front_rank_penalty,
         "penalties": penalties,
         "named_core": named_core,
         "has_liquid_options": has_liquid_options,
         "has_lab_factor": has_lab_factor,
+        "tactical_continuation": tactical_continuation,
+        "execution_action": execution_action,
+        "execution_gate": execution_gate,
     }
 
 
@@ -228,6 +424,8 @@ def build_notable_items(
     mom_map = load_momentum_analysis(con, as_of)
     mr_map = load_mean_reversion(con, as_of)
     bo_map = load_breakout(con, as_of)
+    overnight_gate_map = load_overnight_gate(con, as_of)
+    overnight_alpha_map = load_overnight_continuation_alpha(con, as_of)
     lab_map = load_lab_factor(con, as_of)
     earn_risk_map = load_earnings_risk(con, as_of)
     earn_map = load_earnings_events(con, as_of)
@@ -392,6 +590,10 @@ def build_notable_items(
             item["breakout"] = bo_payload
         if lab_payload:
             item["lab_factor"] = lab_payload
+        if sym in overnight_gate_map:
+            item["execution_gate"] = overnight_gate_map[sym]
+        if sym in overnight_alpha_map:
+            item["overnight_alpha"] = overnight_alpha_map[sym]
 
         selection = _selection_metadata(
             item,
@@ -401,6 +603,7 @@ def build_notable_items(
         item["selection"] = selection
         item["report_bucket"] = selection["lane"]
         item["report_score"] = selection["report_score"]
+        item["selection_rank_score"] = selection["selection_rank_score"]
 
         scored.append(item)
 
@@ -414,6 +617,7 @@ def build_notable_items(
         selected=len(top),
         event_driven=len([s for s in top if s["sub_scores"]["event"] > 0.5]),
         core_book=len([s for s in top if s.get("report_bucket") == "core"]),
+        tactical_continuation=len([s for s in top if s.get("report_bucket") == "tactical_continuation"]),
         event_tape=len([s for s in top if s.get("report_bucket") == "event_tape"]),
     )
 

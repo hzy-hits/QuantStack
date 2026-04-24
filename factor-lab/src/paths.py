@@ -61,4 +61,6 @@ QUANT_US_ROOT = _pick_repo_root(
 
 FACTOR_LAB_DB = FACTOR_LAB_ROOT / "data" / "factor_lab.duckdb"
 QUANT_CN_DB = QUANT_CN_ROOT / "data" / "quant_cn.duckdb"
+QUANT_CN_REPORT_DB = QUANT_CN_ROOT / "data" / "quant_cn_report.duckdb"
 QUANT_US_DB = QUANT_US_ROOT / "data" / "quant.duckdb"
+QUANT_US_REPORT_DB = QUANT_US_ROOT / "data" / "quant_report.duckdb"

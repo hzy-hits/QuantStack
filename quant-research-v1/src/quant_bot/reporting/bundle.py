@@ -223,3 +223,81 @@ def build_report_bundle(
             "pvalue_sigfigs": 3,
         },
     }
+
+
+def compute_headline_gate(bundle: dict[str, Any]) -> dict[str, Any]:
+    """
+    Determine how strongly the report is allowed to frame the market direction.
+
+    Modes:
+      - trend: enough calibrated directional edge to headline a directional view
+      - range: state can be discussed, but not as a bull/bear headline
+      - uncertain: insufficient predictive edge; describe uncertainty explicitly
+    """
+    hmm = bundle.get("hmm_regime") or {}
+    cal = hmm.get("calibration") or {}
+
+    p_ret = hmm.get("p_ret_positive_tomorrow")
+    days = int(hmm.get("days_in_current_regime") or 0)
+    cal_n = int(cal.get("n") or 0)
+    brier_skill = cal.get("brier_skill_score")
+    edge = abs(float(p_ret) - 0.5) if p_ret is not None else None
+
+    reasons: list[str] = []
+    mode = "range"
+
+    if p_ret is None:
+        mode = "uncertain"
+        reasons.append("HMM next-day probability unavailable")
+    else:
+        if cal_n < 20:
+            reasons.append(f"resolved calibration sample too small (n={cal_n})")
+        if edge is not None and edge < 0.03:
+            reasons.append(f"next-day edge weak (|P(up)-0.5|={edge:.3f})")
+        if brier_skill is not None and brier_skill <= 0:
+            reasons.append(f"no calibration edge vs climatology (BSS={brier_skill:.3f})")
+        if days < 3:
+            reasons.append(f"regime age too short ({days}d)")
+
+        if cal_n < 20 or edge is None or edge < 0.03 or (brier_skill is not None and brier_skill <= 0):
+            mode = "uncertain"
+        elif edge >= 0.06 and (brier_skill is None or brier_skill > 0) and days >= 3:
+            mode = "trend"
+        else:
+            mode = "range"
+
+    if not reasons:
+        if mode == "trend":
+            reasons.append("directional edge, calibration, and regime age all clear threshold")
+        elif mode == "range":
+            reasons.append("directional edge present but not strong enough for a bull/bear headline")
+        else:
+            reasons.append("insufficient predictive edge for a directional headline")
+
+    bias = "neutral"
+    if p_ret is not None:
+        if p_ret >= 0.53:
+            bias = "bullish"
+        elif p_ret <= 0.47:
+            bias = "bearish"
+
+    return {
+        "mode": mode,
+        "bias": bias if mode != "uncertain" else "neutral",
+        "allow_directional_regime": mode == "trend",
+        "reporting_rule": (
+            "Use trend framing only."
+            if mode == "trend"
+            else "Do not headline bull/bear; describe the market as range-bound or uncertain."
+        ),
+        "inputs": {
+            "p_ret_positive_tomorrow": round(float(p_ret), 4) if p_ret is not None else None,
+            "edge_vs_coinflip": round(edge, 4) if edge is not None else None,
+            "calibration_n": cal_n,
+            "brier_score": cal.get("brier_score"),
+            "brier_skill_score": brier_skill,
+            "regime_days": days,
+            "hmm_regime": hmm.get("regime"),
+        },
+        "reasons": reasons,
+    }

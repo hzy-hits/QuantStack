@@ -1,3 +1,8 @@
+pub mod event;
+pub mod flow;
+pub mod fundamental;
+pub mod macro_cn;
+pub mod market;
 /// Tushare Pro API client — modular fetcher.
 ///
 /// All endpoints use a unified POST interface:
@@ -6,12 +11,7 @@
 ///
 /// Rate limit: ~200 req/min at 2000-credit tier → 500ms delay between calls.
 pub mod prices;
-pub mod fundamental;
-pub mod flow;
-pub mod event;
-pub mod market;
 pub mod universe;
-pub mod macro_cn;
 
 use anyhow::{anyhow, Result};
 use chrono::NaiveDate;
@@ -85,12 +85,10 @@ pub async fn query(
         fields: fields.to_string(),
     };
 
-    let resp: TushareResponse = super::http::send_with_retry(|| {
-        client.post(API_URL).json(&req)
-    })
-    .await?
-    .json()
-    .await?;
+    let resp: TushareResponse = super::http::send_with_retry(|| client.post(API_URL).json(&req))
+        .await?
+        .json()
+        .await?;
 
     if resp.code != 0 {
         return Err(anyhow!(
@@ -135,11 +133,7 @@ where
 
 // ── Public fetch_all orchestrator ────────────────────────────────────────────
 
-pub async fn fetch_all(
-    db: &Connection,
-    cfg: &Settings,
-    as_of: NaiveDate,
-) -> Result<usize> {
+pub async fn fetch_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usize> {
     let client = super::http::build_client()?;
     let token = &cfg.api.tushare_token;
 
@@ -177,11 +171,13 @@ pub async fn fetch_all(
             continue;
         }
         // Skip if we already have data for this date
-        let existing: i64 = db.query_row(
-            "SELECT COUNT(*) FROM margin_detail WHERE trade_date = ?",
-            duckdb::params![d.to_string()],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let existing: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM margin_detail WHERE trade_date = ?",
+                duckdb::params![d.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         if existing > 0 {
             continue;
         }
@@ -213,7 +209,10 @@ pub async fn fetch_all(
     // ── Macro data (Shibor daily, LPR monthly, macro indicators) ──
     total += macro_cn::fetch_shibor(&client, token, db, as_of).await?;
     total += macro_cn::fetch_lpr(&client, token, db, as_of).await?;
-    let macro_series: Vec<(String, String)> = cfg.r#macro.series.iter()
+    let macro_series: Vec<(String, String)> = cfg
+        .r#macro
+        .series
+        .iter()
         .map(|s| (s.id.clone(), s.name.clone()))
         .collect();
     total += macro_cn::fetch_macro_indicators(&client, token, db, &macro_series).await?;

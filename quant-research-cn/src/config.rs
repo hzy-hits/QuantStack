@@ -34,9 +34,15 @@ pub struct EnrichmentConfig {
     pub model: String,
 }
 
-fn default_true() -> bool { true }
-fn default_concurrency() -> usize { 10 }
-fn default_deepseek_model() -> String { "deepseek-chat".to_string() }
+fn default_true() -> bool {
+    true
+}
+fn default_concurrency() -> usize {
+    10
+}
+fn default_deepseek_model() -> String {
+    "deepseek-chat".to_string()
+}
 
 #[derive(Deserialize, Clone)]
 pub struct RuntimeConfig {
@@ -84,8 +90,35 @@ pub struct OutputConfig {
 
 #[derive(Deserialize, Clone)]
 pub struct DataConfig {
+    #[serde(default)]
     pub db_path: String,
+    #[serde(default = "default_raw_db_path")]
+    pub raw_db_path: String,
+    #[serde(default = "default_research_db_path")]
+    pub research_db_path: String,
+    #[serde(default = "default_report_db_path")]
+    pub report_db_path: String,
+    #[serde(default = "default_dev_db_path")]
+    pub dev_db_path: String,
+    #[serde(default)]
+    pub use_dev_for_research: bool,
     pub constituent_refresh_days: u32,
+}
+
+fn default_raw_db_path() -> String {
+    "data/quant_cn_raw.duckdb".to_string()
+}
+
+fn default_research_db_path() -> String {
+    "data/quant_cn_research.duckdb".to_string()
+}
+
+fn default_report_db_path() -> String {
+    "data/quant_cn_report.duckdb".to_string()
+}
+
+fn default_dev_db_path() -> String {
+    "data/quant_cn_dev.duckdb".to_string()
 }
 
 #[derive(Deserialize, Clone)]
@@ -100,9 +133,15 @@ pub struct SignalsConfig {
     pub unlock_lookahead_days: u32,
 }
 
-fn default_ma_filter() -> u32 { 120 }
-fn default_flow_halflife() -> u32 { 10 }
-fn default_unlock_lookahead() -> u32 { 30 }
+fn default_ma_filter() -> u32 {
+    120
+}
+fn default_flow_halflife() -> u32 {
+    10
+}
+fn default_unlock_lookahead() -> u32 {
+    30
+}
 
 #[derive(Deserialize, Clone, Default)]
 pub struct MacroConfig {
@@ -130,6 +169,34 @@ impl Settings {
         let content = std::fs::read_to_string(path)?;
         let settings: Settings = serde_yaml::from_str(&content)?;
         Ok(settings)
+    }
+}
+
+impl DataConfig {
+    pub fn raw_path(&self) -> &str {
+        if self.raw_db_path.is_empty() && !self.db_path.is_empty() {
+            &self.db_path
+        } else {
+            &self.raw_db_path
+        }
+    }
+
+    pub fn research_path(&self) -> &str {
+        if self.use_dev_for_research {
+            &self.dev_db_path
+        } else if self.research_db_path.is_empty() && !self.db_path.is_empty() {
+            &self.db_path
+        } else {
+            &self.research_db_path
+        }
+    }
+
+    pub fn report_path(&self) -> &str {
+        if self.report_db_path.is_empty() && !self.db_path.is_empty() {
+            &self.db_path
+        } else {
+            &self.report_db_path
+        }
     }
 }
 

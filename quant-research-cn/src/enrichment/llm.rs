@@ -67,7 +67,10 @@ impl DeepSeekClient {
     /// Send a chat completion request with concurrency control.
     /// Returns the assistant's response content.
     pub async fn complete(&self, system: &str, user: &str) -> Result<String> {
-        let _permit = self.semaphore.acquire().await
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
             .map_err(|e| anyhow!("semaphore error: {}", e))?;
 
         let req = ChatRequest {
@@ -89,7 +92,8 @@ impl DeepSeekClient {
             },
         };
 
-        let resp = self.client
+        let resp = self
+            .client
             .post(API_URL)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .json(&req)

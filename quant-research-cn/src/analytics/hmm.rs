@@ -41,7 +41,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
          FROM prices
          WHERE ts_code = ? AND trade_date <= ?
          ORDER BY trade_date DESC
-         LIMIT 500"
+         LIMIT 500",
     )?;
 
     let mut data: Vec<(String, f64)> = stmt
@@ -60,7 +60,11 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     let returns: Vec<f64> = data.iter().map(|(_, r)| *r).collect();
 
     if returns.len() < 100 {
-        info!(n = returns.len(), benchmark = benchmark, "insufficient data for HMM, skipping");
+        info!(
+            n = returns.len(),
+            benchmark = benchmark,
+            "insufficient data for HMM, skipping"
+        );
         return Ok(0);
     }
 
@@ -80,7 +84,11 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         // Check convergence
         if (ll - prev_ll).abs() < CONVERGENCE_EPS {
             converged = true;
-            info!(iterations = iter + 1, log_likelihood = format!("{:.4}", ll), "HMM converged");
+            info!(
+                iterations = iter + 1,
+                log_likelihood = format!("{:.4}", ll),
+                "HMM converged"
+            );
             break;
         }
         prev_ll = ll;
@@ -109,7 +117,11 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     let (_, alpha) = forward(&returns, &hmm);
     let t = returns.len() - 1;
     let alpha_sum: f64 = alpha[t].iter().sum();
-    let p_state0 = if alpha_sum > 0.0 { alpha[t][0] / alpha_sum } else { 0.5 };
+    let p_state0 = if alpha_sum > 0.0 {
+        alpha[t][0] / alpha_sum
+    } else {
+        0.5
+    };
 
     // Semantic label: based on emission mean AND volatility
     let label_state0 = if hmm.mu[0] > 0.2 && hmm.sigma[0] > 1.5 {
@@ -152,7 +164,11 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
 
     // Regime duration: count consecutive days in current regime
     let regime_duration = compute_regime_duration(&returns, &hmm);
-    let current_regime = if p_state0 > 0.5 { label_state0 } else { label_state1 };
+    let current_regime = if p_state0 > 0.5 {
+        label_state0
+    } else {
+        label_state1
+    };
 
     info!(
         p_bull = format!("{:.3}", p_bull),
@@ -176,27 +192,45 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         benchmark,
         returns.len(),
         converged,
-        hmm.mu[0], hmm.mu[1],
-        hmm.sigma[0], hmm.sigma[1],
+        hmm.mu[0],
+        hmm.mu[1],
+        hmm.sigma[0],
+        hmm.sigma[1],
         current_regime,
         regime_duration,
-        label_state0, label_state1,
+        label_state0,
+        label_state1,
         p_state0,
     );
 
     // P(bull)
     insert_stmt.execute(duckdb::params![
-        MARKET_CODE, date_str, MODULE, "p_bull", p_bull, &detail,
+        MARKET_CODE,
+        date_str,
+        MODULE,
+        "p_bull",
+        p_bull,
+        &detail,
     ])?;
 
     // P(r > 0 tomorrow)
     insert_stmt.execute(duckdb::params![
-        MARKET_CODE, date_str, MODULE, "p_ret_positive", p_ret_positive, None::<String>,
+        MARKET_CODE,
+        date_str,
+        MODULE,
+        "p_ret_positive",
+        p_ret_positive,
+        None::<String>,
     ])?;
 
     // regime_duration
     insert_stmt.execute(duckdb::params![
-        MARKET_CODE, date_str, MODULE, "regime_duration", regime_duration as f64, None::<String>,
+        MARKET_CODE,
+        date_str,
+        MODULE,
+        "regime_duration",
+        regime_duration as f64,
+        None::<String>,
     ])?;
 
     // Store 1-step forecast for Brier score tracking
@@ -223,18 +257,28 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     }
 
     // Compute Brier score from resolved forecasts
-    let brier = db.query_row(
-        "SELECT AVG((p_predicted - actual) * (p_predicted - actual))
+    let brier = db
+        .query_row(
+            "SELECT AVG((p_predicted - actual) * (p_predicted - actual))
          FROM hmm_forecasts WHERE resolved = TRUE",
-        [],
-        |row| row.get::<_, Option<f64>>(0),
-    ).unwrap_or(None);
+            [],
+            |row| row.get::<_, Option<f64>>(0),
+        )
+        .unwrap_or(None);
 
     if let Some(bs) = brier {
         insert_stmt.execute(duckdb::params![
-            MARKET_CODE, date_str, MODULE, "brier_score", bs, None::<String>,
+            MARKET_CODE,
+            date_str,
+            MODULE,
+            "brier_score",
+            bs,
+            None::<String>,
         ])?;
-        info!(brier_score = format!("{:.4}", bs), "HMM Brier score computed");
+        info!(
+            brier_score = format!("{:.4}", bs),
+            "HMM Brier score computed"
+        );
     }
 
     Ok(1)
@@ -245,18 +289,30 @@ fn initialize_kmeans(returns: &[f64]) -> GaussianHMM {
     let pos: Vec<f64> = returns.iter().filter(|&&r| r >= 0.0).cloned().collect();
     let neg: Vec<f64> = returns.iter().filter(|&&r| r < 0.0).cloned().collect();
 
-    let mu_bull = if pos.is_empty() { 0.5 } else { pos.iter().sum::<f64>() / pos.len() as f64 };
-    let mu_bear = if neg.is_empty() { -0.5 } else { neg.iter().sum::<f64>() / neg.len() as f64 };
+    let mu_bull = if pos.is_empty() {
+        0.5
+    } else {
+        pos.iter().sum::<f64>() / pos.len() as f64
+    };
+    let mu_bear = if neg.is_empty() {
+        -0.5
+    } else {
+        neg.iter().sum::<f64>() / neg.len() as f64
+    };
 
     let sigma_bull = if pos.len() > 1 {
         let var = pos.iter().map(|r| (r - mu_bull).powi(2)).sum::<f64>() / (pos.len() - 1) as f64;
         var.sqrt().max(0.01)
-    } else { 1.0 };
+    } else {
+        1.0
+    };
 
     let sigma_bear = if neg.len() > 1 {
         let var = neg.iter().map(|r| (r - mu_bear).powi(2)).sum::<f64>() / (neg.len() - 1) as f64;
         var.sqrt().max(0.01)
-    } else { 1.0 };
+    } else {
+        1.0
+    };
 
     let p_bull = pos.len() as f64 / returns.len() as f64;
 
@@ -286,7 +342,9 @@ fn forward(observations: &[f64], hmm: &GaussianHMM) -> (f64, Vec<[f64; 2]>) {
     }
     let scale: f64 = alpha[0].iter().sum();
     if scale > 0.0 {
-        for k in 0..2 { alpha[0][k] /= scale; }
+        for k in 0..2 {
+            alpha[0][k] /= scale;
+        }
         log_likelihood += scale.ln();
     }
 
@@ -302,7 +360,9 @@ fn forward(observations: &[f64], hmm: &GaussianHMM) -> (f64, Vec<[f64; 2]>) {
             scale_t += alpha[t][j];
         }
         if scale_t > 0.0 {
-            for k in 0..2 { alpha[t][k] /= scale_t; }
+            for k in 0..2 {
+                alpha[t][k] /= scale_t;
+            }
             log_likelihood += scale_t.ln();
         }
     }
@@ -332,7 +392,9 @@ fn backward(observations: &[f64], hmm: &GaussianHMM) -> Vec<[f64; 2]> {
             scale_t += beta[t][i];
         }
         if scale_t > 0.0 {
-            for k in 0..2 { beta[t][k] /= scale_t; }
+            for k in 0..2 {
+                beta[t][k] /= scale_t;
+            }
         }
     }
 
@@ -358,7 +420,9 @@ fn compute_gamma_xi(
             denom += gamma[t][k];
         }
         if denom > 0.0 {
-            for k in 0..2 { gamma[t][k] /= denom; }
+            for k in 0..2 {
+                gamma[t][k] /= denom;
+            }
         }
     }
 
@@ -387,12 +451,7 @@ fn compute_gamma_xi(
 }
 
 /// M-step: update HMM parameters from gamma and xi.
-fn m_step(
-    hmm: &mut GaussianHMM,
-    observations: &[f64],
-    gamma: &[[f64; 2]],
-    xi: &[[[f64; 2]; 2]],
-) {
+fn m_step(hmm: &mut GaussianHMM, observations: &[f64], gamma: &[[f64; 2]], xi: &[[[f64; 2]; 2]]) {
     let n = observations.len();
 
     // Update initial probabilities
@@ -414,7 +473,9 @@ fn m_step(
             // Normalize
             let row_sum: f64 = hmm.trans[i].iter().sum();
             if row_sum > 0.0 {
-                for j in 0..2 { hmm.trans[i][j] /= row_sum; }
+                for j in 0..2 {
+                    hmm.trans[i][j] /= row_sum;
+                }
             }
         }
     }
@@ -424,13 +485,17 @@ fn m_step(
         let gamma_sum: f64 = gamma.iter().map(|g| g[k]).sum();
         if gamma_sum > 1e-10 {
             // Mean
-            let weighted_sum: f64 = gamma.iter().zip(observations.iter())
+            let weighted_sum: f64 = gamma
+                .iter()
+                .zip(observations.iter())
                 .map(|(g, &x)| g[k] * x)
                 .sum();
             hmm.mu[k] = weighted_sum / gamma_sum;
 
             // Variance
-            let weighted_var: f64 = gamma.iter().zip(observations.iter())
+            let weighted_var: f64 = gamma
+                .iter()
+                .zip(observations.iter())
                 .map(|(g, &x)| g[k] * (x - hmm.mu[k]).powi(2))
                 .sum();
             hmm.sigma[k] = (weighted_var / gamma_sum).sqrt().max(0.01);
@@ -466,7 +531,9 @@ fn standard_normal_cdf(x: f64) -> f64 {
 /// Count consecutive days in current regime via Viterbi.
 fn compute_regime_duration(returns: &[f64], hmm: &GaussianHMM) -> u32 {
     let n = returns.len();
-    if n == 0 { return 0; }
+    if n == 0 {
+        return 0;
+    }
 
     // Viterbi decoding
     let mut viterbi = vec![[0.0f64; 2]; n];
@@ -474,15 +541,20 @@ fn compute_regime_duration(returns: &[f64], hmm: &GaussianHMM) -> u32 {
 
     // Initialize
     for k in 0..2 {
-        viterbi[0][k] = hmm.pi[k].ln() + gaussian_pdf(returns[0], hmm.mu[k], hmm.sigma[k]).max(1e-300).ln();
+        viterbi[0][k] = hmm.pi[k].ln()
+            + gaussian_pdf(returns[0], hmm.mu[k], hmm.sigma[k])
+                .max(1e-300)
+                .ln();
     }
 
     // Forward
     for t in 1..n {
         for j in 0..2 {
-            let emission = gaussian_pdf(returns[t], hmm.mu[j], hmm.sigma[j]).max(1e-300).ln();
+            let emission = gaussian_pdf(returns[t], hmm.mu[j], hmm.sigma[j])
+                .max(1e-300)
+                .ln();
             let (best_i, best_val) = (0..2)
-                .map(|i| (i, viterbi[t-1][i] + hmm.trans[i][j].max(1e-300).ln()))
+                .map(|i| (i, viterbi[t - 1][i] + hmm.trans[i][j].max(1e-300).ln()))
                 .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
                 .unwrap();
             viterbi[t][j] = best_val + emission;
@@ -492,13 +564,17 @@ fn compute_regime_duration(returns: &[f64], hmm: &GaussianHMM) -> u32 {
 
     // Backtrack
     let mut states = vec![0usize; n];
-    states[n-1] = if viterbi[n-1][0] > viterbi[n-1][1] { 0 } else { 1 };
-    for t in (0..n-1).rev() {
-        states[t] = path[t+1][states[t+1]];
+    states[n - 1] = if viterbi[n - 1][0] > viterbi[n - 1][1] {
+        0
+    } else {
+        1
+    };
+    for t in (0..n - 1).rev() {
+        states[t] = path[t + 1][states[t + 1]];
     }
 
     // Count consecutive from end
-    let current = states[n-1];
+    let current = states[n - 1];
     let mut duration = 0u32;
     for t in (0..n).rev() {
         if states[t] == current {

@@ -20,11 +20,7 @@ use crate::config::Settings;
 
 const BRIDGE_BASE: &str = "http://localhost:8321";
 
-pub async fn fetch_all(
-    db: &Connection,
-    cfg: &Settings,
-    as_of: NaiveDate,
-) -> Result<usize> {
+pub async fn fetch_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usize> {
     let client = match super::http::build_client() {
         Ok(c) => c,
         Err(e) => {
@@ -34,10 +30,7 @@ pub async fn fetch_all(
     };
 
     // Check if bridge is running
-    let health = client
-        .get(format!("{}/health", BRIDGE_BASE))
-        .send()
-        .await;
+    let health = client.get(format!("{}/health", BRIDGE_BASE)).send().await;
     if health.is_err() {
         warn!("⚠ akshare bridge NOT running at {} — sector_fund_flow, concept_board, stock_news will all be EMPTY. Start bridge: cd bridge && uvicorn akshare_bridge:app --port 8321", BRIDGE_BASE);
         return Ok(0);
@@ -46,20 +39,26 @@ pub async fn fetch_all(
     let mut total = 0usize;
     let date_str = as_of.format("%Y-%m-%d").to_string();
 
-    total += fetch_concept_boards(&client, db, &date_str).await.unwrap_or_else(|e| {
-        warn!("concept_boards fetch failed: {}", e);
-        0
-    });
+    total += fetch_concept_boards(&client, db, &date_str)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("concept_boards fetch failed: {}", e);
+            0
+        });
 
-    total += fetch_sector_fund_flow(&client, db, &date_str).await.unwrap_or_else(|e| {
-        warn!("sector_fund_flow fetch failed: {}", e);
-        0
-    });
+    total += fetch_sector_fund_flow(&client, db, &date_str)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("sector_fund_flow fetch failed: {}", e);
+            0
+        });
 
-    total += fetch_stock_news(&client, db, cfg).await.unwrap_or_else(|e| {
-        warn!("stock_news fetch failed: {}", e);
-        0
-    });
+    total += fetch_stock_news(&client, db, cfg)
+        .await
+        .unwrap_or_else(|e| {
+            warn!("stock_news fetch failed: {}", e);
+            0
+        });
 
     info!(rows = total, "akshare fetch complete");
     Ok(total)
@@ -139,7 +138,10 @@ async fn fetch_sector_fund_flow(
     db: &Connection,
     date_str: &str,
 ) -> Result<usize> {
-    let url = format!("{}/sector_fund_flow?indicator=%E4%BB%8A%E6%97%A5", BRIDGE_BASE); // "今日" URL-encoded
+    let url = format!(
+        "{}/sector_fund_flow?indicator=%E4%BB%8A%E6%97%A5",
+        BRIDGE_BASE
+    ); // "今日" URL-encoded
     let rows: Vec<SectorFundFlowRow> = client.get(&url).send().await?.json().await?;
 
     let mut total = 0;
@@ -238,6 +240,10 @@ async fn fetch_stock_news(
         // Small delay between symbols to avoid hammering 东方财富
         sleep(Duration::from_millis(300)).await;
     }
-    info!(rows = total, symbols = symbols.len(), "stock_news (个股新闻) fetched");
+    info!(
+        rows = total,
+        symbols = symbols.len(),
+        "stock_news (个股新闻) fetched"
+    );
     Ok(total)
 }

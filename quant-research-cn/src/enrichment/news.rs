@@ -14,8 +14,8 @@ use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
-use crate::config::Settings;
 use super::llm::DeepSeekClient;
+use crate::config::Settings;
 
 const SYSTEM_PROMPT: &str = r#"你是金融新闻结构化标注工具。从新闻文本中抽取以下字段，输出JSON。
 不要推理、分析或预测，只提取文本中明确存在的信息。
@@ -57,11 +57,7 @@ struct RawNews {
 }
 
 /// Enrich all un-processed news from the last N days.
-pub async fn enrich_news(
-    db: &Connection,
-    cfg: &Settings,
-    as_of: NaiveDate,
-) -> Result<usize> {
+pub async fn enrich_news(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usize> {
     if !cfg.enrichment.enabled || cfg.api.deepseek_key.is_empty() {
         info!("news enrichment disabled or no deepseek key");
         return Ok(0);
@@ -74,7 +70,8 @@ pub async fn enrich_news(
     )?;
 
     // Ensure enrichment table exists
-    db.execute_batch("
+    db.execute_batch(
+        "
         CREATE TABLE IF NOT EXISTS news_enriched (
             ts_code              VARCHAR NOT NULL,
             published_at         VARCHAR NOT NULL,
@@ -89,7 +86,8 @@ pub async fn enrich_news(
             enriched_at          TIMESTAMP DEFAULT current_timestamp,
             PRIMARY KEY (ts_code, published_at, headline)
         );
-    ")?;
+    ",
+    )?;
 
     // Load raw news not yet enriched (last 7 days)
     let cutoff = (as_of - chrono::Duration::days(7)).to_string();
@@ -128,29 +126,31 @@ pub async fn enrich_news(
     for handle in handles {
         let (ts_code, headline, published_at, result) = handle.await?;
         match result {
-            Ok(json_str) => {
-                match serde_json::from_str::<NewsEnrichment>(&json_str) {
-                    Ok(enrichment) => {
-                        store_enrichment(db, &ts_code, &headline, &published_at, &enrichment)?;
-                        total += 1;
-                    }
-                    Err(e) => {
-                        warn!(
-                            ts_code = ts_code,
-                            err = %e,
-                            raw = json_str,
-                            "failed to parse DeepSeek response"
-                        );
-                    }
+            Ok(json_str) => match serde_json::from_str::<NewsEnrichment>(&json_str) {
+                Ok(enrichment) => {
+                    store_enrichment(db, &ts_code, &headline, &published_at, &enrichment)?;
+                    total += 1;
                 }
-            }
+                Err(e) => {
+                    warn!(
+                        ts_code = ts_code,
+                        err = %e,
+                        raw = json_str,
+                        "failed to parse DeepSeek response"
+                    );
+                }
+            },
             Err(e) => {
                 warn!(ts_code = ts_code, err = %e, "DeepSeek call failed");
             }
         }
     }
 
-    info!(enriched = total, skipped = raw_news.len() - total, "news enrichment complete");
+    info!(
+        enriched = total,
+        skipped = raw_news.len() - total,
+        "news enrichment complete"
+    );
     Ok(total)
 }
 
@@ -171,7 +171,7 @@ fn load_unenriched_news(db: &Connection, cutoff: &str) -> Result<Vec<RawNews>> {
              WHERE n.publish_time >= ?
                AND e.ts_code IS NULL
              ORDER BY n.publish_time DESC
-             LIMIT 200"
+             LIMIT 200",
         )?;
 
         let items: Vec<RawNews> = stmt
@@ -200,7 +200,7 @@ fn load_unenriched_news(db: &Connection, cutoff: &str) -> Result<Vec<RawNews>> {
            ON f.ts_code = e.ts_code AND CAST(f.ann_date AS VARCHAR) = e.published_at
          WHERE f.ann_date >= ?
            AND e.ts_code IS NULL
-         LIMIT 100"
+         LIMIT 100",
     )?;
 
     let items: Vec<RawNews> = stmt

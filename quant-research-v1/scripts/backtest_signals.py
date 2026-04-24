@@ -41,6 +41,8 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from quant_bot.analytics.earnings_risk import run_earnings_risk
 from quant_bot.analytics.momentum_risk import run_momentum_risk
+from quant_bot.analytics.overnight_gate import run_overnight_gate
+from quant_bot.analytics.overnight_continuation_alpha import run_overnight_continuation_alpha
 from quant_bot.config.settings import Settings
 from quant_bot.filtering.notable import build_notable_items
 from quant_bot.signals.classify import classify_all
@@ -65,6 +67,10 @@ SOURCE_VIEWS = [
     "index_changes",
     "options_snapshot",
     "options_analysis",
+    "options_sentiment",
+    "report_decisions",
+    "report_outcomes",
+    "alpha_postmortem",
 ]
 
 SANITY_WINDOWS = {
@@ -411,6 +417,8 @@ def _flatten_signal_row(
     momentum = item.get("momentum", {})
     earnings = item.get("earnings_risk", {})
     options = item.get("options", {})
+    overnight_alpha = item.get("overnight_alpha", {})
+    overnight_calibration = overnight_alpha.get("calibration") or {}
     side = 1 if signal.get("direction") == "long" else -1 if signal.get("direction") == "short" else 0
 
     signed_return = None
@@ -483,6 +491,14 @@ def _flatten_signal_row(
         "options_iv_skew": _round_or_none(options.get("iv_skew"), 4),
         "options_liquidity_score": options.get("liquidity_score"),
         "options_flow_intensity": _round_or_none(options.get("flow_intensity"), 3),
+        "overnight_alpha_advice": overnight_alpha.get("advice"),
+        "overnight_alpha_continuation_score": _round_or_none(overnight_alpha.get("continuation_score"), 4),
+        "overnight_alpha_entry_quality": _round_or_none(overnight_alpha.get("entry_quality"), 4),
+        "overnight_alpha_paid_risk": _round_or_none(overnight_alpha.get("alpha_already_paid_risk"), 4),
+        "overnight_alpha_bucket": overnight_alpha.get("bucket"),
+        "overnight_alpha_sample_count": overnight_calibration.get("sample_count"),
+        "overnight_alpha_hit_rate": _round_or_none(overnight_calibration.get("continuation_hit_rate"), 4),
+        "overnight_alpha_latest_sample_date": overnight_calibration.get("latest_sample_date"),
         "events_json": json.dumps(item.get("events", []), sort_keys=True),
         "forward_return_5d": _round_or_none(fwd_return_5d, 6),
         "forward_return_5d_pct": _round_or_none(None if fwd_return_5d is None else fwd_return_5d * 100.0, 4),
@@ -790,7 +806,7 @@ def main() -> None:
     _configure_structlog("warning")
     cfg = Settings.load(args.config)
 
-    db_path = Path(args.db) if args.db else cfg.db_path_abs
+    db_path = Path(args.db) if args.db else cfg.raw_db_path_abs
     benchmark = args.benchmark or cfg.universe.benchmark
     start = _parse_date(args.start)
     end = _parse_date(args.end)
@@ -842,6 +858,11 @@ def main() -> None:
 
             _append_analysis(work_con, mom_df)
             _append_analysis(work_con, earn_df)
+
+            overnight_gate_df = run_overnight_gate(work_con, eligible_symbols, as_of)
+            _append_analysis(work_con, overnight_gate_df)
+            overnight_alpha_df = run_overnight_continuation_alpha(work_con, eligible_symbols, as_of)
+            _append_analysis(work_con, overnight_alpha_df)
 
             candidates = build_notable_items(
                 work_con,

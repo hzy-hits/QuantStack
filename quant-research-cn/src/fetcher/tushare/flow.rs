@@ -3,7 +3,7 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 use tracing::info;
 
-use super::{fetch_and_store, ts_date_val, str_val};
+use super::{fetch_and_store, str_val, ts_date_val};
 
 pub async fn fetch_moneyflow(
     client: &reqwest::Client,
@@ -51,7 +51,9 @@ pub async fn fetch_margin_detail(
 ) -> Result<usize> {
     let date = as_of.format("%Y%m%d").to_string();
     let total = fetch_and_store(
-        client, token, "margin_detail",
+        client,
+        token,
+        "margin_detail",
         serde_json::json!({ "trade_date": &date }),
         "ts_code,trade_date,rzye,rzmre,rzche,rqye,rqmcl,rqchl",
         8,
@@ -63,13 +65,18 @@ pub async fn fetch_margin_detail(
                 duckdb::params![
                     row[0].as_str().unwrap_or_default(),
                     ts_date_val(&row[1]),
-                    row[2].as_f64(), row[3].as_f64(), row[4].as_f64(),
-                    row[5].as_f64(), row[6].as_f64(), row[7].as_f64(),
+                    row[2].as_f64(),
+                    row[3].as_f64(),
+                    row[4].as_f64(),
+                    row[5].as_f64(),
+                    row[6].as_f64(),
+                    row[7].as_f64(),
                 ],
             )?;
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
     info!(rows = total, "margin_detail (融资融券) fetched");
     Ok(total)
 }
@@ -82,20 +89,20 @@ pub async fn fetch_hsgt_flow(
 ) -> Result<usize> {
     let date = as_of.format("%Y%m%d").to_string();
     let total = fetch_and_store(
-        client, token, "moneyflow_hsgt",
+        client,
+        token,
+        "moneyflow_hsgt",
         serde_json::json!({ "trade_date": &date }),
         "trade_date,ggt_ss,ggt_sz,hgt,sgt,north_money,south_money",
         7,
         |row| {
-            let hgt = row[3].as_f64();  // 沪股通
-            let sgt = row[4].as_f64();  // 深股通
-            // Prefer API's north_money; if null, compute from hgt + sgt
-            // only when BOTH legs are present (partial sum would undercount)
-            let north_total = row[5].as_f64().or_else(|| {
-                match (hgt, sgt) {
-                    (Some(h), Some(s)) => Some(h + s),
-                    _ => None,
-                }
+            let hgt = row[3].as_f64(); // 沪股通
+            let sgt = row[4].as_f64(); // 深股通
+                                       // Prefer API's north_money; if null, compute from hgt + sgt
+                                       // only when BOTH legs are present (partial sum would undercount)
+            let north_total = row[5].as_f64().or_else(|| match (hgt, sgt) {
+                (Some(h), Some(s)) => Some(h + s),
+                _ => None,
             });
 
             // Store northbound total
@@ -121,8 +128,12 @@ pub async fn fetch_hsgt_flow(
             )?;
             Ok(())
         },
-    ).await?;
-    info!(rows = total * 3, "northbound_flow (北向资金) fetched via Tushare");
+    )
+    .await?;
+    info!(
+        rows = total * 3,
+        "northbound_flow (北向资金) fetched via Tushare"
+    );
     Ok(total)
 }
 
@@ -166,7 +177,9 @@ pub async fn fetch_hk_hold(
 ) -> Result<usize> {
     let date = as_of.format("%Y%m%d").to_string();
     let total = fetch_and_store(
-        client, token, "hk_hold",
+        client,
+        token,
+        "hk_hold",
         serde_json::json!({ "trade_date": &date }),
         "trade_date,ts_code,name,vol,ratio,exchange",
         6,
@@ -177,14 +190,17 @@ pub async fn fetch_hk_hold(
                  VALUES (?, ?, ?, ?, ?, ?)",
                 duckdb::params![
                     ts_date_val(&row[0]),
-                    str_val(&row[1]), str_val(&row[2]),
-                    row[3].as_f64(), row[4].as_f64(),
+                    str_val(&row[1]),
+                    str_val(&row[2]),
+                    row[3].as_f64(),
+                    row[4].as_f64(),
                     str_val(&row[5]),
                 ],
             )?;
             Ok(())
         },
-    ).await?;
+    )
+    .await?;
     info!(rows = total, "hk_hold (陆股通持股) fetched");
     Ok(total)
 }

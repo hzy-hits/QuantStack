@@ -36,7 +36,13 @@ from src.evaluate.forward_returns import compute_forward_returns
 from src.evaluate.ic import compute_ic_series, ic_summary
 from src.evaluate.quintile import compute_quintile_returns
 from src.mining.batch_mine import generate_factor_formulas, CONFIGS
-from src.paths import FACTOR_LAB_DB
+from src.paths import (
+    FACTOR_LAB_DB,
+    QUANT_CN_DB,
+    QUANT_CN_REPORT_DB,
+    QUANT_US_DB,
+    QUANT_US_REPORT_DB,
+)
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -73,6 +79,12 @@ SIGREG_PENALTY_WEIGHTS = {
     "diversity": 0.20,
     "health": 0.35,
 }
+N_EFF_SHRINKAGE_FLOOR = 0.60
+RUN_AS_OF: str | None = None
+
+
+def current_as_of() -> str:
+    return RUN_AS_OF or date.today().isoformat()
 
 
 def init_db():
@@ -156,6 +168,21 @@ def init_db():
             note VARCHAR,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (as_of, market, stage)
+        )
+    """)
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS candidate_feedback (
+            date DATE NOT NULL,
+            market VARCHAR NOT NULL,
+            factor_id VARCHAR NOT NULL,
+            feedback_score DOUBLE,
+            feedback_multiplier DOUBLE,
+            missed_alpha_overlap DOUBLE,
+            stale_overlap DOUBLE,
+            false_positive_overlap DOUBLE,
+            capture_overlap DOUBLE,
+            detail_json VARCHAR,
+            PRIMARY KEY (date, market, factor_id)
         )
     """)
     con.execute("""
@@ -292,6 +319,29 @@ def _load_promoted_factor_snapshots(market: str, prices: pd.DataFrame) -> dict[s
     return snapshots
 
 
+def _effective_count_shrinkage(
+    n_effective: float | None,
+    n_total: float | None,
+    *,
+    floor: float = N_EFF_SHRINKAGE_FLOOR,
+) -> float:
+    try:
+        total = max(float(n_total or 0.0), 0.0)
+    except (TypeError, ValueError):
+        total = 0.0
+    if total <= 1.0:
+        return 1.0
+
+    try:
+        effective = float(n_effective or total)
+    except (TypeError, ValueError):
+        effective = total
+    effective = min(max(effective, 1.0), total)
+
+    shrink = float(np.sqrt(effective / total))
+    return round(float(np.clip(shrink, floor, 1.0)), 4)
+
+
 def _apply_sigreg_penalties(candidates: list[dict], market: str, prices: pd.DataFrame) -> list[dict]:
     if not candidates:
         return candidates
@@ -318,7 +368,7 @@ def _apply_sigreg_penalties(candidates: list[dict], market: str, prices: pd.Data
 
     penalized = []
     for candidate in candidates:
-        latest_values = candidate.pop("_latest_values", None)
+        latest_values = candidate.get("_latest_values")
         ic_series = np.asarray(candidate.pop("_ic_series", []), dtype=float)
         existing_snapshots = {
             fid: snap for fid, snap in promoted_snapshots.items() if fid != candidate["factor_id"]
@@ -380,10 +430,16 @@ def _apply_sigreg_penalties(candidates: list[dict], market: str, prices: pd.Data
             + SIGREG_PENALTY_WEIGHTS["health"] * health_penalty
         )
         multiplier = max(0.15, 1.0 - total_penalty)
+        n_eff = float(diversity_after.get("n_effective", len(existing_snapshots) + 1))
+        n_total = float(diversity_after.get("n_total", len(existing_snapshots) + 1))
+        n_eff_shrinkage = _effective_count_shrinkage(n_eff, n_total)
 
         candidate["sigreg_penalty"] = round(total_penalty, 3)
         candidate["sigreg_multiplier"] = round(multiplier, 3)
-        candidate["rank_score"] = round(candidate["composite_score"] * multiplier, 6)
+        candidate["sigreg_n_effective"] = round(n_eff, 2)
+        candidate["sigreg_n_total"] = round(n_total, 2)
+        candidate["sigreg_n_eff_shrinkage"] = n_eff_shrinkage
+        candidate["rank_score"] = round(candidate["composite_score"] * multiplier * n_eff_shrinkage, 6)
         candidate["sigreg_redundancy_r2"] = float(redundancy.get("r_squared", 0.0))
         candidate["sigreg_diversity_score"] = float(diversity_after.get("diversity_score", 1.0))
         candidate["sigreg_health_score"] = float(health.get("health_score", 0.5))
@@ -399,11 +455,149 @@ def _apply_sigreg_penalties(candidates: list[dict], market: str, prices: pd.Data
             f"rank={candidate.get('rank_score', candidate['composite_score']):.4f}, "
             f"R2={candidate.get('sigreg_redundancy_r2', 0.0):.3f}, "
             f"div={candidate.get('sigreg_diversity_score', 1.0):.3f}, "
-            f"health={candidate.get('sigreg_health_score', 0.5):.2f}"
+            f"health={candidate.get('sigreg_health_score', 0.5):.2f}, "
+            f"n_eff={candidate.get('sigreg_n_effective', 1.0):.1f}/"
+            f"{candidate.get('sigreg_n_total', 1.0):.1f}, "
+            f"shrink={candidate.get('sigreg_n_eff_shrinkage', 1.0):.3f}"
             + (" regime_change" if candidate.get("sigreg_regime_change") else "")
         )
 
     return penalized
+
+
+def _load_report_feedback(market: str) -> dict[str, dict[str, float]]:
+    if market == "cn":
+        candidates = [QUANT_CN_REPORT_DB, QUANT_CN_DB]
+    else:
+        candidates = [QUANT_US_DB, QUANT_US_REPORT_DB]
+
+    rows = []
+    for pipeline_db in candidates:
+        if not pipeline_db.exists():
+            continue
+        try:
+            con = duckdb.connect(str(pipeline_db), read_only=True)
+        except Exception as exc:
+            print(f"  Report feedback unavailable ({market}, {pipeline_db.name}): {exc}")
+            continue
+
+        try:
+            rows = con.execute("""
+                SELECT symbol, label, factor_feedback_action, factor_feedback_weight
+                FROM alpha_postmortem
+                WHERE evaluation_date >= CURRENT_DATE - INTERVAL '45 days'
+                  AND factor_feedback_action IS NOT NULL
+                  AND factor_feedback_weight IS NOT NULL
+            """).fetchall()
+            if rows:
+                break
+        except duckdb.Error:
+            rows = []
+        finally:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+    if not rows:
+        return {}
+
+    buckets: dict[str, dict[str, float]] = {
+        "missed_alpha": {},
+        "stale": {},
+        "false_positive": {},
+        "captured": {},
+    }
+    for symbol, label, action, weight in rows:
+        try:
+            w = float(weight)
+        except (TypeError, ValueError):
+            continue
+        if not symbol or w <= 0:
+            continue
+        if label == "missed_alpha" or action == "boost_recall":
+            buckets["missed_alpha"][symbol] = buckets["missed_alpha"].get(symbol, 0.0) + w
+        elif label in {"alpha_already_paid", "good_signal_bad_timing", "stale_chase"} or action == "penalize_stale_chase":
+            buckets["stale"][symbol] = buckets["stale"].get(symbol, 0.0) + w
+        elif label == "false_positive" or action == "penalize_false_positive":
+            buckets["false_positive"][symbol] = buckets["false_positive"].get(symbol, 0.0) + w
+        elif label == "captured" or action == "reward_capture":
+            buckets["captured"][symbol] = buckets["captured"].get(symbol, 0.0) + w
+
+    total = sum(len(v) for v in buckets.values())
+    if total:
+        print(
+            "  Report feedback overlay: "
+            f"missed={len(buckets['missed_alpha'])}, "
+            f"stale={len(buckets['stale'])}, "
+            f"false_positive={len(buckets['false_positive'])}, "
+            f"captured={len(buckets['captured'])}"
+        )
+    return buckets
+
+
+def _feedback_overlap(symbols: list[str], weights: dict[str, float]) -> float:
+    if not symbols or not weights:
+        return 0.0
+    denom = max(1.0, len(symbols) / 5.0)
+    return round(sum(weights.get(sym, 0.0) for sym in symbols) / denom, 4)
+
+
+def _basket_symbols(latest_values: pd.Series, direction: str) -> list[str]:
+    if latest_values is None or len(latest_values) == 0:
+        return []
+    clean = latest_values.dropna()
+    if clean.empty:
+        return []
+
+    basket_n = max(10, min(50, int(len(clean) * 0.03)))
+    ranked = clean.sort_values(ascending=(direction == "short"))
+    return list(ranked.head(basket_n).index)
+
+
+def _apply_report_feedback(candidates: list[dict], market: str) -> list[dict]:
+    feedback = _load_report_feedback(market)
+    if not feedback:
+        return candidates
+
+    adjusted = []
+    for candidate in candidates:
+        latest_values = candidate.get("_latest_values")
+        basket = _basket_symbols(latest_values, candidate.get("direction", "long"))
+        missed_overlap = _feedback_overlap(basket, feedback.get("missed_alpha", {}))
+        stale_overlap = _feedback_overlap(basket, feedback.get("stale", {}))
+        false_overlap = _feedback_overlap(basket, feedback.get("false_positive", {}))
+        capture_overlap = _feedback_overlap(basket, feedback.get("captured", {}))
+
+        feedback_score = round(
+            1.30 * missed_overlap
+            + 0.35 * capture_overlap
+            - 0.75 * stale_overlap
+            - 1.00 * false_overlap,
+            4,
+        )
+        raw_multiplier = float(np.clip(1.0 + 0.25 * feedback_score, 0.85, 1.20))
+        n_eff_shrinkage = float(candidate.get("sigreg_n_eff_shrinkage", 1.0) or 1.0)
+        multiplier = float(np.clip(1.0 + (raw_multiplier - 1.0) * n_eff_shrinkage, 0.85, 1.20))
+        candidate["report_feedback_score"] = feedback_score
+        candidate["report_feedback_multiplier_raw"] = round(raw_multiplier, 4)
+        candidate["report_feedback_multiplier"] = round(multiplier, 4)
+        candidate["report_feedback_detail"] = {
+            "missed_alpha_overlap": missed_overlap,
+            "stale_chase_overlap": stale_overlap,
+            "stale_overlap": stale_overlap,
+            "false_positive_overlap": false_overlap,
+            "captured_overlap": capture_overlap,
+            "capture_overlap": capture_overlap,
+            "basket_n": len(basket),
+            "n_eff_shrinkage": round(n_eff_shrinkage, 4),
+        }
+        base_rank = candidate.get("rank_score", candidate["composite_score"])
+        candidate["rank_score"] = round(base_rank * multiplier, 6)
+        adjusted.append(candidate)
+
+    adjusted.sort(key=lambda r: r.get("rank_score", r["composite_score"]), reverse=True)
+    return adjusted
 
 
 def _refresh_promoted_factor(con: duckdb.DuckDBPyConnection, factor_id: str, candidate: dict) -> None:
@@ -469,7 +663,7 @@ def _save_factor_weights(market: str, weights: dict[str, float]) -> None:
 
     init_db()
     con = duckdb.connect(FACTOR_LAB_DB)
-    as_of = date.today().isoformat()
+    as_of = current_as_of()
     for factor_id, weight in weights.items():
         con.execute("""
             INSERT OR REPLACE INTO factor_weights (as_of, market, factor_id, weight, source)
@@ -484,7 +678,7 @@ def _log_pipeline_run(market: str, stage: str, candidate_count: int, note: str =
     con.execute("""
         INSERT OR REPLACE INTO pipeline_runs (as_of, market, stage, candidate_count, note)
         VALUES (?, ?, ?, ?, ?)
-    """, [date.today().isoformat(), market, stage, int(candidate_count), note])
+    """, [current_as_of(), market, stage, int(candidate_count), note])
     con.close()
 
 
@@ -707,6 +901,7 @@ def step2_multi_horizon_backtest(candidates: list[dict], market: str) -> list[di
             print(f"  {c['name']}: backtest error - {e}")
 
     enriched = _apply_sigreg_penalties(enriched, market, prices)
+    enriched = _apply_report_feedback(enriched, market)
     print(f"  Enriched: {len(enriched)} candidates with multi-horizon metrics")
     return enriched
 
@@ -717,7 +912,10 @@ def step3_select_and_promote(candidates: list[dict], market: str):
 
     init_db()
     con = duckdb.connect(FACTOR_LAB_DB)
-    today = date.today().isoformat()
+    today = current_as_of()
+
+    con.execute("DELETE FROM daily_candidates WHERE date=? AND market=?", [today, market])
+    con.execute("DELETE FROM candidate_feedback WHERE date=? AND market=?", [today, market])
 
     # Save all candidates to daily_candidates
     for i, c in enumerate(candidates):
@@ -725,6 +923,26 @@ def step3_select_and_promote(candidates: list[dict], market: str):
             INSERT OR REPLACE INTO daily_candidates (date, market, factor_id, formula, ic, ic_ir, mono, q5_q1, rank)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, [today, market, c["factor_id"], c["formula"], c["ic"], c["ic_ir"], c["mono"], c["q5_q1"], i + 1])
+        if "report_feedback_score" in c:
+            con.execute("""
+                INSERT OR REPLACE INTO candidate_feedback (
+                    date, market, factor_id, feedback_score, feedback_multiplier,
+                    missed_alpha_overlap, stale_overlap, false_positive_overlap,
+                    capture_overlap, detail_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                today,
+                market,
+                c["factor_id"],
+                c.get("report_feedback_score"),
+                c.get("report_feedback_multiplier"),
+                (c.get("report_feedback_detail") or {}).get("missed_alpha_overlap"),
+                (c.get("report_feedback_detail") or {}).get("stale_overlap"),
+                (c.get("report_feedback_detail") or {}).get("false_positive_overlap"),
+                (c.get("report_feedback_detail") or {}).get("capture_overlap"),
+                json.dumps(c.get("report_feedback_detail") or {}, ensure_ascii=True),
+            ])
 
     existing_rows = con.execute("""
         SELECT factor_id, formula, status
@@ -797,7 +1015,7 @@ def step4_health_check(market: str):
     init_db()
     con = duckdb.connect(FACTOR_LAB_DB)
     cfg = CONFIGS[market]
-    today = date.today().isoformat()
+    today = current_as_of()
     from src.evaluate.sigreg import ic_health_test
 
     # Get all promoted + watchlist factors
@@ -953,11 +1171,21 @@ def step4_health_check(market: str):
     con.close()
 
 
-def run(market: str, skip_mine: bool = False, max_factors: int = 500, use_agent: bool = True):
+def run(
+    market: str,
+    skip_mine: bool = False,
+    max_factors: int = 500,
+    use_agent: bool = True,
+    as_of: str | None = None,
+):
     """Run the full daily factor pipeline."""
+    global RUN_AS_OF
+    RUN_AS_OF = as_of
+
     print(f"{'='*60}")
     print(f"  Daily Factor Pipeline — {market.upper()}")
     print(f"  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"  As-of: {current_as_of()}")
     print(f"{'='*60}")
 
     init_db()
@@ -1034,7 +1262,7 @@ def run(market: str, skip_mine: bool = False, max_factors: int = 500, use_agent:
 
                     # Save commentary to file for pipeline to read
                     commentary_path = Path(f"data/{market}_factor_commentary.txt")
-                    commentary_path.write_text(commentary)
+                    commentary_path.write_text(commentary, encoding="utf-8")
         except Exception as e:
             print(f"\n[5/5] Agent selection skipped: {e}")
 
@@ -1062,8 +1290,9 @@ def main():
     parser.add_argument("--skip-mine", action="store_true", help="Skip mining, only health check")
     parser.add_argument("--max-factors", type=int, default=500)
     parser.add_argument("--no-agent", action="store_true", help="Skip agent review/selection")
+    parser.add_argument("--date", "--as-of", dest="as_of", type=str, default=None, help="As-of date YYYY-MM-DD")
     args = parser.parse_args()
-    run(args.market, args.skip_mine, args.max_factors, use_agent=not args.no_agent)
+    run(args.market, args.skip_mine, args.max_factors, use_agent=not args.no_agent, as_of=args.as_of)
 
 
 if __name__ == "__main__":

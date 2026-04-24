@@ -384,7 +384,10 @@ def build_email_message(
     msg = MIMEMultipart("related")
     msg["Subject"] = subject
     msg["From"] = sender
-    msg["To"] = to
+    if to:
+        msg["To"] = to
+    elif bcc:
+        msg["To"] = "undisclosed-recipients:;"
     if bcc:
         msg["Bcc"] = ", ".join(bcc)
 
@@ -443,11 +446,19 @@ def _get_gmail_service(
                 creds.refresh(Request())
             except Exception as e:
                 log.error("gmail_token_refresh_failed", error=str(e))
-                # Delete stale token so next interactive run re-authenticates
-                token_path.unlink(missing_ok=True)
+                # Only discard the token on explicit invalid/revoked states.
+                # Transient transport errors (SSL, timeout, EOF) should not wipe
+                # the shared token file for every downstream pipeline.
+                error_text = str(e).lower()
+                if (
+                    "invalid_grant" in error_text
+                    or "revoked" in error_text
+                    or "expired or revoked" in error_text
+                ):
+                    token_path.unlink(missing_ok=True)
                 raise RuntimeError(
                     f"Gmail token refresh failed: {e}\n"
-                    "token.json has been deleted. Re-run manually to re-authenticate:\n"
+                    "Re-run manually to re-authenticate if the token is truly invalid:\n"
                     "  uv run python scripts/send_report.py --date YYYY-MM-DD"
                 ) from e
         else:
@@ -521,31 +532,56 @@ def send_report_email(
     Recipients are read from config.yaml by default. Returns list of message IDs.
     """
     if to:
-        recipients = [to]
+        direct_to = to
+        bcc_recipients: list[str] = bcc or []
+        log.info("direct_recipient_override", has_bcc=bool(bcc_recipients))
     else:
-        recipients = load_recipients(config_path)
-        log.info("recipients_from_config", count=len(recipients), addresses=recipients)
+        direct_to = ""
+        bcc_recipients = load_recipients(config_path)
+        log.info("recipients_from_config", count=len(bcc_recipients))
 
     import socket
     service = _get_gmail_service(credentials_path, token_path)
     msg_ids = []
 
+    # Gmail API rejects an empty/placeholder To header on single-message Bcc sends.
+    # Use the authenticated sender address as the visible To while keeping recipients
+    # hidden in Bcc.
+    visible_to = direct_to
+    if not visible_to and bcc_recipients:
+        try:
+            visible_to = (
+                service.users().getProfile(userId="me").execute().get("emailAddress", "")
+            )
+        except Exception as e:
+            log.warning("gmail_profile_lookup_failed", error=str(e))
+
     # Set socket-level timeout to prevent indefinite hangs on Gmail API calls
     old_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(60)  # 60s per API call
     try:
-        for recipient in recipients:
-            msg, _ = prepare_email(report_path, chart_paths, recipient, subject, bcc=bcc)
-            result = service.users().messages().send(
-                userId="me", body=_encode_message(msg)
-            ).execute()
-            msg_id = result.get("id", "")
-            msg_ids.append(msg_id)
-            log.info("gmail_sent", to=recipient, message_id=msg_id)
+        msg, _ = prepare_email(
+            report_path,
+            chart_paths,
+            visible_to,
+            subject,
+            bcc=bcc_recipients,
+        )
+        result = service.users().messages().send(
+            userId="me", body=_encode_message(msg)
+        ).execute()
+        msg_id = result.get("id", "")
+        msg_ids.append(msg_id)
+        log.info(
+            "gmail_sent",
+            to=visible_to or "undisclosed-recipients",
+            bcc_count=len(bcc_recipients),
+            message_id=msg_id,
+        )
     finally:
         socket.setdefaulttimeout(old_timeout)
 
-    log.info("gmail_send_complete", total=len(msg_ids))
+    log.info("gmail_send_complete", messages=len(msg_ids), bcc_count=len(bcc_recipients))
     return msg_ids
 
 

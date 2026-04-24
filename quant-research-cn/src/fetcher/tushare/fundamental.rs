@@ -15,8 +15,19 @@ fn latest_period(as_of: NaiveDate) -> String {
         7..=9 => (y, 6),
         _ => (y, 9),
     };
-    let qd = if qm == 12 { 31 } else if qm == 6 { 30 } else if qm == 9 { 30 } else { 31 };
-    NaiveDate::from_ymd_opt(qy, qm, qd).unwrap().format("%Y%m%d").to_string()
+    let qd = if qm == 12 {
+        31
+    } else if qm == 6 {
+        30
+    } else if qm == 9 {
+        30
+    } else {
+        31
+    };
+    NaiveDate::from_ymd_opt(qy, qm, qd)
+        .unwrap()
+        .format("%Y%m%d")
+        .to_string()
 }
 
 pub async fn fetch_income(
@@ -27,13 +38,18 @@ pub async fn fetch_income(
 ) -> Result<usize> {
     let period = latest_period(as_of);
     let rows = query(
-        client, token, "income",
+        client,
+        token,
+        "income",
         serde_json::json!({ "period": &period }),
         "ts_code,ann_date,end_date,revenue,n_income,basic_eps,diluted_eps",
-    ).await?;
+    )
+    .await?;
     let mut all = 0usize;
     for row in &rows {
-        if row.len() < 7 { continue; }
+        if row.len() < 7 {
+            continue;
+        }
         db.execute(
             "INSERT OR REPLACE INTO income
                 (ts_code, ann_date, end_date, revenue, n_income, basic_eps, diluted_eps)
@@ -42,7 +58,10 @@ pub async fn fetch_income(
                 row[0].as_str().unwrap_or_default(),
                 row[1].as_str().map(|s| ts_date(s)),
                 ts_date_val(&row[2]),
-                row[3].as_f64(), row[4].as_f64(), row[5].as_f64(), row[6].as_f64(),
+                row[3].as_f64(),
+                row[4].as_f64(),
+                row[5].as_f64(),
+                row[6].as_f64(),
             ],
         )?;
         all += 1;
@@ -59,13 +78,18 @@ pub async fn fetch_balancesheet(
 ) -> Result<usize> {
     let period = latest_period(as_of);
     let rows = query(
-        client, token, "balancesheet",
+        client,
+        token,
+        "balancesheet",
         serde_json::json!({ "period": &period }),
         "ts_code,ann_date,end_date,total_assets,total_liab,total_hldr_eqy_exc_min_int",
-    ).await?;
+    )
+    .await?;
     let mut all = 0usize;
     for row in &rows {
-        if row.len() < 6 { continue; }
+        if row.len() < 6 {
+            continue;
+        }
         db.execute(
             "INSERT OR REPLACE INTO balancesheet
                 (ts_code, ann_date, end_date, total_assets, total_liab, total_hldr_eqy_exc_min_int)
@@ -74,7 +98,9 @@ pub async fn fetch_balancesheet(
                 row[0].as_str().unwrap_or_default(),
                 row[1].as_str().map(|s| ts_date(s)),
                 ts_date_val(&row[2]),
-                row[3].as_f64(), row[4].as_f64(), row[5].as_f64(),
+                row[3].as_f64(),
+                row[4].as_f64(),
+                row[5].as_f64(),
             ],
         )?;
         all += 1;
@@ -91,13 +117,18 @@ pub async fn fetch_cashflow(
 ) -> Result<usize> {
     let period = latest_period(as_of);
     let rows = query(
-        client, token, "cashflow",
+        client,
+        token,
+        "cashflow",
         serde_json::json!({ "period": &period }),
         "ts_code,ann_date,end_date,n_cashflow_act,n_cashflow_inv_act,n_cash_flows_fnc_act",
-    ).await?;
+    )
+    .await?;
     let mut all = 0usize;
     for row in &rows {
-        if row.len() < 6 { continue; }
+        if row.len() < 6 {
+            continue;
+        }
         db.execute(
             "INSERT OR REPLACE INTO cashflow
                 (ts_code, ann_date, end_date, n_cashflow_act, n_cashflow_inv_act, n_cash_flows_fnc_act)
@@ -129,7 +160,9 @@ pub async fn fetch_fina_indicator(
     ).await?;
     let mut all = 0usize;
     for row in &rows {
-        if row.len() < 13 { continue; }
+        if row.len() < 13 {
+            continue;
+        }
         db.execute(
             "INSERT OR REPLACE INTO fina_indicator
                 (ts_code, ann_date, end_date, roe, roa, debt_to_assets, current_ratio, quick_ratio, eps, bps, cfps, netprofit_yoy, or_yoy)
@@ -157,7 +190,9 @@ pub async fn fetch_dividend(
 ) -> Result<usize> {
     let mut all = 0usize;
     for days_back in (0..30).step_by(10) {
-        let date = (as_of - chrono::Duration::days(days_back)).format("%Y%m%d").to_string();
+        let date = (as_of - chrono::Duration::days(days_back))
+            .format("%Y%m%d")
+            .to_string();
         let total = fetch_and_store(
             client, token, "dividend",
             serde_json::json!({ "ann_date": &date }),

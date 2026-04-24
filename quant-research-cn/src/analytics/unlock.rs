@@ -10,16 +10,17 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 use tracing::{info, warn};
 
-use crate::config::Settings;
 use super::bayes::BetaBinomial;
+use crate::config::Settings;
 
 const MODULE: &str = "unlock";
+const MIN_VALID_FLOAT_RATIO_PCT: f64 = 0.01;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnlockSize {
-    Small,   // < 1% of float — index 0
-    Medium,  // 1-5%          — index 1
-    Large,   // > 5%          — index 2
+    Small,  // < 1% of float — index 0
+    Medium, // 1-5%          — index 1
+    Large,  // > 5%          — index 2
 }
 
 impl UnlockSize {
@@ -53,9 +54,9 @@ impl UnlockSize {
     /// posterior.mean = P(drop).
     fn seed_wins_losses(self) -> (usize, usize) {
         match self {
-            Self::Small => (3, 3),   // ~50% drop probability
-            Self::Medium => (4, 3),  // ~57% drop probability
-            Self::Large => (5, 2),   // ~71% drop probability
+            Self::Small => (3, 3),  // ~50% drop probability
+            Self::Medium => (4, 3), // ~57% drop probability
+            Self::Large => (5, 2),  // ~71% drop probability
         }
     }
 }
@@ -75,6 +76,7 @@ struct UnlockRow {
     float_date: String,
     _float_share: Option<f64>,
     float_ratio: Option<f64>,
+    raw_rows: i64,
 }
 
 pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usize> {
@@ -84,21 +86,43 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
 
     // ── Step 1: Query upcoming unlocks within lookahead window ─────
     let mut stmt = db.prepare(
-        "SELECT ts_code, CAST(float_date AS VARCHAR) AS float_date, float_share, float_ratio
+        "SELECT
+            ts_code,
+            CAST(float_date AS VARCHAR) AS float_date,
+            SUM(COALESCE(float_share, 0)) AS float_share,
+            SUM(
+                CASE
+                    WHEN COALESCE(float_ratio, 0) >= ? THEN float_ratio
+                    ELSE 0
+                END
+            ) AS float_ratio_sum,
+            COUNT(*) AS raw_rows
          FROM share_unlock
          WHERE float_date >= ? AND float_date <= ?
+         GROUP BY ts_code, float_date
          ORDER BY float_date",
     )?;
 
     let upcoming: Vec<UnlockRow> = stmt
-        .query_map([&date_str, &window_end], |row| {
-            Ok(UnlockRow {
-                ts_code: row.get::<_, String>(0)?,
-                float_date: row.get::<_, String>(1)?,
-                _float_share: row.get::<_, Option<f64>>(2)?,
-                float_ratio: row.get::<_, Option<f64>>(3)?,
-            })
-        })?
+        .query_map(
+            duckdb::params![MIN_VALID_FLOAT_RATIO_PCT, &date_str, &window_end],
+            |row| {
+                Ok(UnlockRow {
+                    ts_code: row.get::<_, String>(0)?,
+                    float_date: row.get::<_, String>(1)?,
+                    _float_share: row.get::<_, Option<f64>>(2)?,
+                    float_ratio: {
+                        let ratio_sum = row.get::<_, Option<f64>>(3)?.unwrap_or(0.0);
+                        if ratio_sum >= MIN_VALID_FLOAT_RATIO_PCT {
+                            Some(ratio_sum)
+                        } else {
+                            None
+                        }
+                    },
+                    raw_rows: row.get::<_, i64>(4).unwrap_or(1),
+                })
+            },
+        )?
         .filter_map(|r| r.ok())
         .collect();
 
@@ -115,9 +139,23 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
 
     // Query historical unlock events that already occurred
     let hist_query = db.prepare(
-        "SELECT u.ts_code, u.float_date, u.float_ratio,
+        "WITH unlock_agg AS (
+            SELECT
+                ts_code,
+                float_date,
+                SUM(
+                    CASE
+                        WHEN COALESCE(float_ratio, 0) >= ? THEN float_ratio
+                        ELSE 0
+                    END
+                ) AS float_ratio
+            FROM share_unlock
+            WHERE float_date >= ? AND float_date < ?
+            GROUP BY ts_code, float_date
+         )
+         SELECT u.ts_code, u.float_date, u.float_ratio,
                 p_after.close AS close_after, p_before.close AS close_before
-         FROM share_unlock u
+         FROM unlock_agg u
          LEFT JOIN prices p_before
            ON p_before.ts_code = u.ts_code
            AND p_before.trade_date = (
@@ -130,26 +168,32 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
                SELECT MIN(trade_date) FROM prices
                WHERE ts_code = u.ts_code AND trade_date >= u.float_date + INTERVAL 5 DAY
            )
-         WHERE u.float_date >= ? AND u.float_date < ?
-           AND u.float_ratio IS NOT NULL",
+         WHERE u.float_ratio >= ?",
     );
 
     match hist_query {
         Ok(mut hist_stmt) => {
             let rows: Vec<(Option<f64>, Option<f64>, Option<f64>)> = hist_stmt
-                .query_map([&hist_start, &date_str], |row| {
-                    Ok((
-                        row.get::<_, Option<f64>>(2)?, // float_ratio
-                        row.get::<_, Option<f64>>(3)?, // close_after
-                        row.get::<_, Option<f64>>(4)?, // close_before
-                    ))
-                })?
+                .query_map(
+                    duckdb::params![
+                        MIN_VALID_FLOAT_RATIO_PCT,
+                        &hist_start,
+                        &date_str,
+                        MIN_VALID_FLOAT_RATIO_PCT
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<f64>>(2)?, // float_ratio
+                            row.get::<_, Option<f64>>(3)?, // close_after
+                            row.get::<_, Option<f64>>(4)?, // close_before
+                        ))
+                    },
+                )?
                 .filter_map(|r| r.ok())
                 .collect();
 
             for (ratio_opt, after_opt, before_opt) in &rows {
-                if let (Some(ratio), Some(after), Some(before)) =
-                    (ratio_opt, after_opt, before_opt)
+                if let (Some(ratio), Some(after), Some(before)) = (ratio_opt, after_opt, before_opt)
                 {
                     if *before <= 0.0 {
                         continue;
@@ -197,11 +241,17 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     )?;
 
     let mut count = 0usize;
+    let mut missing_ratio_samples: Vec<String> = Vec::new();
     for u in &upcoming {
         let ratio = match u.float_ratio {
             Some(r) if r > 0.0 => r,
             _ => {
-                warn!(ts_code = %u.ts_code, "missing float_ratio, skipping");
+                if missing_ratio_samples.len() < 8 {
+                    missing_ratio_samples.push(format!(
+                        "{}@{} (rows={})",
+                        u.ts_code, u.float_date, u.raw_rows
+                    ));
+                }
                 continue;
             }
         };
@@ -211,8 +261,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         let post = &posteriors[idx];
 
         // Compute days to unlock
-        let float_date = NaiveDate::parse_from_str(&u.float_date, "%Y-%m-%d")
-            .unwrap_or(as_of);
+        let float_date = NaiveDate::parse_from_str(&u.float_date, "%Y-%m-%d").unwrap_or(as_of);
         let days_to_unlock = (float_date - as_of).num_days().max(0);
 
         let detail = format!(
@@ -227,12 +276,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
 
         // p_drop — P(5D return < -2% | unlock_size)
         insert_stmt.execute(duckdb::params![
-            u.ts_code,
-            date_str,
-            MODULE,
-            "p_drop",
-            post.mean,
-            detail,
+            u.ts_code, date_str, MODULE, "p_drop", post.mean, detail,
         ])?;
         // p_drop_ci_low
         insert_stmt.execute(duckdb::params![
@@ -290,6 +334,14 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         ])?;
 
         count += 1;
+    }
+
+    if !missing_ratio_samples.is_empty() {
+        warn!(
+            skipped = missing_ratio_samples.len(),
+            sample = ?missing_ratio_samples,
+            "aggregated unlock rows missing usable float_ratio, skipped"
+        );
     }
 
     info!(

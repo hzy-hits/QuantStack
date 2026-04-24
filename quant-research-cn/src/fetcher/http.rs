@@ -26,13 +26,17 @@ where
                 if attempt >= MAX_RETRIES {
                     return Err(anyhow!(
                         "HTTP request failed after {} retries: {}",
-                        MAX_RETRIES, e
+                        MAX_RETRIES,
+                        e
                     ));
                 }
                 let wait_secs = 1u64 << attempt;
                 warn!(
                     "http network_error err={} attempt={}/{} retry_in={}s",
-                    e, attempt + 1, MAX_RETRIES, wait_secs
+                    e,
+                    attempt + 1,
+                    MAX_RETRIES,
+                    wait_secs
                 );
                 sleep(Duration::from_secs(wait_secs.min(60))).await;
                 attempt += 1;
@@ -57,7 +61,10 @@ where
                 .unwrap_or(1u64 << attempt);
             warn!(
                 "http rate_limited status={} wait_secs={} attempt={}/{}",
-                status, wait_secs, attempt + 1, MAX_RETRIES
+                status,
+                wait_secs,
+                attempt + 1,
+                MAX_RETRIES
             );
             sleep(Duration::from_secs(wait_secs.min(60))).await;
             attempt += 1;
