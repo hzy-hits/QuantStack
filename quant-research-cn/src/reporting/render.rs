@@ -10,7 +10,9 @@
 use anyhow::Result;
 use chrono::{FixedOffset, NaiveDate, Utc};
 use duckdb::Connection;
+use std::collections::HashMap;
 use std::fmt::Write;
+use std::path::Path;
 use tracing::{info, warn};
 
 use crate::analytics::headline_gate::{
@@ -277,7 +279,18 @@ fn render_vol_hmm(md: &mut String, db: &Connection, date_str: &str) -> Result<()
                        AND as_of <= CAST(? AS DATE)
                        AND module = 'vol_hmm'
                  )
-               ORDER BY metric";
+               ORDER BY CASE metric
+                          WHEN 'p_high_vol' THEN 1
+                          WHEN 'p_high_vol_tomorrow' THEN 2
+                          WHEN 'rv_tobit_20d' THEN 3
+                          WHEN 'rv_raw_20d' THEN 4
+                          WHEN 'limit_censor_ratio_20d' THEN 5
+                          WHEN 'limit_up_count_20d' THEN 6
+                          WHEN 'limit_down_count_20d' THEN 7
+                          WHEN 'vol_regime_duration' THEN 8
+                          ELSE 99
+                        END,
+                        metric";
 
     match db.prepare(sql) {
         Ok(mut stmt) => {
@@ -297,12 +310,18 @@ fn render_vol_hmm(md: &mut String, db: &Connection, date_str: &str) -> Result<()
             } else {
                 // Parse detail from p_high_vol
                 let mut regime_label = String::new();
+                let mut source_label = String::new();
                 let mut vol_low = 0.0;
                 let mut vol_high = 0.0;
                 let mut n_samples = 0u64;
                 if let Some((_, _, Some(detail))) = rows.iter().find(|(m, _, _)| m == "p_high_vol")
                 {
                     if let Ok(obj) = serde_json::from_str::<serde_json::Value>(detail) {
+                        source_label = obj
+                            .get("source")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         regime_label = obj
                             .get("regime")
                             .and_then(|v| v.as_str())
@@ -320,6 +339,9 @@ fn render_vol_hmm(md: &mut String, db: &Connection, date_str: &str) -> Result<()
                     match metric.as_str() {
                         "p_high_vol" => {
                             writeln!(md, "- P(high_vol) = {:.3} (n={})", value, n_samples)?;
+                            if source_label == "cross_section_limit_tobit" {
+                                writeln!(md, "- 波动输入 = 全市场个股涨跌停修正 Tobit 方差")?;
+                            }
                             if !regime_label.is_empty() {
                                 writeln!(md, "- vol_regime = {}", regime_label)?;
                             }
@@ -334,8 +356,20 @@ fn render_vol_hmm(md: &mut String, db: &Connection, date_str: &str) -> Result<()
                         "p_high_vol_tomorrow" => {
                             writeln!(md, "- P(high_vol 明日) = {:.3}", value)?;
                         }
-                        "rv_gk_20d" => {
-                            writeln!(md, "- RV(GK,20d) = {:.2}% (年化)", value)?;
+                        "rv_tobit_20d" => {
+                            writeln!(md, "- RV(Tobit涨跌停修正,20d) = {:.2}% (年化)", value)?;
+                        }
+                        "rv_raw_20d" => {
+                            writeln!(md, "- RV(raw横截面,20d) = {:.2}% (年化)", value)?;
+                        }
+                        "limit_censor_ratio_20d" => {
+                            writeln!(md, "- 涨跌停截尾比例(20d) = {:.2}%", value * 100.0)?;
+                        }
+                        "limit_up_count_20d" => {
+                            writeln!(md, "- 涨停截尾样本(20d) = {} 个", *value as i64)?;
+                        }
+                        "limit_down_count_20d" => {
+                            writeln!(md, "- 跌停截尾样本(20d) = {} 个", *value as i64)?;
                         }
                         "vol_regime_duration" => {
                             writeln!(md, "- vol_regime_duration = {} 天", *value as i64)?;
@@ -403,6 +437,16 @@ fn render_macro_gate(md: &mut String, db: &Connection, date_str: &str) -> Result
                                     }
                                     if let Some(va) = obj.get("vol_ann").and_then(|v| v.as_f64()) {
                                         writeln!(md, "- 实现波动率(年化) = {:.2}%", va)?;
+                                    }
+                                    if let Some(source) =
+                                        obj.get("vol_source").and_then(|v| v.as_str())
+                                    {
+                                        let label = if source == "vol_hmm_tobit" {
+                                            "vol_hmm Tobit涨跌停修正"
+                                        } else {
+                                            source
+                                        };
+                                        writeln!(md, "- 波动率口径 = {}", label)?;
                                     }
                                     if let Some(sp) = obj.get("spread").and_then(|v| v.as_f64()) {
                                         writeln!(md, "- LPR-Shibor利差 = {:.3}", sp)?;
@@ -508,7 +552,7 @@ fn render_macro_data(md: &mut String, db: &Connection, date_str: &str) -> Result
     writeln!(md)?;
     writeln!(
         md,
-        "> 注: 月度指标 (CPI, PPI, PMI, 社融) 通常滞后15-30天发布"
+        "> 注: 月度指标按 payload 中的 series_id 与日期展示；PMI_MFG 必须标注官方/第三方口径与参考期，若日期明显早于报告月，只能写成滞后/待核验，不能当作当月官方 PMI。"
     )?;
     writeln!(md)?;
     Ok(())
@@ -587,10 +631,21 @@ fn render_northbound_flow(md: &mut String, db: &Connection, date_str: &str) -> R
 fn render_sector_fund_flow(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
     writeln!(md, "### 行业资金流向 (AKShare)")?;
     writeln!(md)?;
-    writeln!(md, "| 行业 | 涨跌幅% | 主力净流入(亿) | 主力净占比% |")?;
-    writeln!(md, "|------|---------|---------------|------------|")?;
+    writeln!(
+        md,
+        "> 口径: AKShare sector_fund_flow / 东方财富行业资金流；main_net_in 按元转亿元展示。该表不等同申万一级、数据宝或其他公开资金口径；若外部口径冲突，正文只能称为“本系统/AKShare口径”。"
+    )?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| 数据日 | 行业 | 涨跌幅% | 主力净流入(亿) | 主力净占比% |"
+    )?;
+    writeln!(
+        md,
+        "|--------|------|---------|---------------|------------|"
+    )?;
 
-    let sql = "SELECT sector_name, pct_chg, main_net_in, main_net_pct
+    let sql = "SELECT CAST(trade_date AS VARCHAR), sector_name, pct_chg, main_net_in, main_net_pct
                FROM sector_fund_flow
                WHERE trade_date = (
                    SELECT MAX(trade_date) FROM sector_fund_flow
@@ -601,28 +656,30 @@ fn render_sector_fund_flow(md: &mut String, db: &Connection, date_str: &str) -> 
 
     match db.prepare(sql) {
         Ok(mut stmt) => {
-            let rows: Vec<(String, Option<f64>, Option<f64>, Option<f64>)> = stmt
+            let rows: Vec<(String, String, Option<f64>, Option<f64>, Option<f64>)> = stmt
                 .query_map(duckdb::params![date_str], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, String>(1)?,
                         row.get::<_, Option<f64>>(2)?,
                         row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<f64>>(4)?,
                     ))
                 })?
                 .filter_map(|r| r.ok())
                 .collect();
 
             if rows.is_empty() {
-                writeln!(md, "| (无数据) | - | - | - |")?;
+                writeln!(md, "| (无数据) | - | - | - | - |")?;
             } else {
-                for (name, pct, net_in, net_pct) in &rows {
+                for (trade_date, name, pct, net_in, net_pct) in &rows {
                     writeln!(
                         md,
-                        "| {} | {} | {} | {} |",
+                        "| {} | {} | {} | {} | {} |",
+                        trade_date,
                         name,
                         fmt_pct(*pct),
-                        fmt_f64_yi(*net_in),
+                        fmt_f64_yuan_to_yi(*net_in),
                         fmt_pct(*net_pct),
                     )?;
                 }
@@ -630,7 +687,7 @@ fn render_sector_fund_flow(md: &mut String, db: &Connection, date_str: &str) -> 
         }
         Err(e) => {
             warn!(err = %e, "sector_fund_flow query failed");
-            writeln!(md, "| (查询失败) | - | - | - |")?;
+            writeln!(md, "| (查询失败) | - | - | - | - |")?;
         }
     }
     writeln!(md)?;
@@ -967,18 +1024,20 @@ fn render_cross_market(md: &mut String, db: &Connection, date_str: &str) -> Resu
     writeln!(md)?;
 
     // ── 黄金 (SGE) ─────────────────────────────────────────────────────────
-    // Compute pct_change locally (Tushare pct_change is unreliable for SGE).
+    // Compute pct_change as current close vs previous session average price.
+    // This matches SGE-style daily move more closely than close/close for T+D.
     writeln!(md, "**黄金 (上海金交所)**")?;
+    writeln!(md, "> 涨跌幅口径: 当日 close / 前一交易日 price_avg - 1")?;
     let sge_sql = "WITH ranked AS (
                        SELECT ts_code, trade_date, close, vol,
-                              LAG(close) OVER (PARTITION BY ts_code ORDER BY trade_date) AS prev_close,
+                              LAG(price_avg) OVER (PARTITION BY ts_code ORDER BY trade_date) AS prev_price_avg,
                               ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
                        FROM sge_daily
                        WHERE trade_date <= CAST(? AS DATE)
                    )
-                   SELECT ts_code, close,
-                          CASE WHEN prev_close > 0
-                               THEN (close / prev_close - 1.0) * 100.0
+                   SELECT ts_code, CAST(trade_date AS VARCHAR), close,
+                          CASE WHEN prev_price_avg > 0
+                               THEN (close / prev_price_avg - 1.0) * 100.0
                                ELSE NULL END AS pct_chg,
                           vol
                    FROM ranked
@@ -988,13 +1047,14 @@ fn render_cross_market(md: &mut String, db: &Connection, date_str: &str) -> Resu
 
     match db.prepare(sge_sql) {
         Ok(mut stmt) => {
-            let rows: Vec<(String, Option<f64>, Option<f64>, Option<f64>)> = stmt
+            let rows: Vec<(String, String, Option<f64>, Option<f64>, Option<f64>)> = stmt
                 .query_map(duckdb::params![date_str], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
-                        row.get::<_, Option<f64>>(1)?,
+                        row.get::<_, String>(1)?,
                         row.get::<_, Option<f64>>(2)?,
                         row.get::<_, Option<f64>>(3)?,
+                        row.get::<_, Option<f64>>(4)?,
                     ))
                 })?
                 .filter_map(|r| r.ok())
@@ -1003,11 +1063,12 @@ fn render_cross_market(md: &mut String, db: &Connection, date_str: &str) -> Resu
             if rows.is_empty() {
                 writeln!(md, "- 数据缺失")?;
             } else {
-                for (code, close, pct, vol) in &rows {
+                for (code, trade_date, close, pct, vol) in &rows {
                     writeln!(
                         md,
-                        "- {}: close={}, pct_chg={}%, vol={}",
+                        "- {} ({}): close={}, pct_chg={}%, vol={}",
                         code,
+                        trade_date,
                         fmt_f64(*close),
                         fmt_f64(*pct),
                         fmt_f64(*vol),
@@ -1152,6 +1213,9 @@ fn render_structural(
     writeln!(md, "{}", PRECISION_RULES)?;
 
     render_headline_gate(&mut md, &headline_gate)?;
+    render_shadow_calibration(&mut md, db, date_str)?;
+    render_alpha_bulletin(&mut md, date_str, "cn")?;
+    render_setup_alpha_summary(&mut md, db, date_str, notable)?;
 
     // ── Report lanes ──────────────────────────────────────────────────────
     writeln!(md, "### 报告分层总览")?;
@@ -1167,11 +1231,11 @@ fn render_structural(
     )?;
     writeln!(
         md,
-        "- `RANGE CORE` = Headline Gate 不够强时的区间复核层；不得写成买入清单，只能记录回踩复核、确认条件和失效条件。"
+        "- `RANGE CORE` = 区间复核层；Headline Gate 只作背景解释，是否可执行仍看主信号、execution gate、RR 和追价约束。"
     )?;
     writeln!(
         md,
-        "- `TACTICAL CONTINUATION` = 市场 headline 不够清晰时的战术观察层；不得给开仓/追价指令，只能保留少量复核对象。"
+        "- `TACTICAL CONTINUATION` = 战术观察层；市场 headline 不清晰时要弱化主线叙事，但不能把 headline 当作单独否决器。"
     )?;
     writeln!(
         md,
@@ -1184,13 +1248,11 @@ fn render_structural(
     if headline_gate.mode != "trend" {
         writeln!(
             md,
-            "- 当前 Headline Gate = `{}`，禁止把主报告写成牛/熊单边主线；RANGE CORE / TACTICAL 在最终研报中只能写观察、回踩复核和失效条件，不得写入场、追价、T1/T2。",
+            "- 当前 Headline Gate = `{}`，它只约束市场叙事强度，不单独决定个股是否可执行；个股执行仍服从主信号、execution gate、RR 和追价约束。",
             headline_gate.mode.to_uppercase(),
         )?;
     }
     writeln!(md)?;
-
-    render_shadow_calibration(&mut md, db, date_str)?;
 
     for bucket in [
         "CORE BOOK",
@@ -1228,6 +1290,362 @@ fn render_structural(
     render_algorithm_postmortem_summary(&mut md, db, date_str)?;
 
     Ok(md)
+}
+
+#[derive(Clone, Debug)]
+struct SetupAlphaView {
+    ts_code: String,
+    name: String,
+    bucket: &'static str,
+    lane: String,
+    execution_mode: String,
+    ret_1d: f64,
+    ret_5d: f64,
+    ret_20d: f64,
+    trend_prob: f64,
+    setup_score: f64,
+    event_score: f64,
+    priced_in_score: f64,
+    pullback_price: Option<f64>,
+    reason: &'static str,
+}
+
+fn render_setup_alpha_summary(
+    md: &mut String,
+    db: &Connection,
+    date_str: &str,
+    notable: &[NotableItem],
+) -> Result<()> {
+    if notable.is_empty() {
+        return Ok(());
+    }
+
+    let daily_pct = query_setup_daily_pct_map(db, date_str, notable);
+    let views: Vec<SetupAlphaView> = notable
+        .iter()
+        .map(|item| setup_alpha_view(item, daily_pct.get(&item.ts_code).copied()))
+        .collect();
+    let early = setup_bucket(&views, "early_accumulation");
+    let pullback = setup_bucket(&views, "pullback_reset");
+    let breakout = setup_bucket(&views, "breakout_acceptance");
+    let post_event = setup_bucket(&views, "post_event_second_day");
+    let blocked = setup_bucket(&views, "blocked_chase");
+
+    writeln!(md, "## Setup Alpha / Anti-Chase")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "该段由系统在叙事前计算，专门区分“还没过热的布局/回踩复核”和“已经追高或定价过满”的候选。它不是买入清单；Execution Alpha 仍必须通过主信号、execution gate、RR 与 A股执行约束。"
+    )?;
+    writeln!(md)?;
+    writeln!(md, "| 分组 | 数量 | 报告用法 |")?;
+    writeln!(md, "|------|-----:|----------|")?;
+    writeln!(
+        md,
+        "| Early accumulation | {} | 只写成 setup alpha / 回踩确认，不能写成追涨。 |",
+        early.len()
+    )?;
+    writeln!(
+        md,
+        "| Pullback / reset | {} | 等参考回踩价或结构重置后再复核。 |",
+        pullback.len()
+    )?;
+    writeln!(
+        md,
+        "| Breakout acceptance | {} | 已涨但趋势/承接/事件确认仍支持延续；不能机械归为追高。 |",
+        breakout.len()
+    )?;
+    writeln!(
+        md,
+        "| Post-event second day | {} | 事件已公开，必须看次日承接，不能追首日反应。 |",
+        post_event.len()
+    )?;
+    writeln!(
+        md,
+        "| Blocked chase / priced-in | {} | 只能放风险回避/观望，不得升级到做多或战术延续。 |",
+        blocked.len()
+    )?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "**硬约束**: Headline Gate 只是上下文；涨幅不是原罪，只有涨幅缺少 trend_prob/承接/fade risk/execution 确认，或 execution_mode=do_not_chase，才进 Blocked Chase。"
+    )?;
+    writeln!(md)?;
+
+    render_setup_bucket(
+        md,
+        "Early Accumulation",
+        &early,
+        "本期没有干净的早期布局候选。",
+        5,
+    )?;
+    render_setup_bucket(
+        md,
+        "Pullback / Reset",
+        &pullback,
+        "本期没有需要等待回踩重置的高支持候选。",
+        5,
+    )?;
+    render_setup_bucket(
+        md,
+        "Breakout Acceptance",
+        &breakout,
+        "本期没有已经拉升但仍获得趋势确认的突破候选。",
+        5,
+    )?;
+    render_setup_bucket(
+        md,
+        "Post-Event Second Day",
+        &post_event,
+        "本期没有通过反追高过滤的事件次日候选。",
+        5,
+    )?;
+    render_setup_bucket(
+        md,
+        "Blocked Chase / Priced-In",
+        &blocked,
+        "本期没有触发 stale-chase 过滤的候选。",
+        8,
+    )?;
+
+    Ok(())
+}
+
+fn setup_bucket<'a>(views: &'a [SetupAlphaView], bucket: &str) -> Vec<&'a SetupAlphaView> {
+    let mut rows: Vec<&SetupAlphaView> =
+        views.iter().filter(|view| view.bucket == bucket).collect();
+    rows.sort_by(|a, b| {
+        b.setup_score
+            .partial_cmp(&a.setup_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                a.priced_in_score
+                    .partial_cmp(&b.priced_in_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                b.event_score
+                    .partial_cmp(&a.event_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.ts_code.cmp(&b.ts_code))
+    });
+    rows
+}
+
+fn render_setup_bucket(
+    md: &mut String,
+    title: &str,
+    rows: &[&SetupAlphaView],
+    empty: &str,
+    limit: usize,
+) -> Result<()> {
+    writeln!(md, "### {}", title)?;
+    writeln!(md)?;
+    if rows.is_empty() {
+        writeln!(md, "- {}", empty)?;
+        writeln!(md)?;
+        return Ok(());
+    }
+
+    writeln!(
+        md,
+        "| 代码 | 名称 | lane | execution | 1D% | 5D% | 20D% | trend_prob | setup | priced-in | 回踩价 | 原因 |"
+    )?;
+    writeln!(
+        md,
+        "|------|------|------|-----------|-----|-----|------|------------|-------|-----------|--------|------|"
+    )?;
+    for row in rows.iter().take(limit) {
+        writeln!(
+            md,
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            row.ts_code,
+            row.name,
+            row.lane,
+            row.execution_mode,
+            fmt_pct(Some(row.ret_1d)),
+            fmt_pct(Some(row.ret_5d)),
+            fmt_pct(Some(row.ret_20d)),
+            fmt_opt_f64(Some(row.trend_prob), 3),
+            fmt_opt_f64(Some(row.setup_score), 3),
+            fmt_opt_f64(Some(row.priced_in_score), 2),
+            fmt_f64(row.pullback_price),
+            row.reason
+        )?;
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn query_setup_daily_pct_map(
+    db: &Connection,
+    date_str: &str,
+    notable: &[NotableItem],
+) -> HashMap<String, f64> {
+    let mut map = HashMap::new();
+    let sql = "SELECT pct_chg
+               FROM prices
+               WHERE ts_code = ?
+                 AND trade_date = (
+                     SELECT MAX(trade_date) FROM prices
+                     WHERE ts_code = ? AND trade_date <= CAST(? AS DATE)
+                 )";
+
+    let Ok(mut stmt) = db.prepare(sql) else {
+        return map;
+    };
+    for item in notable {
+        if let Ok(Some(pct_chg)) = stmt.query_row(
+            duckdb::params![&item.ts_code, &item.ts_code, date_str],
+            |row| row.get::<_, Option<f64>>(0),
+        ) {
+            map.insert(item.ts_code.clone(), pct_chg);
+        }
+    }
+    map
+}
+
+fn setup_alpha_view(item: &NotableItem, daily_pct_chg: Option<f64>) -> SetupAlphaView {
+    let ret_1d = daily_pct_chg
+        .or_else(|| detail_f64_opt(&item.detail, "ret_1d"))
+        .unwrap_or(0.0);
+    let ret_5d = detail_f64(&item.detail, "ret_5d", 0.0);
+    let ret_20d = detail_f64(&item.detail, "ret_20d", 0.0);
+    let trend_prob = detail_f64(&item.detail, "trend_prob", 0.5);
+    let setup_score = detail_f64(&item.detail, "setup_score", 0.0);
+    let setup_direction = detail_str(&item.detail, "setup_direction");
+    let execution_mode = detail_str(&item.detail, "execution_mode")
+        .unwrap_or("executable")
+        .to_string();
+    let continuation_score = detail_f64(&item.detail, "continuation_score", 0.0);
+    let pullback_price = detail_f64_opt(&item.detail, "pullback_price");
+    let stale_chase_risk = detail_f64(&item.detail, "stale_chase_risk", 0.0);
+    let fade_risk = detail_f64(&item.detail, "fade_risk", 0.0);
+    let event_score = item.event_score;
+    let limit_up_like = if item.name.contains("ST") {
+        ret_1d >= 4.8
+    } else {
+        ret_1d >= 9.5
+    };
+    let mut priced_in_score = cn_priced_in_score(
+        &execution_mode,
+        ret_5d,
+        ret_20d,
+        trend_prob,
+        stale_chase_risk,
+        fade_risk,
+    );
+    if limit_up_like {
+        priced_in_score = priced_in_score.max(0.82);
+    }
+    let bullish_setup =
+        setup_direction == Some("bullish") || item.signal.direction.eq_ignore_ascii_case("bullish");
+    let not_hot = priced_in_score < 0.62;
+    let breakout_supported = bullish_setup
+        && execution_mode != "do_not_chase"
+        && ret_5d >= 6.0
+        && ret_20d >= 10.0
+        && ret_5d <= 18.0
+        && ret_20d <= 38.0
+        && trend_prob >= 0.56
+        && setup_score >= 0.55
+        && continuation_score >= 0.48
+        && fade_risk <= 0.38
+        && stale_chase_risk <= 0.55
+        && priced_in_score < 0.82
+        && !limit_up_like;
+
+    let (bucket, reason) = if limit_up_like {
+        ("blocked_chase", "涨停次日盘口风险，缺少封单/换手确认")
+    } else if execution_mode == "do_not_chase" || priced_in_score >= 0.82 {
+        ("blocked_chase", "涨幅/追价风险已兑现")
+    } else if breakout_supported {
+        ("breakout_acceptance", "已拉升但趋势承接仍确认")
+    } else if execution_mode == "wait_pullback"
+        || (pullback_price.is_some()
+            && setup_score >= 0.50
+            && (0.50..0.72).contains(&priced_in_score))
+    {
+        ("pullback_reset", "需要回踩重置后复核")
+    } else if priced_in_score >= 0.72 {
+        ("blocked_chase", "拉升缺少足够趋势确认")
+    } else if bullish_setup
+        && not_hot
+        && setup_score >= 0.55
+        && (-2.0..=6.0).contains(&ret_5d)
+        && ret_20d <= 12.0
+        && fade_risk <= 0.45
+    {
+        ("early_accumulation", "结构蓄势但尚未过热")
+    } else if event_score >= 0.50 && not_hot && ret_5d <= 8.0 && ret_20d <= 20.0 {
+        ("post_event_second_day", "事件已公开，等次日承接")
+    } else {
+        ("other", "非 setup-alpha 候选")
+    };
+
+    SetupAlphaView {
+        ts_code: item.ts_code.clone(),
+        name: item.name.clone(),
+        bucket,
+        lane: item.report_bucket.clone(),
+        execution_mode,
+        ret_1d,
+        ret_5d,
+        ret_20d,
+        trend_prob,
+        setup_score,
+        event_score,
+        priced_in_score,
+        pullback_price,
+        reason,
+    }
+}
+
+fn cn_priced_in_score(
+    execution_mode: &str,
+    ret_5d: f64,
+    ret_20d: f64,
+    trend_prob: f64,
+    stale_chase_risk: f64,
+    fade_risk: f64,
+) -> f64 {
+    let mut score = stale_chase_risk
+        .clamp(0.0, 1.0)
+        .max(fade_risk.clamp(0.0, 1.0) * 0.85);
+    if execution_mode == "do_not_chase" {
+        score = score.max(0.90);
+    } else if execution_mode == "wait_pullback" {
+        score = score.max(0.50);
+    }
+    if ret_20d >= 20.0 {
+        score = score.max(((ret_20d - 20.0) / 35.0).clamp(0.0, 1.0));
+    }
+    if ret_5d >= 9.0 {
+        score = score.max(((ret_5d - 9.0) / 18.0).clamp(0.0, 1.0));
+    }
+    if ret_5d >= 7.0 && trend_prob <= 0.50 {
+        score = score.max(0.74);
+    }
+    if ret_20d >= 15.0 && trend_prob <= 0.52 {
+        score = score.max(0.72);
+    }
+    (score * 1000.0).round() / 1000.0
+}
+
+fn detail_f64(detail: &serde_json::Value, key: &str, default: f64) -> f64 {
+    detail
+        .get(key)
+        .and_then(|value| value.as_f64())
+        .unwrap_or(default)
+}
+
+fn detail_f64_opt(detail: &serde_json::Value, key: &str) -> Option<f64> {
+    detail.get(key).and_then(|value| value.as_f64())
+}
+
+fn detail_str<'a>(detail: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+    detail.get(key).and_then(|value| value.as_str())
 }
 
 fn render_notable_item(
@@ -1397,8 +1815,9 @@ fn render_notable_item(
     if let Some((rzye, delta_rzye)) = margin {
         writeln!(
             md,
-            "- **融资**: rzye={:.2}万, 5D变化={:.2}万",
-            rzye, delta_rzye,
+            "- **融资**: rzye={}亿, 5D变化={}亿",
+            fmt_f64_yuan_to_yi(Some(rzye)),
+            fmt_f64_yuan_to_yi(Some(delta_rzye)),
         )?;
     }
 
@@ -1595,7 +2014,7 @@ fn execution_summary_sentence(
             _ => "复核",
         };
         return format!(
-            "主信号门槛未通过（blockers={}），{}层不输出买入/追价指令；执行得分={}，仅记录回踩复核约 {}%，参考复核价={}。最终研报只写观察与失效条件，不写入场、止盈或T1/T2。",
+            "主信号门槛未通过（blockers={}），{}层不输出买入/追价指令；执行得分={}，仅记录回踩复核约 {}%，参考复核价={}。A股 T+1 下止损不是硬止损，涨跌停可能导致不可成交；最终研报只写观察与失效条件，不写入场、止盈或T1/T2。",
             main_gate_blockers,
             lane,
             fmt_opt_f64(execution_score, 3),
@@ -1604,41 +2023,35 @@ fn execution_summary_sentence(
         );
     }
 
-    if headline_mode != "trend" {
-        let lane = match report_bucket {
-            "RANGE CORE" => "区间复核",
-            "TACTICAL CONTINUATION" => "战术观察",
-            "THEME ROTATION" => "主题轮动观察",
-            "RADAR" => "雷达观察",
-            _ => "非趋势复核",
-        };
-        return format!(
-            "Headline Gate={}，{}层不输出买入/追价指令；执行得分={}，仅记录回踩复核约 {}%，参考复核价={}。最终研报只写观察与失效条件，不写入场、止盈或T1/T2。",
-            headline_mode.to_uppercase(),
-            lane,
-            fmt_opt_f64(execution_score, 3),
-            fmt_opt_f64(pullback_trigger_pct, 2),
-            fmt_opt_f64(pullback_price, 2)
-        );
-    }
+    let headline_note = if headline_mode != "trend" {
+        format!(
+            "Headline Gate={} 仅作辅助上下文，不单独否决；",
+            headline_mode.to_uppercase()
+        )
+    } else {
+        String::new()
+    };
 
     match mode.unwrap_or("executable") {
         "do_not_chase" => format!(
-            "{}；执行得分={}，当前不建议新开仓，至少等待约 {}% 的回踩后再评估，参考回踩价={}",
+            "{}{}；执行得分={}，当前不建议新开仓，至少等待约 {}% 的回踩后再评估，参考回踩价={}；A股 T+1 与涨跌停约束下不得把静态止损写成硬止损",
+            headline_note,
             execution_mode_sentence(mode),
             fmt_opt_f64(execution_score, 3),
             fmt_opt_f64(pullback_trigger_pct, 2),
             fmt_opt_f64(pullback_price, 2)
         ),
         "wait_pullback" => format!(
-            "{}；执行得分={}，当前不宜直接追价，优先观察约 {}% 的回踩，参考回踩价={}",
+            "{}{}；执行得分={}，当前不宜直接追价，优先观察约 {}% 的回踩，参考回踩价={}；A股 T+1 与涨跌停约束下不得把静态止损写成硬止损",
+            headline_note,
             execution_mode_sentence(mode),
             fmt_opt_f64(execution_score, 3),
             fmt_opt_f64(pullback_trigger_pct, 2),
             fmt_opt_f64(pullback_price, 2)
         ),
         _ => format!(
-            "{}；执行得分={}，可接受追价上限约 {}%，更理想的回踩触发约 {}%，参考回踩价={}",
+            "{}{}；执行得分={}，可接受追价上限约 {}%，更理想的回踩触发约 {}%，参考回踩价={}；A股 T+1 与涨跌停约束下需写清次日处理线而非硬止损",
+            headline_note,
             execution_mode_sentence(mode),
             fmt_opt_f64(execution_score, 3),
             fmt_opt_f64(max_chase_gap_pct, 2),
@@ -2192,6 +2605,47 @@ fn render_headline_gate(md: &mut String, gate: &HeadlineGateSummary) -> Result<(
     Ok(())
 }
 
+fn render_alpha_bulletin(md: &mut String, date_str: &str, market: &str) -> Result<()> {
+    let file_name = format!("alpha_bulletin_{}.md", market);
+    let candidates = [
+        format!(
+            "reports/review_dashboard/strategy_backtest/{}/{}",
+            date_str, file_name
+        ),
+        format!(
+            "../reports/review_dashboard/strategy_backtest/{}/{}",
+            date_str, file_name
+        ),
+        format!(
+            "../quant-research-cn/reports/review_dashboard/strategy_backtest/{}/{}",
+            date_str, file_name
+        ),
+    ];
+
+    for candidate in candidates {
+        let path = Path::new(&candidate);
+        if !path.exists() {
+            continue;
+        }
+        match std::fs::read_to_string(path) {
+            Ok(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return Ok(());
+                }
+                writeln!(md, "{}", trimmed)?;
+                writeln!(md)?;
+                return Ok(());
+            }
+            Err(err) => {
+                warn!(path = %candidate, error = %err, "alpha bulletin read failed");
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn report_bucket_description(bucket: &str) -> &'static str {
     match bucket {
         "CORE BOOK" => "主报告正文层。优先看这里来形成 house view。",
@@ -2423,7 +2877,8 @@ fn render_enriched_news(md: &mut String, db: &Connection, date_str: &str) -> Res
     let sql = "SELECT ts_code, published_at, headline, event_type, sentiment,
                       relevance, summary_one_line
                FROM news_enriched
-               WHERE published_at >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS VARCHAR)
+               WHERE TRY_CAST(published_at AS TIMESTAMP) >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS TIMESTAMP)
+                 AND TRY_CAST(published_at AS TIMESTAMP) < CAST(CAST(? AS DATE) + INTERVAL '1 day' AS TIMESTAMP)
                ORDER BY relevance DESC, published_at DESC
                LIMIT 40";
 
@@ -2438,7 +2893,7 @@ fn render_enriched_news(md: &mut String, db: &Connection, date_str: &str) -> Res
                 Option<f64>,
                 Option<String>,
             )> = stmt
-                .query_map(duckdb::params![date_str], |row| {
+                .query_map(duckdb::params![date_str, date_str], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -2495,14 +2950,15 @@ fn render_enriched_news(md: &mut String, db: &Connection, date_str: &str) -> Res
 fn render_raw_stock_news(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
     let sql = "SELECT ts_code, publish_time, title, source
                FROM stock_news
-               WHERE publish_time >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS VARCHAR)
+               WHERE TRY_CAST(publish_time AS TIMESTAMP) >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS TIMESTAMP)
+                 AND TRY_CAST(publish_time AS TIMESTAMP) < CAST(CAST(? AS DATE) + INTERVAL '1 day' AS TIMESTAMP)
                ORDER BY publish_time DESC
                LIMIT 30";
 
     match db.prepare(sql) {
         Ok(mut stmt) => {
             let rows: Vec<(String, String, String, Option<String>)> = stmt
-                .query_map(duckdb::params![date_str], |row| {
+                .query_map(duckdb::params![date_str, date_str], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
@@ -2547,14 +3003,15 @@ fn render_sentiment_summary(md: &mut String, db: &Connection, date_str: &str) ->
                       COUNT(CASE WHEN sentiment = 'negative'
                                   AND sentiment_confidence >= 0.7 THEN 1 END) AS high_neg
                FROM news_enriched
-               WHERE published_at >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS VARCHAR)
+               WHERE TRY_CAST(published_at AS TIMESTAMP) >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS TIMESTAMP)
+                 AND TRY_CAST(published_at AS TIMESTAMP) < CAST(CAST(? AS DATE) + INTERVAL '1 day' AS TIMESTAMP)
                GROUP BY ts_code
                ORDER BY neg DESC, high_neg DESC";
 
     match db.prepare(sql) {
         Ok(mut stmt) => {
             let rows: Vec<(String, i64, i64, i64, i64)> = stmt
-                .query_map(duckdb::params![date_str], |row| {
+                .query_map(duckdb::params![date_str, date_str], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
@@ -2968,6 +3425,14 @@ fn fmt_f64_yi(v: Option<f64>) -> String {
     }
 }
 
+/// Format f64 as 亿 from raw yuan amounts.
+fn fmt_f64_yuan_to_yi(v: Option<f64>) -> String {
+    match v {
+        Some(val) => format!("{:.2}", val / 100_000_000.0),
+        None => "-".to_string(),
+    }
+}
+
 /// Format f64 as 万 (10K units, Tushare default for many monetary fields).
 fn fmt_f64_wan(v: Option<f64>) -> String {
     match v {
@@ -2980,12 +3445,15 @@ fn fmt_f64_wan(v: Option<f64>) -> String {
 fn macro_cadence(series_id: &str) -> &'static str {
     match series_id {
         // Monthly indicators
-        "CPI" | "CPIAUCSL" | "PPI" | "PMI" | "M2" => "月度, 滞后~15天",
+        "CPI" | "CPI_YOY" | "CPIAUCSL" => "月度, 通常滞后约3-4周",
+        "PPI" | "PPI_YOY" => "月度, 通常滞后约3-4周",
+        "PMI" | "PMI_MFG" => "制造业PMI, 月度; 必须标注官方/第三方口径与日期",
+        "M2" | "M2_YOY" => "月度, 通常滞后约3-4周",
         // Social financing, credit
-        "TSF" | "社融" => "月度, 滞后~15天",
+        "TSF" | "社融" => "月度, 通常滞后约3-4周",
         // Daily/weekly rates
-        "M0009970" | "SHIBOR" | "Shibor" => "日度",
-        "M0062063" | "LPR" => "月度(每月20日)",
+        "M0009970" | "SHIBOR" | "Shibor" | "SHIBOR_ON" => "日度",
+        "M0062063" | "LPR" | "LPR_1Y" => "月度(每月20日)",
         // Quarterly
         "GDP" => "季度, 滞后~45天",
         _ => "-",
@@ -2994,10 +3462,15 @@ fn macro_cadence(series_id: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{execution_summary_sentence, report_bucket_description};
+    use super::{
+        cn_priced_in_score, execution_summary_sentence, macro_cadence, report_bucket_description,
+        setup_alpha_view,
+    };
+    use crate::filtering::notable::{NotableItem, Signal};
+    use serde_json::json;
 
     #[test]
-    fn uncertain_gate_execution_summary_suppresses_trade_instructions() {
+    fn uncertain_headline_is_context_not_execution_blocker() {
         let summary = execution_summary_sentence(
             "TACTICAL CONTINUATION",
             "uncertain",
@@ -3010,10 +3483,9 @@ mod tests {
             "none",
         );
 
-        assert!(summary.contains("不输出买入/追价指令"));
-        assert!(summary.contains("参考复核价=3.81"));
-        assert!(summary.contains("不写入场、止盈或T1/T2"));
-        assert!(!summary.contains("可接受追价上限"));
+        assert!(summary.contains("仅作辅助上下文，不单独否决"));
+        assert!(summary.contains("可接受追价上限"));
+        assert!(summary.contains("参考回踩价=3.81"));
     }
 
     #[test]
@@ -3032,8 +3504,18 @@ mod tests {
 
         assert!(summary.contains("主信号门槛未通过"));
         assert!(summary.contains("不输出买入/追价指令"));
+        assert!(summary.contains("T+1"));
+        assert!(summary.contains("止损不是硬止损"));
         assert!(summary.contains("不写入场、止盈或T1/T2"));
         assert!(!summary.contains("可接受追价上限"));
+    }
+
+    #[test]
+    fn macro_cadence_labels_current_cn_series_ids() {
+        assert!(macro_cadence("PMI_MFG").contains("制造业PMI"));
+        assert!(macro_cadence("CPI_YOY").contains("3-4周"));
+        assert_eq!(macro_cadence("SHIBOR_ON"), "日度");
+        assert_eq!(macro_cadence("LPR_1Y"), "月度(每月20日)");
     }
 
     #[test]
@@ -3042,5 +3524,49 @@ mod tests {
 
         assert!(description.contains("复核层"));
         assert!(description.contains("不得作为买入清单"));
+    }
+
+    #[test]
+    fn high_return_without_trend_confirmation_is_chase_risk() {
+        let score = cn_priced_in_score("executable", 10.0, 24.0, 0.48, 0.10, 0.20);
+
+        assert!(score >= 0.66);
+    }
+
+    #[test]
+    fn confirmed_breakout_is_not_mechanically_blocked() {
+        let item = NotableItem {
+            ts_code: "000001.SZ".to_string(),
+            name: "测试银行".to_string(),
+            composite_score: 0.50,
+            magnitude_score: 0.30,
+            event_score: 0.40,
+            momentum_score: 0.55,
+            flow_score: 0.45,
+            cross_asset_score: 0.20,
+            report_bucket: "TACTICAL CONTINUATION".to_string(),
+            report_reason: "unit test".to_string(),
+            signal: Signal {
+                confidence: "HIGH".to_string(),
+                direction: "bullish".to_string(),
+                horizon: "5D".to_string(),
+            },
+            detail: json!({
+                "ret_5d": 10.0,
+                "ret_20d": 24.0,
+                "trend_prob": 0.62,
+                "setup_score": 0.66,
+                "setup_direction": "bullish",
+                "continuation_score": 0.58,
+                "execution_mode": "executable",
+                "fade_risk": 0.20,
+                "stale_chase_risk": 0.10
+            }),
+        };
+
+        let view = setup_alpha_view(&item, None);
+
+        assert_eq!(view.bucket, "breakout_acceptance");
+        assert!(view.priced_in_score < 0.72);
     }
 }

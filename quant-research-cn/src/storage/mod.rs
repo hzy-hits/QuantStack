@@ -71,7 +71,7 @@ pub fn restore_report_review_history(src: &str, dst: &str) -> Result<()> {
 
     let escaped = src.replace('\'', "''");
     con.execute_batch(&format!("ATTACH '{}' AS report_history;", escaped))?;
-    let result = con.execute_batch(
+    con.execute_batch(
         "CREATE TABLE IF NOT EXISTS report_history.algorithm_postmortem (
             report_date            DATE NOT NULL,
             session                VARCHAR NOT NULL,
@@ -98,22 +98,94 @@ pub fn restore_report_review_history(src: &str, dst: &str) -> Result<()> {
             fill_quality           VARCHAR,
             detail_json            VARCHAR,
             PRIMARY KEY (report_date, session, symbol, selection_status)
-         );
-
-         INSERT OR REPLACE INTO report_decisions
-         SELECT * FROM report_history.report_decisions;
-
-         INSERT OR REPLACE INTO report_outcomes
-         SELECT * FROM report_history.report_outcomes;
-
-         INSERT OR REPLACE INTO alpha_postmortem
-         SELECT * FROM report_history.alpha_postmortem;
-
-         INSERT OR REPLACE INTO algorithm_postmortem
-         SELECT * FROM report_history.algorithm_postmortem;
-
-         DETACH report_history;",
-    );
+         );",
+    )?;
+    let result = (|| -> Result<()> {
+        copy_attached_table_compatible(&con, "report_decisions")?;
+        copy_attached_table_compatible(&con, "report_outcomes")?;
+        copy_attached_table_compatible(&con, "alpha_postmortem")?;
+        copy_attached_table_compatible(&con, "algorithm_postmortem")?;
+        Ok(())
+    })();
+    con.execute_batch("DETACH report_history;")?;
     result?;
     Ok(())
+}
+
+fn copy_attached_table_compatible(con: &Connection, table: &str) -> Result<()> {
+    if !attached_table_exists(con, "report_history", table)? {
+        return Ok(());
+    }
+
+    let target_columns = table_columns(con, "main", table)?;
+    let source_columns = table_columns(con, "report_history", table)?;
+    if target_columns.is_empty() || source_columns.is_empty() {
+        return Ok(());
+    }
+
+    let target_list = target_columns
+        .iter()
+        .map(|c| quote_ident(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source_set = source_columns
+        .iter()
+        .map(|c| c.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let select_list = target_columns
+        .iter()
+        .map(|c| {
+            if source_set.contains(c.as_str()) {
+                format!("src.{}", quote_ident(c))
+            } else if c == "created_at" {
+                "current_timestamp".to_string()
+            } else {
+                "NULL".to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let sql = format!(
+        "INSERT OR REPLACE INTO {table} ({target_list})
+         SELECT {select_list}
+         FROM report_history.{table} AS src",
+        table = quote_ident(table),
+        target_list = target_list,
+        select_list = select_list,
+    );
+    con.execute_batch(&sql)?;
+    Ok(())
+}
+
+fn attached_table_exists(con: &Connection, schema: &str, table: &str) -> Result<bool> {
+    let count: i64 = con.query_row(
+        "SELECT COUNT(*)
+         FROM information_schema.tables
+         WHERE table_schema = ? AND table_name = ?",
+        duckdb::params![schema, table],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
+fn table_columns(con: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
+    let mut stmt = con.prepare(
+        "SELECT column_name
+         FROM information_schema.columns
+         WHERE table_schema = ? AND table_name = ?
+         ORDER BY ordinal_position",
+    )?;
+    let rows = stmt.query_map(duckdb::params![schema, table], |row| {
+        row.get::<_, String>(0)
+    })?;
+    let mut columns = Vec::new();
+    for row in rows {
+        columns.push(row?);
+    }
+    Ok(columns)
+}
+
+fn quote_ident(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
 }

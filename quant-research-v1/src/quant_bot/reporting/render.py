@@ -39,14 +39,26 @@ def render_payload_md(bundle: dict, output_path: Path, chart_paths: list | None 
     Write the full computed payload as structured Markdown.
     This is the file the agent reads.
     """
+    meta = bundle.setdefault("meta", {})
+    if not meta.get("session"):
+        stem = output_path.stem.lower()
+        if stem.endswith("_post"):
+            meta["session"] = "post"
+            meta.setdefault("session_label", "post-market")
+        elif stem.endswith("_pre"):
+            meta["session"] = "pre"
+            meta.setdefault("session_label", "pre-market")
+
     lines: list[str] = []
 
     lines += render_header_and_context(bundle)
     lines += render_report_postmortem(bundle)
     lines += render_scorecard(bundle)
+    lines += render_alpha_bulletin(bundle, output_path)
     lines += render_portfolio_risk(bundle)
     lines += render_shared_catalysts(bundle)
     lines += render_options_extremes(bundle)
+    lines += render_setup_alpha_summary(bundle)
     lines += _render_notable_items(bundle)
     lines += render_dividend_screen(bundle)
     lines += render_universe_summary(bundle)
@@ -57,10 +69,323 @@ def render_payload_md(bundle: dict, output_path: Path, chart_paths: list | None 
     output_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def render_alpha_bulletin(bundle: dict, output_path: Path) -> list[str]:
+    """Include the daily stable-alpha bulletin when the gate has emitted it."""
+    trade_date = str((bundle.get("meta") or {}).get("trade_date") or "").strip()
+    if not trade_date:
+        return []
+
+    candidates = [
+        output_path.parent / "review_dashboard" / "strategy_backtest" / trade_date / "alpha_bulletin_us.md",
+        Path("reports") / "review_dashboard" / "strategy_backtest" / trade_date / "alpha_bulletin_us.md",
+    ]
+    project_root = Path(__file__).resolve().parents[3]
+    stack_root = project_root.parent
+    candidates.extend(
+        [
+            project_root / "reports" / "review_dashboard" / "strategy_backtest" / trade_date / "alpha_bulletin_us.md",
+            stack_root / "reports" / "review_dashboard" / "strategy_backtest" / trade_date / "alpha_bulletin_us.md",
+        ]
+    )
+
+    seen: set[Path] = set()
+    for path in candidates:
+        normalized = path.resolve() if path.exists() else path
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8").strip()
+        if not text:
+            return []
+        return [text, "", "---", ""]
+    return []
+
+
+def render_setup_alpha_summary(bundle: dict) -> list[str]:
+    """Summarize early/pullback setups separately from stale chase risk."""
+    items = bundle.get("notable_items") or []
+    if not items:
+        return []
+
+    views = [_setup_alpha_view(item) for item in items]
+    groups = {
+        "early_accumulation": [v for v in views if v["bucket"] == "early_accumulation"],
+        "pullback_reset": [v for v in views if v["bucket"] == "pullback_reset"],
+        "breakout_acceptance": [v for v in views if v["bucket"] == "breakout_acceptance"],
+        "post_event_second_day": [v for v in views if v["bucket"] == "post_event_second_day"],
+        "blocked_chase": [v for v in views if v["bucket"] == "blocked_chase"],
+    }
+
+    lines: list[str] = [
+        "## Setup Alpha / Anti-Chase",
+        "",
+        "This section is computed before narrative writing. It separates not-yet-overheated setups from names where the move already consumed too much expected value.",
+        "",
+        "| Bucket | Count | Use in report |",
+        "|--------|------:|---------------|",
+        f"| Early accumulation | {len(groups['early_accumulation'])} | Setup Alpha candidate; needs confirmation, not a chase. |",
+        f"| Pullback / reset | {len(groups['pullback_reset'])} | Wait for the stated pullback/review level before upgrade. |",
+        f"| Breakout acceptance | {len(groups['breakout_acceptance'])} | Price moved, but confirmation still supports follow-through; do not treat as stale chase by default. |",
+        f"| Post-event second day | {len(groups['post_event_second_day'])} | Event is known; require second-day acceptance instead of day-one chase. |",
+        f"| Blocked chase / priced-in | {len(groups['blocked_chase'])} | Do not promote to Execution Alpha unless it resets. |",
+        "",
+        "**Rules:** Execution Alpha still requires main signal pass + execution gate + R:R. Headline Gate is context only; anti-chase is an execution constraint. Price extension is allowed only when trend/event/options confirmation pays for it.",
+        "",
+    ]
+
+    lines += _render_setup_alpha_bucket(
+        "Early Accumulation",
+        groups["early_accumulation"],
+        empty="No clean early accumulation setups in the current notable set.",
+    )
+    lines += _render_setup_alpha_bucket(
+        "Pullback / Reset",
+        groups["pullback_reset"],
+        empty="No pullback/reset candidates with enough support.",
+    )
+    lines += _render_setup_alpha_bucket(
+        "Breakout Acceptance",
+        groups["breakout_acceptance"],
+        empty="No extended names earned breakout-acceptance status.",
+    )
+    lines += _render_setup_alpha_bucket(
+        "Post-Event Second Day",
+        groups["post_event_second_day"],
+        empty="No post-event names passed the anti-chase filter.",
+    )
+    lines += _render_setup_alpha_bucket(
+        "Blocked Chase / Priced-In",
+        groups["blocked_chase"],
+        empty="No names triggered the stale-chase filter.",
+        limit=8,
+    )
+    lines += ["---", ""]
+    return lines
+
+
+def _setup_alpha_view(item: dict[str, Any]) -> dict[str, Any]:
+    gate = item.get("execution_gate") or {}
+    selection = item.get("selection") or {}
+    options = item.get("options") or {}
+    sub = item.get("sub_scores") or {}
+    signal = item.get("signal") or {}
+    risk = item.get("risk_params") or {}
+
+    action = (
+        gate.get("action")
+        or selection.get("execution_action")
+        or risk.get("execution_mode")
+        or "unknown"
+    )
+    ret_1d = _to_float(item.get("ret_1d_pct"))
+    ret_5d = _to_float(item.get("ret_5d_pct"))
+    ret_21d = _to_float(item.get("ret_21d_pct"))
+    expected_move = _to_float(options.get("expected_move_pct")) or _to_float((item.get("momentum") or {}).get("expected_move_pct"))
+    move_consumed = abs(ret_1d) / expected_move if expected_move and expected_move > 0 else None
+    stretch = _to_float(gate.get("effective_stretch_score"))
+    if stretch is None:
+        stretch = _to_float(gate.get("stretch_score"), 0.0)
+    cone = _to_float(options.get("cone_position_68"))
+    from_high = _to_float(item.get("pct_from_52w_high"))
+    event_score = _to_float(sub.get("event"), 0.0) or 0.0
+    lab_score = _to_float(sub.get("lab_factor"), 0.0) or 0.0
+    options_score = _to_float(sub.get("options"), 0.0) or 0.0
+    support = _to_float(gate.get("support_score"), 0.0) or 0.0
+    support_score = max(event_score, lab_score, options_score, support)
+
+    priced_in_score = _priced_in_score(
+        action=action,
+        ret_1d=ret_1d,
+        ret_5d=ret_5d,
+        ret_21d=ret_21d,
+        move_consumed=move_consumed,
+        stretch=stretch,
+        cone=cone,
+        from_high=from_high,
+        direction=str(signal.get("direction") or "").lower(),
+    )
+    long_bias = str(signal.get("direction") or "").lower() in {"long", "bullish"}
+    not_hot = priced_in_score < 0.62
+    breakout_supported = (
+        long_bias
+        and action not in {"do_not_chase"}
+        and support_score >= 0.58
+        and (ret_5d >= 8.0 or ret_21d >= 15.0 or (move_consumed is not None and move_consumed >= 0.65))
+        and ret_5d <= 18.0
+        and ret_21d <= 35.0
+        and priced_in_score < 0.82
+        and (move_consumed is None or move_consumed <= 1.20)
+    )
+
+    if action == "do_not_chase" or priced_in_score >= 0.82:
+        bucket = "blocked_chase"
+        reason = "move already paid / stale chase risk"
+    elif action in {"wait_pullback", "pullback_only"}:
+        bucket = "pullback_reset"
+        reason = "execution gate requires pullback"
+    elif breakout_supported:
+        bucket = "breakout_acceptance"
+        reason = "extended but confirmation still supports follow-through"
+    elif priced_in_score >= 0.72:
+        bucket = "blocked_chase"
+        reason = "extension lacks enough confirmation"
+    elif (
+        long_bias
+        and not_hot
+        and -3.0 <= ret_1d <= 3.5
+        and -4.0 <= ret_5d <= 8.0
+        and ret_21d <= 15.0
+        and max(event_score, lab_score, options_score, support) >= 0.45
+    ):
+        bucket = "early_accumulation"
+        reason = "support building before price stretch"
+    elif event_score >= 0.65 and not_hot and abs(ret_1d) <= 8.0:
+        bucket = "post_event_second_day"
+        reason = "event known; require second-day acceptance"
+    else:
+        bucket = "other"
+        reason = "not a setup-alpha candidate"
+
+    return {
+        "symbol": item.get("symbol") or "-",
+        "bucket": bucket,
+        "reason": reason,
+        "lane": item.get("report_bucket") or "-",
+        "confidence": signal.get("confidence") or "-",
+        "action": action,
+        "price": _to_float(item.get("price")),
+        "pullback": _to_float(gate.get("pullback_price")) or _to_float(risk.get("entry")),
+        "ret_1d": ret_1d,
+        "ret_5d": ret_5d,
+        "ret_21d": ret_21d,
+        "expected_move": expected_move,
+        "move_consumed": move_consumed,
+        "priced_in_score": priced_in_score,
+        "support": support_score,
+        "score": _to_float(item.get("selection_rank_score")) or _to_float(item.get("report_score")) or _to_float(item.get("score"), 0.0) or 0.0,
+    }
+
+
+def _render_setup_alpha_bucket(
+    title: str,
+    rows: list[dict[str, Any]],
+    *,
+    empty: str,
+    limit: int = 5,
+) -> list[str]:
+    lines = [f"### {title}", ""]
+    if not rows:
+        return lines + [f"- {empty}", ""]
+
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            -float(row.get("support") or 0.0),
+            float(row.get("priced_in_score") or 0.0),
+            -float(row.get("score") or 0.0),
+            str(row.get("symbol") or ""),
+        ),
+    )[:limit]
+    lines += [
+        "| Symbol | Lane | Exec | 1D | 5D | 21D | Move consumed | Priced-in | Review level | Reason |",
+        "|--------|------|------|----|----|-----|---------------|-----------|--------------|--------|",
+    ]
+    for row in ordered:
+        lines.append(
+            "| {symbol} | {lane} | {action} | {ret_1d} | {ret_5d} | {ret_21d} | {move_consumed} | {priced_in} | {pullback} | {reason} |".format(
+                symbol=row["symbol"],
+                lane=_lane_label(row.get("lane")),
+                action=row.get("action") or "-",
+                ret_1d=_fmt_pct(row.get("ret_1d")),
+                ret_5d=_fmt_pct(row.get("ret_5d")),
+                ret_21d=_fmt_pct(row.get("ret_21d")),
+                move_consumed=_fmt_x(row.get("move_consumed")),
+                priced_in=_fmt_val(row.get("priced_in_score"), 2),
+                pullback=_fmt_price(row.get("pullback")),
+                reason=row.get("reason") or "-",
+            )
+        )
+    lines.append("")
+    return lines
+
+
+def _priced_in_score(
+    *,
+    action: str,
+    ret_1d: float,
+    ret_5d: float,
+    ret_21d: float,
+    move_consumed: float | None,
+    stretch: float | None,
+    cone: float | None,
+    from_high: float | None,
+    direction: str,
+) -> float:
+    score = 0.0
+    if action == "do_not_chase":
+        score = max(score, 0.90)
+    if action in {"wait_pullback", "pullback_only"}:
+        score = max(score, 0.48)
+    if stretch is not None:
+        score = max(score, float(stretch))
+    if move_consumed is not None:
+        score = max(score, min(abs(float(move_consumed)) / 1.35, 1.0))
+    if ret_21d >= 20.0:
+        score = max(score, min((ret_21d - 20.0) / 45.0, 1.0))
+    if ret_5d >= 12.0:
+        score = max(score, min((ret_5d - 12.0) / 24.0, 1.0))
+    if from_high is not None and from_high >= -1.0 and ret_21d >= 12.0:
+        score = max(score, 0.70)
+    if cone is not None:
+        if direction in {"long", "bullish"} and cone >= 0.82:
+            score = max(score, min((cone - 0.72) / 0.24, 1.0))
+        elif direction in {"short", "bearish"} and cone <= 0.18:
+            score = max(score, min((0.28 - cone) / 0.24, 1.0))
+    return round(max(0.0, min(score, 1.0)), 3)
+
+
+def _to_float(value: Any, default: float | None = 0.0) -> float | None:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _fmt_pct(value: Any) -> str:
+    parsed = _to_float(value)
+    if parsed is None:
+        return "-"
+    return f"{parsed:+.1f}%"
+
+
+def _fmt_val(value: Any, decimals: int = 2) -> str:
+    parsed = _to_float(value)
+    if parsed is None:
+        return "-"
+    return f"{parsed:.{decimals}f}"
+
+
+def _fmt_x(value: Any) -> str:
+    parsed = _to_float(value)
+    if parsed is None:
+        return "-"
+    return f"{parsed:.2f}x"
+
+
+def _lane_label(value: Any) -> str:
+    text = str(value or "-").replace("_", " ")
+    return text.upper() if text != "-" else "-"
+
+
 def _render_notable_items(bundle: dict) -> list[str]:
     """Render the full notable-items section with report-lane grouping."""
     all_items = bundle.get("notable_items", [])
     headline_mode = str((bundle.get("headline_gate") or {}).get("mode") or "unknown").lower()
+    report_session = str((bundle.get("meta") or {}).get("session") or "").lower()
 
     lines: list[str] = [
         "## Notable Items",
@@ -73,8 +398,8 @@ def _render_notable_items(bundle: dict) -> list[str]:
     ]
     if headline_mode != "trend":
         lines += [
-            f"**Execution guard:** Headline Gate is `{headline_mode.upper()}`. Do not turn any lane below into a buy list.",
-            "For final reports, use observation / pullback-review / invalidation language only; do not write Entry/Stop/Target tables, 'today only do', or chase instructions.",
+            f"**Headline context:** Headline Gate is `{headline_mode.upper()}`. Treat this as source-quality / regime context, not an execution blocker.",
+            "Execution eligibility below is controlled by the main signal and execution gates.",
             "",
         ]
 
@@ -126,11 +451,13 @@ def _render_notable_items(bundle: dict) -> list[str]:
 
         for item in bucket_items:
             item = {**item, "_headline_mode": headline_mode}
+            if report_session:
+                item["_report_session"] = report_session
             compact = bucket == "appendix" or item.get("signal", {}).get("confidence") in ("LOW", "NO_SIGNAL", None)
             lines += render_item_header(item_idx, item, compact=compact)
             if not compact:
                 main_gate = _main_signal_gate(item)
-                if headline_mode == "trend" and (main_gate or {}).get("status") == "pass":
+                if (main_gate or {}).get("status") == "pass":
                     lines += render_item_risk_params(item)
                 else:
                     lines += _render_execution_guard(item, headline_mode)
@@ -186,6 +513,7 @@ def _render_execution_guard(item: dict, headline_mode: str) -> list[str]:
     main_gate = _main_signal_gate(item) or {}
     pullback = gate.get("pullback_price") or risk.get("entry")
     action = gate.get("action") or risk.get("execution_mode") or "unknown"
+    report_session = str(item.get("_report_session") or "").lower()
     status = str(main_gate.get("status") or "missing").upper()
     role = main_gate.get("role") or "unknown"
     intent = main_gate.get("action_intent") or "OBSERVE"
@@ -194,9 +522,14 @@ def _render_execution_guard(item: dict, headline_mode: str) -> list[str]:
     lines = [
         "**Execution guard:**",
         "",
-        f"- Headline Gate `{headline_mode.upper()}` and Main Signal Gate `{status}`: this item is a review candidate, not an order surface.",
+        f"- Main Signal Gate `{status}`: this item is a review candidate, not an order surface.",
+        f"- Headline Gate `{headline_mode.upper()}` is advisory context only.",
         f"- Role: {role}; intent: {intent}; blockers: {blocker_text}.",
-        f"- Execution state: {action}; pullback/review reference: {_fmt_price(pullback)}.",
+        (
+            "- Execution state: post-market close report; overnight/pre-open gap diagnostics are hidden and must not be used as current execution instructions."
+            if report_session == "post"
+            else f"- Execution state: {action}; pullback/review reference: {_fmt_price(pullback)}."
+        ),
         "- Final report must not print Entry/Stop/Target, 'today only do', or max-chase instructions for this item.",
         "",
     ]

@@ -277,12 +277,15 @@ def load_news(
 ) -> dict[str, list]:
     """Load news per symbol (last 3 days) as {symbol: [news_dicts]}."""
     try:
+        start_ts = (as_of - timedelta(days=3)).strftime("%Y-%m-%d 00:00:00")
+        end_ts = (as_of + timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
         news = con.execute("""
             SELECT symbol, headline, summary, source, published_at
             FROM news_items
             WHERE published_at >= ?
+              AND published_at < ?
             ORDER BY published_at DESC
-        """, [(as_of - timedelta(days=3)).strftime("%Y-%m-%d 00:00:00")]).fetchdf()
+        """, [start_ts, end_ts]).fetchdf()
         news_map: dict[str, list] = {}
         if not news.empty:
             for _, r in news.iterrows():

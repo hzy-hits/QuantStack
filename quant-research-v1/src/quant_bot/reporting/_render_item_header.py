@@ -148,6 +148,7 @@ def _selection_lines(item: dict) -> list[str]:
     avg_dollar_volume = item.get("avg_dollar_volume_20d")
     execution_gate = item.get("execution_gate") or {}
     headline_mode = str(item.get("_headline_mode") or "unknown").lower()
+    report_session = str(item.get("_report_session") or "").lower()
 
     confirmations = []
     if selection.get("named_core"):
@@ -165,7 +166,12 @@ def _selection_lines(item: dict) -> list[str]:
             f" | **ADV20:** {_fmt_dollar_volume(avg_dollar_volume)}"
         )
     ]
-    if execution_gate:
+    if execution_gate and report_session == "post":
+        lines.append(
+            "**Execution read:** post-market report uses the regular close; "
+            "overnight/pre-open gap diagnostics are not an order surface"
+        )
+    elif execution_gate:
         action = execution_gate.get("action", "executable_now")
         gap_vs_move = execution_gate.get("gap_vs_expected_move")
         lines.append(
@@ -245,11 +251,12 @@ def _execution_label(action: str | None) -> str:
 
 
 def _execution_sentence(action: str | None, *, headline_mode: str = "unknown") -> str:
-    if headline_mode != "trend":
-        return "non-trend gate: observation only; do not convert this into an order"
     mapping = {
         "executable_now": "still actionable at current levels",
         "wait_pullback": "conditional only; do not enter at the current gap, wait for pullback",
         "do_not_chase": "edge looks spent after the overnight stretch; stand down here",
     }
-    return mapping.get(action or "", "no execution read")
+    sentence = mapping.get(action or "", "no execution read")
+    if headline_mode != "trend":
+        sentence += "; headline mode is advisory context"
+    return sentence

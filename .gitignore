@@ -10,6 +10,7 @@ token.pickle
 *.duckdb.wal
 data/
 logs/
+reports/
 __pycache__/
 *.py[cod]
 .venv/

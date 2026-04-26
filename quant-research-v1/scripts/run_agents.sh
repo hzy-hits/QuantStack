@@ -52,15 +52,17 @@ fi
 
 if [ "$SESSION" = "pre" ]; then
     SESSION_LABEL_CN="盘前"
-    SESSION_CONTEXT="--- 本期报告时段 ---
+SESSION_CONTEXT="--- 本期报告时段 ---
 Session: pre / 盘前。
 写作要求：本期必须突出 overnight delta：上一份盘后之后新增/移除的名字、隔夜新闻、盘前价差、期权/宏观变化。价格层若仍是上一交易日收盘，要明确说明这是盘前限制；不要把上一份盘后复述成一份新报告。
+As-of 约束：本报告只能使用 ${DATE} 盘前可知的信息；禁止使用 ${DATE} 之后发布、结算或验证的事实。
 --- 本期报告时段结束 ---"
 else
     SESSION_LABEL_CN="盘后"
-    SESSION_CONTEXT="--- 本期报告时段 ---
+SESSION_CONTEXT="--- 本期报告时段 ---
 Session: post / 盘后。
 写作要求：本期必须突出 full-session delta：当日收盘、全天新闻、期权/波动率和盘前假设兑现情况。不要把盘前的触发条件原样保留；必须裁决哪些已触发、作废、升级或降级。
+As-of 约束：本报告只能使用 ${DATE} 盘后当时可知的信息；未来日程可以写成“待发生催化剂”，但禁止写入 ${DATE} 之后才知道的结果、行情或验证。
 --- 本期报告时段结束 ---"
 fi
 
@@ -274,15 +276,16 @@ cat > "$OUT_DIR/prompts/macro-analyst.txt" <<PROMPT
 你是美股宏观提取器。你的任务不是写故事，而是从 payload 里提取“今天能不能下主方向判断”的结构化证据。
 
 阅读下面数据，输出约 450-650 字的**中文结构化提取**。不要写成散文。
+严格 as-of：只使用 payload 和上一份报告中截至 ${DATE} 可知的信息；不要用模型常识补入 ${DATE} 之后的结果。
 
 --- TODAY'S MACRO DATA ---
 $(cat "$OUT_DIR/context/macro.md")
 --- END DATA ---
 ${PREV_CONTEXT}
 
-先读 Headline Gate。这是硬约束：
+先读 Headline Gate。它是市场叙事上下文，不是个股执行门禁：
 - 如果 Headline mode = TREND，你可以承认市场存在方向偏置。
-- 如果 Headline mode = RANGE / UNCERTAIN，你必须明确写“不能 headline 成牛/熊”，HMM 只能作为背景。
+- 如果 Headline mode = RANGE / UNCERTAIN，你必须明确写“不能 headline 成牛/熊”，但不能仅凭 headline 否决通过执行约束的个股 alpha。
 
 输出格式严格遵守：
 
@@ -337,20 +340,26 @@ cat > "$OUT_DIR/prompts/quant-analyst.txt" <<PROMPT
 你是美股量化提取器。你的任务是回答“今天哪些名字还能做，哪些已经被 overnight move 或结构冲突吃掉了 alpha”。
 
 阅读下面数据，输出约 550-750 字的**中文结构化提取**。不要写散文，不要给主观大段评论。
+严格 as-of：只使用 payload 和上一份报告中截至 ${DATE} 可知的信息；不要用 ${DATE} 之后的行情、新闻或结果解释今天。
 
 --- TODAY'S STRUCTURAL DATA ---
 $(cat "$OUT_DIR/context/structural.md")
 --- END DATA ---
 ${PREV_CONTEXT}
 
-先读 Headline Gate。这是硬约束：
-- 如果 Headline mode != TREND，不得把 Core Book 写成单边主书。
-- 如果 Headline mode = UNCERTAIN，优先输出触发条件、回踩条件和“不要追价”的名字，但允许保留 1-2 个满足硬规则的单名股 alpha。
+先读 Headline Gate。它是市场叙事上下文，不是个股执行门禁：
+- 如果 Headline mode != TREND，不得把 Core Book 写成单边市场主线。
+- 如果 Headline mode = UNCERTAIN，优先输出触发条件、回踩条件和“不要追价”的名字，但允许保留满足执行硬规则的单名股 alpha。
 
 再读 Report Postmortem（如果 payload 里有）。这不是背景噪音，而是交易复盘硬约束：
 - 你必须明确回答近期主问题更像：漏 alpha、追晚了、判断错了、还是 edge 太薄
 - 如果 postmortem 明确写 “The bigger problem is arriving after the move is already paid” 或同义结论，今天就不能把高开后已消耗 expected move 的名字写成还能做
 - 如果 postmortem 明确写 missed alpha 偏高，要点名系统更容易错过 follow-through，而不是假装一切只是 headline 问题
+
+再读 Setup Alpha / Anti-Chase。反追高不是反趋势：
+- Early accumulation / Pullback / Post-event second day 只能写成 setup、回踩复核或次日承接观察，不得直接升为“可直接做”
+- Breakout Acceptance 代表“已经涨了但趋势/事件/期权确认仍支持 follow-through”，不得机械打成 stale chase
+- Blocked Chase / Priced-in 必须进入风险回避或不追价，不得升入可直接做
 
 执行层硬规则：
 - 只有同时满足 Execution read = Still actionable、R:R >= 1.20、且没有重大冲突的名字，才允许归入“可直接做”
@@ -410,6 +419,7 @@ cat > "$OUT_DIR/prompts/news-analyst.txt" <<PROMPT
 你是美股事件提取器。你的任务是回答“催化剂是不是还新鲜、是不是已经被价格吃掉、有没有自我否定”。
 
 阅读下面数据，输出约 450-650 字的**中文结构化提取**。不要写散文。
+严格 as-of：未来事件只能写成“待发生/待验证”，不得写事件结果或 ${DATE} 之后才发布的事实。
 
 --- TODAY'S NEWS & EVENTS DATA ---
 $(cat "$OUT_DIR/context/news.md")
@@ -459,6 +469,7 @@ cat > "$OUT_DIR/prompts/risk-analyst.txt" <<PROMPT
 当你写到 bear / downside / 下行情景时，含义只能是：空仓、减仓、回避、等待更好买点，不能是反手做空。
 
 阅读下面数据，输出约 450-650 字的**中文结构化提取**。不要写散文，不要替交易找理由。
+严格 as-of：只评估 ${DATE} 当时可知的风险，不得引用 ${DATE} 之后的行情或事件结果。
 
 --- TODAY'S STRUCTURAL DATA ---
 $(cat "$OUT_DIR/context/structural.md")
@@ -605,11 +616,12 @@ fi
 
 cat > "$OUT_DIR/prompts/merge-report.txt" <<PROMPT
 你是美股日报叙事官。请阅读四个分析师的**结构化提取**，写成一篇清晰、连贯、说人话的中文市场日报。
+严格 as-of：这是一份 ${DATE} ${SESSION_LABEL_CN} 日报，只能写当时已经可知的信息。未来日程只能作为待发生催化剂；禁止使用 ${DATE} 之后的结果、行情、新闻验证或模型外事实。
 
 写作风格要求（极其重要）：
 - 写作风格：像顶级对冲基金的晨会纪要。冷静、精准、有攻击性。每句话都有信息量。
 - 数字驱动：每个判断必须附数字。不说"资金流出明显"，说"净流出8.5亿，连续3天"。
-- 服从 Headline Gate：只有当 payload 明确给出 "Headline mode = TREND" 时，才允许把市场 headline 成牛/熊或强单边方向。
+- Headline Gate 只约束市场 headline 强度：只有当 payload 明确给出 "Headline mode = TREND" 时，才允许把市场 headline 成牛/熊或强单边方向；它不是个股执行否决器。
 - 有观点，但不要强行选边：如果 "Headline mode = RANGE/UNCERTAIN"，就直接写震荡/等待确认/暂不下主方向，并给触发条件。
 - 禁用词：综合考量、谨慎乐观、值得关注、密切跟踪、不确定性较大。
 - 上次错了一句话说清楚，不要包装。
@@ -645,13 +657,14 @@ ${PREV_MERGE_CONTEXT}
 1. 结构（严格按这个来，标题和小标题照抄）：
    - "# 市场日报 — ${DATE}（${SESSION_LABEL_CN}）"
    - "## 一句话"
-     一句话，不超过30字，必须服从 Headline Gate。
+     一句话，不超过30字。Headline Gate 只约束市场叙事强度。
    - "## 信号记分卡"
      上次 HIGH 信号对还是错。没有可追踪就写“本期无可追踪信号”。结尾必须补一句：近期主问题到底是“漏 alpha”“追晚了”“判断错了”还是“edge 太薄”。
    - "## 今日市场"
      一段连贯叙事，必须回答“今天能不能下主方向判断”。必须包含：联邦基金利率、10年美债收益率、10Y-2Y利差、高收益利差、VIX，并说明 HMM 是否可信。
    - "## 交易地图"
      - "### 做多"：只允许写真正还能做的名字。
+     - "### Setup Alpha"：先写 Early/Pullback/Post-event/Breakout Acceptance 的系统分组结论；Breakout Acceptance 是条件式突破承接，不等于追高。
      - "### 条件式延续观察"：只写仍有延续 edge 的名字，最多2只；明确写“小仓位、硬止损、不追高超过 max chase gap”。
      - "### 风险回避"：不该追、不该加、该降风险的名字，最多 3-6 个。
      - "### 继续跟踪"：值得跟踪但今天不做的名字，优先写 2-4 个带催化剂或等待位的名字。
@@ -662,7 +675,7 @@ ${PREV_MERGE_CONTEXT}
      一行风险提示。
 2. “做多” 的硬规则：
    - 只有同时满足 execution = Still actionable、R:R >= 1.20、没有重大冲突、并且没有被新闻/风险分析师判定为“已 price in / 不该追”的名字，才允许进入“做多”
-   - 如果 Headline Gate != TREND，“做多”仍可保留最多 2 个条件式单名股机会，但必须同时满足 execution = Still actionable、R:R >= 1.35、没有重大冲突，且没有被风险/新闻分析师明确判成“already-done / priced in / 不该追”；它们只能写成条件式个股 alpha，不能上升成市场主方向。如果没有这种机会，直接写：“今天没有可直接做的多头，别追价。”
+   - 如果 Headline Gate != TREND，“做多”仍可保留通过执行硬规则的条件式单名股机会，但必须同时满足 execution = Still actionable、R:R >= 1.35、没有重大冲突，且没有被风险/新闻分析师明确判成“already-done / priced in / 不该追”；它们只能写成条件式个股 alpha，不能上升成市场主方向。如果没有这种机会，直接写：“今天没有可直接做的多头，别追价。”
    - 不允许出现“前文说今天没机会，后文又列出两个买点”的矛盾
 3. 延续候选里的名字可以写进“条件式延续观察”，但不能偷换成市场主方向；若 Headline Gate != TREND，它们默认只是 continuation 战术仓位。
 4. 事件驱动候选默认是“战术观察”，不是主书。除非四个分析师都支持，否则不要抬进“做多”。不要仅凭“IV 高”或“接近 52 周新高”就把已经满足上面硬规则的名字打回继续跟踪；必须给出明确的数值型 exhaustion / priced-in 证据。
@@ -699,7 +712,7 @@ ${PREV_MERGE_CONTEXT}
 13. Tactical Event Tape 如果主要由小盘/高波动标的构成，必须明确写成“战术观察”
 14. 专业直白，有观点。只用分析师提供的数字，不编造。
 15. 如果没有符合条件的多头机会，就明确写“今天没有可直接做的多头，别追价”
-16. 如果 payload 的 "Headline Gate" 不是 "TREND"，禁止把全文主线写成“熊市延续”或“牛市确认”；最多写成震荡、等待确认、或条件式方向。
+16. 如果 payload 的 "Headline Gate" 不是 "TREND"，禁止把全文主线写成“熊市延续”或“牛市确认”；但不能仅凭 headline 否决通过执行硬规则的个股 alpha。
 17. 如果 Report Review 说主问题是“追晚了”或“edge 太薄”，不要把当天的失败解释成“判断正确，只是市场太快”。那仍然是今天不能追的理由。
 18. 如果 Report Review 说主问题是“漏 alpha”，就要在交易地图或风险与展望里明确写出：系统更容易漏掉 follow-through，而不是只会追已经走完的名字。
 19. 这是 long-only 日报。禁止写“做空”“反手空”“空头对冲可以做”“双杀可空”这类可执行空头语言；如果市场偏弱，只能写成“空仓/减仓/回避/等待更优买点”。

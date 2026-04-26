@@ -1,0 +1,19 @@
+[package]
+name = "quant-stack-py"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "quant_stack_py"
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+chrono.workspace = true
+pyo3 = { workspace = true, features = ["anyhow"] }
+quant-stack-core = { path = "../quant-stack-core" }
+serde.workspace = true
+serde_json.workspace = true

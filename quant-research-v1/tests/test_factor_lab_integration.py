@@ -304,7 +304,7 @@ class TacticalContinuationSelectionTests(unittest.TestCase):
 
 
 class RenderPayloadTests(unittest.TestCase):
-    def test_main_signal_gate_requires_trend_headline_core_and_executable(self) -> None:
+    def test_main_signal_gate_uses_headline_as_context_only(self) -> None:
         from quant_bot.signals.classify import apply_main_signal_gate
 
         bundle = {
@@ -327,10 +327,10 @@ class RenderPayloadTests(unittest.TestCase):
         apply_main_signal_gate(bundle)
 
         gate = bundle["notable_items"][0]["main_signal_gate"]
-        self.assertEqual(gate["status"], "blocked")
-        self.assertEqual(gate["role"], "directional_observation")
-        self.assertEqual(gate["action_intent"], "OBSERVE")
-        self.assertIn("headline_gate_range", gate["blockers"])
+        self.assertEqual(gate["status"], "pass")
+        self.assertEqual(gate["role"], "main_signal")
+        self.assertEqual(gate["action_intent"], "TRADE")
+        self.assertNotIn("headline_gate_range", gate["blockers"])
 
         bundle["headline_gate"] = {"mode": "trend"}
         apply_main_signal_gate(bundle)
@@ -398,7 +398,7 @@ class RenderPayloadTests(unittest.TestCase):
         )
         self.assertIn("BBB", rendered)
 
-    def test_nontrend_headline_gate_suppresses_order_shaped_risk_params(self) -> None:
+    def test_nontrend_headline_gate_does_not_suppress_passing_main_signal(self) -> None:
         from quant_bot.reporting.render import _render_notable_items
 
         bundle = {
@@ -430,19 +430,24 @@ class RenderPayloadTests(unittest.TestCase):
                         "rr_ratio": 2.4,
                         "execution_mode": "executable_now",
                     },
+                    "main_signal_gate": {
+                        "status": "pass",
+                        "role": "main_signal",
+                        "action_intent": "TRADE",
+                        "blockers": [],
+                    },
                 }
             ],
         }
 
         rendered = "\n".join(_render_notable_items(bundle))
 
-        self.assertIn("Execution guard", rendered)
-        self.assertIn("Do not turn any lane below into a buy list", rendered)
-        self.assertIn("observation only", rendered)
-        self.assertNotIn("| Entry |", rendered)
-        self.assertNotIn("| Stop (2-ATR) |", rendered)
-        self.assertNotIn("| Target |", rendered)
-        self.assertNotIn("still actionable at current levels", rendered)
+        self.assertIn("Headline Gate is `UNCERTAIN`", rendered)
+        self.assertIn("not an execution blocker", rendered)
+        self.assertIn("| Entry |", rendered)
+        self.assertIn("| Stop (2-ATR) |", rendered)
+        self.assertIn("| Target |", rendered)
+        self.assertIn("still actionable at current levels", rendered)
 
     def test_blocked_main_signal_gate_suppresses_order_shaped_risk_params(self) -> None:
         from quant_bot.reporting.render import _render_notable_items
@@ -567,7 +572,7 @@ class FactorLabReportSyncTests(unittest.TestCase):
 
         synced = sync_factor_lab_signal_section(report_text, structural_text)
 
-        self.assertIn("**Factor Lab 选股**", synced)
+        self.assertIn("**Factor Lab research prior / recall lead**", synced)
         self.assertIn("| `AAA` | ALPHA | 10.00 | 9.00 | 12.00 | 18.2% | 强度#1 |", synced)
         self.assertIn("| `BBB` | BETA | 20.00 | 18.00 | 24.00 | 16.4% | 强度#2 |", synced)
         self.assertIn("当前因子：`d2_3_516`。", synced)
@@ -608,7 +613,7 @@ class FactorLabReportSyncTests(unittest.TestCase):
         synced = sync_factor_lab_signal_section(report_text, structural_text)
 
         self.assertIn("状态: UNAVAILABLE", synced)
-        self.assertIn("本期不展示 Factor Lab 候选表", synced)
+        self.assertIn("本期不展示 Factor Lab research prior / recall lead 候选表", synced)
         self.assertNotIn("| `AAA` |", synced)
         self.assertNotIn("怎么操作:", synced)
 

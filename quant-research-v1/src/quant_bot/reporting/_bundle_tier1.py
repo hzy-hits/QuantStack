@@ -239,36 +239,56 @@ class Tier1Builder:
         polymarket_events: list[dict] = []
         poly_latest: date | None = None
         try:
-            # Only show events fetched within last 2 days; join previous snapshot for Δ
+            # Only show snapshots that existed as of the report trade date.  This
+            # matters when rerendering a historical report after newer snapshots
+            # have landed in the same DuckDB.
+            window_start = (self.as_of_date.toordinal() - 2)
+            window_start_str = date.fromordinal(window_start).isoformat()
             poly_rows = self.con.execute("""
-                WITH latest AS (
-                    -- Deduplicate: keep only the most recent snapshot per market
-                    SELECT DISTINCT ON (market_id)
-                           market_id, question, p_yes, p_no, volume_usd,
-                           end_date, category, fetched_at, fetch_date
+                WITH eligible AS (
+                    SELECT market_id, question, p_yes, p_no, volume_usd,
+                           end_date, category, fetched_at, fetch_date,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY market_id
+                               ORDER BY fetch_date DESC, fetched_at DESC NULLS LAST
+                           ) AS rn
                     FROM polymarket_events
                     WHERE p_yes IS NOT NULL
                       AND volume_usd >= 10000
-                      AND fetch_date >= CURRENT_DATE - INTERVAL '2 days'
-                    ORDER BY market_id, fetch_date DESC
+                      AND CAST(fetch_date AS DATE) BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
                 ),
-                prev AS (
-                    -- Previous snapshot (before the 2-day window) for Δ
-                    SELECT DISTINCT ON (market_id)
-                           market_id, p_yes AS prev_p_yes
-                    FROM polymarket_events
-                    WHERE fetch_date < (SELECT MIN(fetch_date) FROM latest)
-                    ORDER BY market_id, fetch_date DESC
+                latest AS (
+                    SELECT market_id, question, p_yes, p_no, volume_usd,
+                           end_date, category, fetched_at, fetch_date
+                    FROM eligible
+                    WHERE rn = 1
                 )
                 SELECT t.question, t.p_yes, t.p_no, t.volume_usd,
                        t.end_date, t.category, t.fetched_at,
                        p.prev_p_yes,
                        (t.p_yes - p.prev_p_yes) AS p_yes_delta
                 FROM latest t
-                LEFT JOIN prev p ON t.market_id = p.market_id
+                LEFT JOIN LATERAL (
+                    SELECT p_yes AS prev_p_yes
+                    FROM polymarket_events p
+                    WHERE p.market_id = t.market_id
+                      AND p.p_yes IS NOT NULL
+                      AND CAST(p.fetch_date AS DATE) <= CAST(? AS DATE)
+                      AND (
+                          CAST(p.fetch_date AS TIMESTAMP) < CAST(t.fetch_date AS TIMESTAMP)
+                          OR (
+                              CAST(p.fetch_date AS TIMESTAMP) = CAST(t.fetch_date AS TIMESTAMP)
+                              AND p.fetched_at IS NOT NULL
+                              AND t.fetched_at IS NOT NULL
+                              AND p.fetched_at < t.fetched_at
+                          )
+                      )
+                    ORDER BY p.fetch_date DESC, p.fetched_at DESC NULLS LAST
+                    LIMIT 1
+                ) p ON TRUE
                 ORDER BY t.volume_usd DESC NULLS LAST
                 LIMIT 10
-            """).fetchdf()
+            """, [window_start_str, self.as_of_str, self.as_of_str]).fetchdf()
             if not poly_rows.empty:
                 for _, r in poly_rows.iterrows():
                     fd = self._to_date(r.get("fetched_at"))

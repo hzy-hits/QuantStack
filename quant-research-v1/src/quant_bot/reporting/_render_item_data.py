@@ -53,6 +53,7 @@ def _price_momentum_table(item: dict) -> list[str]:
     gate = item.get("execution_gate") or {}
     overnight_alpha = item.get("overnight_alpha") or {}
     headline_mode = str(item.get("_headline_mode") or "unknown").lower()
+    report_session = str(item.get("_report_session") or "").lower()
     lines = [
         "**Price & Momentum:**",
         "",
@@ -66,14 +67,18 @@ def _price_momentum_table(item: dict) -> list[str]:
         f"| Relative Volume | {_fmt_val(item.get('rel_volume'), 2)}\u00d7 avg |",
         f"| ATR (14D) | ${_fmt_val(item.get('atr'), 2)} |",
     ]
-    if gate:
+    if gate and report_session == "post":
+        lines += [
+            "| Execution reference | Regular close; overnight/pre-open gate hidden for post-market consistency |",
+        ]
+    elif gate:
         lines += [
             f"| Live reference price | ${_fmt_val(gate.get('ref_price'), 2)} |",
             f"| Overnight gap vs last close | {_fmt_pct(gate.get('gap_pct'), 2)} |",
             f"| Stretch vs implied move | {_fmt_val(gate.get('gap_vs_expected_move'), 2)}\u00d7 |",
             f"| Execution read | {_execution_phrase(gate.get('action'), headline_mode=headline_mode)} |",
         ]
-    if overnight_alpha:
+    if overnight_alpha and report_session != "post":
         calibration = overnight_alpha.get("calibration") or {}
         interval = calibration.get("continuation_hit_rate_interval")
         interval_text = (
@@ -110,14 +115,15 @@ def _price_momentum_table(item: dict) -> list[str]:
 
 
 def _execution_phrase(action: str | None, *, headline_mode: str = "unknown") -> str:
-    if headline_mode != "trend":
-        return "Non-trend gate: observation/pullback review only, not an order"
     mapping = {
         "executable_now": "Still actionable at current levels",
         "wait_pullback": "Not actionable at current price; wait for a pullback reset",
         "do_not_chase": "Move looks spent here; stand down and do not chase",
     }
-    return mapping.get(action or "", "No execution read")
+    phrase = mapping.get(action or "", "No execution read")
+    if headline_mode != "trend":
+        phrase += "; headline mode is advisory context"
+    return phrase
 
 
 def _overnight_alpha_phrase(advice: str | None) -> str:

@@ -12,8 +12,9 @@ Requires:
       pyyaml markdown
 """
 
-import sys
 import os
+import sys
+import argparse
 import base64
 import re
 from pathlib import Path
@@ -64,13 +65,65 @@ CHART_SECTION_MAP = {
 }
 
 
-def load_config():
+def load_config(*, required: bool = True):
     config_path = PROJECT_DIR / "config.yaml"
     if not config_path.exists():
-        print(f"ERROR: {config_path} not found.")
-        sys.exit(1)
+        if required:
+            print(f"ERROR: {config_path} not found.")
+            sys.exit(1)
+        return {}
     with open(config_path) as f:
         return yaml.safe_load(f)
+
+
+def _split_recipients(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _list_config_recipients(value: object) -> list[str]:
+    if isinstance(value, str):
+        return _split_recipients(value)
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def resolve_recipients(
+    cfg: dict,
+    *,
+    delivery_mode: str,
+    test_recipient: str | None,
+) -> tuple[list[str], str]:
+    reporting = cfg.get("reporting", {}) if isinstance(cfg, dict) else {}
+    if not isinstance(reporting, dict):
+        reporting = {}
+
+    if delivery_mode == "prod":
+        recipients = _list_config_recipients(reporting.get("recipients"))
+        return recipients, "config.reporting.recipients"
+
+    override = _split_recipients(test_recipient) or _split_recipients(
+        os.environ.get("QUANT_TEST_RECIPIENT")
+    )
+    if override:
+        return override, "override"
+
+    configured = _list_config_recipients(reporting.get("test_recipients"))
+    if not configured:
+        configured = _list_config_recipients(reporting.get("test_recipient"))
+    if configured:
+        return configured, "config.reporting.test_recipients"
+
+    prod = [r for r in _list_config_recipients(reporting.get("recipients")) if r != "you@example.com"]
+    if prod:
+        return [prod[0]], "first configured production recipient"
+
+    raise SystemExit(
+        "Test delivery needs a recipient. Set --test-recipient, "
+        "QUANT_TEST_RECIPIENT, or reporting.test_recipients in config.yaml."
+    )
 
 
 def get_gmail_service():
@@ -317,7 +370,16 @@ hr {{
     return {"raw": raw}
 
 
-def send(report_path: str, recipients: list[str], chart_dir: str | None = None, subject: str | None = None):
+def send(
+    report_path: str,
+    recipients: list[str],
+    chart_dir: str | None = None,
+    subject: str | None = None,
+    *,
+    delivery_mode: str = "test",
+    recipient_source: str = "",
+    dry_run: bool = False,
+):
     """Send the report email via Gmail API."""
     if not recipients:
         print("WARNING: No recipients configured in config.yaml -> reporting.recipients")
@@ -340,7 +402,13 @@ def send(report_path: str, recipients: list[str], chart_dir: str | None = None, 
 
     print(f"  Report:     {report_path}")
     print(f"  Charts:     {len(chart_paths)} images")
+    print(f"  Mode:       {delivery_mode}")
+    if recipient_source:
+        print(f"  Source:     {recipient_source}")
     print(f"  Recipients: {', '.join(recipients)}")
+    if dry_run:
+        print("  Dry run: Gmail call skipped")
+        return
 
     service = get_gmail_service()
     message = build_email(report_path, recipients, chart_paths, subject=subject)
@@ -351,20 +419,22 @@ def send(report_path: str, recipients: list[str], chart_dir: str | None = None, 
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python scripts/send_email.py <report_path> [--charts <chart_dir>]")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(description="Send A-share daily report email")
+    parser.add_argument("report_path")
+    parser.add_argument("--charts", dest="chart_dir", default=None)
+    parser.add_argument("--subject", dest="subject_override", default=None)
+    parser.add_argument("--delivery-mode", choices=["test", "prod"],
+                        default=os.environ.get("QUANT_DELIVERY_MODE", "test"),
+                        help="test sends only to the test recipient; prod uses config recipients")
+    parser.add_argument("--test-recipient", default=None,
+                        help="Comma-separated test recipient override")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print resolved delivery targets without calling Gmail")
+    args = parser.parse_args()
 
-    report_path = sys.argv[1]
-    chart_dir = None
-    subject_override = None
-
-    # Parse optional arguments
-    for i, arg in enumerate(sys.argv):
-        if arg == "--charts" and i + 1 < len(sys.argv):
-            chart_dir = sys.argv[i + 1]
-        if arg == "--subject" and i + 1 < len(sys.argv):
-            subject_override = sys.argv[i + 1]
+    report_path = args.report_path
+    chart_dir = args.chart_dir
+    subject_override = args.subject_override
 
     # Auto-detect chart dir from report date
     if not chart_dir:
@@ -375,9 +445,31 @@ def main():
             chart_dir = str(auto_dir)
             print(f"  Auto-detected charts: {chart_dir}")
 
-    cfg = load_config()
-    recipients = cfg.get("reporting", {}).get("recipients", [])
-    send(report_path, recipients, chart_dir, subject=subject_override)
+    has_test_override = bool(
+        _split_recipients(args.test_recipient)
+        or _split_recipients(os.environ.get("QUANT_TEST_RECIPIENT"))
+    )
+    cfg = load_config(required=args.delivery_mode == "prod" or not has_test_override)
+    recipients, source = resolve_recipients(
+        cfg,
+        delivery_mode=args.delivery_mode,
+        test_recipient=args.test_recipient,
+    )
+    if args.delivery_mode == "test":
+        if subject_override:
+            subject_override = f"[TEST] {subject_override}"
+        else:
+            date_str = Path(report_path).stem.split("_")[0]
+            subject_override = f"[TEST] A股量化研究日报 — {date_str}"
+    send(
+        report_path,
+        recipients,
+        chart_dir,
+        subject=subject_override,
+        delivery_mode=args.delivery_mode,
+        recipient_source=source,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

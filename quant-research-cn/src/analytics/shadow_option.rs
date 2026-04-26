@@ -1152,6 +1152,7 @@ mod tests {
     use crate::{config::Settings, storage};
 
     #[test]
+    #[ignore = "integration smoke uses local full DuckDB snapshot and is too slow for default cargo test"]
     fn smoke_shadow_option_pipeline() {
         let cfg = Settings::load("config.yaml").expect("config");
         let as_of = NaiveDate::from_ymd_opt(2026, 4, 14).unwrap();

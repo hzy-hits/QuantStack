@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "crates/quant-stack-core",
+    "crates/quant-stack-cli",
+    "crates/quant-stack-py",
+]
+exclude = [
+    "quant-research-cn",
+    "quant-research-v1/rust",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive", "env"] }
+duckdb = { version = "1.1", features = ["bundled"] }
+pyo3 = "0.27"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

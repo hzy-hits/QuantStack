@@ -7,6 +7,7 @@
 #   ./scripts/run_full.sh 2026-03-09         # specific date, post-market
 #   ./scripts/run_full.sh --skip-data        # re-analyze only (no data fetch, manual use)
 #   ./scripts/run_full.sh --skip-data --premarket  # re-analyze pre-market session
+#   ./scripts/run_full.sh --prod             # send to full config recipients
 #
 # On failure: sends alert email to admin, then retries once.
 #
@@ -117,11 +118,16 @@ trap 'rm -f "$LOCK_FILE"' EXIT
 DATE=""
 SKIP_DATA=false
 SESSION="post"
+DELIVERY_MODE="${QUANT_DELIVERY_MODE:-test}"
+TEST_RECIPIENT="${QUANT_TEST_RECIPIENT:-}"
 for arg in "$@"; do
     case $arg in
         --skip-data) SKIP_DATA=true ;;
         --premarket) SESSION="pre" ;;
-        --*) echo "ERROR: Unknown option '$arg'"; echo "Usage: run_full.sh [--premarket|--skip-data] [YYYY-MM-DD]"; exit 1 ;;
+        --prod) DELIVERY_MODE="prod" ;;
+        --test) DELIVERY_MODE="test" ;;
+        --test-recipient=*) TEST_RECIPIENT="${arg#--test-recipient=}" ;;
+        --*) echo "ERROR: Unknown option '$arg'"; echo "Usage: run_full.sh [--premarket|--skip-data|--test|--prod|--test-recipient=email] [YYYY-MM-DD]"; exit 1 ;;
         *)
             if [[ "$arg" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
                 DATE="$arg"
@@ -144,6 +150,7 @@ run_pipeline() {
 
     echo "=========================================="
     echo "Quant Research Pipeline — $DATE ($SESSION) [attempt $attempt]"
+    echo "Delivery mode: $DELIVERY_MODE"
     echo "$(date '+%Y-%m-%d %H:%M:%S %Z')"
     echo "=========================================="
 
@@ -323,7 +330,11 @@ PY
     # ── 4. Send email ───────────────────────────────────────────────────────
     echo ""
     echo "[4/4] Sending email..."
-    if ! timeout "$EMAIL_TIMEOUT" uv run python scripts/send_report.py --send --date "$DATE" --session "$SESSION" --lang zh; then
+    SEND_ARGS=(--send --date "$DATE" --session "$SESSION" --lang zh --delivery-mode "$DELIVERY_MODE")
+    if [[ -n "$TEST_RECIPIENT" ]]; then
+        SEND_ARGS+=(--test-recipient "$TEST_RECIPIENT")
+    fi
+    if ! timeout "$EMAIL_TIMEOUT" uv run python scripts/send_report.py "${SEND_ARGS[@]}"; then
         return 4
     fi
 

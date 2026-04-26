@@ -9,6 +9,7 @@
 #   ./scripts/daily_pipeline.sh evening              # evening slot (6:00 PM label)
 #   ./scripts/daily_pipeline.sh morning 2026-04-16   # rerun specific date/slot
 #   ./scripts/daily_pipeline.sh 2026-04-16 morning   # same as above
+#   ./scripts/daily_pipeline.sh --prod evening       # send to full config recipients
 
 set -euo pipefail
 
@@ -25,7 +26,7 @@ resolve_repo_dir() {
     return 1
 }
 
-STACK_ROOT="${QUANT_STACK_ROOT:-}"
+STACK_ROOT="${QUANT_STACK_ROOT:-$(cd "$PROJ_DIR/.." && pwd)}"
 FACTOR_LAB_ROOT="${FACTOR_LAB_ROOT:-$(resolve_repo_dir \
     "${STACK_ROOT:+$STACK_ROOT/factor-lab}" \
     "$PROJ_DIR/../factor-lab" \
@@ -39,17 +40,28 @@ fi
 
 DATE=""
 SLOT=""
+DELIVERY_MODE="${QUANT_DELIVERY_MODE:-test}"
+TEST_RECIPIENT="${QUANT_TEST_RECIPIENT:-}"
 for arg in "$@"; do
     case "$arg" in
         morning|evening)
             SLOT="$arg"
+            ;;
+        --prod)
+            DELIVERY_MODE="prod"
+            ;;
+        --test)
+            DELIVERY_MODE="test"
+            ;;
+        --test-recipient=*)
+            TEST_RECIPIENT="${arg#--test-recipient=}"
             ;;
         [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
             DATE="$arg"
             ;;
         *)
             echo "ERROR: Unknown argument '$arg'"
-            echo "Usage: ./scripts/daily_pipeline.sh [morning|evening] [YYYY-MM-DD]"
+            echo "Usage: ./scripts/daily_pipeline.sh [--test|--prod|--test-recipient=email] [morning|evening] [YYYY-MM-DD]"
             exit 1
             ;;
     esac
@@ -192,6 +204,7 @@ echo "=========================================="
 echo "  A-Share Daily Pipeline"
 echo "  Date:  $DATE"
 echo "  Slot:  $SLOT"
+echo "  Delivery mode: $DELIVERY_MODE"
 echo "  Start: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST')"
 echo "=========================================="
 echo ""
@@ -232,9 +245,73 @@ echo "[2/6] Running pipeline (fetch → analyze → filter → render)..."
 echo "[2.5/6] Importing Factor Lab factors..."
 (cd "$FACTOR_LAB_ROOT" && "$PYTHON_BIN" -m src.mining.export_to_pipeline --market cn --date "$DATE") 2>&1 || echo "  Factor Lab import failed (non-fatal)"
 
-# `quant-cn run` already performed enrichment. Only refresh payloads here so we
-# preserve the same-day research snapshot and its analytics state.
-echo "[3/6] Re-rendering payloads..."
+# `quant-cn run` already performed enrichment. Refresh the post-import review
+# ledger, emit the stable-alpha bulletin, then render final payloads with it.
+echo "[3/6] Refreshing payloads and stable alpha bulletin..."
+./target/release/quant-cn render --date "$DATE" 2>&1
+./target/release/quant-cn review-backfill --date-to "$DATE" 2>&1 || echo "  Review history backfill failed (non-fatal)"
+if [[ -n "${QUANT_STACK_BIN:-}" ]]; then
+    "$QUANT_STACK_BIN" alpha evaluate \
+        --date "$DATE" \
+        --lookback-days 30 \
+        --auto-select \
+        --emit-bulletin \
+        --history-db "$STACK_ROOT/data/strategy_backtest_history.duckdb" \
+        --output-root "$PROJ_DIR/reports/review_dashboard/strategy_backtest" \
+        --us-db "$STACK_ROOT/quant-research-v1/data/quant.duckdb" \
+        --cn-db "$PROJ_DIR/data/quant_cn_report.duckdb" \
+        --no-project-copies \
+        2>&1 || echo "  Stable alpha bulletin failed (non-fatal)"
+elif [[ -x "$STACK_ROOT/target/release/quant-stack" ]]; then
+    "$STACK_ROOT/target/release/quant-stack" alpha evaluate \
+        --date "$DATE" \
+        --lookback-days 30 \
+        --auto-select \
+        --emit-bulletin \
+        --history-db "$STACK_ROOT/data/strategy_backtest_history.duckdb" \
+        --output-root "$PROJ_DIR/reports/review_dashboard/strategy_backtest" \
+        --us-db "$STACK_ROOT/quant-research-v1/data/quant.duckdb" \
+        --cn-db "$PROJ_DIR/data/quant_cn_report.duckdb" \
+        --no-project-copies \
+        2>&1 || echo "  Stable alpha bulletin failed (non-fatal)"
+elif [[ -x "$STACK_ROOT/target/debug/quant-stack" ]]; then
+    "$STACK_ROOT/target/debug/quant-stack" alpha evaluate \
+        --date "$DATE" \
+        --lookback-days 30 \
+        --auto-select \
+        --emit-bulletin \
+        --history-db "$STACK_ROOT/data/strategy_backtest_history.duckdb" \
+        --output-root "$PROJ_DIR/reports/review_dashboard/strategy_backtest" \
+        --us-db "$STACK_ROOT/quant-research-v1/data/quant.duckdb" \
+        --cn-db "$PROJ_DIR/data/quant_cn_report.duckdb" \
+        --no-project-copies \
+        2>&1 || echo "  Stable alpha bulletin failed (non-fatal)"
+elif [[ -f "$STACK_ROOT/Cargo.toml" ]]; then
+    cargo run --quiet --manifest-path "$STACK_ROOT/Cargo.toml" --bin quant-stack -- alpha evaluate \
+        --date "$DATE" \
+        --lookback-days 30 \
+        --auto-select \
+        --emit-bulletin \
+        --history-db "$STACK_ROOT/data/strategy_backtest_history.duckdb" \
+        --output-root "$PROJ_DIR/reports/review_dashboard/strategy_backtest" \
+        --us-db "$STACK_ROOT/quant-research-v1/data/quant.duckdb" \
+        --cn-db "$PROJ_DIR/data/quant_cn_report.duckdb" \
+        --no-project-copies \
+        2>&1 || echo "  Stable alpha bulletin failed (non-fatal)"
+elif [[ -f "$STACK_ROOT/scripts/run_strategy_backtest_report.py" ]]; then
+    "$PYTHON_BIN" "$STACK_ROOT/scripts/run_strategy_backtest_report.py" \
+        --date "$DATE" \
+        --lookback-days 30 \
+        --auto-select \
+        --emit-bulletin \
+        --history-db "$STACK_ROOT/data/strategy_backtest_history.duckdb" \
+        --output-root "$PROJ_DIR/reports/review_dashboard/strategy_backtest" \
+        --us-db "$STACK_ROOT/quant-research-v1/data/quant.duckdb" \
+        --cn-db "$PROJ_DIR/data/quant_cn_report.duckdb" \
+        2>&1 || echo "  Stable alpha bulletin failed (non-fatal)"
+else
+    echo "  Stable alpha gate script not found; skipping bulletin"
+fi
 ./target/release/quant-cn render --date "$DATE" 2>&1
 
 # Append Factor Lab research candidates AFTER render (so they don't get overwritten)
@@ -278,9 +355,9 @@ PY
     fi
 
     echo "" >> "$STRUCT_PAYLOAD"
-    echo "## Factor Lab Research Candidates" >> "$STRUCT_PAYLOAD"
+    echo "## Factor Lab research prior / recall lead" >> "$STRUCT_PAYLOAD"
     echo "" >> "$STRUCT_PAYLOAD"
-    echo "以下是 Factor Lab 的研究候选，不是独立交易指令。" >> "$STRUCT_PAYLOAD"
+    echo "以下是 Factor Lab research prior / recall lead，不是独立交易指令。" >> "$STRUCT_PAYLOAD"
     echo "它不能决定 Headline Gate、今日市场主方向或主书排序；只有通过主系统方向、execution gate、流动性和追价过滤后，才能进入主书。" >> "$STRUCT_PAYLOAD"
     if [ "$FACTOR_STATUS" = "stale" ]; then
         echo "状态: STALE。候选输出使用的最新交易日为 ${FACTOR_TRADE_DATE}，较报告日 ${DATE} 滞后 ${FACTOR_AGE_DAYS} 天。只允许放在附录，不得作为主书确认信号。" >> "$STRUCT_PAYLOAD"
@@ -296,7 +373,32 @@ PY
     echo "每只股票附带参考价、风控线、观察上沿和研究权重。" >> "$STRUCT_PAYLOAD"
     echo "" >> "$STRUCT_PAYLOAD"
     if [ -s "$FACTOR_TMP" ]; then
-        cat "$FACTOR_TMP" >> "$STRUCT_PAYLOAD"
+        "$PYTHON_BIN" - "$FACTOR_TMP" >> "$STRUCT_PAYLOAD" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(errors="ignore").replace("\r\n", "\n")
+for old, new in {
+    "## Factor Lab Independent Trading Signal": "## Factor Lab research prior / recall lead",
+    "## Factor Lab Research Candidates": "## Factor Lab research prior / recall lead",
+    "怎么操作:": "研究观察:",
+    "买入价": "参考价",
+    "止损": "风控线",
+    "止盈": "观察上沿",
+    "仓位": "研究权重",
+}.items():
+    text = text.replace(old, new)
+
+text = re.sub(
+    r"(?m)^(\s*\d+\.\s*)明天开盘买入下面\s*([0-9]+)\s*只.*$",
+    r"\1研究候选清单如下（仅 recall lead，进入主书前仍需 gate）",
+    text,
+)
+text = re.sub(r"(?m)^(\s*\d+\.\s*)持有\s*([^\n]+)$", r"\1研究观察窗口：\2", text)
+text = text.replace("买入", "研究关注")
+print(text.strip())
+PY
     fi
     echo "" >> "$STRUCT_PAYLOAD"
     echo "请在最终研报中完整展示上述清单，但明确标注为研究附录，不得让其主导 headline 或主书排序。" >> "$STRUCT_PAYLOAD"
@@ -339,9 +441,11 @@ echo "[7/8] Running multi-agent analysis..."
 PREV_REPORT="$(find_previous_report)"
 if [[ -f "$PREV_REPORT" ]]; then
     echo "  Using previous report: $PREV_REPORT"
-    SEND_EMAIL=1 bash scripts/run_agents.sh "$DATE" "$SLOT" "$PREV_REPORT"
+    SEND_EMAIL=1 QUANT_DELIVERY_MODE="$DELIVERY_MODE" QUANT_TEST_RECIPIENT="$TEST_RECIPIENT" \
+        bash scripts/run_agents.sh "$DATE" "$SLOT" "$PREV_REPORT"
 else
-    SEND_EMAIL=1 bash scripts/run_agents.sh "$DATE" "$SLOT"
+    SEND_EMAIL=1 QUANT_DELIVERY_MODE="$DELIVERY_MODE" QUANT_TEST_RECIPIENT="$TEST_RECIPIENT" \
+        bash scripts/run_agents.sh "$DATE" "$SLOT"
 fi
 
 echo ""

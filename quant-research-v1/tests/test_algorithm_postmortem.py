@@ -157,7 +157,7 @@ class AlgorithmPostmortemTests(unittest.TestCase):
             ),
         )
 
-    def test_uncertain_headline_core_item_is_observation(self) -> None:
+    def test_uncertain_headline_core_item_can_still_be_trade(self) -> None:
         self._insert_decision("UNC", report_bucket="core", headline_mode="uncertain")
         self._insert_outcome("UNC", hold_3d_ret_pct=6.0)
 
@@ -170,9 +170,9 @@ class AlgorithmPostmortemTests(unittest.TestCase):
             WHERE symbol = 'UNC'
             """
         ).fetchone()
-        self.assertEqual(row, ("OBSERVE", "OBSERVE", "observed_alpha", None))
+        self.assertEqual(row, ("TRADE_NOW", "TRADE", "won_and_executable", "reward_executable_capture"))
 
-    def test_blocked_main_signal_gate_overrides_trade_default(self) -> None:
+    def test_headline_only_main_signal_blocker_does_not_override_trade_default(self) -> None:
         self._insert_decision(
             "GATED",
             details_json=(
@@ -191,7 +191,10 @@ class AlgorithmPostmortemTests(unittest.TestCase):
             WHERE symbol = 'GATED'
             """
         ).fetchone()
-        self.assertEqual(row, ("OBSERVE", "main_signal_gate", "OBSERVE", "observed_alpha", None))
+        self.assertEqual(
+            row,
+            ("TRADE_NOW", "execution_gate", "TRADE", "won_and_executable", "reward_executable_capture"),
+        )
 
     def test_ignored_follow_through_becomes_missed_alpha(self) -> None:
         self._insert_decision("MISS", selection_status="ignored")

@@ -295,6 +295,23 @@ fn action_from_main_signal_gate(row: &ReviewRow) -> Option<(&'static str, &'stat
     if status == "pass" {
         return Some(("TRADE_NOW", "main_signal_gate"));
     }
+    let hard_blockers = gate
+        .get("blockers")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .filter(|blocker| {
+                    let text = blocker.trim().to_lowercase();
+                    !text.starts_with("headline_gate_") && !text.contains("headline gate")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    if hard_blockers == 0 {
+        return None;
+    }
     match intent.as_str() {
         "AVOID" => Some(("DO_NOT_CHASE", "main_signal_gate")),
         "WAIT" => Some(("WAIT_PULLBACK", "main_signal_gate")),
@@ -703,7 +720,7 @@ mod tests {
     }
 
     #[test]
-    fn blocked_main_signal_gate_overrides_trade_default() {
+    fn headline_only_main_signal_blocker_does_not_override_trade_default() {
         let db = setup_db();
         insert_decision_with_bucket_and_detail(
             &db,
@@ -736,11 +753,11 @@ mod tests {
         assert_eq!(
             row,
             (
-                "OBSERVE".to_string(),
-                "main_signal_gate".to_string(),
-                "OBSERVE".to_string(),
-                "observed_alpha".to_string(),
-                None,
+                "TRADE_NOW".to_string(),
+                "execution_gate".to_string(),
+                "TRADE".to_string(),
+                "won_and_executable".to_string(),
+                Some("reward_executable_capture".to_string()),
             )
         );
     }

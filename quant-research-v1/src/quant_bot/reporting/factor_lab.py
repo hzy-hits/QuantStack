@@ -8,9 +8,9 @@ SIGNAL_HEADING = "## Factor Lab Research Candidates"
 SIGNAL_HEADING_RE = re.compile(
     r"(?ms)^## Factor Lab (?:Research Candidates|Independent Trading Signal)\s*\n.*$"
 )
-REPORT_HEADING = "**Factor Lab 选股**"
+REPORT_HEADING = "**Factor Lab research prior / recall lead**"
 REPORT_SECTION_RE = re.compile(
-    r"(?ms)^\*\*Factor Lab 选股\*\*\n\n.*?(?=\n---\n\n\*\*|\n## |\Z)"
+    r"(?ms)^\*\*Factor Lab (?:选股|research prior / recall lead)\*\*\n\n.*?(?=\n---\n\n\*\*|\n## |\Z)"
 )
 MERGE_FACTOR_SECTION_RE = re.compile(
     r"(?ms)^### Factor Lab\n.*?(?=^## |\Z)"
@@ -84,12 +84,14 @@ def render_factor_lab_report_section(signal_block: str) -> str:
         return (
             f"{REPORT_HEADING}\n\n"
             f"{unavailable_match.group(0).strip()} "
-            "本期不展示 Factor Lab 候选表，也不把其方向性结论写入正文。"
+            "本期不展示 Factor Lab research prior / recall lead 候选表，也不把其方向性结论写入正文。"
         ).strip()
 
     parsed = _parse_factor_lab_signal(signal_block)
     if parsed:
-        summary_bits = ["研究附录，不改变主系统结论；未通过主系统 gate 的票只能观察。"]
+        summary_bits = [
+            "research prior / recall lead，不是交易指令；不改变主系统结论；未通过主系统 gate 的票只能观察。"
+        ]
         if parsed["status_line"]:
             summary_bits.append(parsed["status_line"])
         if parsed["trade_date_line"]:

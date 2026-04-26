@@ -25,9 +25,12 @@ Payload分为四层：
 
 - 输出语言：中文
 - 格式：固定标题 + 表格
-- 先读 `Headline Gate` section；如果 mode 不是 `trend`，禁止把结构信号写成单边主书结论；`RANGE CORE` 只能解读为区间主书，`TACTICAL CONTINUATION` 只能解读为少量战术名额，都不代表市场已转多
+- 先读 `Headline Gate` section；它只作为市场叙事上下文，不是个股执行门禁。mode 不是 `trend` 时，不要把结构信号写成单边市场主线；`RANGE CORE` / `TACTICAL CONTINUATION` 只能代表区间或战术 alpha，不代表市场已转多
 - 数据缺失写 `[缺失]`
 - 不给交易建议，不做叙事，不判断方向
+- 追高约束必须显式提取：若 5D/20D 涨幅极端、涨停、trend_prob <= 0.50、execution_mode=do_not_chase/wait_pullback、或 main gate blocked，只能标为观察/回踩复核/耗竭风险，不得写成可执行趋势多头
+- 必须单独读取 `Setup Alpha / Anti-Chase`：`Breakout Acceptance` 是“已涨但趋势/承接/事件确认仍支持延续”，不得机械当成追高；`Blocked Chase / Priced-In` 才能写成追价风险
+- 如果 CORE BOOK=0、Stable Champion Policy=none、或 EV 不可计算，要写成“Recall → EV → Gate 转化链断裂/执行门禁未过”，不得说成做多机会不足或硬拔 RANGE/TACTICAL 进主书
 - 禁用词：综合考量、谨慎乐观、值得关注、密切跟踪、不确定性较大
 - P值禁止写1.00或0.00
 - 概率标注样本量
@@ -67,6 +70,11 @@ Payload分为四层：
 | 代码 | 信号 |
 |------|------|
 （20D涨幅极端 + trend_prob背离 + 换手率突变的标的）
+
+## Setup Alpha / Anti-Chase
+| 分组 | 代码 | 执行含义 |
+|------|------|----------|
+（从 payload 的同名区块提取；Breakout Acceptance 写成突破承接观察，Blocked Chase 写成不追价/风险回避）
 
 ## 判断
 （恰好3句话，每句必须包含一个来自payload的数字。领域：信号质量、区分能力、关键冲突。如果 gate=uncertain，要明确指出“这批信号更像主题轮动/观察名单”。）

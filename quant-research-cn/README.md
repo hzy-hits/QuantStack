@@ -1,116 +1,183 @@
 # quant-research-cn
 
-A-share quantitative research pipeline — pure Rust.
+A-share research producer for Quant Stack, implemented in Rust. It owns China
+market data ingestion, analytics, report filtering, payload rendering, agent
+orchestration, and Gmail delivery. The root `quant-stack` CLI consumes its
+review ledger for shared alpha maturity and daily bulletins.
 
-Computes cross-sectional and market analytics from Chinese stock market data, filters by information density, and renders a structured Markdown payload for agent-driven analysis.
+`Execution Alpha` is a research execution candidate. It is not an order ticket.
+A-share T+1, limit-up/limit-down, and liquidity constraints must still be
+handled by the human execution layer.
 
-## What This Does
+## Pipeline
 
+```text
+Tushare + AKShare + DeepSeek
+        |
+        v
+DuckDB -> analytics -> notable filter -> report_decisions/report_outcomes
+        |
+        v
+review-backfill -> algorithm_postmortem -> Quant Stack alpha gate
+        |
+        v
+payload markdown -> agents -> Chinese report -> Gmail
 ```
-Tushare Pro + AKShare → DuckDB → Analytics (10 modules) → Filter → Payload → Agent → Report
-```
 
-- Fetches daily A-share data (prices, fundamentals, flow, announcements, macro)
-- Computes 10 analytics modules spanning momentum, flow, regime, volatility, and Bayesian features
-- Filters 300+ stocks down to 30 notable items
-- Renders Markdown payload for Claude/agent to narrate in Chinese
-
-**Not a trading system.** No signals, no execution, no portfolio management.
+The producer remains A-share-specific. The post-producer alpha gate is shared
+with the US system.
 
 ## Quick Start
 
 ```bash
-# Build
+cp config.example.yaml config.yaml
+# Fill api.tushare_token and optional DeepSeek/Gmail fields.
+
 cargo build --release
 
-# Configure
-cp config.example.yaml config.yaml
-# Edit config.yaml: fill in tushare_token (required), deepseek_key (optional)
+# Full daily pipeline; default delivery mode is test.
+./scripts/daily_pipeline.sh evening 2026-04-24 --test
 
-# Initialize database
-./target/release/quant-cn init
-
-# Run full pipeline
-./target/release/quant-cn run
-
-# Or run individual phases
-./target/release/quant-cn fetch --date 2026-03-12
-./target/release/quant-cn enrich
-./target/release/quant-cn analyze
-./target/release/quant-cn render
+# Rebuild review history from existing data.
+./target/release/quant-cn review-backfill \
+  --date-from 2026-03-23 \
+  --date-to 2026-04-24
 ```
 
-## Daily Pipeline
+Production delivery is explicit:
 
 ```bash
-# Full daily pipeline (cron target)
-./scripts/daily_pipeline.sh          # auto-detect morning/evening
-./scripts/daily_pipeline.sh morning  # morning slot
-./scripts/daily_pipeline.sh evening  # evening slot
+./scripts/daily_pipeline.sh --prod evening YYYY-MM-DD
 ```
 
-## Requirements
+## Delivery Modes
 
-- **Rust 2021 edition** (1.70+)
-- **Tushare Pro** account (200 RMB/year, 2000 credits) — required for data
-- **DeepSeek API key** — optional, for news enrichment
-- **AKShare Python bridge** — optional, for 北向资金/news supplementary data
+`scripts/daily_pipeline.sh`, `scripts/run_agents.sh`, and `scripts/send_email.py`
+all support:
 
-## Data Sources
+- `--test`: send only to one test recipient.
+- `--prod`: send to full `reporting.recipients`.
+- `--test-recipient=email@example.com`: override the test target.
+- `QUANT_DELIVERY_MODE=test|prod`
+- `QUANT_TEST_RECIPIENT=email@example.com`
 
-| Source | Type | Cost | Data |
-|--------|------|------|------|
-| Tushare Pro | Structured API | 200 RMB/year | Prices, PE/PB, 业绩预告, 融资融券, 大宗交易, 龙虎榜, 限售解禁 |
-| AKShare | Web scraping (Python bridge) | Free | 北向资金, news, macro |
-| CBOE-style | 300ETF Options | Free (via Tushare opt_daily) | iVIX model-free implied vol |
-| DeepSeek | LLM extraction | Per-token | Structured news annotations |
+Dry-run recipient resolution:
 
-## Project Structure
-
-```
-src/
-├── main.rs              # CLI: init / run / fetch / analyze / enrich / render
-├── config.rs            # YAML config + date resolution
-├── storage/             # DuckDB schema (15 tables)
-├── fetcher/             # Tushare (9 endpoints) + AKShare bridge
-├── enrichment/          # DeepSeek async concurrent extraction
-├── analytics/           # 10 modules: momentum, announcement, flow, hmm, vol_hmm, rv, unlock, macro_gate, sector_rotation, bayes
-├── filtering/           # Two-pass: 300+ → 120 → 30 notable items
-└── reporting/           # Markdown payload renderer
+```bash
+python3 scripts/send_email.py reports/2026-04-24_report_zh_evening.md \
+  --delivery-mode test \
+  --dry-run
 ```
 
-## Mathematical Foundation
+## Headline Gate Policy
 
-10 analytics modules, adapted for A-share market structure:
+Headline/news state is advisory context only. It is rendered in the report so a
+human can understand the tape, but it must not demote a candidate from
+`CORE BOOK` by itself.
 
-1. **Momentum** — multi-horizon trend and breakout persistence
-2. **Announcement** — event-conditioned response around disclosures and notices
-3. **Flow** — financing, block trade, northbound, and leaderboard flow features
-4. **HMM** — 2-state Gaussian HMM on 沪深300
-5. **Volatility Regime** — 2-state HMM on log-variance
-6. **Realized Volatility** — Parkinson, Garman-Klass, Yang-Zhang estimators
-7. **Unlock** — conditional impact around share unlock schedules
-8. **Macro Gate** — macro/liquidity filters that gate cross-sectional scoring
-9. **Sector Rotation** — industry-level momentum + flow rotation
-10. **Bayes** — Beta-Binomial and CPT updates; **iVIX** — VIX-style model-free variance from 300ETF options
+The report lane is determined by structural signal quality, direction,
+execution score, strategy scope, and A-share-specific execution constraints.
 
-See `docs/AXIOMS.md` for full mathematical specification.
+Current lanes:
 
-## Configuration
+| Lane | Meaning |
+|---|---|
+| `CORE BOOK` | main report candidate eligible for shared `Execution Alpha` if stable |
+| `THEME ROTATION` | theme/flow/rotation candidate, useful for recall or tactical context |
+| `RADAR` | low confidence, neutral/bearish, no-fill, stale chase, or out-of-scope |
 
-See `config.example.yaml` for all options. Key sections:
+## Review Backfill
 
-- `api` — Tushare token, DeepSeek key
-- `universe` — which indices to scan (CSI300, SSE50, etc.) + manual watchlist
-- `signals` — momentum windows, ATR period, flow EWMA halflife
-- `enrichment` — DeepSeek concurrency and model selection
-- `reporting` — Claude model for narrative generation
+Historical `algorithm_postmortem` must not be built before execution analytics
+exist. `review-backfill` now checks and fills these modules for each review
+date before materializing the review ledger:
 
-## Related Projects
+- `setup_alpha`
+- `continuation_vs_fade`
+- `open_execution_gate`
 
-- US pipeline: `quant-research-v1` (Python + Rust fetcher)
-- Same philosophy, different market microstructure
-- Signal mapping: `spec.md` §4
+This prevents historical rows from collapsing into all `OBSERVE/WAIT` because
+of missing `execution_score`.
+
+## Analytics
+
+| Module | Purpose |
+|---|---|
+| `momentum` | multi-horizon return and trend context |
+| `flow` | northbound, margin, block trade, hot money, turnover |
+| `announcement` | event-conditioned response around disclosures |
+| `unlock` | lockup expiration risk |
+| `setup_alpha` | structure/setup score |
+| `continuation_vs_fade` | follow-through vs fade diagnostics |
+| `open_execution_gate` | chase, pullback, and entry-quality constraints |
+| `vol_hmm` | limit-adjusted volatility regime diagnostics |
+| `shadow_option` | A-share shadow option risk/convexity features |
+| `shadow_option_alpha` | report-only shadow option alpha calibration |
+| `macro_gate` | market-wide context |
+
+A-share shadow options are not real single-name option trades. They are used for
+risk correction, stale-chase detection, and convexity context.
+
+## Shared Alpha Gate
+
+After the producer has rendered/reviewed a date:
+
+```bash
+cd ..
+target/release/quant-stack alpha evaluate \
+  --date 2026-04-24 \
+  --lookback-days 30 \
+  --auto-select \
+  --emit-bulletin
+```
+
+The CN candidate becomes `Equity Execution Alpha` only if:
+
+- selected policy is the stable champion,
+- policy scope is core/high-or-moderate/executable-now,
+- rolling history passes CN stability thresholds,
+- execution gate passes,
+- headline context is not treated as a hard blocker.
+
+## Project Layout
+
+```text
+quant-research-cn/
+├── src/
+│   ├── analytics/
+│   ├── enrichment/
+│   ├── fetcher/
+│   ├── filtering/
+│   ├── reporting/
+│   └── storage/
+├── scripts/
+│   ├── daily_pipeline.sh
+│   ├── run_agents.sh
+│   └── send_email.py
+├── data/                    # DuckDB, gitignored
+└── reports/                 # payloads, reports, charts, gitignored
+```
+
+## Verification
+
+```bash
+cargo test filtering::notable
+cargo test reporting filtering analytics
+cargo build --release
+```
+
+Root integration smoke:
+
+```bash
+cd ..
+target/release/quant-stack daily \
+  --date 2026-04-24 \
+  --markets cn \
+  --session post \
+  --send-reports \
+  --delivery-mode test \
+  --delivery-dry-run
+```
 
 ## License
 

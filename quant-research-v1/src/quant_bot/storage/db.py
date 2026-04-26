@@ -209,6 +209,23 @@ CREATE TABLE IF NOT EXISTS options_sentiment (
     PRIMARY KEY (symbol, as_of)
 );
 
+-- Daily expression-aware options alpha layer.
+-- This is a research/confirmation layer until it earns its own stability gate.
+CREATE TABLE IF NOT EXISTS options_alpha (
+    symbol            VARCHAR NOT NULL,
+    as_of             DATE NOT NULL,
+    directional_edge  DOUBLE,
+    vol_edge          DOUBLE,
+    vrp_edge          DOUBLE,
+    flow_edge         DOUBLE,
+    liquidity_gate    VARCHAR,
+    expression        VARCHAR,          -- stock_long|call_spread|put_spread|wait|blocked
+    reason            VARCHAR,
+    detail_json       VARCHAR,
+    computed_at       TIMESTAMP DEFAULT current_timestamp,
+    PRIMARY KEY (symbol, as_of)
+);
+
 -- Cointegrated pairs (Engle-Granger within sector)
 CREATE TABLE IF NOT EXISTS cointegrated_pairs (
     symbol_a    VARCHAR NOT NULL,

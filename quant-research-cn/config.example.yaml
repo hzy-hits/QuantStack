@@ -95,4 +95,7 @@ reporting:
   anthropic_model: "claude-sonnet-4-6"
   anthropic_temperature: 0.15
   max_tokens: 3000
+  # Production recipients are used only with --delivery-mode prod.
   recipients: []
+  # Test delivery is the default for pipeline wrappers.
+  test_recipients: []

@@ -1,150 +1,176 @@
-# QuantResearcher
+# quant-research-v1
 
-Automated quantitative research pipeline that computes probabilities, filters notable market events, and delivers analyst-grade research reports via email — twice daily.
+US equities research producer for Quant Stack. It ingests market data, computes
+structured analytics, renders the US daily payload/report, and sends Gmail
+delivery. The root `quant-stack` CLI consumes its review ledger for shared alpha
+maturity and bulletin generation.
 
-**Philosophy: The program computes. The agent narrates. No trading signals.**
+The operating rule is:
 
-## Architecture
+**Python/Rust compute; agents narrate; Quant Stack promotes only stable alpha.**
 
-### Pipeline Overview
+`Execution Alpha` in the report is a research execution candidate, not an order.
 
-> Cron (2x/day) → Data Ingestion → Analytics → Agent Analysis → Email
+## Pipeline
 
-![Pipeline Overview](docs/pipeline-overview.svg)
+```text
+Finnhub / FRED / SEC / Polymarket / yfinance / CBOE
+        |
+        v
+Rust + Python ingestion -> DuckDB -> analytics -> report_decisions
+        |
+        v
+payload markdown -> agents -> Chinese report -> Gmail
+        |
+        v
+Quant Stack stable alpha gate -> alpha_bulletin_us.md
+```
 
-### Data Architecture
-
-> 8 External APIs → Rust/Python Ingestion → DuckDB → 15 Analytics Modules → Markdown Payload
-
-![Data Architecture](docs/data-architecture.svg)
-
-## How It Works
-
-| Phase | What | Time |
-|-------|------|------|
-| **Data** | Universe (~748 symbols), prices, options, news, macro, filings | ~27 min |
-| **Analytics** | 15 modules: CPT, Beta-Binomial, VRP, HMM, Kalman, pairs, etc. | ~1 min |
-| **Filter** | 2-pass: 748 → 120 candidates → 30 notable items (HIGH/MOD/WATCH/LOW) | <1 min |
-| **Agents** | 4 specialist analysts (EN) → merge into Chinese report | ~10 min |
-| **Email** | HTML + inline charts → recipients | ~15 sec |
+The report renderer reads `alpha_bulletin_us.md` when present and skips it when
+missing, so the producer can still run while the shared gate is being repaired.
 
 ## Quick Start
 
 ```bash
-# 1. Clone & configure
-cp config.example.yaml config.yaml   # fill in API keys
-uv sync                              # install Python deps
+cp config.example.yaml config.yaml
+uv sync
 
-# 2. Build Rust fetcher
-cd rust && cargo build --release && cd ..
+# Build the async Rust fetcher.
+cd rust
+cargo build --release
+cd ..
 
-# 3. Initialize (fetches 2yr history, ~40 min first time)
-uv run python scripts/run_daily.py --init
+# Generate/re-render a daily report.
+uv run python scripts/run_daily.py --date 2026-04-24 --session post
 
-# 4. Full pipeline (data → agents → email)
-./scripts/run_full.sh
-
-# 5. Or just regenerate analysis (skip data fetch)
-./scripts/run_full.sh --skip-data
+# Full wrapper, default delivery mode is test.
+./scripts/run_full.sh 2026-04-24 --test
 ```
 
-## Cron Schedule (UTC+8)
+Production send is explicit:
 
-| Session | Time | Days | Coverage |
-|---------|------|------|----------|
-| Post-market | 05:00 | Tue-Sat | Previous trading day close |
-| Pre-market | 21:00 | Mon-Fri | Overnight news + pre-market |
-
-## Probability Architecture
-
-Every output is `P(event | conditions)` with explicit horizon, conditioning set, and sample size.
-
-| Module | Output | Method |
-|--------|--------|--------|
-| `momentum_risk` | `trend_prob` = P(5D return > 0 \| regime, vol_bucket) | 9-cell CPT + Beta-Binomial (Beta(2,2) prior) |
-| `earnings_risk` | `p_upside` = P(5D excess > 0 \| surprise_quintile) | Beta-Binomial posterior |
-| `variance_premium` | VRP = IV² - RV² | Implied vs realized variance spread |
-| `sentiment_ewma` | P/C + skew EWMA z-score | Exponentially weighted anomaly |
-| `hmm_regime` | P(bull), P(r>0 tomorrow), regime duration | 2-state Gaussian HMM + Brier calibration |
-| `macro_gate` | Asset-class multipliers | 3×3 VIX × Yield Curve matrix |
-
-### Mathematical Foundations
-
-The entire screening system derives from **5 axioms**:
-
-1. **Conditional Probability** — P(r>0 | state) ≠ P(r>0) → regime classification → 9-cell CPT
-2. **Bayesian Updating** — Beta(2,2) prior → posterior mean → credible intervals
-3. **Latent States** — HMM → transition matrix → forward prediction → Brier calibration
-4. **Multi-Source Information** — 5-dim weighted scoring (magnitude + event + momentum + options + cross-asset)
-5. **Finite Attention** — saturation clamp → two-pass filter → Top 30
-
-![Axiom Derivation Tree](docs/math_axiom_tree.png)
-
-### Probability Pipeline
-
-![Probability Pipeline](docs/math_probability_pipeline.png)
-
-### Data Flow
-
-![Data Flow DAG](docs/math_data_flow.png)
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Data fetching | **Rust** (tokio, reqwest, duckdb-rs) — rate-limited async HTTP |
-| Analytics | **Python** (polars, scipy, hmmlearn, statsmodels) |
-| Storage | **DuckDB** — embedded OLAP, 12 tables |
-| Agent analysis | **Claude** (claude -p, 4 parallel analysts + merge) |
-| Email | **Gmail API** (OAuth2, HTML + CID inline charts) |
-| Options data | **CBOE CDN** (delayed quotes, no API key needed) |
-| Prices | **yfinance** (batch OHLCV) |
-
-## Project Structure
-
-```
-├── CLAUDE.md              # Dev guidance for Claude Code
-├── config.example.yaml    # Config template (fill API keys)
-├── pyproject.toml
-├── docs/                  # Design docs & architecture diagrams
-│   ├── pipeline-overview.svg
-│   ├── data-architecture.svg
-│   ├── Agents.md          # Agent philosophy & prompt design
-│   └── UPGRADE_PLAN.md    # V2 upgrade plan
-├── rust/                  # Rust data fetcher (async, rate-limited)
-│   └── src/
-│       ├── main.rs
-│       ├── fetcher/       # finnhub, fred, sec_edgar, polymarket
-│       └── storage/       # duckdb bulk writes
-├── scripts/               # Pipeline orchestration
-│   ├── run_full.sh        # Entry point (cron target)
-│   ├── run_daily.py       # Data + analytics pipeline
-│   ├── run_agents.sh      # 4 analysts + merge (claude -p)
-│   ├── split_payload.py   # Split payload for parallel agents
-│   ├── send_report.py     # Gmail delivery
-│   └── send_alert.py      # Failure alerts
-├── src/quant_bot/         # Python source
-│   ├── analytics/         # 15 modules (bayes, momentum, HMM, etc.)
-│   ├── config/            # Settings loader
-│   ├── data_ingestion/    # prices, options, fundamentals, symbols
-│   ├── filtering/         # 2-pass notable item filter
-│   ├── reporting/         # Payload render + charts
-│   ├── screens/           # Broad screen + dividend dips
-│   ├── signals/           # Classification (HIGH/MOD/WATCH/LOW)
-│   ├── storage/           # DuckDB connection + schema
-│   └── universe/          # S&P 500 + ETF + watchlist builder
-├── data/                  # DuckDB file (gitignored)
-├── logs/                  # Run logs (gitignored)
-└── reports/               # Payloads, reports, charts (gitignored)
+```bash
+./scripts/run_full.sh 2026-04-24 --prod
 ```
 
-## Universe
+## Delivery Modes
 
-- **S&P 500** — auto-fetched from Wikipedia (cached 7d)
-- **Broad screen** — yfinance bulk download → top 200 movers
-- **29 ETFs** — sectors (11), bonds (5), commodities (5), international (4), volatility (2), thematic (6)
-- **47 watchlist** — AI/chips, space, nuclear, biotech, robotics, defense, Chinese ADRs
-- **Total**: ~748 symbols after dedup
+The delivery wrapper and `send_report.py` support the same contract as the root
+CLI:
+
+```bash
+# Test send: one test recipient only.
+uv run python scripts/send_report.py \
+  --send \
+  --date 2026-04-24 \
+  --session post \
+  --lang zh \
+  --delivery-mode test
+
+# Dry-run recipient resolution.
+uv run python scripts/send_report.py \
+  --send \
+  --date 2026-04-24 \
+  --session post \
+  --lang zh \
+  --delivery-mode test \
+  --dry-run
+
+# Production recipient list.
+uv run python scripts/send_report.py \
+  --send \
+  --date YYYY-MM-DD \
+  --session post \
+  --lang zh \
+  --delivery-mode prod
+```
+
+`QUANT_TEST_RECIPIENT` can override the default test recipient. Production uses
+`reporting.recipients` in `config.yaml`.
+
+## Analytics
+
+Core modules include:
+
+| Module | Purpose |
+|---|---|
+| `momentum_risk` | conditional return probability by regime/vol bucket |
+| `earnings_risk` | event-conditioned upside probability |
+| `hmm_regime` | SPY latent state and calibration diagnostics |
+| `overnight_continuation_alpha` | post-close continuation/fade diagnostics |
+| `options_alpha` | directional, vol, VRP, flow, liquidity gate, expression choice |
+| `algorithm_postmortem` | captured/missed/stale/false-positive review labels |
+| `factor_lab` | research priors and recall leads; never direct sizing |
+| `reporting.render` | payload and report markdown with alpha bulletin injection |
+
+Options alpha emits:
+
+- `directional_edge`
+- `vol_edge`
+- `vrp_edge`
+- `flow_edge`
+- `liquidity_gate`
+- expression: `stock_long`, `call_spread`, `put_spread`, `wait`, or `blocked`
+
+## Shared Alpha Gate
+
+The shared gate lives in the root repo:
+
+```bash
+cd ..
+target/release/quant-stack alpha evaluate \
+  --date 2026-04-24 \
+  --lookback-days 30 \
+  --auto-select \
+  --emit-bulletin
+```
+
+For US, the core champion policy is selected only if historical rows pass the
+US stability thresholds. Headline state is advisory context only. Factor Lab is
+rendered as `research prior / recall lead`; only historical
+`won_and_executable` postmortem rows can be described as captured alpha.
+
+## Project Layout
+
+```text
+quant-research-v1/
+├── rust/                    # async fetcher
+├── scripts/
+│   ├── run_full.sh          # cron-friendly wrapper
+│   ├── run_daily.py         # producer and renderer
+│   ├── run_agents.sh        # agent synthesis
+│   └── send_report.py       # Gmail delivery
+├── src/quant_bot/
+│   ├── analytics/
+│   ├── filtering/
+│   ├── reporting/
+│   ├── signals/
+│   └── storage/
+├── tests/
+├── data/                    # DuckDB, gitignored
+└── reports/                 # payloads, reports, charts, gitignored
+```
+
+## Verification
+
+```bash
+python -m unittest discover tests
+python -m unittest tests/test_strategy_backtest_gate.py
+python -m unittest tests/test_options_alpha.py
+```
+
+Root integration smoke:
+
+```bash
+cd ..
+target/release/quant-stack daily \
+  --date 2026-04-24 \
+  --markets us \
+  --session post \
+  --send-reports \
+  --delivery-mode test \
+  --delivery-dry-run
+```
 
 ## License
 

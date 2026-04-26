@@ -1520,9 +1520,6 @@ fn main_signal_gate_value(
     fade_risk: f64,
 ) -> serde_json::Value {
     let mut blockers: Vec<String> = Vec::new();
-    if headline_mode != "trend" {
-        blockers.push(format!("headline_gate_{}", headline_mode));
-    }
     if report_bucket != "CORE BOOK" {
         blockers.push(format!("report_lane_{}", report_bucket.to_lowercase()));
     }
@@ -1628,63 +1625,18 @@ fn apply_uncertain_headline_policy(
     report_bucket: &mut String,
     report_reason: &mut String,
     headline_reason: &str,
-    tactical_candidate: bool,
-    tactical_slots_remaining: &mut usize,
-    range_core_candidate: bool,
-    range_core_slots_remaining: &mut usize,
+    _tactical_candidate: bool,
+    _tactical_slots_remaining: &mut usize,
+    _range_core_candidate: bool,
+    _range_core_slots_remaining: &mut usize,
 ) {
-    if *report_bucket == "RADAR" {
+    if *report_bucket == "RADAR" || report_reason.contains("Headline Gate=uncertain") {
         return;
     }
-
-    if tactical_candidate && *tactical_slots_remaining > 0 {
-        *report_bucket = TACTICAL_CONTINUATION_BUCKET.to_string();
-        *report_reason = format!(
-            "Headline Gate=uncertain：{}；市场不 headline 单边，仅保留为战术续涨复核对象（不作为买入清单；只记录回踩复核与失效条件）",
-            headline_reason
-        );
-        *tactical_slots_remaining -= 1;
-        return;
-    }
-
-    if *report_bucket == "CORE BOOK" {
-        if range_core_candidate && *range_core_slots_remaining > 0 {
-            *report_bucket = RANGE_CORE_BUCKET.to_string();
-            *report_reason = format!(
-                "Headline Gate=uncertain：{}；市场未到趋势主书，仅保留为区间复核对象（不代表开仓；只记录确认/回踩条件与失效条件）",
-                headline_reason
-            );
-            *range_core_slots_remaining -= 1;
-            return;
-        }
-
-        *report_bucket = "THEME ROTATION".to_string();
-        *report_reason = if tactical_candidate {
-            format!(
-                "Headline Gate=uncertain：{}；该标的具备续涨条件，但战术名额已满，回退为主题轮动观察",
-                headline_reason
-            )
-        } else if range_core_candidate {
-            format!(
-                "Headline Gate=uncertain：{}；该标的本可保留区间复核，但 range-core 名额已满，回退为主题轮动观察",
-                headline_reason
-            )
-        } else {
-            format!(
-                "Headline Gate=uncertain：{}；主书降级为主题轮动观察",
-                headline_reason
-            )
-        };
-    } else if *report_bucket == "THEME ROTATION" {
-        *report_reason = if tactical_candidate {
-            format!(
-                "Headline Gate=uncertain：{}；该标的续涨逻辑成立但战术名额已满，只保留观察与失效复核",
-                headline_reason
-            )
-        } else {
-            "Headline Gate=uncertain：只保留条件式观察，不形成主书方向".to_string()
-        };
-    }
+    *report_reason = format!(
+        "Headline Gate=uncertain：{}；仅作为市场背景，不改变报告层级。{}",
+        headline_reason, report_reason
+    );
 }
 
 fn shadow_execution_blocked(c: &Candidate) -> bool {
@@ -2261,7 +2213,7 @@ mod tests {
         effective_pass1_cutoff, effective_report_limit, expanded_report_pool_limit,
         is_tactical_continuation_candidate, lab_composite_score, main_signal_gate_value,
         plan_uncertain_headline_candidates, select_uncertain_tactical_symbols_from_candidates,
-        Candidate, RANGE_CORE_BUCKET, TACTICAL_CONTINUATION_BUCKET, UNCERTAIN_TACTICAL_LIMIT_MAX,
+        Candidate, UNCERTAIN_TACTICAL_LIMIT_MAX,
     };
     use crate::analytics::shadow_calibration::ShadowCalibrationSummary;
 
@@ -2512,7 +2464,7 @@ mod tests {
     }
 
     #[test]
-    fn main_signal_gate_requires_trend_core_and_executable() {
+    fn main_signal_gate_uses_headline_as_context_only() {
         let blocked = main_signal_gate_value(
             "CORE BOOK",
             "HIGH",
@@ -2522,14 +2474,10 @@ mod tests {
             0.68,
             0.20,
         );
-        assert_eq!(blocked["status"], "blocked");
-        assert_eq!(blocked["role"], "directional_observation");
-        assert_eq!(blocked["action_intent"], "OBSERVE");
-        assert!(blocked["blockers"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|v| v == "headline_gate_uncertain"));
+        assert_eq!(blocked["status"], "pass");
+        assert_eq!(blocked["role"], "main_signal");
+        assert_eq!(blocked["action_intent"], "TRADE");
+        assert!(blocked["blockers"].as_array().unwrap().is_empty());
 
         let passed = main_signal_gate_value(
             "CORE BOOK",
@@ -2546,7 +2494,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_policy_caps_tactical_slots() {
+    fn uncertain_headline_policy_keeps_structural_lane() {
         let mut bucket_a = "THEME ROTATION".to_string();
         let mut reason_a = String::new();
         let mut slots = UNCERTAIN_TACTICAL_LIMIT_MAX;
@@ -2560,11 +2508,12 @@ mod tests {
             false,
             &mut range_slots,
         );
-        assert_eq!(bucket_a, TACTICAL_CONTINUATION_BUCKET);
-        assert_eq!(slots, UNCERTAIN_TACTICAL_LIMIT_MAX - 1);
+        assert_eq!(bucket_a, "THEME ROTATION");
+        assert_eq!(slots, UNCERTAIN_TACTICAL_LIMIT_MAX);
+        assert!(reason_a.contains("不改变报告层级"));
 
         let mut bucket_b = "CORE BOOK".to_string();
-        let mut reason_b = String::new();
+        let mut reason_b = "高置信且方向明确，适合作为主报告主书信号".to_string();
         let mut exhausted_slots = 0usize;
         let mut exhausted_range_slots = 0usize;
         apply_uncertain_headline_policy(
@@ -2576,14 +2525,15 @@ mod tests {
             false,
             &mut exhausted_range_slots,
         );
-        assert_eq!(bucket_b, "THEME ROTATION");
-        assert!(reason_b.contains("战术名额已满"));
+        assert_eq!(bucket_b, "CORE BOOK");
+        assert_eq!(exhausted_slots, 0);
+        assert!(reason_b.contains("不改变报告层级"));
     }
 
     #[test]
-    fn uncertain_policy_can_preserve_range_core_bucket() {
+    fn uncertain_headline_policy_does_not_force_range_core_bucket() {
         let mut bucket = "CORE BOOK".to_string();
-        let mut reason = String::new();
+        let mut reason = "高置信且方向明确，适合作为主报告主书信号".to_string();
         let mut tactical_slots = 0usize;
         let mut range_slots = 1usize;
         apply_uncertain_headline_policy(
@@ -2595,10 +2545,9 @@ mod tests {
             true,
             &mut range_slots,
         );
-        assert_eq!(bucket, RANGE_CORE_BUCKET);
-        assert_eq!(range_slots, 0);
-        assert!(reason.contains("区间复核"));
-        assert!(reason.contains("不代表开仓"));
+        assert_eq!(bucket, "CORE BOOK");
+        assert_eq!(range_slots, 1);
+        assert!(reason.contains("不改变报告层级"));
     }
 
     #[test]

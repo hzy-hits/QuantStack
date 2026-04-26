@@ -13,7 +13,7 @@ Claude never touches arithmetic. Every number here is computed upstream.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import duckdb
@@ -164,13 +164,17 @@ def build_report_bundle(
 
     # Market news (MARKET symbol = general headlines)
     try:
+        news_start = (as_of - timedelta(days=3)).strftime("%Y-%m-%d 00:00:00")
+        news_end = (as_of + timedelta(days=1)).strftime("%Y-%m-%d 00:00:00")
         market_news = con.execute("""
             SELECT headline, source, published_at
             FROM news_items
             WHERE symbol = 'MARKET'
+              AND published_at >= ?
+              AND published_at < ?
             ORDER BY published_at DESC
             LIMIT 5
-        """).fetchdf()
+        """, [news_start, news_end]).fetchdf()
         market_headlines = [
             {"headline": r["headline"], "source": r["source"], "published_at": str(r["published_at"])}
             for _, r in market_news.iterrows()
@@ -190,7 +194,7 @@ def build_report_bundle(
             "data_freshness": {
                 "prices": as_of_str,
                 "macro": max((v["as_of"] for v in macro.values()), default="unknown"),
-                "news": "last 3 days",
+                "news": f"last 3 days through {as_of_str}",
                 "filings": "last 7 days",
             },
         },

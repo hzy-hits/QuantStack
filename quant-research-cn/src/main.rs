@@ -235,6 +235,16 @@ async fn main() -> Result<()> {
                     info!("analytics complete");
                     return Ok(());
                 }
+                if module_name == "shadow_full" {
+                    prepare_incremental_research(&cfg)?;
+                    let research_db = storage::open(cfg.data.research_path())?;
+                    let rows = filtering::materialize_shadow_full(&research_db, &cfg, as_of)?;
+                    research_db.execute_batch("CHECKPOINT")?;
+                    promote_research_to_report(&cfg)?;
+                    info!(rows = rows, "shadow_full shortlist pricing complete");
+                    info!("analytics complete");
+                    return Ok(());
+                }
                 prepare_incremental_research(&cfg)?;
                 let research_db = storage::open(cfg.data.research_path())?;
                 let shadow_full_rows = if matches!(
@@ -287,6 +297,11 @@ async fn main() -> Result<()> {
             ensure_report_snapshot(&cfg)?;
             let report_db = storage::open(cfg.data.report_path())?;
             let notable = filtering::build_notable_items(&report_db, &cfg, as_of)?;
+            let reviewed = analytics::report_review::materialize_report_review(
+                &report_db, &cfg, as_of, &notable,
+            )?;
+            info!(rows = reviewed, "report review ledger refreshed");
+            report_db.execute_batch("CHECKPOINT")?;
             let path = reporting::render_payload(&report_db, &cfg, as_of, &notable)?;
             info!(%path, "payload ready");
         }
@@ -301,6 +316,7 @@ async fn main() -> Result<()> {
             let review_dates = load_review_dates(&report_db, start_date, end_date)?;
             let mut refreshed = 0usize;
             for review_date in review_dates {
+                ensure_review_backfill_analytics(&report_db, &cfg, review_date)?;
                 let notable = filtering::build_notable_items(&report_db, &cfg, review_date)?;
                 let rows = analytics::report_review::materialize_report_review(
                     &report_db,
@@ -349,6 +365,32 @@ fn load_review_dates(
         dates.push(NaiveDate::parse_from_str(date_part, "%Y-%m-%d")?);
     }
     Ok(dates)
+}
+
+fn ensure_review_backfill_analytics(
+    db: &Connection,
+    cfg: &config::Settings,
+    as_of: NaiveDate,
+) -> Result<()> {
+    for module in [
+        "setup_alpha",
+        "continuation_vs_fade",
+        "open_execution_gate",
+    ] {
+        if analytics_module_rows(db, as_of, module)? == 0 {
+            analytics::run_module(db, cfg, as_of, module)?;
+        }
+    }
+    Ok(())
+}
+
+fn analytics_module_rows(db: &Connection, as_of: NaiveDate, module: &str) -> Result<i64> {
+    db.query_row(
+        "SELECT COUNT(*) FROM analytics WHERE as_of = CAST(? AS DATE) AND module = ?",
+        duckdb::params![as_of.to_string(), module],
+        |row| row.get::<_, i64>(0),
+    )
+    .map_err(Into::into)
 }
 
 fn stage_raw_to_research(cfg: &config::Settings) -> Result<()> {

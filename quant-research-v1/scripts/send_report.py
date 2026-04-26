@@ -18,9 +18,12 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import date
 from pathlib import Path
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
@@ -42,6 +45,57 @@ def _find_charts(as_of: str, session: str) -> list[Path]:
     return sorted(charts_dir.glob("*.png"))
 
 
+def _split_recipients(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def _reporting_config(config_path: str = "config.yaml") -> dict:
+    path = Path(config_path)
+    if not path.exists():
+        return {}
+    cfg = yaml.safe_load(path.read_text()) or {}
+    reporting = cfg.get("reporting", {})
+    return reporting if isinstance(reporting, dict) else {}
+
+
+def _list_config_recipients(value: object) -> list[str]:
+    if isinstance(value, str):
+        return _split_recipients(value)
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
+
+
+def _resolve_test_recipients(args: argparse.Namespace) -> tuple[list[str], str]:
+    override = _split_recipients(args.test_recipient) or _split_recipients(
+        os.environ.get("QUANT_TEST_RECIPIENT")
+    )
+    if override:
+        return override, "override"
+
+    reporting = _reporting_config()
+    configured = _list_config_recipients(reporting.get("test_recipients"))
+    if not configured:
+        configured = _list_config_recipients(reporting.get("test_recipient"))
+    if configured:
+        return configured, "config.reporting.test_recipients"
+
+    if args.to:
+        return [args.to], "--to"
+
+    prod = _list_config_recipients(reporting.get("recipients"))
+    prod = [r for r in prod if r != "you@example.com"]
+    if prod:
+        return [prod[0]], "first configured production recipient"
+
+    raise SystemExit(
+        "Test delivery needs a recipient. Set --test-recipient, "
+        "QUANT_TEST_RECIPIENT, or reporting.test_recipients in config.yaml."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description="Send daily report email")
     parser.add_argument("--date", type=str, default=None, help="Report date (default: today)")
@@ -52,6 +106,13 @@ def main():
     parser.add_argument("--send", action="store_true", help="Send directly (default: draft)")
     parser.add_argument("--to", type=str, default=None,
                         help="Override recipient (skips config list)")
+    parser.add_argument("--delivery-mode", choices=["test", "prod"],
+                        default=os.environ.get("QUANT_DELIVERY_MODE", "test"),
+                        help="test sends only to the test recipient; prod uses config recipients")
+    parser.add_argument("--test-recipient", type=str, default=None,
+                        help="Comma-separated test recipient override")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print resolved delivery targets without calling Gmail")
     args = parser.parse_args()
 
     if args.date:
@@ -94,25 +155,48 @@ def main():
     print(f"Date: {as_of} ({session_label})")
     print(f"Charts: {len(chart_paths)} files")
     print(f"Mode: {'SEND' if args.send else 'DRAFT'}")
+    print(f"Delivery mode: {args.delivery_mode.upper()}")
     print()
 
     for report_path, subject in reports:
+        send_to = args.to
+        send_bcc: list[str] | None = None
+        delivery_note = "config.reporting.recipients"
+        effective_subject = subject
+        if args.delivery_mode == "test":
+            recipients, source = _resolve_test_recipients(args)
+            send_to = recipients[0]
+            send_bcc = recipients[1:]
+            delivery_note = source
+            effective_subject = f"[TEST] {subject}"
+        elif args.to:
+            delivery_note = "--to override"
+
         print(f"{'Sending' if args.send else 'Drafting'}: {report_path.name}")
+        print(f"  Delivery: {args.delivery_mode} ({delivery_note})")
+        if args.delivery_mode == "test":
+            print(f"  Recipients: {', '.join([send_to, *(send_bcc or [])])}")
+
+        if args.dry_run:
+            print("  Dry run: Gmail call skipped")
+            continue
 
         if args.send:
             msg_ids = send_report_email(
                 report_path=report_path,
                 chart_paths=chart_paths,
-                to=args.to,
-                subject=subject,
+                to=send_to,
+                bcc=send_bcc,
+                subject=effective_subject,
             )
             print(f"  Sent successfully ({len(msg_ids)} message)")
         else:
             draft_id = create_report_draft(
                 report_path=report_path,
                 chart_paths=chart_paths,
-                to=args.to or "",
-                subject=subject,
+                to=send_to or "",
+                bcc=send_bcc,
+                subject=effective_subject,
             )
             print(f"  Draft created: {draft_id}")
 

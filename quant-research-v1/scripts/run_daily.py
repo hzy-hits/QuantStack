@@ -25,6 +25,7 @@ Pipeline:
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import uuid
@@ -60,6 +61,7 @@ from quant_bot.analytics.breakout import run_breakout, store_breakout
 from quant_bot.analytics.value_score import compute_value_scores
 from quant_bot.analytics.variance_premium import compute_vrp, store_vrp
 from quant_bot.analytics.sentiment_ewma import compute_sentiment_ewma, store_sentiment
+from quant_bot.analytics.options_alpha import compute_options_alpha, store_options_alpha
 from quant_bot.analytics.overnight_gate import run_overnight_gate, store_overnight_gate
 from quant_bot.analytics.overnight_continuation_alpha import (
     run_overnight_continuation_alpha,
@@ -190,6 +192,71 @@ def sync_review_ledgers_to_reports(cfg: Settings, as_of: date, session: str) -> 
         session_report=str(session_report_path),
         session=session,
     )
+
+
+def emit_stable_alpha_bulletin(cfg: Settings, as_of: date) -> tuple[str, str]:
+    """Run the cross-market stable-alpha gate before payload rendering."""
+    project_root = Path(__file__).resolve().parents[1]
+    stack_root = project_root.parent
+    quant_stack_bin = os.environ.get("QUANT_STACK_BIN")
+    if quant_stack_bin:
+        cmd = [quant_stack_bin]
+    elif (stack_root / "target" / "debug" / "quant-stack").exists():
+        cmd = [str(stack_root / "target" / "debug" / "quant-stack")]
+    elif (stack_root / "target" / "release" / "quant-stack").exists():
+        cmd = [str(stack_root / "target" / "release" / "quant-stack")]
+    else:
+        cmd = []
+
+    if cmd:
+        cmd += [
+            "alpha",
+            "evaluate",
+            "--date",
+            as_of.isoformat(),
+            "--lookback-days",
+            "30",
+            "--auto-select",
+            "--emit-bulletin",
+            "--us-db",
+            str(cfg.raw_db_path_abs),
+            "--cn-db",
+            str(stack_root / "quant-research-cn" / "data" / "quant_cn_report.duckdb"),
+        ]
+    else:
+        script = stack_root / "scripts" / "run_strategy_backtest_report.py"
+        if not script.exists():
+            return "skipped", f"missing gate script: {script}"
+        cmd = [
+            sys.executable,
+            str(script),
+            "--date",
+            as_of.isoformat(),
+            "--lookback-days",
+            "30",
+            "--auto-select",
+            "--emit-bulletin",
+            "--us-db",
+            str(cfg.raw_db_path_abs),
+            "--cn-db",
+            str(stack_root / "quant-research-cn" / "data" / "quant_cn_report.duckdb"),
+        ]
+    result = subprocess.run(
+        cmd,
+        cwd=stack_root,
+        text=True,
+        capture_output=True,
+        timeout=300,
+        check=False,
+    )
+    detail = "\n".join(
+        part.strip()
+        for part in [result.stdout, result.stderr]
+        if part and part.strip()
+    )
+    if result.returncode != 0:
+        return "error", detail[-2000:] or f"exit={result.returncode}"
+    return "ok", detail[-2000:]
 
 
 def main() -> None:
@@ -515,6 +582,11 @@ def main() -> None:
         store_sentiment(research_con, ewma_results, as_of)
         log_run(research_con, run_id, "sentiment", "ok", len(vrp_results) + len(ewma_results))
 
+        log.info("step_options_alpha")
+        options_alpha_rows = compute_options_alpha(research_con, all_symbols, as_of)
+        n_options_alpha = store_options_alpha(research_con, options_alpha_rows, as_of)
+        log_run(research_con, run_id, "options_alpha", "ok", n_options_alpha)
+
         log.info("step_overnight_gate")
         overnight_gate_df = run_overnight_gate(research_con, candidate_syms, as_of)
         n_overnight = store_overnight_gate(research_con, overnight_gate_df)
@@ -723,6 +795,31 @@ def main() -> None:
             bundle["clusters"] = None
 
         bundle.setdefault("headline_gate", compute_headline_gate(bundle))
+
+        # Stable alpha bulletin must exist before render_payload_md() so the
+        # report can include Execution Alpha / Recall Alpha / Blocked sections.
+        log.info("step_alpha_bulletin")
+        try:
+            raw_log_con.execute("CHECKPOINT")
+            raw_log_con.close()
+            raw_log_con = None
+            bulletin_status, bulletin_detail = emit_stable_alpha_bulletin(cfg, as_of)
+            raw_log_con = connect_write(cfg.raw_db_path_abs)
+            log_run(
+                raw_log_con,
+                run_id,
+                "alpha_bulletin",
+                bulletin_status,
+                1 if bulletin_status == "ok" else 0,
+                bulletin_detail,
+            )
+            if bulletin_status != "ok":
+                log.warning("alpha_bulletin_nonfatal", status=bulletin_status, detail=bulletin_detail)
+        except Exception as e:
+            if raw_log_con is None:
+                raw_log_con = connect_write(cfg.raw_db_path_abs)
+            log.warning("alpha_bulletin_failed", error=str(e))
+            log_run(raw_log_con, run_id, "alpha_bulletin", "error", 0, str(e))
 
         # ── 8. Generate charts ───────────────────────────────────────────────
         chart_output_dir = charts_dir("reports", as_of, session)

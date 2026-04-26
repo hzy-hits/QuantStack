@@ -69,6 +69,13 @@ impl YieldCurve {
     }
 }
 
+struct VolInput {
+    ann: f64,
+    regime: VolRegime,
+    source: &'static str,
+    observations: usize,
+}
+
 /// Gate multiplier lookup — 3×3 vol × yield_curve matrix.
 ///
 /// Steep curve (easing) is favorable for equities; Panic vol is unfavorable.
@@ -138,11 +145,16 @@ fn realized_vol(returns: &[f64]) -> f64 {
     daily_std * (252.0_f64).sqrt()
 }
 
-pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usize> {
-    let date_str = as_of.to_string();
-    let benchmark = &cfg.universe.benchmark;
+fn resolve_vol_input(db: &Connection, benchmark: &str, date_str: &str) -> Result<VolInput> {
+    if let Some((ann, observations)) = query_vol_hmm_tobit(db, date_str) {
+        return Ok(VolInput {
+            ann,
+            regime: classify_vol_regime(ann),
+            source: "vol_hmm_tobit",
+            observations,
+        });
+    }
 
-    // ── Step 1: Compute 20D realized volatility of benchmark ──────
     let mut vol_stmt = db.prepare(
         "SELECT pct_chg FROM prices
          WHERE ts_code = ? AND trade_date <= ?
@@ -157,23 +169,83 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         .filter_map(|r| r.ok().flatten())
         .collect();
 
-    let vol_ann = if returns.len() >= 5 {
+    let ann = if returns.len() >= 5 {
         realized_vol(&returns)
     } else {
         warn!(
             n = returns.len(),
             benchmark = benchmark,
-            "insufficient price data for vol, defaulting to Calm"
+            "insufficient price data for macro vol, defaulting to Calm"
         );
-        15.0 // default: Calm regime
+        15.0
     };
 
-    let vol_regime = classify_vol_regime(vol_ann);
+    Ok(VolInput {
+        ann,
+        regime: classify_vol_regime(ann),
+        source: "benchmark_close_to_close",
+        observations: returns.len(),
+    })
+}
+
+fn query_vol_hmm_tobit(db: &Connection, date_str: &str) -> Option<(f64, usize)> {
+    let ann = db
+        .query_row(
+            "SELECT value FROM analytics
+             WHERE ts_code = '_MARKET'
+               AND as_of = (
+                   SELECT MAX(as_of) FROM analytics
+                   WHERE ts_code = '_MARKET'
+                     AND as_of <= CAST(? AS DATE)
+                     AND module = 'vol_hmm'
+                     AND metric = 'rv_tobit_20d'
+               )
+               AND module = 'vol_hmm'
+               AND metric = 'rv_tobit_20d'",
+            duckdb::params![date_str],
+            |row| row.get::<_, f64>(0),
+        )
+        .ok()?;
+
+    let observations = db
+        .query_row(
+            "SELECT detail FROM analytics
+             WHERE ts_code = '_MARKET'
+               AND as_of = (
+                   SELECT MAX(as_of) FROM analytics
+                   WHERE ts_code = '_MARKET'
+                     AND as_of <= CAST(? AS DATE)
+                     AND module = 'vol_hmm'
+                     AND metric = 'p_high_vol'
+               )
+               AND module = 'vol_hmm'
+               AND metric = 'p_high_vol'",
+            duckdb::params![date_str],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .and_then(|detail| serde_json::from_str::<serde_json::Value>(&detail).ok())
+        .and_then(|obj| obj.get("n").and_then(|v| v.as_u64()))
+        .unwrap_or(0) as usize;
+
+    Some((ann, observations))
+}
+
+pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usize> {
+    let date_str = as_of.to_string();
+    let benchmark = &cfg.universe.benchmark;
+
+    // ── Step 1: Resolve market volatility ────────────────────────
+    // Prefer the main vol_hmm input, which is A-share limit-censored Tobit vol.
+    // Fall back to the old benchmark close-to-close vol only when vol_hmm is absent.
+    let vol_input = resolve_vol_input(db, benchmark, &date_str)?;
     info!(
-        vol_ann = format!("{:.2}", vol_ann),
-        regime = vol_regime.label(),
-        n = returns.len(),
-        "benchmark realized vol computed"
+        vol_ann = format!("{:.2}", vol_input.ann),
+        regime = vol_input.regime.label(),
+        source = vol_input.source,
+        n = vol_input.observations,
+        "macro volatility input resolved"
     );
 
     // ── Step 2: Query Shibor and LPR from macro_cn ────────────────
@@ -202,10 +274,10 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     };
 
     // ── Step 3: Gate multiplier ───────────────────────────────────
-    let mult = gate_multiplier(vol_regime, yield_curve);
+    let mult = gate_multiplier(vol_input.regime, yield_curve);
     info!(
         multiplier = format!("{:.2}", mult),
-        vol = vol_regime.label(),
+        vol = vol_input.regime.label(),
         curve = yield_curve.label(),
         "macro gate computed"
     );
@@ -220,13 +292,15 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     )?;
 
     let detail = format!(
-        r#"{{"benchmark":"{}","vol_ann":{:.2},"vol_regime":"{}","spread":{:.3},"yield_curve":"{}","n_returns":{}}}"#,
+        r#"{{"benchmark":"{}","vol_source":"{}","vol_ann":{:.2},"vol_regime":"{}","spread":{:.3},"yield_curve":"{}","n_returns":{},"n_vol_observations":{}}}"#,
         benchmark,
-        vol_ann,
-        vol_regime.label(),
+        vol_input.source,
+        vol_input.ann,
+        vol_input.regime.label(),
         spread,
         yield_curve.label(),
-        returns.len(),
+        vol_input.observations,
+        vol_input.observations,
     );
 
     // gate_multiplier
@@ -245,7 +319,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         date_str,
         MODULE,
         "vol_regime",
-        vol_regime.as_i32() as f64,
+        vol_input.regime.as_i32() as f64,
         serde_null(),
     ])?;
 
@@ -265,7 +339,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         date_str,
         MODULE,
         "realized_vol_ann",
-        vol_ann,
+        vol_input.ann,
         serde_null(),
     ])?;
 
@@ -383,4 +457,43 @@ fn compute_opt_stress(db: &Connection, as_of: &str) -> Option<f64> {
 
 fn serde_null() -> Option<String> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_vol_input_prefers_vol_hmm_tobit() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE analytics (
+                 ts_code VARCHAR NOT NULL,
+                 as_of DATE NOT NULL,
+                 module VARCHAR NOT NULL,
+                 metric VARCHAR NOT NULL,
+                 value DOUBLE,
+                 detail VARCHAR,
+                 PRIMARY KEY (ts_code, as_of, module, metric)
+             );",
+        )?;
+        db.execute(
+            "INSERT INTO analytics (ts_code, as_of, module, metric, value, detail)
+             VALUES ('_MARKET', DATE '2026-04-24', 'vol_hmm', 'rv_tobit_20d', 71.75, NULL)",
+            [],
+        )?;
+        db.execute(
+            "INSERT INTO analytics (ts_code, as_of, module, metric, value, detail)
+             VALUES ('_MARKET', DATE '2026-04-24', 'vol_hmm', 'p_high_vol', 1.0, ?)",
+            duckdb::params![r#"{"source":"cross_section_limit_tobit","n":511}"#],
+        )?;
+
+        let input = resolve_vol_input(&db, "000300.SH", "2026-04-24")?;
+        assert_eq!(input.source, "vol_hmm_tobit");
+        assert_eq!(input.observations, 511);
+        assert!(matches!(input.regime, VolRegime::Panic));
+        assert!((input.ann - 71.75).abs() < 1e-9);
+
+        Ok(())
+    }
 }

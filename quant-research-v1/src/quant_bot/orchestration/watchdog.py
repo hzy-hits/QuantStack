@@ -122,6 +122,7 @@ def resolve_stack_roots(project_dir: Path) -> tuple[Path, Path, Path]:
     cn_root = resolve_repo_dir(
         os.environ.get("QUANT_CN_ROOT"),
         Path(stack_root) / "quant-research-cn" if stack_root else None,
+        us_root.parent / "quant-research-cn",
         base_root / "rust" / "quant-research-cn",
     )
     return us_root, cn_root, factor_lab_root
@@ -160,7 +161,7 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         TaskConfig(
             name="us-premarket",
             workdir=us_root,
-            command=("bash", "scripts/run_full.sh", "--premarket", "{logical_date}"),
+            command=("bash", "scripts/run_full.sh", "--prod", "--premarket", "{logical_date}"),
             completion=CompletionCheck(
                 kind="file_exists",
                 path_template="reports/{logical_date}_report_zh_pre.md",
@@ -176,7 +177,7 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         TaskConfig(
             name="us-postmarket",
             workdir=us_root,
-            command=("bash", "scripts/run_full.sh", "{logical_date}"),
+            command=("bash", "scripts/run_full.sh", "--prod", "{logical_date}"),
             completion=CompletionCheck(
                 kind="file_exists",
                 path_template="reports/{logical_date}_report_zh_post.md",
@@ -207,7 +208,7 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         TaskConfig(
             name="cn-morning",
             workdir=cn_root,
-            command=("bash", "scripts/daily_pipeline.sh", "morning", "{logical_date}"),
+            command=("bash", "scripts/daily_pipeline.sh", "--prod", "morning", "{logical_date}"),
             completion=CompletionCheck(
                 kind="file_contains_all",
                 path_template="reports/logs/{logical_date}_morning.log",
@@ -225,7 +226,7 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         TaskConfig(
             name="cn-evening",
             workdir=cn_root,
-            command=("bash", "scripts/daily_pipeline.sh", "evening", "{logical_date}"),
+            command=("bash", "scripts/daily_pipeline.sh", "--prod", "evening", "{logical_date}"),
             completion=CompletionCheck(
                 kind="file_contains_all",
                 path_template="reports/logs/{logical_date}_evening.log",

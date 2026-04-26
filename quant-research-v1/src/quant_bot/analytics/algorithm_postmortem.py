@@ -121,14 +121,21 @@ def _load_details(raw: Any) -> dict[str, Any]:
     return out if isinstance(out, dict) else {}
 
 
-def _is_actionable_lane(report_bucket: Any, headline_mode: Any) -> bool:
+def _is_actionable_lane(report_bucket: Any, _headline_mode: Any) -> bool:
     lane = str(report_bucket or "").strip().lower().replace("_", " ")
-    headline = str(headline_mode or "").strip().lower()
     if lane and lane not in {"core", "core book"}:
         return False
-    if headline in {"range", "uncertain"}:
-        return False
     return True
+
+
+def _hard_gate_blockers(gate: dict[str, Any]) -> list[str]:
+    blockers = gate.get("blockers") if isinstance(gate.get("blockers"), list) else []
+    return [
+        str(blocker)
+        for blocker in blockers
+        if not str(blocker).lower().startswith("headline_gate_")
+        and "headline gate" not in str(blocker).lower()
+    ]
 
 
 def _action_intent(action_label: str) -> str:
@@ -150,6 +157,8 @@ def _action_from_main_signal_gate(details: dict[str, Any]) -> tuple[str, str] | 
     intent = str(gate.get("action_intent") or "").strip().upper()
     if status == "pass":
         return "TRADE_NOW", "main_signal_gate"
+    if not _hard_gate_blockers(gate):
+        return None
     if intent == "AVOID":
         return "DO_NOT_CHASE", "main_signal_gate"
     if intent == "WAIT":
@@ -248,8 +257,6 @@ def _action_from_row(
 
     if rr_ratio is not None and rr_ratio < 1.0:
         return "RISK_AVOID", "rr_below_1"
-    if headline_mode == "uncertain" and (rr_ratio is None or rr_ratio < 2.0):
-        return "WAIT_PULLBACK", "uncertain_headline"
     if move_consumed_ratio is not None and move_consumed_ratio >= 1.0:
         return "DO_NOT_CHASE", "move_consumed"
 

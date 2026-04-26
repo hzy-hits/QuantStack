@@ -295,9 +295,14 @@ def _load_current_rows(
         FROM news_items
         WHERE symbol IN ({placeholders})
           AND published_at >= ?
+          AND published_at < ?
         GROUP BY symbol
         """,
-        symbols + [(as_of - timedelta(days=3)).strftime("%Y-%m-%d")],
+        symbols
+        + [
+            (as_of - timedelta(days=3)).strftime("%Y-%m-%d 00:00:00"),
+            (as_of + timedelta(days=1)).strftime("%Y-%m-%d 00:00:00"),
+        ],
     )
     if news_df is not None and not news_df.empty:
         for _, row in news_df.iterrows():

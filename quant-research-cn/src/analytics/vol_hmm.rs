@@ -4,11 +4,12 @@
 ///   State 0 (low_vol): market in quiet/calm regime
 ///   State 1 (high_vol): market in stressed/turbulent regime
 ///
-/// Uses Garman-Klass log-variance as observation (better Gaussian fit than raw vol).
-/// Outputs: P(high_vol), P(high_vol_tomorrow), rv_gk_20d, vol_regime_duration.
+/// Uses cross-sectional limit-censored Tobit log-variance as observation.
+/// Outputs: P(high_vol), P(high_vol_tomorrow), rv_tobit_20d, vol_regime_duration.
 use anyhow::Result;
 use chrono::NaiveDate;
 use duckdb::Connection;
+use std::collections::BTreeMap;
 use tracing::{info, warn};
 
 use super::rv;
@@ -31,55 +32,27 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     let benchmark = &cfg.universe.benchmark;
     let date_str = as_of.to_string();
 
-    // Query benchmark OHLC (latest 500 bars, DESC then reverse for correct order)
-    let mut stmt = db.prepare(
-        "SELECT trade_date, open, high, low, close
-         FROM prices
-         WHERE ts_code = ? AND trade_date <= ?
-         ORDER BY trade_date DESC
-         LIMIT 500",
-    )?;
-
-    let mut data: Vec<(String, f64, f64, f64, f64)> = stmt
-        .query_map(duckdb::params![benchmark, date_str], |row| {
-            Ok((
-                row.get::<_, String>(0).unwrap_or_default(),
-                row.get::<_, Option<f64>>(1).unwrap_or(None).unwrap_or(0.0),
-                row.get::<_, Option<f64>>(2).unwrap_or(None).unwrap_or(0.0),
-                row.get::<_, Option<f64>>(3).unwrap_or(None).unwrap_or(0.0),
-                row.get::<_, Option<f64>>(4).unwrap_or(None).unwrap_or(0.0),
-            ))
-        })?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    // Reverse to chronological order (we queried DESC)
-    data.reverse();
-
-    if data.len() < 100 {
+    let points = load_market_censored_vol_points(db, as_of)?;
+    if points.len() < 100 {
         info!(
-            n = data.len(),
-            "insufficient OHLC data for vol_hmm, skipping"
+            n = points.len(),
+            "insufficient censored market vol data for vol_hmm, skipping"
         );
         return Ok(0);
     }
 
-    // Build OHLC bars and log-variance observations
-    let bars: Vec<(f64, f64, f64, f64)> = data
-        .iter()
-        .map(|(_, o, h, l, c)| (*o, *h, *l, *c))
-        .filter(|(o, h, l, c)| *o > 0.0 && *h > 0.0 && *l > 0.0 && *c > 0.0)
-        .collect();
-
-    if bars.len() < 100 {
-        info!(n = bars.len(), "insufficient valid OHLC bars for vol_hmm");
-        return Ok(0);
-    }
-
-    let log_vars = rv::log_variance_series(&bars);
-
-    // Also compute current 20-day realized vol (GK)
-    let rv_gk_20d = rv::rolling_gk_vol(&bars, 20);
+    let log_vars = rv::log_tobit_variance_series(&points);
+    let rv_tobit_20d = rv::rolling_tobit_vol(&points, 20);
+    let rv_raw_20d = rv::rolling_raw_cross_section_vol(&points, 20);
+    let latest = points.last().expect("points checked non-empty");
+    let recent_n: usize = points.iter().rev().take(20).map(|point| point.n).sum();
+    let recent_limit_up: usize = points.iter().rev().take(20).map(|point| point.limit_up).sum();
+    let recent_limit_down: usize = points.iter().rev().take(20).map(|point| point.limit_down).sum();
+    let censor_ratio_20d = if recent_n == 0 {
+        0.0
+    } else {
+        (recent_limit_up + recent_limit_down) as f64 / recent_n as f64
+    };
 
     // Initialize HMM via percentile split on log-variance
     let mut hmm = initialize_percentile(&log_vars);
@@ -152,7 +125,9 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     info!(
         p_high_vol = format!("{:.3}", p_high_vol),
         p_high_vol_tomorrow = format!("{:.3}", p_high_vol_tomorrow),
-        rv_gk_20d = format!("{:.2}", rv_gk_20d),
+        rv_tobit_20d = format!("{:.2}", rv_tobit_20d),
+        rv_raw_20d = format!("{:.2}", rv_raw_20d),
+        censor_ratio_20d = format!("{:.4}", censor_ratio_20d),
         regime = current_regime,
         duration = regime_duration,
         vol_low = format!("{:.1}%", vol_state0),
@@ -161,6 +136,14 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
         "vol_hmm regime computed"
     );
 
+    db.execute(
+        "DELETE FROM analytics
+         WHERE ts_code = ?
+           AND as_of = CAST(? AS DATE)
+           AND module = ?",
+        duckdb::params![MARKET_CODE, &date_str, MODULE],
+    )?;
+
     // Write analytics rows
     let mut insert = db.prepare(
         "INSERT OR REPLACE INTO analytics (ts_code, as_of, module, metric, value, detail)
@@ -168,9 +151,17 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     )?;
 
     let detail = format!(
-        r#"{{"benchmark":"{}","n":{},"converged":{},"mu_logvar":[{:.4},{:.4}],"sigma_logvar":[{:.4},{:.4}],"vol_approx":[{:.1},{:.1}],"regime":"{}","duration":{}}}"#,
+        r#"{{"source":"cross_section_limit_tobit","benchmark":"{}","n":{},"latest_date":"{}","latest_cross_section_n":{},"latest_limit_up":{},"latest_limit_down":{},"latest_censor_ratio":{:.6},"censor_ratio_20d":{:.6},"rv_tobit_20d":{:.4},"rv_raw_20d":{:.4},"converged":{},"mu_logvar":[{:.4},{:.4}],"sigma_logvar":[{:.4},{:.4}],"vol_approx":[{:.1},{:.1}],"regime":"{}","duration":{}}}"#,
         benchmark,
         log_vars.len(),
+        latest.date,
+        latest.n,
+        latest.limit_up,
+        latest.limit_down,
+        latest.censor_ratio(),
+        censor_ratio_20d,
+        rv_tobit_20d,
+        rv_raw_20d,
         converged,
         hmm.mu[0],
         hmm.mu[1],
@@ -185,7 +176,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     // p_high_vol — current probability of being in high-vol regime
     insert.execute(duckdb::params![
         MARKET_CODE,
-        date_str,
+        &date_str,
         MODULE,
         "p_high_vol",
         p_high_vol,
@@ -195,27 +186,63 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     // p_high_vol_tomorrow — 1-step-ahead forecast
     insert.execute(duckdb::params![
         MARKET_CODE,
-        date_str,
+        &date_str,
         MODULE,
         "p_high_vol_tomorrow",
         p_high_vol_tomorrow,
         None::<String>,
     ])?;
 
-    // rv_gk_20d — current 20-day realized vol (GK, annualized %)
+    // rv_tobit_20d — main A-share vol input: limit-censored cross-section vol.
     insert.execute(duckdb::params![
         MARKET_CODE,
-        date_str,
+        &date_str,
         MODULE,
-        "rv_gk_20d",
-        rv_gk_20d,
+        "rv_tobit_20d",
+        rv_tobit_20d,
+        None::<String>,
+    ])?;
+
+    insert.execute(duckdb::params![
+        MARKET_CODE,
+        &date_str,
+        MODULE,
+        "rv_raw_20d",
+        rv_raw_20d,
+        None::<String>,
+    ])?;
+
+    insert.execute(duckdb::params![
+        MARKET_CODE,
+        &date_str,
+        MODULE,
+        "limit_censor_ratio_20d",
+        censor_ratio_20d,
+        None::<String>,
+    ])?;
+
+    insert.execute(duckdb::params![
+        MARKET_CODE,
+        &date_str,
+        MODULE,
+        "limit_up_count_20d",
+        recent_limit_up as f64,
+        None::<String>,
+    ])?;
+
+    insert.execute(duckdb::params![
+        MARKET_CODE,
+        &date_str,
+        MODULE,
+        "limit_down_count_20d",
+        recent_limit_down as f64,
         None::<String>,
     ])?;
 
     // vol_regime_duration
     insert.execute(duckdb::params![
         MARKET_CODE,
-        date_str,
+        &date_str,
         MODULE,
         "vol_regime_duration",
         regime_duration as f64,
@@ -224,6 +251,70 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
 
     info!("vol_hmm analytics written");
     Ok(1)
+}
+
+fn load_market_censored_vol_points(
+    db: &Connection,
+    as_of: NaiveDate,
+) -> Result<Vec<rv::CensoredVolPoint>> {
+    let mut grouped: BTreeMap<String, Vec<rv::CensoredReturn>> = BTreeMap::new();
+    let mut stmt = db.prepare(
+        "WITH recent_dates AS (
+             SELECT DISTINCT trade_date
+             FROM prices
+             WHERE trade_date <= CAST(? AS DATE)
+             ORDER BY trade_date DESC
+             LIMIT 520
+         )
+         SELECT CAST(p.trade_date AS VARCHAR),
+                p.ts_code,
+                COALESCE(sb.name, ''),
+                p.pct_chg,
+                p.high,
+                p.low,
+                p.close
+         FROM prices p
+         INNER JOIN recent_dates rd ON p.trade_date = rd.trade_date
+         INNER JOIN stock_basic sb ON p.ts_code = sb.ts_code
+         WHERE COALESCE(sb.list_status, 'L') = 'L'
+           AND p.pct_chg IS NOT NULL
+           AND p.high IS NOT NULL
+           AND p.low IS NOT NULL
+           AND p.close IS NOT NULL
+           AND p.close > 0
+         ORDER BY p.trade_date, p.ts_code",
+    )?;
+
+    let rows = stmt.query_map(duckdb::params![as_of.to_string()], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, f64>(3)?,
+            row.get::<_, f64>(4)?,
+            row.get::<_, f64>(5)?,
+            row.get::<_, f64>(6)?,
+        ))
+    })?;
+
+    for row in rows {
+        let (date, ts_code, name, pct_chg, high, low, close) = row?;
+        if high <= 0.0 || low <= 0.0 || close <= 0.0 || high < low {
+            continue;
+        }
+        if let Some(obs) = rv::censored_return_from_pct(&ts_code, &name, pct_chg, high, low, close)
+        {
+            grouped.entry(date).or_default().push(obs);
+        }
+    }
+
+    let mut points = Vec::with_capacity(grouped.len());
+    for (date, observations) in grouped {
+        if let Some(point) = rv::daily_censored_vol_point(date, &observations) {
+            points.push(point);
+        }
+    }
+    Ok(points)
 }
 
 /// Initialize via percentile split: bottom 60% = low_vol, top 40% = high_vol.
@@ -476,4 +567,223 @@ fn compute_regime_duration(observations: &[f64], hmm: &GaussianHMM) -> u32 {
     }
 
     duration
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{
+        ApiConfig, AssetClassConfig, DataConfig, EnrichmentConfig, FilterConfig, MacroConfig,
+        OutputConfig, ReportingConfig, RuntimeConfig, ScanConfig, Settings, SignalsConfig,
+        UniverseConfig,
+    };
+    use chrono::Duration;
+
+    fn test_settings() -> Settings {
+        Settings {
+            api: ApiConfig {
+                tushare_token: String::new(),
+                deepseek_key: String::new(),
+            },
+            runtime: RuntimeConfig {
+                timezone: "Asia/Shanghai".to_string(),
+                random_seed: 1,
+            },
+            universe: UniverseConfig {
+                benchmark: "000300.SH".to_string(),
+                scan: ScanConfig {
+                    csi300: true,
+                    csi500: false,
+                    csi1000: false,
+                    sse50: false,
+                },
+                asset_classes: AssetClassConfig {
+                    sector_etfs: false,
+                    bond_etfs: false,
+                    commodity_etfs: false,
+                    cross_border: false,
+                },
+                watchlist: Vec::new(),
+                filters: FilterConfig {
+                    min_avg_volume_shares: 0,
+                    min_price: 0.0,
+                },
+            },
+            output: OutputConfig {
+                max_notable_items: 10,
+                min_notable_items: 1,
+            },
+            data: DataConfig {
+                db_path: String::new(),
+                raw_db_path: String::new(),
+                research_db_path: String::new(),
+                report_db_path: String::new(),
+                dev_db_path: String::new(),
+                use_dev_for_research: false,
+                constituent_refresh_days: 7,
+            },
+            signals: SignalsConfig {
+                momentum_windows: vec![5, 20],
+                atr_period: 14,
+                ma_filter_window: 120,
+                flow_ewma_halflife: 10,
+                unlock_lookahead_days: 30,
+            },
+            reporting: ReportingConfig {
+                anthropic_model: String::new(),
+                anthropic_temperature: 0.0,
+                max_tokens: 0,
+                recipients: Vec::new(),
+            },
+            r#macro: MacroConfig::default(),
+            enrichment: EnrichmentConfig::default(),
+        }
+    }
+
+    fn init_test_db(db: &Connection) -> Result<()> {
+        db.execute_batch(
+            "CREATE TABLE prices (
+                 ts_code VARCHAR NOT NULL,
+                 trade_date DATE NOT NULL,
+                 open DOUBLE,
+                 high DOUBLE,
+                 low DOUBLE,
+                 close DOUBLE,
+                 pre_close DOUBLE,
+                 change DOUBLE,
+                 pct_chg DOUBLE,
+                 vol DOUBLE,
+                 amount DOUBLE,
+                 adj_factor DOUBLE,
+                 PRIMARY KEY (ts_code, trade_date)
+             );
+             CREATE TABLE stock_basic (
+                 ts_code VARCHAR NOT NULL PRIMARY KEY,
+                 symbol VARCHAR,
+                 name VARCHAR,
+                 area VARCHAR,
+                 industry VARCHAR,
+                 market VARCHAR,
+                 list_date VARCHAR,
+                 list_status VARCHAR
+             );
+             CREATE TABLE analytics (
+                 ts_code VARCHAR NOT NULL,
+                 as_of DATE NOT NULL,
+                 module VARCHAR NOT NULL,
+                 metric VARCHAR NOT NULL,
+                 value DOUBLE,
+                 detail VARCHAR,
+                 PRIMARY KEY (ts_code, as_of, module, metric)
+             );",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn compute_replaces_stale_gk_metric_with_tobit_metrics() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        init_test_db(&db)?;
+
+        db.execute_batch("BEGIN TRANSACTION")?;
+        {
+            let mut insert_stock = db.prepare(
+                "INSERT INTO stock_basic
+                 (ts_code, symbol, name, area, industry, market, list_date, list_status)
+                 VALUES (?, ?, ?, '', '', '主板', '20200101', 'L')",
+            )?;
+            for stock_idx in 0..50 {
+                let ts_code = format!("{:06}.SH", 600000 + stock_idx);
+                insert_stock.execute(duckdb::params![
+                    &ts_code,
+                    format!("{:06}", 600000 + stock_idx),
+                    format!("测试{stock_idx}")
+                ])?;
+            }
+        }
+
+        let start = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+        {
+            let mut insert_price = db.prepare(
+                "INSERT INTO prices
+                 (ts_code, trade_date, open, high, low, close, pct_chg)
+                 VALUES (?, CAST(? AS DATE), ?, ?, ?, ?, ?)",
+            )?;
+            for day in 0..100 {
+                let trade_date = start + Duration::days(day);
+                let date_str = trade_date.to_string();
+                for stock_idx in 0..50 {
+                    let ts_code = format!("{:06}.SH", 600000 + stock_idx);
+                    let base = 10.0 + stock_idx as f64 * 0.05 + day as f64 * 0.01;
+                    let pct_chg = if day % 17 == 0 && stock_idx % 10 == 0 {
+                        10.0
+                    } else if day % 19 == 0 && stock_idx % 15 == 0 {
+                        -10.0
+                    } else {
+                        (stock_idx as f64 % 9.0 - 4.0) * 0.35
+                            + (day as f64 % 7.0 - 3.0) * 0.18
+                    };
+                    let close = base * (1.0 + pct_chg / 100.0);
+                    let (high, low) = if pct_chg >= 9.8 {
+                        (close, base.min(close) * 0.99)
+                    } else if pct_chg <= -9.8 {
+                        (base.max(close) * 1.01, close)
+                    } else {
+                        (base.max(close) * 1.01, base.min(close) * 0.99)
+                    };
+                    insert_price.execute(duckdb::params![
+                        &ts_code, &date_str, base, high, low, close, pct_chg
+                    ])?;
+                }
+            }
+        }
+        db.execute_batch("COMMIT")?;
+
+        let as_of = start + Duration::days(99);
+        let as_of_str = as_of.to_string();
+        db.execute(
+            "INSERT INTO analytics (ts_code, as_of, module, metric, value, detail)
+             VALUES ('_MARKET', CAST(? AS DATE), 'vol_hmm', 'rv_gk_20d', 12.3, NULL)",
+            duckdb::params![&as_of_str],
+        )?;
+
+        let written = compute(&db, &test_settings(), as_of)?;
+        assert_eq!(written, 1);
+
+        let stale_gk: i64 = db.query_row(
+            "SELECT COUNT(*) FROM analytics
+             WHERE ts_code = '_MARKET'
+               AND as_of = CAST(? AS DATE)
+               AND module = 'vol_hmm'
+               AND metric = 'rv_gk_20d'",
+            duckdb::params![&as_of_str],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stale_gk, 0);
+
+        let rv_tobit: f64 = db.query_row(
+            "SELECT value FROM analytics
+             WHERE ts_code = '_MARKET'
+               AND as_of = CAST(? AS DATE)
+               AND module = 'vol_hmm'
+               AND metric = 'rv_tobit_20d'",
+            duckdb::params![&as_of_str],
+            |row| row.get(0),
+        )?;
+        assert!(rv_tobit > 0.0);
+
+        let source: String = db.query_row(
+            "SELECT json_extract_string(detail, '$.source')
+             FROM analytics
+             WHERE ts_code = '_MARKET'
+               AND as_of = CAST(? AS DATE)
+               AND module = 'vol_hmm'
+               AND metric = 'p_high_vol'",
+            duckdb::params![&as_of_str],
+            |row| row.get(0),
+        )?;
+        assert_eq!(source, "cross_section_limit_tobit");
+
+        Ok(())
+    }
 }

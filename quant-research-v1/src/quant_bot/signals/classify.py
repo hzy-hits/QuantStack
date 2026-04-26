@@ -438,8 +438,6 @@ def main_signal_gate(item: dict[str, Any], headline_gate: dict[str, Any] | None)
     rr_ratio = (item.get("risk_params") or {}).get("rr_ratio")
 
     blockers: list[str] = []
-    if headline_mode != "trend":
-        blockers.append(f"headline_gate_{headline_mode}")
     if report_bucket != "core":
         blockers.append(f"report_lane_{report_bucket or 'unknown'}")
     if confidence not in {"HIGH", "MODERATE"}:
@@ -486,6 +484,6 @@ def apply_main_signal_gate(bundle: dict[str, Any]) -> dict[str, Any]:
     bundle["main_signal_summary"] = {
         "headline_mode": headline_gate.get("mode"),
         "counts": counts,
-        "rule": "Main signal requires trend headline, core lane, HIGH/MODERATE directional evidence, executable_now, and no exhaustion blocker.",
+        "rule": "Main signal requires core lane, HIGH/MODERATE directional evidence, executable_now, sufficient RR, and no exhaustion blocker. Headline mode is advisory context only.",
     }
     return bundle

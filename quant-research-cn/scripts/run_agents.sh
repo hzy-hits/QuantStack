@@ -14,6 +14,8 @@
 #
 # Environment:
 #   SEND_EMAIL=1  — trigger email delivery after report generation
+#   QUANT_DELIVERY_MODE=test|prod  — test sends only to the test recipient
+#   QUANT_TEST_RECIPIENT=email[,email]  — optional test recipient override
 
 set -euo pipefail
 
@@ -647,10 +649,14 @@ if [[ "${SEND_EMAIL:-}" == "1" ]]; then
     if [[ "$SLOT" != "daily" ]]; then
         SUBJECT="A股量化研究${SLOT_LABEL_CN}日报 — $DATE"
     fi
+    SEND_ARGS=(--subject "$SUBJECT" --delivery-mode "${QUANT_DELIVERY_MODE:-test}")
+    if [[ -n "${QUANT_TEST_RECIPIENT:-}" ]]; then
+        SEND_ARGS+=(--test-recipient "$QUANT_TEST_RECIPIENT")
+    fi
     if [[ -d "$CHART_DIR" ]]; then
-        python3 "$PROJ_DIR/scripts/send_email.py" "$FINAL_REPORT" --charts "$CHART_DIR" --subject "$SUBJECT"
+        python3 "$PROJ_DIR/scripts/send_email.py" "$FINAL_REPORT" --charts "$CHART_DIR" "${SEND_ARGS[@]}"
     else
-        python3 "$PROJ_DIR/scripts/send_email.py" "$FINAL_REPORT" --subject "$SUBJECT"
+        python3 "$PROJ_DIR/scripts/send_email.py" "$FINAL_REPORT" "${SEND_ARGS[@]}"
     fi
     echo "  Email sent."
 fi
