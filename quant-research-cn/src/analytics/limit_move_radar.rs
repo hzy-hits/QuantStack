@@ -27,7 +27,9 @@ struct RawRow {
     circ_mv: f64,
     amount: f64,
     net_mf_amount: f64,
+    net_mf_amount_raw: f64,
     elg_net_amount: f64,
+    flow_conflict_flag: bool,
     information_score: f64,
     setup_score: f64,
     continuation_score: f64,
@@ -51,6 +53,7 @@ struct LimitMoveFeatures {
     turnover_rate: f64,
     total_mv: f64,
     net_mf_amount: f64,
+    flow_conflict_flag: bool,
     elg_net_amount: f64,
     information_score: f64,
     setup_score: f64,
@@ -126,6 +129,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
                 turnover_rate: row.turnover_rate,
                 total_mv: row.total_mv,
                 net_mf_amount: row.net_mf_amount,
+                flow_conflict_flag: row.flow_conflict_flag,
                 elg_net_amount: row.elg_net_amount,
                 information_score: row.information_score,
                 setup_score: row.setup_score,
@@ -156,8 +160,11 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
                 "total_mv": round2(row.total_mv),
                 "circ_mv": round2(row.circ_mv),
                 "amount": round2(row.amount),
+                "large_plus_extra_net": round2(row.net_mf_amount),
                 "net_mf_amount": round2(row.net_mf_amount),
+                "net_mf_amount_raw": round2(row.net_mf_amount_raw),
                 "elg_net_amount": round2(row.elg_net_amount),
+                "flow_conflict_flag": row.flow_conflict_flag,
                 "information_score": round3(row.information_score),
                 "setup_score": round3(row.setup_score),
                 "continuation_score": round3(row.continuation_score),
@@ -239,7 +246,11 @@ fn append_next_day_label(
     for (metric, value) in [
         (
             "next_day_limit_up_label",
-            if censor == CensorSide::Right { 1.0 } else { 0.0 },
+            if censor == CensorSide::Right {
+                1.0
+            } else {
+                0.0
+            },
         ),
         (
             "next_day_limit_down_label",
@@ -295,6 +306,9 @@ fn load_rows(db: &Connection, as_of: NaiveDate) -> Result<Vec<RawRow>> {
             SELECT
                 ts_code,
                 MAX(CASE WHEN module = 'flow' AND metric = 'information_score' THEN value END) AS information_score,
+                MAX(CASE WHEN module = 'flow_audit' AND metric = 'large_plus_extra_net' THEN value END) AS large_plus_extra_net,
+                MAX(CASE WHEN module = 'flow_audit' AND metric = 'net_mf_amount_raw' THEN value END) AS net_mf_amount_raw,
+                MAX(CASE WHEN module = 'flow_audit' AND metric = 'flow_conflict_flag' THEN value END) AS flow_conflict_flag,
                 MAX(CASE WHEN module = 'setup_alpha' AND metric = 'setup_score' THEN value END) AS setup_score,
                 MAX(CASE WHEN module = 'continuation_vs_fade' AND metric = 'continuation_score' THEN value END) AS continuation_score,
                 MAX(CASE WHEN module = 'continuation_vs_fade' AND metric = 'fade_risk' THEN value END) AS fade_risk
@@ -302,6 +316,7 @@ fn load_rows(db: &Connection, as_of: NaiveDate) -> Result<Vec<RawRow>> {
             WHERE as_of = CAST(? AS DATE)
               AND (
                   (module = 'flow' AND metric = 'information_score')
+               OR (module = 'flow_audit' AND metric IN ('large_plus_extra_net', 'net_mf_amount_raw', 'flow_conflict_flag'))
                OR (module = 'setup_alpha' AND metric = 'setup_score')
                OR (module = 'continuation_vs_fade' AND metric IN ('continuation_score', 'fade_risk'))
               )
@@ -326,9 +341,16 @@ fn load_rows(db: &Connection, as_of: NaiveDate) -> Result<Vec<RawRow>> {
             COALESCE(dbasic.volume_ratio, 0) AS daily_volume_ratio,
             COALESCE(dbasic.total_mv, 0) AS total_mv,
             COALESCE(dbasic.circ_mv, 0) AS circ_mv,
-            COALESCE(mf.net_mf_amount, 0) AS net_mf_amount,
+            COALESCE(
+                an.large_plus_extra_net,
+                COALESCE(mf.buy_lg_amount, 0) - COALESCE(mf.sell_lg_amount, 0)
+              + COALESCE(mf.buy_elg_amount, 0) - COALESCE(mf.sell_elg_amount, 0),
+                0
+            ) AS large_plus_extra_net,
+            COALESCE(an.net_mf_amount_raw, mf.net_mf_amount, 0) AS net_mf_amount_raw,
             COALESCE(mf.buy_elg_amount, 0) AS buy_elg_amount,
             COALESCE(mf.sell_elg_amount, 0) AS sell_elg_amount,
+            COALESCE(an.flow_conflict_flag, 0) AS flow_conflict_flag,
             COALESCE(an.information_score, 0) AS information_score,
             COALESCE(an.setup_score, 0) AS setup_score,
             COALESCE(an.continuation_score, 0) AS continuation_score,
@@ -358,50 +380,49 @@ fn load_rows(db: &Connection, as_of: NaiveDate) -> Result<Vec<RawRow>> {
     ";
 
     let mut stmt = db.prepare(sql)?;
-    let rows = stmt.query_map(
-        duckdb::params![&date_str, &lower_bound, &date_str],
-        |row| {
-            let ts_code = row.get::<_, String>(0)?;
-            let close = row.get::<_, f64>(4).unwrap_or(0.0);
-            let close_5d_ago = row.get::<_, f64>(10).unwrap_or(0.0);
-            let close_20d_ago = row.get::<_, f64>(11).unwrap_or(0.0);
-            let vol_now = row.get::<_, f64>(8).unwrap_or(0.0);
-            let avg_vol_base = row.get::<_, f64>(12).unwrap_or(0.0);
-            let daily_volume_ratio = row.get::<_, f64>(15).unwrap_or(0.0);
-            let volume_ratio = if daily_volume_ratio > 0.0 {
-                daily_volume_ratio
-            } else if avg_vol_base > 0.0 {
-                vol_now / avg_vol_base
-            } else {
-                0.0
-            };
-            Ok(RawRow {
-                ts_code,
-                latest_trade_date: row.get::<_, String>(1)?,
-                name: row.get::<_, String>(2).unwrap_or_default(),
-                industry: row.get::<_, String>(3).unwrap_or_default(),
-                close,
-                high: row.get::<_, f64>(5).unwrap_or(0.0),
-                low: row.get::<_, f64>(6).unwrap_or(0.0),
-                ret_1d: row.get::<_, f64>(7).unwrap_or(0.0),
-                ret_5d: pct_return(close, close_5d_ago),
-                ret_20d: pct_return(close, close_20d_ago),
-                volume_ratio,
-                turnover_rate: row.get::<_, f64>(14).unwrap_or(0.0),
-                total_mv: row.get::<_, f64>(16).unwrap_or(0.0),
-                circ_mv: row.get::<_, f64>(17).unwrap_or(0.0),
-                amount: row.get::<_, f64>(9).unwrap_or(0.0),
-                net_mf_amount: row.get::<_, f64>(18).unwrap_or(0.0),
-                elg_net_amount: row.get::<_, f64>(19).unwrap_or(0.0)
-                    - row.get::<_, f64>(20).unwrap_or(0.0),
-                information_score: row.get::<_, f64>(21).unwrap_or(0.0),
-                setup_score: row.get::<_, f64>(22).unwrap_or(0.0),
-                continuation_score: row.get::<_, f64>(23).unwrap_or(0.0),
-                fade_risk: row.get::<_, f64>(24).unwrap_or(0.0),
-                std20_ret: row.get::<_, f64>(13).unwrap_or(0.0),
-            })
-        },
-    )?;
+    let rows = stmt.query_map(duckdb::params![&date_str, &lower_bound, &date_str], |row| {
+        let ts_code = row.get::<_, String>(0)?;
+        let close = row.get::<_, f64>(4).unwrap_or(0.0);
+        let close_5d_ago = row.get::<_, f64>(10).unwrap_or(0.0);
+        let close_20d_ago = row.get::<_, f64>(11).unwrap_or(0.0);
+        let vol_now = row.get::<_, f64>(8).unwrap_or(0.0);
+        let avg_vol_base = row.get::<_, f64>(12).unwrap_or(0.0);
+        let daily_volume_ratio = row.get::<_, f64>(15).unwrap_or(0.0);
+        let volume_ratio = if daily_volume_ratio > 0.0 {
+            daily_volume_ratio
+        } else if avg_vol_base > 0.0 {
+            vol_now / avg_vol_base
+        } else {
+            0.0
+        };
+        Ok(RawRow {
+            ts_code,
+            latest_trade_date: row.get::<_, String>(1)?,
+            name: row.get::<_, String>(2).unwrap_or_default(),
+            industry: row.get::<_, String>(3).unwrap_or_default(),
+            close,
+            high: row.get::<_, f64>(5).unwrap_or(0.0),
+            low: row.get::<_, f64>(6).unwrap_or(0.0),
+            ret_1d: row.get::<_, f64>(7).unwrap_or(0.0),
+            ret_5d: pct_return(close, close_5d_ago),
+            ret_20d: pct_return(close, close_20d_ago),
+            volume_ratio,
+            turnover_rate: row.get::<_, f64>(14).unwrap_or(0.0),
+            total_mv: row.get::<_, f64>(16).unwrap_or(0.0),
+            circ_mv: row.get::<_, f64>(17).unwrap_or(0.0),
+            amount: row.get::<_, f64>(9).unwrap_or(0.0),
+            net_mf_amount: row.get::<_, f64>(18).unwrap_or(0.0),
+            net_mf_amount_raw: row.get::<_, f64>(19).unwrap_or(0.0),
+            elg_net_amount: row.get::<_, f64>(20).unwrap_or(0.0)
+                - row.get::<_, f64>(21).unwrap_or(0.0),
+            flow_conflict_flag: row.get::<_, f64>(22).unwrap_or(0.0) >= 0.5,
+            information_score: row.get::<_, f64>(23).unwrap_or(0.0),
+            setup_score: row.get::<_, f64>(24).unwrap_or(0.0),
+            continuation_score: row.get::<_, f64>(25).unwrap_or(0.0),
+            fade_risk: row.get::<_, f64>(26).unwrap_or(0.0),
+            std20_ret: row.get::<_, f64>(13).unwrap_or(0.0),
+        })
+    })?;
 
     Ok(rows.filter_map(|row| row.ok()).collect())
 }
@@ -409,17 +430,19 @@ fn load_rows(db: &Connection, as_of: NaiveDate) -> Result<Vec<RawRow>> {
 fn load_next_day_labels(db: &Connection, as_of: NaiveDate) -> Result<Vec<NextDayLabelRow>> {
     let max_label_date = latest_closed_cst_date().to_string();
     let as_of_str = as_of.to_string();
-    let next_date = db.query_row(
-        "SELECT CAST(MIN(trade_date) AS VARCHAR)
+    let mut next_stmt = db.prepare(
+        "SELECT CAST(trade_date AS VARCHAR)
          FROM prices
          WHERE trade_date > CAST(? AS DATE)
-           AND trade_date <= CAST(? AS DATE)",
-        duckdb::params![&as_of_str, &max_label_date],
-        |row| row.get::<_, Option<String>>(0),
+           AND trade_date <= CAST(? AS DATE)
+         ORDER BY trade_date
+         LIMIT 1",
     )?;
-    let Some(next_date) = next_date else {
+    let mut next_rows = next_stmt.query(duckdb::params![&as_of_str, &max_label_date])?;
+    let Some(next_row) = next_rows.next()? else {
         return Ok(Vec::new());
     };
+    let next_date = next_row.get::<_, String>(0)?;
 
     let mut stmt = db.prepare(
         "SELECT p.ts_code,
@@ -502,6 +525,11 @@ fn score_limit_up_candidate(f: &LimitMoveFeatures) -> f64 {
         + 0.35 * signed_flow_score(f.elg_net_amount)
         + 0.20 * f.information_score.clamp(0.0, 1.0))
     .clamp(0.0, 1.0);
+    let flow = if f.flow_conflict_flag {
+        (flow * 0.72).clamp(0.0, 1.0)
+    } else {
+        flow
+    };
     let structure = f
         .setup_score
         .max(f.continuation_score * 0.90)
@@ -535,9 +563,14 @@ fn score_limit_down_risk(f: &LimitMoveFeatures) -> f64 {
     let turnover = sigmoid((f.turnover_rate - 4.0) / 3.0);
     let volume = sigmoid((f.volume_ratio - 1.10) / 0.35);
     let fragile_spike = (sigmoid((f.ret_20d - 12.0) / 8.0) * current_down).clamp(0.0, 1.0);
-    let flow_negative =
-        (0.60 * signed_flow_score(-f.net_mf_amount) + 0.40 * signed_flow_score(-f.elg_net_amount))
-            .clamp(0.0, 1.0);
+    let flow_negative = (0.60 * signed_flow_score(-f.net_mf_amount)
+        + 0.40 * signed_flow_score(-f.elg_net_amount))
+    .clamp(0.0, 1.0);
+    let flow_negative = if f.flow_conflict_flag {
+        (flow_negative + 0.08).min(1.0)
+    } else {
+        flow_negative
+    };
     let small_mid = small_mid_cap_score(f.total_mv);
 
     let mut score = 0.18 * short_weak
@@ -585,6 +618,9 @@ fn limit_up_labels(row: &RawRow, f: &LimitMoveFeatures, board_limit: f64) -> Vec
     if row.net_mf_amount <= 0.0 && row.elg_net_amount <= 0.0 {
         labels.push("flow_not_confirmed");
     }
+    if row.flow_conflict_flag {
+        labels.push("flow_scope_conflict");
+    }
     if row.ret_20d >= 60.0 {
         labels.push("overheated_20d");
     }
@@ -607,6 +643,9 @@ fn limit_down_labels(row: &RawRow, f: &LimitMoveFeatures, _board_limit: f64) -> 
     }
     if row.net_mf_amount < 0.0 {
         labels.push("moneyflow_out");
+    }
+    if row.flow_conflict_flag {
+        labels.push("flow_scope_conflict");
     }
     if row.elg_net_amount < 0.0 {
         labels.push("extra_large_order_out");
@@ -634,8 +673,7 @@ fn industry_weakness_score(heat: &IndustryHeat) -> f64 {
     if heat.count < 3 {
         return 0.0;
     }
-    (0.55 * sigmoid((-heat.avg_ret_1d - 0.6) / 1.1) + 0.45 * (1.0 - heat.hot_ratio))
-        .clamp(0.0, 1.0)
+    (0.55 * sigmoid((-heat.avg_ret_1d - 0.6) / 1.1) + 0.45 * (1.0 - heat.hot_ratio)).clamp(0.0, 1.0)
 }
 
 fn board_scope(ts_code: &str, name: &str) -> &'static str {
@@ -700,6 +738,7 @@ mod tests {
             turnover_rate: 7.0,
             total_mv: 800_000.0,
             net_mf_amount: 8_000.0,
+            flow_conflict_flag: false,
             elg_net_amount: 3_000.0,
             information_score: 0.65,
             setup_score: 0.58,

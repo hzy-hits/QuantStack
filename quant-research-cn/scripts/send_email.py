@@ -116,10 +116,6 @@ def resolve_recipients(
     if configured:
         return configured, "config.reporting.test_recipients"
 
-    prod = [r for r in _list_config_recipients(reporting.get("recipients")) if r != "you@example.com"]
-    if prod:
-        return [prod[0]], "first configured production recipient"
-
     raise SystemExit(
         "Test delivery needs a recipient. Set --test-recipient, "
         "QUANT_TEST_RECIPIENT, or reporting.test_recipients in config.yaml."

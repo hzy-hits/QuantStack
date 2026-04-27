@@ -373,6 +373,7 @@ fn ensure_review_backfill_analytics(
     as_of: NaiveDate,
 ) -> Result<()> {
     for module in [
+        "flow_audit",
         "setup_alpha",
         "continuation_vs_fade",
         "limit_move_radar",
@@ -426,9 +427,17 @@ fn stage_raw_to_research(cfg: &config::Settings) -> Result<()> {
 
 fn prepare_incremental_research(cfg: &config::Settings) -> Result<()> {
     if storage::exists(cfg.data.research_path()) {
+        storage::restore_report_review_history(cfg.data.report_path(), cfg.data.research_path())
+            .with_context(|| {
+                format!(
+                    "failed to restore report review history from {} into existing research snapshot {}",
+                    cfg.data.report_path(),
+                    cfg.data.research_path()
+                )
+            })?;
         info!(
             research = cfg.data.research_path(),
-            "reusing existing research snapshot for incremental analysis"
+            "reusing existing research snapshot for incremental analysis with report review history"
         );
         return Ok(());
     }
@@ -495,8 +504,9 @@ fn ensure_report_snapshot(cfg: &config::Settings) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::prepare_incremental_research;
-    use crate::config::Settings;
+    use crate::{config::Settings, storage};
     use anyhow::Result;
+    use duckdb::params;
     use std::fs;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -574,6 +584,102 @@ reporting:
 
         assert_eq!(fs::read(&research_path)?, b"research-snapshot");
         assert_eq!(fs::read(&raw_path)?, b"raw-snapshot");
+
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_incremental_research_restores_review_history_into_existing_research() -> Result<()> {
+        let root = temp_test_dir("enrich-restore-review-history");
+        fs::create_dir_all(&root)?;
+
+        let raw_path = root.join("raw.duckdb");
+        let research_path = root.join("research.duckdb");
+        let report_path = root.join("report.duckdb");
+        let dev_path = root.join("dev.duckdb");
+        fs::write(&raw_path, b"raw-snapshot")?;
+
+        let research_db = storage::open(research_path.to_str().expect("valid research path"))?;
+        research_db.execute_batch("CHECKPOINT")?;
+        drop(research_db);
+
+        let report_db = storage::open(report_path.to_str().expect("valid report path"))?;
+        report_db.execute(
+            "INSERT INTO report_decisions (
+                report_date, session, symbol, selection_status, rank_order,
+                report_bucket, signal_direction, signal_confidence, composite_score,
+                execution_mode, execution_score, max_chase_gap_pct, pullback_trigger_pct,
+                setup_score, continuation_score, fade_risk, reference_close, details_json
+             ) VALUES (
+                CAST('2026-04-24' AS DATE), 'am', '603444.SH', 'selected', 1,
+                'core', 'long', 'high', 0.8, 'trade', 0.7, 2.0, -1.5,
+                0.72, 0.68, 0.22, 397.43, '{}'
+             )",
+            params![],
+        )?;
+        report_db.execute_batch("CHECKPOINT")?;
+        drop(report_db);
+
+        let config_path = root.join("config.yaml");
+        fs::write(
+            &config_path,
+            format!(
+                r#"
+api:
+  tushare_token: ""
+runtime:
+  timezone: Asia/Shanghai
+  random_seed: 1
+universe:
+  benchmark: 000300.SH
+  scan:
+    csi300: true
+    csi500: false
+    csi1000: false
+    sse50: false
+  asset_classes:
+    sector_etfs: false
+    bond_etfs: false
+    commodity_etfs: false
+    cross_border: false
+  filters:
+    min_avg_volume_shares: 0
+    min_price: 0.0
+output:
+  max_notable_items: 10
+  min_notable_items: 1
+data:
+  raw_db_path: "{raw}"
+  research_db_path: "{research}"
+  report_db_path: "{report}"
+  dev_db_path: "{dev}"
+  constituent_refresh_days: 7
+signals:
+  momentum_windows: [5, 20]
+  atr_period: 14
+reporting:
+  anthropic_model: test
+  anthropic_temperature: 0.0
+  max_tokens: 512
+"#,
+                raw = raw_path.display(),
+                research = research_path.display(),
+                report = report_path.display(),
+                dev = dev_path.display(),
+            ),
+        )?;
+
+        let cfg = Settings::load(config_path.to_str().expect("valid config path"))?;
+        prepare_incremental_research(&cfg)?;
+
+        let research_db = storage::open(research_path.to_str().expect("valid research path"))?;
+        let count: i64 = research_db.query_row(
+            "SELECT COUNT(*) FROM report_decisions WHERE symbol = '603444.SH'",
+            params![],
+            |row| row.get(0),
+        )?;
+        assert_eq!(count, 1);
 
         let _ = fs::remove_dir_all(&root);
         Ok(())

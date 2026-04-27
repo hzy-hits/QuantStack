@@ -46,8 +46,18 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
     let rv_raw_20d = rv::rolling_raw_cross_section_vol(&points, 20);
     let latest = points.last().expect("points checked non-empty");
     let recent_n: usize = points.iter().rev().take(20).map(|point| point.n).sum();
-    let recent_limit_up: usize = points.iter().rev().take(20).map(|point| point.limit_up).sum();
-    let recent_limit_down: usize = points.iter().rev().take(20).map(|point| point.limit_down).sum();
+    let recent_limit_up: usize = points
+        .iter()
+        .rev()
+        .take(20)
+        .map(|point| point.limit_up)
+        .sum();
+    let recent_limit_down: usize = points
+        .iter()
+        .rev()
+        .take(20)
+        .map(|point| point.limit_down)
+        .sum();
     let censor_ratio_20d = if recent_n == 0 {
         0.0
     } else {
@@ -720,8 +730,7 @@ mod tests {
                     } else if day % 19 == 0 && stock_idx % 15 == 0 {
                         -10.0
                     } else {
-                        (stock_idx as f64 % 9.0 - 4.0) * 0.35
-                            + (day as f64 % 7.0 - 3.0) * 0.18
+                        (stock_idx as f64 % 9.0 - 4.0) * 0.35 + (day as f64 % 7.0 - 3.0) * 0.18
                     };
                     let close = base * (1.0 + pct_chg / 100.0);
                     let (high, low) = if pct_chg >= 9.8 {

@@ -558,4 +558,65 @@ pub const CREATE_TABLES: &str = "
         detail_json            VARCHAR,
         PRIMARY KEY (report_date, session, symbol, selection_status)
     );
+
+    CREATE TABLE IF NOT EXISTS paper_trades (
+        report_date            DATE NOT NULL,
+        session                VARCHAR NOT NULL,
+        symbol                 VARCHAR NOT NULL,
+        selection_status       VARCHAR NOT NULL,
+        strategy_family        VARCHAR NOT NULL,
+        strategy_key           VARCHAR NOT NULL,
+        execution_rule         VARCHAR NOT NULL,
+        action_intent          VARCHAR NOT NULL,
+        evaluation_date        DATE NOT NULL,
+        reference_close        DOUBLE,
+        planned_entry          DOUBLE,
+        fill_date              DATE,
+        fill_price             DOUBLE,
+        exit_date              DATE,
+        exit_price             DOUBLE,
+        fill_status            VARCHAR NOT NULL,
+        realized_ret_pct       DOUBLE,
+        max_favorable_pct      DOUBLE,
+        max_adverse_pct        DOUBLE,
+        shadow_alpha_prob      DOUBLE,
+        downside_stress        DOUBLE,
+        stale_chase_risk       DOUBLE,
+        flow_conflict_flag     BOOLEAN DEFAULT FALSE,
+        label                  VARCHAR NOT NULL,
+        detail_json            VARCHAR,
+        updated_at             TIMESTAMP DEFAULT current_timestamp,
+        PRIMARY KEY (report_date, session, symbol, selection_status, execution_rule)
+    );
+
+    CREATE TABLE IF NOT EXISTS strategy_ev (
+        as_of                  DATE NOT NULL,
+        strategy_key           VARCHAR NOT NULL,
+        strategy_family        VARCHAR NOT NULL,
+        samples                INTEGER,
+        planned_trades         INTEGER,
+        fills                  INTEGER,
+        wins                   INTEGER,
+        losses                 INTEGER,
+        fill_rate              DOUBLE,
+        win_rate_raw           DOUBLE,
+        win_rate_bayes         DOUBLE,
+        avg_win_pct            DOUBLE,
+        avg_loss_pct           DOUBLE,
+        avg_tail_loss_pct      DOUBLE,
+        avg_downside_stress    DOUBLE,
+        ev_pct                 DOUBLE,
+        risk_unit_pct          DOUBLE,
+        ev_per_risk            DOUBLE,
+        ev_norm_score          DOUBLE,
+        eligible              BOOLEAN DEFAULT FALSE,
+        fail_reasons           VARCHAR,
+        detail_json            VARCHAR,
+        updated_at             TIMESTAMP DEFAULT current_timestamp,
+        PRIMARY KEY (as_of, strategy_key)
+    );
+
+    ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS risk_unit_pct DOUBLE;
+    ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_per_risk DOUBLE;
+    ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_norm_score DOUBLE;
 ";

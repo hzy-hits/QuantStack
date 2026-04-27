@@ -142,6 +142,29 @@ impl DeliveryMode {
     }
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum DailyPipelineState {
+    ProducersReady,
+    AlphaEvaluated,
+    ReportModelWritten,
+    NarrativeExternal,
+    DeliveryReady,
+    Delivered,
+}
+
+impl DailyPipelineState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ProducersReady => "producers_ready",
+            Self::AlphaEvaluated => "alpha_evaluated",
+            Self::ReportModelWritten => "report_model_written",
+            Self::NarrativeExternal => "narrative_external",
+            Self::DeliveryReady => "delivery_ready",
+            Self::Delivered => "delivered",
+        }
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -215,6 +238,18 @@ fn run_daily(args: DailyArgs) -> Result<()> {
         .stack_root
         .canonicalize()
         .unwrap_or_else(|_| args.stack_root.clone());
+    if args.send_reports
+        && args.delivery_mode == DeliveryMode::Test
+        && args.test_recipient.is_none()
+        && std::env::var("QUANT_TEST_RECIPIENT")
+            .ok()
+            .filter(|v| !v.trim().is_empty())
+            .is_none()
+    {
+        anyhow::bail!(
+            "test delivery requires --test-recipient or QUANT_TEST_RECIPIENT; refusing to fall back to production recipients"
+        );
+    }
     if args.run_producers {
         run_producers(
             &stack_root,
@@ -224,6 +259,7 @@ fn run_daily(args: DailyArgs) -> Result<()> {
             args.dry_run,
         )?;
     }
+    enter_daily_state(DailyPipelineState::ProducersReady, &args, &markets);
 
     let alpha_args = AlphaEvaluateArgs {
         date: args.date.clone(),
@@ -246,6 +282,7 @@ fn run_daily(args: DailyArgs) -> Result<()> {
         );
     } else {
         run_alpha_evaluate(alpha_args)?;
+        enter_daily_state(DailyPipelineState::AlphaEvaluated, &args, &markets);
         let written = report_model::write_models_from_history(
             &args.history_db,
             &args.date,
@@ -253,16 +290,32 @@ fn run_daily(args: DailyArgs) -> Result<()> {
             &args.session,
             &stack_root.join("reports"),
         )?;
+        enter_daily_state(DailyPipelineState::ReportModelWritten, &args, &markets);
         println!("daily core complete: report models written={written}");
     }
 
     if args.with_narrative {
+        enter_daily_state(DailyPipelineState::NarrativeExternal, &args, &markets);
         warn!("--with-narrative requested; LLM narrator cutover is intentionally left to the report-model phase. Use legacy run_agents wrappers during transition.");
     }
     if args.send_reports {
+        enter_daily_state(DailyPipelineState::DeliveryReady, &args, &markets);
         send_reports(&stack_root, &args.date, &args.session, &markets, &args)?;
+        enter_daily_state(DailyPipelineState::Delivered, &args, &markets);
     }
     Ok(())
+}
+
+fn enter_daily_state(state: DailyPipelineState, args: &DailyArgs, markets: &[String]) {
+    info!(
+        state = state.as_str(),
+        date = %args.date,
+        session = %args.session,
+        markets = %markets.join(","),
+        delivery_mode = args.delivery_mode.as_str(),
+        dry_run = args.dry_run,
+        "daily pipeline state"
+    );
 }
 
 fn run_producers(

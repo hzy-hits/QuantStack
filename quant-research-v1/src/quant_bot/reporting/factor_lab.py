@@ -108,7 +108,7 @@ def render_factor_lab_report_section(signal_block: str) -> str:
             "",
             " ".join(summary_bits),
             "",
-            "| 代码 | 名称 | 参考价 | 风控线 | 观察上沿 | 研究权重 | 备注 |",
+            "| 代码 | 名称 | 研究参考价 | 失效观察线 | 复核上沿 | 排序权重 | 备注 |",
             "|---|---|---:|---:|---:|---:|---|",
         ]
         for row in parsed["rows"]:

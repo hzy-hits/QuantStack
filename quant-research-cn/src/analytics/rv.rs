@@ -474,8 +474,13 @@ mod tests {
                 side: CensorSide::Right,
             });
         }
-        let raw = sample_variance(&observations.iter().map(|obs| obs.observed).collect::<Vec<_>>())
-            .unwrap();
+        let raw = sample_variance(
+            &observations
+                .iter()
+                .map(|obs| obs.observed)
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
         let tobit = tobit_variance(&observations).unwrap();
         assert!(tobit >= raw, "tobit={tobit}, raw={raw}");
     }

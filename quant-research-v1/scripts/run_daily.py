@@ -201,10 +201,10 @@ def emit_stable_alpha_bulletin(cfg: Settings, as_of: date) -> tuple[str, str]:
     quant_stack_bin = os.environ.get("QUANT_STACK_BIN")
     if quant_stack_bin:
         cmd = [quant_stack_bin]
-    elif (stack_root / "target" / "debug" / "quant-stack").exists():
-        cmd = [str(stack_root / "target" / "debug" / "quant-stack")]
     elif (stack_root / "target" / "release" / "quant-stack").exists():
         cmd = [str(stack_root / "target" / "release" / "quant-stack")]
+    elif (stack_root / "target" / "debug" / "quant-stack").exists():
+        cmd = [str(stack_root / "target" / "debug" / "quant-stack")]
     else:
         cmd = []
 

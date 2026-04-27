@@ -105,6 +105,8 @@ pub fn restore_report_review_history(src: &str, dst: &str) -> Result<()> {
         copy_attached_table_compatible(&con, "report_outcomes")?;
         copy_attached_table_compatible(&con, "alpha_postmortem")?;
         copy_attached_table_compatible(&con, "algorithm_postmortem")?;
+        copy_attached_table_compatible(&con, "paper_trades")?;
+        copy_attached_table_compatible(&con, "strategy_ev")?;
         Ok(())
     })();
     con.execute_batch("DETACH report_history;")?;
@@ -117,7 +119,8 @@ fn copy_attached_table_compatible(con: &Connection, table: &str) -> Result<()> {
         return Ok(());
     }
 
-    let target_columns = table_columns(con, "main", table)?;
+    let main_catalog = current_catalog(con)?;
+    let target_columns = table_columns(con, &main_catalog, table)?;
     let source_columns = table_columns(con, "report_history", table)?;
     if target_columns.is_empty() || source_columns.is_empty() {
         return Ok(());
@@ -162,21 +165,21 @@ fn attached_table_exists(con: &Connection, schema: &str, table: &str) -> Result<
     let count: i64 = con.query_row(
         "SELECT COUNT(*)
          FROM information_schema.tables
-         WHERE table_schema = ? AND table_name = ?",
+         WHERE table_catalog = ? AND table_schema = 'main' AND table_name = ?",
         duckdb::params![schema, table],
         |row| row.get(0),
     )?;
     Ok(count > 0)
 }
 
-fn table_columns(con: &Connection, schema: &str, table: &str) -> Result<Vec<String>> {
+fn table_columns(con: &Connection, catalog: &str, table: &str) -> Result<Vec<String>> {
     let mut stmt = con.prepare(
         "SELECT column_name
          FROM information_schema.columns
-         WHERE table_schema = ? AND table_name = ?
+         WHERE table_catalog = ? AND table_schema = 'main' AND table_name = ?
          ORDER BY ordinal_position",
     )?;
-    let rows = stmt.query_map(duckdb::params![schema, table], |row| {
+    let rows = stmt.query_map(duckdb::params![catalog, table], |row| {
         row.get::<_, String>(0)
     })?;
     let mut columns = Vec::new();
@@ -184,6 +187,10 @@ fn table_columns(con: &Connection, schema: &str, table: &str) -> Result<Vec<Stri
         columns.push(row?);
     }
     Ok(columns)
+}
+
+fn current_catalog(con: &Connection) -> Result<String> {
+    Ok(con.query_row("SELECT current_database()", [], |row| row.get(0))?)
 }
 
 fn quote_ident(value: &str) -> String {

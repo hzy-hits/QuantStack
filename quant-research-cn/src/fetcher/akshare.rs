@@ -69,7 +69,10 @@ pub async fn fetch_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Res
     total += match fetch_sector_fund_flow(&client, db, &date_str).await {
         Ok(rows) => rows,
         Err(e) => {
-            warn!("sector_fund_flow fetch failed: {}; trying Tushare fallback", e);
+            warn!(
+                "sector_fund_flow fetch failed: {}; trying Tushare fallback",
+                e
+            );
             fetch_sector_fund_flow_tushare(db, cfg, as_of).await
         }
     };
@@ -98,14 +101,15 @@ async fn fetch_sector_fund_flow_tushare(
     let client = match super::http::build_client() {
         Ok(c) => c,
         Err(e) => {
-            warn!("sector_fund_flow Tushare fallback client build failed: {}", e);
+            warn!(
+                "sector_fund_flow Tushare fallback client build failed: {}",
+                e
+            );
             return 0;
         }
     };
-    match crate::fetcher::tushare::flow::fetch_industry_moneyflow_ths(
-        &client, token, db, as_of,
-    )
-    .await
+    match crate::fetcher::tushare::flow::fetch_industry_moneyflow_ths(&client, token, db, as_of)
+        .await
     {
         Ok(rows) => rows,
         Err(e) => {

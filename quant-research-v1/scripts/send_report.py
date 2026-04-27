@@ -85,14 +85,10 @@ def _resolve_test_recipients(args: argparse.Namespace) -> tuple[list[str], str]:
     if args.to:
         return [args.to], "--to"
 
-    prod = _list_config_recipients(reporting.get("recipients"))
-    prod = [r for r in prod if r != "you@example.com"]
-    if prod:
-        return [prod[0]], "first configured production recipient"
-
     raise SystemExit(
         "Test delivery needs a recipient. Set --test-recipient, "
-        "QUANT_TEST_RECIPIENT, or reporting.test_recipients in config.yaml."
+        "QUANT_TEST_RECIPIENT, reporting.test_recipients in config.yaml, "
+        "or --to for an explicit one-off test."
     )
 
 

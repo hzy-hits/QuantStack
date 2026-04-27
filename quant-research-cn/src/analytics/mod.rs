@@ -4,6 +4,7 @@ pub mod bayes;
 pub mod breakout;
 pub mod continuation_vs_fade;
 pub mod flow;
+pub mod flow_audit;
 pub mod headline_gate;
 pub mod hmm;
 pub mod limit_move_radar;
@@ -11,6 +12,7 @@ pub mod macro_gate;
 pub mod mean_reversion;
 pub mod momentum;
 pub mod open_execution_gate;
+pub mod paper_trade_ev;
 pub mod report_review;
 pub mod rv;
 pub mod sector_rotation;
@@ -35,6 +37,7 @@ pub fn run_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<()> 
         "momentum",
         "announcement",
         "flow",
+        "flow_audit",
         "unlock",
         "shadow_option",
         "hmm",
@@ -82,6 +85,10 @@ fn run_module_inner(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &
         "flow" | "flow_score" => {
             let n = flow::compute(db, cfg, as_of)?;
             info!(rows = n, "flow_score complete");
+        }
+        "flow_audit" => {
+            let n = flow_audit::compute(db, as_of)?;
+            info!(rows = n, "flow_audit complete");
         }
         "unlock" | "unlock_risk" => {
             let n = unlock::compute(db, cfg, as_of)?;
@@ -131,6 +138,10 @@ fn run_module_inner(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &
             let n = shadow_option_alpha_calibration::compute(db, as_of)?;
             info!(rows = n, "shadow_option_alpha calibration complete");
         }
+        "paper_trade_ev" | "strategy_ev" => {
+            let n = paper_trade_ev::compute(db, as_of)?;
+            info!(rows = n, "paper_trade_ev complete");
+        }
         "algorithm_postmortem" | "algorithm_review" => {
             let n = algorithm_postmortem::compute(db, as_of)?;
             info!(rows = n, "algorithm_postmortem complete");
@@ -141,7 +152,7 @@ fn run_module_inner(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &
         }
         other => {
             return Err(anyhow!(
-                "unknown analytics module `{}`. supported: momentum, announcement, flow, unlock, shadow_option, hmm, vol_hmm, mean_reversion, breakout, sector_rotation, setup_alpha, continuation_vs_fade, limit_move_radar, open_execution_gate, shadow_option_alpha_calibration, algorithm_postmortem, macro_gate",
+                "unknown analytics module `{}`. supported: momentum, announcement, flow, flow_audit, unlock, shadow_option, hmm, vol_hmm, mean_reversion, breakout, sector_rotation, setup_alpha, continuation_vs_fade, limit_move_radar, open_execution_gate, shadow_option_alpha_calibration, paper_trade_ev, algorithm_postmortem, macro_gate",
                 other
             ));
         }
