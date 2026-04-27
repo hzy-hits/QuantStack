@@ -73,6 +73,7 @@ LOG_DIR="$PROJ_DIR/reports/logs"
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/${DATE}_${SLOT}.log"
 BRIDGE_PID=""
+REVIEW_BACKFILL_TIMING="${QUANT_CN_REVIEW_BACKFILL_TIMING:-post-email}"
 if [[ "$SLOT" == "morning" ]]; then
     SLOT_LABEL_CN="盘前"
 elif [[ "$SLOT" == "evening" ]]; then
@@ -198,6 +199,26 @@ for section in ("macro", "structural", "events"):
 PY
 }
 
+run_review_backfill() {
+    local review_backfill_days review_from
+    review_backfill_days="${QUANT_CN_REVIEW_BACKFILL_DAYS:-7}"
+    if [[ "$review_backfill_days" =~ ^[0-9]+$ ]] && [[ "$review_backfill_days" -gt 0 ]]; then
+        review_from="$("$PYTHON_BIN" - "$DATE" "$review_backfill_days" <<'PY'
+import sys
+from datetime import date, timedelta
+
+as_of = date.fromisoformat(sys.argv[1])
+days = int(sys.argv[2])
+print((as_of - timedelta(days=days)).isoformat())
+PY
+)"
+        echo "  Review backfill window: ${review_from} -> ${DATE} (${review_backfill_days} calendar days)"
+        ./target/release/quant-cn review-backfill --date-from "$review_from" --date-to "$DATE" 2>&1 || echo "  Review history backfill failed (non-fatal)"
+    else
+        echo "  Review history backfill skipped (QUANT_CN_REVIEW_BACKFILL_DAYS=${review_backfill_days})"
+    fi
+}
+
 exec > >(tee -a "$LOG") 2>&1
 
 echo "=========================================="
@@ -245,25 +266,16 @@ echo "[2/6] Running pipeline (fetch → analyze → filter → render)..."
 echo "[2.5/6] Importing Factor Lab factors..."
 (cd "$FACTOR_LAB_ROOT" && "$PYTHON_BIN" -m src.mining.export_to_pipeline --market cn --date "$DATE") 2>&1 || echo "  Factor Lab import failed (non-fatal)"
 
-# `quant-cn run` already performed enrichment. Refresh the post-import review
-# ledger, emit the stable-alpha bulletin, then render final payloads with it.
+# `quant-cn run` already performed enrichment. Re-render after Factor Lab,
+# emit the stable-alpha bulletin, then render final payloads with it. Historical
+# review backfill is maintenance and stays out of the email critical path by
+# default.
 echo "[3/6] Refreshing payloads and stable alpha bulletin..."
 ./target/release/quant-cn render --date "$DATE" 2>&1
-REVIEW_BACKFILL_DAYS="${QUANT_CN_REVIEW_BACKFILL_DAYS:-7}"
-if [[ "$REVIEW_BACKFILL_DAYS" =~ ^[0-9]+$ && "$REVIEW_BACKFILL_DAYS" -gt 0 ]]; then
-    REVIEW_FROM="$("$PYTHON_BIN" - "$DATE" "$REVIEW_BACKFILL_DAYS" <<'PY'
-import sys
-from datetime import date, timedelta
-
-as_of = date.fromisoformat(sys.argv[1])
-days = int(sys.argv[2])
-print((as_of - timedelta(days=days)).isoformat())
-PY
-)"
-    echo "  Review backfill window: ${REVIEW_FROM} → ${DATE} (${REVIEW_BACKFILL_DAYS} calendar days)"
-    ./target/release/quant-cn review-backfill --date-from "$REVIEW_FROM" --date-to "$DATE" 2>&1 || echo "  Review history backfill failed (non-fatal)"
+if [[ "$REVIEW_BACKFILL_TIMING" == "pre-alpha" || "$REVIEW_BACKFILL_TIMING" == "pre_email" ]]; then
+    run_review_backfill
 else
-    echo "  Review history backfill skipped (QUANT_CN_REVIEW_BACKFILL_DAYS=${REVIEW_BACKFILL_DAYS})"
+    echo "  Review history backfill deferred until after email (QUANT_CN_REVIEW_BACKFILL_TIMING=${REVIEW_BACKFILL_TIMING})"
 fi
 if [[ -n "${QUANT_STACK_BIN:-}" ]]; then
     "$QUANT_STACK_BIN" alpha evaluate \
@@ -461,6 +473,13 @@ if [[ -f "$PREV_REPORT" ]]; then
 else
     SEND_EMAIL=1 QUANT_DELIVERY_MODE="$DELIVERY_MODE" QUANT_TEST_RECIPIENT="$TEST_RECIPIENT" \
         bash scripts/run_agents.sh "$DATE" "$SLOT"
+fi
+
+if [[ "$REVIEW_BACKFILL_TIMING" == "post-email" || "$REVIEW_BACKFILL_TIMING" == "post_email" ]]; then
+    echo "[8/8] Post-email review maintenance..."
+    run_review_backfill
+else
+    echo "[8/8] Post-email review maintenance skipped (QUANT_CN_REVIEW_BACKFILL_TIMING=${REVIEW_BACKFILL_TIMING})"
 fi
 
 echo ""

@@ -210,12 +210,9 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
             workdir=cn_root,
             command=("bash", "scripts/daily_pipeline.sh", "--prod", "morning", "{logical_date}"),
             completion=CompletionCheck(
-                kind="file_contains_all",
-                path_template="reports/logs/{logical_date}_morning.log",
-                markers=(
-                    "Pipeline complete:",
-                    "Report: reports/{logical_date}_report_zh.md",
-                ),
+                kind="file_exists",
+                path_template="reports/{logical_date}_report_zh_morning.md",
+                min_size=200,
             ),
             local_weekdays=(0, 1, 2, 3, 4),
             local_hour=8,
@@ -228,12 +225,9 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
             workdir=cn_root,
             command=("bash", "scripts/daily_pipeline.sh", "--prod", "evening", "{logical_date}"),
             completion=CompletionCheck(
-                kind="file_contains_all",
-                path_template="reports/logs/{logical_date}_evening.log",
-                markers=(
-                    "Pipeline complete:",
-                    "Report: reports/{logical_date}_report_zh.md",
-                ),
+                kind="file_exists",
+                path_template="reports/{logical_date}_report_zh_evening.md",
+                min_size=200,
             ),
             local_weekdays=(0, 1, 2, 3, 4),
             local_hour=18,

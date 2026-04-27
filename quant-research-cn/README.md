@@ -18,14 +18,16 @@ Tushare + AKShare + DeepSeek
 DuckDB -> analytics -> notable filter -> report_decisions/report_outcomes
         |
         v
-review-backfill -> algorithm_postmortem -> Quant Stack alpha gate
+Quant Stack alpha gate -> payload markdown -> agents -> Chinese report -> Gmail
         |
         v
-payload markdown -> agents -> Chinese report -> Gmail
+post-email review-backfill -> algorithm_postmortem history
 ```
 
 The producer remains A-share-specific. The post-producer alpha gate is shared
-with the US system.
+with the US system. Historical review maintenance is deliberately outside the
+email critical path; morning reports should consume precomputed history instead
+of rebuilding it before sending.
 
 ## Quick Start
 
@@ -42,6 +44,10 @@ cargo build --release
 ./target/release/quant-cn review-backfill \
   --date-from 2026-03-23 \
   --date-to 2026-04-24
+
+# Cron-friendly maintenance: backfill recent history and refresh alpha bulletin,
+# without agents or email.
+./scripts/precompute_alpha.sh 2026-04-24
 ```
 
 Production delivery is explicit:
@@ -98,6 +104,11 @@ date before materializing the review ledger:
 
 This prevents historical rows from collapsing into all `OBSERVE/WAIT` because
 of missing `execution_score`.
+
+`daily_pipeline.sh` defaults to `QUANT_CN_REVIEW_BACKFILL_TIMING=post-email`.
+That keeps historical maintenance from delaying the report. Use
+`QUANT_CN_REVIEW_BACKFILL_TIMING=pre-alpha` only for manual backfills where
+latency is not important. Use `QUANT_CN_REVIEW_BACKFILL_DAYS=0` to skip it.
 
 ## Analytics
 

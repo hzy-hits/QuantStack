@@ -4,6 +4,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from quant_bot.orchestration.watchdog import (
+    build_default_tasks,
     CompletionCheck,
     DueRun,
     LOCAL_TZ,
@@ -14,6 +15,8 @@ from quant_bot.orchestration.watchdog import (
     task_completed,
     update_completion_state,
 )
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _task(
@@ -109,6 +112,18 @@ def test_task_completed_uses_log_markers(tmp_path: Path):
     )
 
     assert task_completed(due) is True
+
+
+def test_default_cn_tasks_use_slot_specific_report_files():
+    tasks = {task.name: task for task in build_default_tasks(REPO_ROOT)}
+
+    morning = tasks["cn-morning"].completion
+    assert morning.kind == "file_exists"
+    assert morning.path_template == "reports/{logical_date}_report_zh_morning.md"
+
+    evening = tasks["cn-evening"].completion
+    assert evening.kind == "file_exists"
+    assert evening.path_template == "reports/{logical_date}_report_zh_evening.md"
 
 
 def test_update_completion_state_marks_existing_artifact_complete(tmp_path: Path):
