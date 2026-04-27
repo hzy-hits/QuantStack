@@ -249,7 +249,22 @@ echo "[2.5/6] Importing Factor Lab factors..."
 # ledger, emit the stable-alpha bulletin, then render final payloads with it.
 echo "[3/6] Refreshing payloads and stable alpha bulletin..."
 ./target/release/quant-cn render --date "$DATE" 2>&1
-./target/release/quant-cn review-backfill --date-to "$DATE" 2>&1 || echo "  Review history backfill failed (non-fatal)"
+REVIEW_BACKFILL_DAYS="${QUANT_CN_REVIEW_BACKFILL_DAYS:-7}"
+if [[ "$REVIEW_BACKFILL_DAYS" =~ ^[0-9]+$ && "$REVIEW_BACKFILL_DAYS" -gt 0 ]]; then
+    REVIEW_FROM="$("$PYTHON_BIN" - "$DATE" "$REVIEW_BACKFILL_DAYS" <<'PY'
+import sys
+from datetime import date, timedelta
+
+as_of = date.fromisoformat(sys.argv[1])
+days = int(sys.argv[2])
+print((as_of - timedelta(days=days)).isoformat())
+PY
+)"
+    echo "  Review backfill window: ${REVIEW_FROM} → ${DATE} (${REVIEW_BACKFILL_DAYS} calendar days)"
+    ./target/release/quant-cn review-backfill --date-from "$REVIEW_FROM" --date-to "$DATE" 2>&1 || echo "  Review history backfill failed (non-fatal)"
+else
+    echo "  Review history backfill skipped (QUANT_CN_REVIEW_BACKFILL_DAYS=${REVIEW_BACKFILL_DAYS})"
+fi
 if [[ -n "${QUANT_STACK_BIN:-}" ]]; then
     "$QUANT_STACK_BIN" alpha evaluate \
         --date "$DATE" \
