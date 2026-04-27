@@ -18,6 +18,8 @@ If AKShare changes column names, only this bridge needs updating.
 """
 import math
 import traceback
+import contextlib
+import io
 from datetime import datetime
 
 import akshare as ak
@@ -59,6 +61,18 @@ def _str(v) -> str:
     return "" if s == "nan" else s
 
 
+def _yuan_from_yi(v) -> float | None:
+    """AKShare THS fund-flow tables report amounts in 亿元."""
+    f = _float(v)
+    return None if f is None else f * 100_000_000.0
+
+
+def _quiet_call(fn, *args, **kwargs):
+    """Suppress AKShare tqdm/progress noise in cron logs."""
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        return fn(*args, **kwargs)
+
+
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @app.get("/health")
@@ -74,21 +88,47 @@ def concept_boards():
     One API call, no per-stock iteration needed.
     """
     try:
-        df = ak.stock_board_concept_name_em()
+        try:
+            df = _quiet_call(ak.stock_board_concept_name_em)
+            source = "em"
+        except Exception:
+            # Eastmoney occasionally closes the connection. THS concept fund flow
+            # still gives a usable same-day concept heat map.
+            df = _quiet_call(ak.stock_fund_flow_concept, symbol="即时")
+            source = "ths_fund_flow"
         records = []
         for _, row in df.iterrows():
-            records.append({
-                "board_name": _str(row.get("板块名称")),
-                "board_code": _str(row.get("板块代码")),
-                "pct_chg": _float(row.get("涨跌幅")),
-                "turnover_rate": _float(row.get("换手率")),
-                "total_mv": _float(row.get("总市值")),
-                "amount": _float(row.get("成交额")),
-                "up_count": _int(row.get("上涨家数")),
-                "down_count": _int(row.get("下跌家数")),
-                "lead_stock": _str(row.get("领涨股票")),
-                "lead_pct": _float(row.get("领涨股票-涨跌幅")),
-            })
+            if source == "em":
+                records.append({
+                    "board_name": _str(row.get("板块名称")),
+                    "board_code": _str(row.get("板块代码")),
+                    "pct_chg": _float(row.get("涨跌幅")),
+                    "turnover_rate": _float(row.get("换手率")),
+                    "total_mv": _float(row.get("总市值")),
+                    "amount": _float(row.get("成交额")),
+                    "up_count": _int(row.get("上涨家数")),
+                    "down_count": _int(row.get("下跌家数")),
+                    "lead_stock": _str(row.get("领涨股票")),
+                    "lead_pct": _float(row.get("领涨股票-涨跌幅")),
+                })
+            else:
+                inflow = _yuan_from_yi(row.get("流入资金"))
+                outflow = _yuan_from_yi(row.get("流出资金"))
+                amount = None
+                if inflow is not None and outflow is not None:
+                    amount = inflow + outflow
+                records.append({
+                    "board_name": _str(row.get("行业")),
+                    "board_code": "",
+                    "pct_chg": _float(row.get("行业-涨跌幅")),
+                    "turnover_rate": None,
+                    "total_mv": None,
+                    "amount": amount,
+                    "up_count": None,
+                    "down_count": None,
+                    "lead_stock": _str(row.get("领涨股")),
+                    "lead_pct": _float(row.get("领涨股-涨跌幅")),
+                })
         return records
     except Exception as e:
         return JSONResponse(
@@ -104,24 +144,51 @@ def sector_fund_flow(indicator: str = Query("今日")):
     indicator: "今日" | "5日" | "10日"
     """
     try:
-        df = ak.stock_sector_fund_flow_rank(indicator=indicator)
+        try:
+            df = _quiet_call(ak.stock_sector_fund_flow_rank, indicator=indicator)
+            source = "em"
+        except Exception:
+            # THS fallback has the same directional information, with amount
+            # columns reported in 亿元.
+            df = _quiet_call(ak.stock_fund_flow_industry, symbol="即时")
+            source = "ths"
         cols = list(df.columns)
         records = []
         for _, row in df.iterrows():
-            # Columns are positional: 序号, 名称, 涨跌幅, 主力净流入-净额, 主力净流入-净占比,
-            # 超大单净流入-净额, 超大单净流入-净占比, 大单净流入-净额, 大单净流入-净占比,
-            # 中单净流入-净额, 中单净流入-净占比, 小单净流入-净额, 小单净流入-净占比
-            r = list(row)
-            records.append({
-                "sector_name": _str(r[1]) if len(r) > 1 else "",
-                "pct_chg": _float(r[2]) if len(r) > 2 else None,
-                "main_net_in": _float(r[3]) if len(r) > 3 else None,
-                "main_net_pct": _float(r[4]) if len(r) > 4 else None,
-                "super_net_in": _float(r[5]) if len(r) > 5 else None,
-                "big_net_in": _float(r[7]) if len(r) > 7 else None,
-                "mid_net_in": _float(r[9]) if len(r) > 9 else None,
-                "small_net_in": _float(r[11]) if len(r) > 11 else None,
-            })
+            if source == "em":
+                # Columns are positional: 序号, 名称, 涨跌幅, 主力净流入-净额,
+                # 主力净流入-净占比, 超大单净流入-净额, ...
+                r = list(row)
+                records.append({
+                    "sector_name": _str(r[1]) if len(r) > 1 else "",
+                    "pct_chg": _float(r[2]) if len(r) > 2 else None,
+                    "main_net_in": _float(r[3]) if len(r) > 3 else None,
+                    "main_net_pct": _float(r[4]) if len(r) > 4 else None,
+                    "super_net_in": _float(r[5]) if len(r) > 5 else None,
+                    "big_net_in": _float(r[7]) if len(r) > 7 else None,
+                    "mid_net_in": _float(r[9]) if len(r) > 9 else None,
+                    "small_net_in": _float(r[11]) if len(r) > 11 else None,
+                })
+            else:
+                inflow = _yuan_from_yi(row.get("流入资金"))
+                outflow = _yuan_from_yi(row.get("流出资金"))
+                net = _yuan_from_yi(row.get("净额"))
+                denom = None
+                if inflow is not None and outflow is not None:
+                    denom = inflow + outflow
+                net_pct = None
+                if net is not None and denom and denom != 0:
+                    net_pct = net / denom * 100.0
+                records.append({
+                    "sector_name": _str(row.get("行业")),
+                    "pct_chg": _float(row.get("行业-涨跌幅")),
+                    "main_net_in": net,
+                    "main_net_pct": net_pct,
+                    "super_net_in": None,
+                    "big_net_in": None,
+                    "mid_net_in": None,
+                    "small_net_in": None,
+                })
         return records
     except Exception as e:
         return JSONResponse(

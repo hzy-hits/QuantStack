@@ -9,9 +9,10 @@
 ///   - /stock_news        个股新闻 (per-stock news for enrichment)
 ///
 /// If the bridge is not running, all fetches return Ok(0) — non-fatal.
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use chrono::NaiveDate;
 use duckdb::Connection;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use tokio::time::{sleep, Duration};
 use tracing::{info, warn};
@@ -19,6 +20,25 @@ use tracing::{info, warn};
 use crate::config::Settings;
 
 const BRIDGE_BASE: &str = "http://localhost:8321";
+const ERROR_BODY_LIMIT: usize = 600;
+
+async fn get_json<T: DeserializeOwned>(client: &reqwest::Client, url: &str) -> Result<T> {
+    let resp = client.get(url).send().await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        let excerpt: String = body.chars().take(ERROR_BODY_LIMIT).collect();
+        return Err(anyhow!(
+            "bridge returned status={} body={}",
+            status,
+            excerpt
+        ));
+    }
+    serde_json::from_str(&body).with_context(|| {
+        let excerpt: String = body.chars().take(ERROR_BODY_LIMIT).collect();
+        format!("bridge JSON decode failed body={}", excerpt)
+    })
+}
 
 pub async fn fetch_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usize> {
     let client = match super::http::build_client() {
@@ -33,7 +53,7 @@ pub async fn fetch_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Res
     let health = client.get(format!("{}/health", BRIDGE_BASE)).send().await;
     if health.is_err() {
         warn!("⚠ akshare bridge NOT running at {} — sector_fund_flow, concept_board, stock_news will all be EMPTY. Start bridge: cd bridge && uvicorn akshare_bridge:app --port 8321", BRIDGE_BASE);
-        return Ok(0);
+        return Ok(fetch_sector_fund_flow_tushare(db, cfg, as_of).await);
     }
 
     let mut total = 0usize;
@@ -46,12 +66,13 @@ pub async fn fetch_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Res
             0
         });
 
-    total += fetch_sector_fund_flow(&client, db, &date_str)
-        .await
-        .unwrap_or_else(|e| {
-            warn!("sector_fund_flow fetch failed: {}", e);
-            0
-        });
+    total += match fetch_sector_fund_flow(&client, db, &date_str).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!("sector_fund_flow fetch failed: {}; trying Tushare fallback", e);
+            fetch_sector_fund_flow_tushare(db, cfg, as_of).await
+        }
+    };
 
     total += fetch_stock_news(&client, db, cfg)
         .await
@@ -62,6 +83,36 @@ pub async fn fetch_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Res
 
     info!(rows = total, "akshare fetch complete");
     Ok(total)
+}
+
+async fn fetch_sector_fund_flow_tushare(
+    db: &Connection,
+    cfg: &Settings,
+    as_of: NaiveDate,
+) -> usize {
+    let token = cfg.api.tushare_token.trim();
+    if token.is_empty() {
+        warn!("sector_fund_flow Tushare fallback skipped: missing tushare_token");
+        return 0;
+    }
+    let client = match super::http::build_client() {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("sector_fund_flow Tushare fallback client build failed: {}", e);
+            return 0;
+        }
+    };
+    match crate::fetcher::tushare::flow::fetch_industry_moneyflow_ths(
+        &client, token, db, as_of,
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            warn!("sector_fund_flow Tushare fallback failed: {}", e);
+            0
+        }
+    }
 }
 
 // ── Concept Boards (概念板块) ────────────────────────────────────────────────
@@ -86,7 +137,7 @@ async fn fetch_concept_boards(
     date_str: &str,
 ) -> Result<usize> {
     let url = format!("{}/concept_boards", BRIDGE_BASE);
-    let rows: Vec<ConceptBoardRow> = client.get(&url).send().await?.json().await?;
+    let rows: Vec<ConceptBoardRow> = get_json(client, &url).await?;
 
     let mut total = 0;
     for row in &rows {
@@ -142,7 +193,7 @@ async fn fetch_sector_fund_flow(
         "{}/sector_fund_flow?indicator=%E4%BB%8A%E6%97%A5",
         BRIDGE_BASE
     ); // "今日" URL-encoded
-    let rows: Vec<SectorFundFlowRow> = client.get(&url).send().await?.json().await?;
+    let rows: Vec<SectorFundFlowRow> = get_json(client, &url).await?;
 
     let mut total = 0;
     for row in &rows {

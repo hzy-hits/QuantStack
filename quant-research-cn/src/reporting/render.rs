@@ -629,11 +629,11 @@ fn render_northbound_flow(md: &mut String, db: &Connection, date_str: &str) -> R
 }
 
 fn render_sector_fund_flow(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
-    writeln!(md, "### 行业资金流向 (AKShare)")?;
+    writeln!(md, "### 行业资金流向 (AKShare/Tushare)")?;
     writeln!(md)?;
     writeln!(
         md,
-        "> 口径: AKShare sector_fund_flow / 东方财富行业资金流；main_net_in 按元转亿元展示。该表不等同申万一级、数据宝或其他公开资金口径；若外部口径冲突，正文只能称为“本系统/AKShare口径”。"
+        "> 口径: 优先 AKShare/东方财富行业资金流；若接口失败，回退 Tushare moneyflow_ind_ths/同花顺行业资金流。main_net_in 按元转亿元展示。该表不等同申万一级、数据宝或其他公开资金口径；若外部口径冲突，正文只能称为“本系统口径”。"
     )?;
     writeln!(md)?;
     writeln!(
