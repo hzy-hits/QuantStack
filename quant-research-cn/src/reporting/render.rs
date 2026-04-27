@@ -1436,11 +1436,14 @@ fn render_limit_move_radar_summary(
     db: &Connection,
     date_str: &str,
 ) -> Result<()> {
-    let up_rows = query_limit_move_radar_rows(db, date_str, "limit_up_radar_score", 12);
+    let up_rows = query_limit_move_radar_rows(db, date_str, "limit_up_radar_score", 120);
     let down_rows = query_limit_move_radar_rows(db, date_str, "limit_down_risk_score", 8);
     if up_rows.is_empty() && down_rows.is_empty() {
         return Ok(());
     }
+    let (tradable_up, out_of_scope_up): (Vec<_>, Vec<_>) = up_rows
+        .into_iter()
+        .partition(|row| row.board_scope == "mainboard_10cm");
 
     writeln!(md, "## Limit Move Radar / 涨跌停前兆")?;
     writeln!(md)?;
@@ -1452,21 +1455,38 @@ fn render_limit_move_radar_summary(
         md,
         "autoresearch 学习方式: 每日保存这些前兆特征，下一交易日收盘后再打 `next_day_limit_up / next_day_limit_down` 标签，做 walk-forward 命中率、假阳性和回撤复盘；未通过回测前只能写成雷达，不得写成买入指令。"
     )?;
+    writeln!(
+        md,
+        "`Tradable Limit Radar` 只保留主板10cm且账户可做的候选；`Out-of-scope Heat Radar` 包含创业板/科创板/ST/北交所，只用于观察热区和风险，不当作候选。"
+    )?;
     writeln!(md)?;
 
     render_limit_move_radar_table(
         md,
-        "涨停点火雷达",
-        &up_rows,
-        "本期没有日频点火分数靠前的候选。",
+        "Tradable Limit Radar / 主板10cm",
+        &tradable_up,
+        "本期没有主板10cm日频点火分数靠前的可交易雷达候选。",
+        Some("主板10cm仍只是雷达；如果次日集合竞价、开盘承接和板块同涨不确认，不升级为执行候选。"),
         true,
+        8,
+    )?;
+    render_limit_move_radar_table(
+        md,
+        "Out-of-scope Heat Radar / 创业科创ST北交热区",
+        &out_of_scope_up,
+        "本期没有策略范围外的高热度点火样本。",
+        Some("这些标的只说明热区在哪里；因板型/交易权限/涨跌幅制度不同，不进入可交易候选池。"),
+        true,
+        8,
     )?;
     render_limit_move_radar_table(
         md,
         "跌停/退潮风险雷达",
         &down_rows,
         "本期没有日频退潮风险分数靠前的候选。",
+        None,
         false,
+        6,
     )?;
     Ok(())
 }
@@ -1476,14 +1496,20 @@ fn render_limit_move_radar_table(
     title: &str,
     rows: &[LimitMoveRadarView],
     empty: &str,
+    note: Option<&str>,
     up_table: bool,
+    limit: usize,
 ) -> Result<()> {
     writeln!(md, "### {}", title)?;
     writeln!(md)?;
+    if let Some(note) = note {
+        writeln!(md, "- {}", note)?;
+        writeln!(md)?;
+    }
     let display_rows: Vec<&LimitMoveRadarView> = rows
         .iter()
         .filter(|row| row.score >= if up_table { 0.55 } else { 0.50 })
-        .take(if up_table { 8 } else { 6 })
+        .take(limit)
         .collect();
     let display_rows = if display_rows.is_empty() {
         rows.iter().take(5).collect::<Vec<_>>()
