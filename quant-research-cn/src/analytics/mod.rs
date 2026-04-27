@@ -6,6 +6,7 @@ pub mod continuation_vs_fade;
 pub mod flow;
 pub mod headline_gate;
 pub mod hmm;
+pub mod limit_move_radar;
 pub mod macro_gate;
 pub mod mean_reversion;
 pub mod momentum;
@@ -43,6 +44,7 @@ pub fn run_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<()> 
         "sector_rotation",
         "setup_alpha",
         "continuation_vs_fade",
+        "limit_move_radar",
         "open_execution_gate",
         "shadow_option_alpha_calibration",
         "macro_gate",
@@ -117,6 +119,10 @@ fn run_module_inner(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &
             let n = continuation_vs_fade::compute(db, as_of)?;
             info!(rows = n, "continuation_vs_fade complete");
         }
+        "limit_move_radar" => {
+            let n = limit_move_radar::compute(db, as_of)?;
+            info!(rows = n, "limit_move_radar complete");
+        }
         "open_execution_gate" => {
             let n = open_execution_gate::compute(db, as_of)?;
             info!(rows = n, "open_execution_gate complete");
@@ -135,7 +141,7 @@ fn run_module_inner(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &
         }
         other => {
             return Err(anyhow!(
-                "unknown analytics module `{}`. supported: momentum, announcement, flow, unlock, shadow_option, hmm, vol_hmm, mean_reversion, breakout, sector_rotation, setup_alpha, continuation_vs_fade, open_execution_gate, shadow_option_alpha_calibration, algorithm_postmortem, macro_gate",
+                "unknown analytics module `{}`. supported: momentum, announcement, flow, unlock, shadow_option, hmm, vol_hmm, mean_reversion, breakout, sector_rotation, setup_alpha, continuation_vs_fade, limit_move_radar, open_execution_gate, shadow_option_alpha_calibration, algorithm_postmortem, macro_gate",
                 other
             ));
         }

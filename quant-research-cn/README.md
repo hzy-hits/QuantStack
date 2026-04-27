@@ -100,6 +100,7 @@ date before materializing the review ledger:
 
 - `setup_alpha`
 - `continuation_vs_fade`
+- `limit_move_radar`
 - `open_execution_gate`
 
 This prevents historical rows from collapsing into all `OBSERVE/WAIT` because
@@ -120,6 +121,7 @@ latency is not important. Use `QUANT_CN_REVIEW_BACKFILL_DAYS=0` to skip it.
 | `unlock` | lockup expiration risk |
 | `setup_alpha` | structure/setup score |
 | `continuation_vs_fade` | follow-through vs fade diagnostics |
+| `limit_move_radar` | daily-data limit-up ignition and limit-down risk radar |
 | `open_execution_gate` | chase, pullback, and entry-quality constraints |
 | `vol_hmm` | limit-adjusted volatility regime diagnostics |
 | `shadow_option` | A-share shadow option risk/convexity features |
@@ -128,6 +130,12 @@ latency is not important. Use `QUANT_CN_REVIEW_BACKFILL_DAYS=0` to skip it.
 
 A-share shadow options are not real single-name option trades. They are used for
 risk correction, stale-chase detection, and convexity context.
+
+`limit_move_radar` is deliberately separate from `Execution Alpha`. It scans the
+full daily universe for high-volatility ignition and retreat patterns, stores
+as-of feature scores, and writes next-day limit-up/limit-down labels only after
+the following trading day has fully closed. Reports render it as a radar, not a
+buy list.
 
 ## Shared Alpha Gate
 

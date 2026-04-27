@@ -1216,6 +1216,7 @@ fn render_structural(
     render_shadow_calibration(&mut md, db, date_str)?;
     render_alpha_bulletin(&mut md, date_str, "cn")?;
     render_setup_alpha_summary(&mut md, db, date_str, notable)?;
+    render_limit_move_radar_summary(&mut md, db, date_str)?;
 
     // ── Report lanes ──────────────────────────────────────────────────────
     writeln!(md, "### 报告分层总览")?;
@@ -1308,6 +1309,25 @@ struct SetupAlphaView {
     priced_in_score: f64,
     pullback_price: Option<f64>,
     reason: &'static str,
+}
+
+#[derive(Clone, Debug)]
+struct LimitMoveRadarView {
+    ts_code: String,
+    name: String,
+    industry: String,
+    board_scope: String,
+    score: f64,
+    ret_1d: f64,
+    ret_5d: f64,
+    ret_20d: f64,
+    volume_ratio: f64,
+    turnover_rate: f64,
+    total_mv: f64,
+    net_mf_amount: f64,
+    elg_net_amount: f64,
+    industry_score: f64,
+    labels: Vec<String>,
 }
 
 fn render_setup_alpha_summary(
@@ -1409,6 +1429,198 @@ fn render_setup_alpha_summary(
     )?;
 
     Ok(())
+}
+
+fn render_limit_move_radar_summary(
+    md: &mut String,
+    db: &Connection,
+    date_str: &str,
+) -> Result<()> {
+    let up_rows = query_limit_move_radar_rows(db, date_str, "limit_up_radar_score", 12);
+    let down_rows = query_limit_move_radar_rows(db, date_str, "limit_down_risk_score", 8);
+    if up_rows.is_empty() && down_rows.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(md, "## Limit Move Radar / 涨跌停前兆")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "该段是独立的高波动点火/退潮雷达，不等同于 Execution Alpha 或 CORE BOOK。它只使用当日及以前的日频数据；真正下单前必须再看集合竞价、开盘量比、板块同涨数量、封单/开板质量和 T+1 风险。"
+    )?;
+    writeln!(
+        md,
+        "autoresearch 学习方式: 每日保存这些前兆特征，下一交易日收盘后再打 `next_day_limit_up / next_day_limit_down` 标签，做 walk-forward 命中率、假阳性和回撤复盘；未通过回测前只能写成雷达，不得写成买入指令。"
+    )?;
+    writeln!(md)?;
+
+    render_limit_move_radar_table(
+        md,
+        "涨停点火雷达",
+        &up_rows,
+        "本期没有日频点火分数靠前的候选。",
+        true,
+    )?;
+    render_limit_move_radar_table(
+        md,
+        "跌停/退潮风险雷达",
+        &down_rows,
+        "本期没有日频退潮风险分数靠前的候选。",
+        false,
+    )?;
+    Ok(())
+}
+
+fn render_limit_move_radar_table(
+    md: &mut String,
+    title: &str,
+    rows: &[LimitMoveRadarView],
+    empty: &str,
+    up_table: bool,
+) -> Result<()> {
+    writeln!(md, "### {}", title)?;
+    writeln!(md)?;
+    let display_rows: Vec<&LimitMoveRadarView> = rows
+        .iter()
+        .filter(|row| row.score >= if up_table { 0.55 } else { 0.50 })
+        .take(if up_table { 8 } else { 6 })
+        .collect();
+    let display_rows = if display_rows.is_empty() {
+        rows.iter().take(5).collect::<Vec<_>>()
+    } else {
+        display_rows
+    };
+
+    if display_rows.is_empty() {
+        writeln!(md, "- {}", empty)?;
+        writeln!(md)?;
+        return Ok(());
+    }
+
+    writeln!(
+        md,
+        "| 代码 | 名称 | 板型 | 行业 | score | 1D% | 5D% | 20D% | 换手 | 量比 | 总市值(亿) | 主力净流入(亿) | 超大单(亿) | 行业热度 | 标签 |"
+    )?;
+    writeln!(
+        md,
+        "|------|------|------|------|------:|----:|----:|-----:|-----:|-----:|-----------:|--------------:|-----------:|---------:|------|"
+    )?;
+    for row in display_rows {
+        writeln!(
+            md,
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            row.ts_code,
+            row.name,
+            row.board_scope,
+            row.industry,
+            fmt_opt_f64(Some(row.score), 3),
+            fmt_pct(Some(row.ret_1d)),
+            fmt_pct(Some(row.ret_5d)),
+            fmt_pct(Some(row.ret_20d)),
+            fmt_pct(Some(row.turnover_rate)),
+            fmt_opt_f64(Some(row.volume_ratio), 2),
+            fmt_f64_yi(Some(row.total_mv)),
+            fmt_f64_yi(Some(row.net_mf_amount)),
+            fmt_f64_yi(Some(row.elg_net_amount)),
+            fmt_opt_f64(Some(row.industry_score), 3),
+            row.labels.join(", ")
+        )?;
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn query_limit_move_radar_rows(
+    db: &Connection,
+    date_str: &str,
+    metric: &str,
+    limit: usize,
+) -> Vec<LimitMoveRadarView> {
+    let sql = "
+        SELECT ts_code, value, detail
+        FROM analytics
+        WHERE as_of = CAST(? AS DATE)
+          AND module = 'limit_move_radar'
+          AND metric = ?
+        ORDER BY value DESC, ts_code
+        LIMIT ?
+    ";
+    let Ok(mut stmt) = db.prepare(sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map(
+        duckdb::params![date_str, metric, limit as i64],
+        |row| {
+            let ts_code = row.get::<_, String>(0)?;
+            let score = row.get::<_, Option<f64>>(1)?.unwrap_or(0.0);
+            let detail_raw = row.get::<_, Option<String>>(2)?.unwrap_or_default();
+            Ok(limit_move_radar_view(ts_code, score, metric, &detail_raw))
+        },
+    ) else {
+        return Vec::new();
+    };
+
+    rows.filter_map(|row| row.ok()).collect()
+}
+
+fn limit_move_radar_view(
+    ts_code: String,
+    score: f64,
+    metric: &str,
+    detail_raw: &str,
+) -> LimitMoveRadarView {
+    let detail = serde_json::from_str::<serde_json::Value>(detail_raw).unwrap_or_default();
+    let labels_key = if metric == "limit_down_risk_score" {
+        "limit_down_labels"
+    } else {
+        "limit_up_labels"
+    };
+    let industry_score_key = if metric == "limit_down_risk_score" {
+        "industry_weakness_score"
+    } else {
+        "industry_heat_score"
+    };
+    let labels = detail
+        .get(labels_key)
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    LimitMoveRadarView {
+        ts_code,
+        name: detail
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        industry: detail
+            .get("industry")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        board_scope: detail
+            .get("board_scope")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        score,
+        ret_1d: detail_f64(&detail, "ret_1d", 0.0),
+        ret_5d: detail_f64(&detail, "ret_5d", 0.0),
+        ret_20d: detail_f64(&detail, "ret_20d", 0.0),
+        volume_ratio: detail_f64(&detail, "volume_ratio", 0.0),
+        turnover_rate: detail_f64(&detail, "turnover_rate", 0.0),
+        total_mv: detail_f64(&detail, "total_mv", 0.0),
+        net_mf_amount: detail_f64(&detail, "net_mf_amount", 0.0),
+        elg_net_amount: detail_f64(&detail, "elg_net_amount", 0.0),
+        industry_score: detail_f64(&detail, industry_score_key, 0.0),
+        labels,
+    }
 }
 
 fn setup_bucket<'a>(views: &'a [SetupAlphaView], bucket: &str) -> Vec<&'a SetupAlphaView> {
