@@ -30,7 +30,8 @@ Payload分为四层：
 - 不给交易建议，不做叙事，不判断方向
 - 追高约束必须显式提取：若 5D/20D 涨幅极端、涨停、trend_prob <= 0.50、execution_mode=do_not_chase/wait_pullback、或 main gate blocked，只能标为观察/回踩复核/耗竭风险，不得写成可执行趋势多头
 - 必须单独读取 `Setup Alpha / Anti-Chase`：`Breakout Acceptance` 是“已涨但趋势/承接/事件确认仍支持延续”，不得机械当成追高；`Blocked Chase / Priced-In` 才能写成追价风险
-- 如果 CORE BOOK=0、Stable Champion Policy=none、或 EV 不可计算，要写成“Recall → EV → Gate 转化链断裂/执行门禁未过”，不得说成做多机会不足或硬拔 RANGE/TACTICAL 进主书
+- 必须读取 `Stable Alpha Bulletin` 的 `ev_status`：`pending` 表示 EV/稳定门禁尚未完成评估，不得写成 Stable Champion Policy=none 或 EV 失败；`failed` 才能写成稳定门禁已评估但无 champion 通过；`passed` 时也只有 bulletin 的 Execution Alpha 可以写成可执行 alpha
+- 如果 CORE BOOK=0、`ev_status=failed`、或主信号门槛未过，要写成“Recall → EV → Gate 转化链未取得可执行资格/执行门禁未过”，不得说成做多机会不足或硬拔 RANGE/TACTICAL 进主书
 - 禁用词：综合考量、谨慎乐观、值得关注、密切跟踪、不确定性较大
 - P值禁止写1.00或0.00
 - 概率标注样本量

@@ -2643,6 +2643,22 @@ fn render_alpha_bulletin(md: &mut String, date_str: &str, market: &str) -> Resul
             }
         }
     }
+    let market_upper = market.to_uppercase();
+    writeln!(md, "## {} Stable Alpha Bulletin", market_upper)?;
+    writeln!(md)?;
+    writeln!(md, "- as_of: {}", date_str)?;
+    writeln!(md, "- evaluated_through: pending")?;
+    writeln!(md, "- ev_status: `pending`")?;
+    writeln!(md, "- selected_policy: `pending`")?;
+    writeln!(
+        md,
+        "- ev_note: stable alpha bulletin has not been generated yet; do not treat pending as Stable Champion Policy=none or EV failure"
+    )?;
+    writeln!(
+        md,
+        "- headline: advisory context only, not an execution blocker"
+    )?;
+    writeln!(md)?;
     Ok(())
 }
 
@@ -3463,8 +3479,8 @@ fn macro_cadence(series_id: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        cn_priced_in_score, execution_summary_sentence, macro_cadence, report_bucket_description,
-        setup_alpha_view,
+        cn_priced_in_score, execution_summary_sentence, macro_cadence, render_alpha_bulletin,
+        report_bucket_description, setup_alpha_view,
     };
     use crate::filtering::notable::{NotableItem, Signal};
     use serde_json::json;
@@ -3524,6 +3540,16 @@ mod tests {
 
         assert!(description.contains("复核层"));
         assert!(description.contains("不得作为买入清单"));
+    }
+
+    #[test]
+    fn missing_alpha_bulletin_renders_pending_not_none() {
+        let mut md = String::new();
+        render_alpha_bulletin(&mut md, "2099-01-01", "cn").unwrap();
+
+        assert!(md.contains("- ev_status: `pending`"));
+        assert!(md.contains("- selected_policy: `pending`"));
+        assert!(md.contains("do not treat pending as Stable Champion Policy=none"));
     }
 
     #[test]

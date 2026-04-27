@@ -111,6 +111,14 @@ fn select_tactical_policy(candidates: &[PolicyCandidate]) -> Option<String> {
         .map(|candidate| candidate.policy_id.clone())
 }
 
+fn market_ev_status(selected_policy: Option<&String>) -> String {
+    if selected_policy.is_some() {
+        "passed".to_string()
+    } else {
+        "failed".to_string()
+    }
+}
+
 fn has_factor_lab_prior(row: &TradeRow) -> bool {
     let details = parse_details(row);
     let mut parts = vec![
@@ -245,6 +253,13 @@ pub(super) fn build_bulletin(
         .iter()
         .map(|(market, candidates)| (market.clone(), select_tactical_policy(candidates)))
         .collect();
+    let ev_status: BTreeMap<String, String> = candidates_by_market
+        .keys()
+        .map(|market| {
+            let selected_policy = selected_policies.get(market).and_then(|p| p.as_ref());
+            (market.clone(), market_ev_status(selected_policy))
+        })
+        .collect();
     for (market, rows) in current_by_market {
         let selected_policy = selected_policies.get(market).and_then(|p| p.as_ref());
         let tactical_policy = tactical_policies.get(market).and_then(|p| p.as_ref());
@@ -297,6 +312,7 @@ pub(super) fn build_bulletin(
     AlphaBulletin {
         as_of: as_of.to_string(),
         evaluated_through,
+        ev_status,
         selected_policies,
         tactical_policies,
         stability: candidates_by_market.clone(),
@@ -325,13 +341,38 @@ pub fn render_market_bulletin_md(bulletin: &AlphaBulletin, market: &str) -> Stri
         .get(market)
         .map(String::as_str)
         .unwrap_or("unknown");
+    let ev_status = bulletin
+        .ev_status
+        .get(market)
+        .map(String::as_str)
+        .unwrap_or_else(|| {
+            if selected == "none" {
+                "failed"
+            } else {
+                "passed"
+            }
+        });
+    let ev_note = match ev_status {
+        "passed" => {
+            "stable champion selected; Execution Alpha may be emitted only for matching current candidates"
+        }
+        "failed" => {
+            "stable gate evaluated; no champion policy passed, so Setup/Recall names remain review-only"
+        }
+        "pending" => {
+            "stable gate not evaluated yet; do not treat pending as no champion or EV failure"
+        }
+        _ => "stable gate status unknown; do not promote candidates without explicit pass",
+    };
     let mut lines = vec![
         format!("## {market_upper} Stable Alpha Bulletin"),
         String::new(),
         format!("- as_of: {}", bulletin.as_of),
         format!("- evaluated_through: {evaluated}"),
+        format!("- ev_status: `{ev_status}`"),
         format!("- selected_policy: `{selected}`"),
         format!("- tactical_policy: `{tactical}`"),
+        format!("- ev_note: {ev_note}"),
         "- headline: advisory context only, not an execution blocker".to_string(),
         String::new(),
     ];

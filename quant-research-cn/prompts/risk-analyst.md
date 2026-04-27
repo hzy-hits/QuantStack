@@ -29,6 +29,7 @@
 - A股 T+1 与涨跌停是一级执行风险：不得写“硬止损”；失效条件只能写风控线/次日处理线，并标注跳空、跌停或涨停不可成交风险
 - 涨停票必须单列为“涨停次日盘口风险”，关注集合竞价溢价、封单强度、换手、开板回封质量；不得和普通回踩票使用同一套静态止损表达
 - 必须读取 `Setup Alpha / Anti-Chase`：`Blocked Chase / Priced-In` 全部进风险回避；`Breakout Acceptance` 只能写成突破承接失败的风险条件，不得简单等同于追高风险
+- 必须读取 `Stable Alpha Bulletin` 的 `ev_status`：pending 是流程未完成，failed 才是稳定门禁失败；不得把 pending 写成 Stable Champion Policy=none
 - 禁用词：综合考量、谨慎乐观、值得关注、密切跟踪、不确定性较大
 - 失效条件必须具体、可观察、可量化（不接受"如果宏观恶化"）
 - 情景触发条件是观测事实，不是概率

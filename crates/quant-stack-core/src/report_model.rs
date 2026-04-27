@@ -15,6 +15,7 @@ pub struct DailyReportModel {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportAlphaBulletin {
+    pub ev_status: Option<String>,
     pub selected_policy: Option<String>,
     pub tactical_policy: Option<String>,
     pub evaluated_through: Option<String>,
@@ -35,6 +36,7 @@ pub fn build_report_model(
         market: market.to_string(),
         session: session.to_string(),
         alpha_bulletin: ReportAlphaBulletin {
+            ev_status: bulletin.ev_status.get(market).cloned(),
             selected_policy: bulletin
                 .selected_policies
                 .get(market)

@@ -992,6 +992,10 @@ def build_bulletin(
         market: select_tactical_policy(candidates)
         for market, candidates in candidates_by_market.items()
     }
+    ev_status = {
+        market: "passed" if selected_policies.get(market) else "failed"
+        for market in candidates_by_market
+    }
 
     for market, current_rows in current_by_market.items():
         selected_policy_id = selected_policies.get(market)
@@ -1061,6 +1065,7 @@ def build_bulletin(
     return {
         "as_of": as_of.isoformat(),
         "evaluated_through": evaluated_through,
+        "ev_status": ev_status,
         "selected_policies": selected_policies,
         "tactical_policies": tactical_policies,
         "stability": stability,
@@ -1077,13 +1082,23 @@ def render_market_bulletin_md(bulletin: dict[str, Any], market: str) -> str:
     selected = bulletin["selected_policies"].get(market)
     tactical = bulletin.get("tactical_policies", {}).get(market)
     evaluated = bulletin["evaluated_through"].get(market, "unknown")
+    ev_status = bulletin.get("ev_status", {}).get(
+        market, "passed" if selected else "failed"
+    )
+    ev_note = {
+        "passed": "stable champion selected; Execution Alpha may be emitted only for matching current candidates",
+        "failed": "stable gate evaluated; no champion policy passed, so Setup/Recall names remain review-only",
+        "pending": "stable gate not evaluated yet; do not treat pending as no champion or EV failure",
+    }.get(ev_status, "stable gate status unknown; do not promote candidates without explicit pass")
     lines = [
         f"## {market_upper} Stable Alpha Bulletin",
         "",
         f"- as_of: {bulletin['as_of']}",
         f"- evaluated_through: {evaluated}",
+        f"- ev_status: `{ev_status}`",
         f"- selected_policy: `{selected or 'none'}`",
         f"- tactical_policy: `{tactical or 'none'}`",
+        f"- ev_note: {ev_note}",
         "- headline: advisory context only, not an execution blocker",
         "",
     ]
@@ -1452,18 +1467,24 @@ def strategy_report_md(
     evaluated_through: dict[str, str],
     candidates_by_market: dict[str, list[dict[str, Any]]],
     selected_policies: dict[str, str | None],
+    ev_status: dict[str, str] | None = None,
 ) -> str:
+    ev_status = ev_status or {
+        market: "passed" if selected_policies.get(market) else "failed"
+        for market in ["us", "cn"]
+    }
     lines = [
         f"# Strategy Backtest Gate — {as_of.isoformat()}",
         "",
-        "| Market | Evaluated through | Selected policy | Eligible / Total |",
-        "|---|---|---|---:|",
+        "| Market | Evaluated through | EV status | Selected policy | Eligible / Total |",
+        "|---|---|---|---|---:|",
     ]
     for market in ["us", "cn"]:
         candidates = candidates_by_market.get(market, [])
         eligible = sum(1 for c in candidates if c.get("eligible"))
         lines.append(
             f"| {market.upper()} | {evaluated_through.get(market, '-')} | "
+            f"`{ev_status.get(market, 'unknown')}` | "
             f"`{selected_policies.get(market) or 'none'}` | {eligible} / {len(candidates)} |"
         )
     lines.append("")
@@ -1568,7 +1589,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     output_dir = args.output_root / as_of.isoformat()
     output_dir.mkdir(parents=True, exist_ok=True)
-    report_text = strategy_report_md(as_of, evaluated_through, candidates_by_market, selected_policies)
+    report_text = strategy_report_md(
+        as_of,
+        evaluated_through,
+        candidates_by_market,
+        selected_policies,
+        bulletin.get("ev_status", {}),
+    )
     (output_dir / "strategy_backtest_report.md").write_text(report_text, encoding="utf-8")
     write_result_tables(
         output_dir / "strategy_backtest.duckdb",

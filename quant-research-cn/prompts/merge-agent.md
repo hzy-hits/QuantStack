@@ -62,13 +62,13 @@
 
 ### 做多
 每只：一句话逻辑 + 执行触发/风控线/目标观察区 + 失效条件
-优先写 payload 里的 `CORE BOOK`；如果 CORE BOOK=0、Stable Champion Policy=none、或主信号门槛未过，必须写“本期无可执行做多”，不得从 RANGE/TACTICAL/RADAR 硬拔。
+优先写 payload 里的 `CORE BOOK` 和 `Stable Alpha Bulletin`。`ev_status=pending` 表示 EV/稳定门禁尚未完成评估，只能写“尚未取得可执行资格”，不得写 Stable Champion Policy=none 或 EV 失败；`ev_status=failed` 才能写“稳定门禁已评估但无 champion 通过”。如果 CORE BOOK=0、`ev_status` 不是 `passed`、或主信号门槛未过，必须写“本期无可执行做多”，不得从 RANGE/TACTICAL/RADAR 硬拔。
 如果 Headline Gate = uncertain，必须明确个股机会只是条件式 alpha，不代表趋势主线。
 只允许写当前账户可执行的多头标的；`688*` 科创板不得放入此处。
 A股 T+1 下止损不是硬止损，不能写“硬止损”；只能写“风控线/失效线/次日处理线”，并标注跳空和涨跌停不可成交风险。
 
 ### Setup Alpha
-必须优先引用 payload 的 `Setup Alpha / Anti-Chase` 区块。Early accumulation / Pullback / Post-event second day 只能写成布局、回踩或次日承接观察；Breakout Acceptance 是“已经拉升但趋势/承接/事件确认仍支持延续”，不得机械写成追高；Blocked Chase / Priced-In 只能放风险回避或观望。
+必须优先引用 payload 的 `Setup Alpha / Anti-Chase` 区块。Early accumulation / Pullback / Post-event second day 只能写成布局、回踩或次日承接观察；Breakout Acceptance 是“已经拉升但趋势/承接/事件确认仍支持延续”，不得机械写成追高；Blocked Chase / Priced-In 只能放风险回避或观望。Setup Alpha 不是 Execution Alpha；EV pending 时尤其不能把它写成半执行清单。
 
 ### 战术延续
 只写 payload 里的 `TACTICAL CONTINUATION` 名字，最多4只。

@@ -500,8 +500,9 @@ pub(super) fn strategy_report_md(
     let mut lines = vec![
         format!("# Strategy Backtest Gate - {}", bulletin.as_of),
         String::new(),
-        "| Market | Evaluated through | Selected policy | Eligible / Total |".to_string(),
-        "|---|---|---|---:|".to_string(),
+        "| Market | Evaluated through | EV status | Selected policy | Eligible / Total |"
+            .to_string(),
+        "|---|---|---|---|---:|".to_string(),
     ];
     for market in ["us", "cn"] {
         let candidates = candidates_by_market
@@ -514,14 +515,26 @@ pub(super) fn strategy_report_md(
             .get(market)
             .and_then(|v| v.as_deref())
             .unwrap_or("none");
+        let ev_status = bulletin
+            .ev_status
+            .get(market)
+            .map(String::as_str)
+            .unwrap_or_else(|| {
+                if selected == "none" {
+                    "failed"
+                } else {
+                    "passed"
+                }
+            });
         lines.push(format!(
-            "| {} | {} | `{}` | {} / {} |",
+            "| {} | {} | `{}` | `{}` | {} / {} |",
             market.to_uppercase(),
             bulletin
                 .evaluated_through
                 .get(market)
                 .map(String::as_str)
                 .unwrap_or("-"),
+            ev_status,
             selected,
             eligible,
             candidates.len()

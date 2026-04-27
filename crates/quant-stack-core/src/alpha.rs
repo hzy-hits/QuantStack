@@ -107,6 +107,8 @@ pub struct BulletinItem {
 pub struct AlphaBulletin {
     pub as_of: String,
     pub evaluated_through: BTreeMap<String, String>,
+    #[serde(default)]
+    pub ev_status: BTreeMap<String, String>,
     pub selected_policies: BTreeMap<String, Option<String>>,
     #[serde(default)]
     pub tactical_policies: BTreeMap<String, Option<String>>,

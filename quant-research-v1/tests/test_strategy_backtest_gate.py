@@ -438,7 +438,10 @@ class StrategyBacktestGateTests(unittest.TestCase):
         )
         rendered = gate.render_market_bulletin_md(bulletin, "us")
 
+        self.assertEqual(bulletin["ev_status"]["us"], "failed")
         self.assertEqual(bulletin["execution_alpha"], [])
+        self.assertIn("- ev_status: `failed`", rendered)
+        self.assertIn("stable gate evaluated", rendered)
         self.assertIn("EV unknown", rendered)
         self.assertIn("### Equity Execution Alpha", rendered)
         self.assertIn("### Options / Shadow Options Alpha", rendered)
@@ -482,10 +485,26 @@ class StrategyBacktestGateTests(unittest.TestCase):
         )
         rendered = gate.render_market_bulletin_md(bulletin, "cn")
 
+        self.assertEqual(bulletin["ev_status"]["cn"], "failed")
         self.assertEqual(bulletin["execution_alpha"], [])
         self.assertEqual(len(bulletin["tactical_alpha"]), 1)
         self.assertIn("Tactical / Theme Rotation Alpha", rendered)
         self.assertIn("600861.SH", rendered)
+
+    def test_strategy_report_surfaces_ev_status(self) -> None:
+        report = gate.strategy_report_md(
+            date(2026, 4, 24),
+            {"us": "2026-04-21"},
+            {"us": [], "cn": []},
+            {"us": None, "cn": "cn:core:long:high_mod:executable_now:h2"},
+            {"us": "failed", "cn": "passed"},
+        )
+
+        self.assertIn("| US | 2026-04-21 | `failed` | `none` | 0 / 0 |", report)
+        self.assertIn(
+            "| CN | - | `passed` | `cn:core:long:high_mod:executable_now:h2` | 0 / 0 |",
+            report,
+        )
 
 
 class AlphaBulletinRenderTests(unittest.TestCase):
