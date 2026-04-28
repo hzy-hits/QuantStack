@@ -198,3 +198,21 @@ Legend: . = tested weak, + = decent IC, ++ = strong IC, +++ = promoted, ! = stro
 - Experiments run: 20
 - OOS passed: 3/3
 - Passing factors: anti_autocorr_amount_corridor_20, anti_autocorr_float_value_stability_20, log_amount_change_stability_20_5
+
+## Session 20260427_060002_ded4b4 — CN
+- Timestamp: 2026-04-27 06:56
+- Experiments run: 23
+- OOS passed: 3/3
+- Passing factors: anti_autocorr_amtflow_smooth_20, anti_autocorr_turnover_growth_stability_20, float_flow_smooth_20
+
+## Session 20260427_140002_cda48d — CN
+- Timestamp: 2026-04-27 14:55
+- Experiments run: 29
+- OOS passed: 2/3
+- Passing factors: anti_autocorr_float_flow_smooth_20, float_flow_smooth_20
+
+## Session 20260428_060002_dc8b1a — CN
+- Timestamp: 2026-04-28 06:57
+- Experiments run: 25
+- OOS passed: 3/3
+- Passing factors: anti_autocorr_floatflow_weekly_smooth_20, anti_autocorr_relvol_weekly_smooth_20, anti_autocorr_float_stability_20
