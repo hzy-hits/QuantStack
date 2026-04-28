@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run 4 analysis agents in parallel using claude -p (stdin), then merge.
+# Run 4 analysis agents in parallel, then merge.
 #
 # Usage:
 #   ./scripts/run_agents.sh                                                 # today (Shanghai time)
@@ -42,8 +42,10 @@ MERGE_TIMEOUT=1200  # 20 min for merge agent
 MIN_AGENT_BYTES=100
 MIN_MERGE_BYTES=200
 
-CLAUDE_BIN="${CLAUDE_BIN:-claude}"
 CODEX_BIN="${CODEX_BIN:-codex}"
+CODEX_MODEL="${CODEX_MODEL:-gpt-5.5}"
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+QUANT_AGENT_BACKEND="${QUANT_AGENT_BACKEND:-codex}"
 TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"
 
 PROJ_DIR="$(cd "$(dirname "$0")/.." && pwd)"
@@ -132,7 +134,8 @@ run_agent_with_fallback() {
 
     : > "$log_file"
 
-    if [[ "$CLAUDE_AVAILABLE" -eq 1 ]]; then
+    try_claude_agent() {
+        [[ "$CLAUDE_AVAILABLE" -eq 1 ]] || return 1
         echo "[claude] starting ${agent_name}" >> "$log_file"
         if CLAUDECODE="" "$TIMEOUT_BIN" "$timeout_secs" "$CLAUDE_BIN" -p --output-format text \
             < "$prompt_file" > "$output_file" 2>>"$log_file"; then
@@ -148,11 +151,14 @@ run_agent_with_fallback() {
             local rc=$?
             echo "[claude] failed (exit ${rc})" >> "$log_file"
         fi
-    fi
+        return 1
+    }
 
-    if [[ "$CODEX_AVAILABLE" -eq 1 ]]; then
-        echo "[codex] starting ${agent_name}" >> "$log_file"
+    try_codex_agent() {
+        [[ "$CODEX_AVAILABLE" -eq 1 ]] || return 1
+        echo "[codex] starting ${agent_name} model=${CODEX_MODEL}" >> "$log_file"
         if "$TIMEOUT_BIN" "$timeout_secs" "$CODEX_BIN" exec \
+            --model "$CODEX_MODEL" \
             --sandbox read-only \
             --color never \
             --skip-git-repo-check \
@@ -171,6 +177,15 @@ run_agent_with_fallback() {
             local rc=$?
             echo "[codex] failed (exit ${rc})" >> "$log_file"
         fi
+        return 1
+    }
+
+    if [[ "$QUANT_AGENT_BACKEND" == "claude" ]]; then
+        try_claude_agent && return 0
+        try_codex_agent && return 0
+    else
+        try_codex_agent && return 0
+        try_claude_agent && return 0
     fi
 
     echo "  [FAIL] ${agent_name} failed on all available backends"
@@ -182,6 +197,7 @@ echo "  Date:    $DATE"
 echo "  Slot:    $SLOT ($SLOT_LABEL_CN)"
 echo "  Project: $PROJ_DIR"
 echo "  Output:  $OUT_DIR"
+echo "  Agent:   ${QUANT_AGENT_BACKEND} (codex model: ${CODEX_MODEL})"
 [[ -n "$PREV_REPORT" ]] && echo "  Prev:    $PREV_REPORT"
 echo ""
 
