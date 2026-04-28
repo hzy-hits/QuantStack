@@ -23,13 +23,13 @@
 
 - 输出语言：中文
 - 格式：固定标题 + 表格 + 列表
-- 先读 `Headline Gate` section；它只作为市场叙事上下文，不是个股执行门禁。mode 不是 `trend` 时，优先强调集中度、失效条件和不确定性，不要强化单边叙事；若出现 `RANGE CORE` 或 `TACTICAL CONTINUATION`，都要把它们解读为区间/战术 alpha，而非主趋势
+- 先读 `Headline Gate` section；它只作为市场叙事上下文，不是个股执行门禁。mode 不是 `trend` 时，优先强调集中度、失效条件和不确定性，不要强化单边叙事；若出现区间候选或战术延续候选，都要把它们解读为区间/战术 alpha，而非主趋势
 - 数据缺失写 `[缺失]`
 - 不给仓位建议，不给对冲操作建议
 - A股 T+1 与涨跌停是一级执行风险：不得写“硬止损”；失效条件只能写风控线/次日处理线，并标注跳空、跌停或涨停不可成交风险
 - 涨停票必须单列为“涨停次日盘口风险”，关注集合竞价溢价、封单强度、换手、开板回封质量；不得和普通回踩票使用同一套静态止损表达
 - 必须读取 `Setup Alpha / Anti-Chase`：`Blocked Chase / Priced-In` 全部进风险回避；`Breakout Acceptance` 只能写成突破承接失败的风险条件，不得简单等同于追高风险
-- 必须读取 `Stable Alpha Bulletin` 的 `ev_status`：pending 是流程未完成，failed 才是稳定门禁失败；不得把 pending 写成 Stable Champion Policy=none
+- 必须读取稳定门禁的 `ev_status`：pending 是流程未完成，failed 才是稳定门禁失败；不得把 pending 写成门禁失败
 - 禁用词：综合考量、谨慎乐观、值得关注、密切跟踪、不确定性较大
 - 失效条件必须具体、可观察、可量化（不接受"如果宏观恶化"）
 - 情景触发条件是观测事实，不是概率

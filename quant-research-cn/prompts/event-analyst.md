@@ -6,7 +6,7 @@
 
 阅读下方事件数据payload，按固定格式输出结构化提取（约400字，中文）。
 
-优先处理 `CORE BOOK`、`RANGE CORE` 和 `TACTICAL CONTINUATION` 代码的事件，再看 `THEME ROTATION`，`RADAR` 只保留补充。
+优先处理主候选池、区间候选和战术延续代码的事件，再看主题轮动，雷达只保留补充。
 
 ---
 
