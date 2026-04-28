@@ -49,7 +49,125 @@ pub fn materialize_algorithm_postmortem(db: &Connection, as_of: NaiveDate) -> Re
         return Ok(0);
     }
 
-    let mut insert = db.prepare(
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS algorithm_postmortem_stage (
+            report_date VARCHAR,
+            session VARCHAR,
+            symbol VARCHAR,
+            selection_status VARCHAR,
+            evaluation_date VARCHAR,
+            action_label VARCHAR,
+            action_source VARCHAR,
+            direction VARCHAR,
+            direction_right BOOLEAN,
+            executable BOOLEAN,
+            fill_price DOUBLE,
+            exit_price DOUBLE,
+            realized_pnl_pct DOUBLE,
+            best_possible_ret_pct DOUBLE,
+            stale_chase BOOLEAN,
+            no_fill_reason VARCHAR,
+            label VARCHAR,
+            feedback_action VARCHAR,
+            feedback_weight DOUBLE,
+            action_intent VARCHAR,
+            calibration_bucket VARCHAR,
+            regime_bucket VARCHAR,
+            fill_quality VARCHAR,
+            detail_json VARCHAR
+        );
+        DELETE FROM algorithm_postmortem_stage;",
+    )?;
+
+    let mut inserted = 0usize;
+    {
+        let mut appender = db.appender("algorithm_postmortem_stage")?;
+        for row in rows {
+            let best_possible =
+                directional_best_ret(&row.direction, row.best_up_2d_pct, row.best_down_2d_pct);
+            let direction_right = is_direction_right(best_possible);
+            let (action_label, action_source) = infer_action(&row);
+            let gap_ratio = row.gap_vs_chase_limit.unwrap_or(0.0);
+            let stale_chase = action_label == "DO_NOT_CHASE"
+                || matches!(action_label, "TRADE_NOW" | "WAIT_PULLBACK") && gap_ratio >= 1.0;
+
+            let (executable, fill_price, exit_price, realized_pnl_pct, no_fill_reason) =
+                fill_result(&row, action_label, stale_chase);
+            let label = classify(
+                &row,
+                action_label,
+                direction_right,
+                stale_chase,
+                executable,
+                realized_pnl_pct,
+                best_possible,
+            );
+            let (feedback_action, feedback_weight) = feedback(label);
+            let action_intent = action_intent(action_label);
+            let regime_bucket = regime_bucket(&row);
+            let calibration_bucket = calibration_bucket(
+                &row.report_bucket,
+                &row.signal_confidence,
+                &row.execution_mode,
+                action_intent,
+                &regime_bucket,
+            );
+            let fill_quality = fill_quality(
+                action_intent,
+                row.data_ready,
+                executable,
+                stale_chase,
+                realized_pnl_pct,
+                no_fill_reason,
+            );
+            let detail = json!({
+                "alpha_postmortem_label": row.alpha_label,
+                "report_bucket": row.report_bucket,
+                "signal_confidence": row.signal_confidence,
+                "execution_mode": row.execution_mode,
+                "action_intent": action_intent,
+                "calibration_bucket": calibration_bucket,
+                "regime_bucket": regime_bucket,
+                "fill_quality": fill_quality,
+                "max_chase_gap_pct": row.max_chase_gap_pct,
+                "gap_vs_chase_limit": row.gap_vs_chase_limit,
+                "direction_threshold_pct": DIRECTION_THRESHOLD_PCT,
+            })
+            .to_string();
+            let report_date = row.report_date.to_string();
+            let evaluation_date = row.evaluation_date.to_string();
+
+            appender.append_row(duckdb::params![
+                &report_date,
+                SESSION,
+                &row.symbol,
+                &row.selection_status,
+                &evaluation_date,
+                action_label,
+                action_source,
+                &row.direction,
+                direction_right,
+                executable,
+                fill_price,
+                exit_price,
+                realized_pnl_pct,
+                best_possible,
+                stale_chase,
+                no_fill_reason,
+                label,
+                feedback_action,
+                feedback_weight,
+                action_intent,
+                &calibration_bucket,
+                &regime_bucket,
+                fill_quality,
+                &detail,
+            ])?;
+            inserted += 1;
+        }
+    }
+
+    db.execute_batch(
         "INSERT OR REPLACE INTO algorithm_postmortem (
             report_date, session, symbol, selection_status, evaluation_date,
             action_label, action_source, direction, direction_right, executable,
@@ -57,91 +175,16 @@ pub fn materialize_algorithm_postmortem(db: &Connection, as_of: NaiveDate) -> Re
             stale_chase, no_fill_reason, label, feedback_action, feedback_weight,
             action_intent, calibration_bucket, regime_bucket, fill_quality,
             detail_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        SELECT
+            CAST(report_date AS DATE), session, symbol, selection_status,
+            CAST(evaluation_date AS DATE), action_label, action_source,
+            direction, direction_right, executable, fill_price, exit_price,
+            realized_pnl_pct, best_possible_ret_pct, stale_chase, no_fill_reason,
+            label, feedback_action, feedback_weight, action_intent,
+            calibration_bucket, regime_bucket, fill_quality, detail_json
+        FROM algorithm_postmortem_stage",
     )?;
-
-    let mut inserted = 0usize;
-    for row in rows {
-        let best_possible =
-            directional_best_ret(&row.direction, row.best_up_2d_pct, row.best_down_2d_pct);
-        let direction_right = is_direction_right(best_possible);
-        let (action_label, action_source) = infer_action(&row);
-        let gap_ratio = row.gap_vs_chase_limit.unwrap_or(0.0);
-        let stale_chase = action_label == "DO_NOT_CHASE"
-            || matches!(action_label, "TRADE_NOW" | "WAIT_PULLBACK") && gap_ratio >= 1.0;
-
-        let (executable, fill_price, exit_price, realized_pnl_pct, no_fill_reason) =
-            fill_result(&row, action_label, stale_chase);
-        let label = classify(
-            &row,
-            action_label,
-            direction_right,
-            stale_chase,
-            executable,
-            realized_pnl_pct,
-            best_possible,
-        );
-        let (feedback_action, feedback_weight) = feedback(label);
-        let action_intent = action_intent(action_label);
-        let regime_bucket = regime_bucket(&row);
-        let calibration_bucket = calibration_bucket(
-            &row.report_bucket,
-            &row.signal_confidence,
-            &row.execution_mode,
-            action_intent,
-            &regime_bucket,
-        );
-        let fill_quality = fill_quality(
-            action_intent,
-            row.data_ready,
-            executable,
-            stale_chase,
-            realized_pnl_pct,
-            no_fill_reason,
-        );
-        let detail = json!({
-            "alpha_postmortem_label": row.alpha_label,
-            "report_bucket": row.report_bucket,
-            "signal_confidence": row.signal_confidence,
-            "execution_mode": row.execution_mode,
-            "action_intent": action_intent,
-            "calibration_bucket": calibration_bucket,
-            "regime_bucket": regime_bucket,
-            "fill_quality": fill_quality,
-            "max_chase_gap_pct": row.max_chase_gap_pct,
-            "gap_vs_chase_limit": row.gap_vs_chase_limit,
-            "direction_threshold_pct": DIRECTION_THRESHOLD_PCT,
-        })
-        .to_string();
-
-        insert.execute(duckdb::params![
-            row.report_date.to_string(),
-            SESSION,
-            row.symbol,
-            row.selection_status,
-            row.evaluation_date.to_string(),
-            action_label,
-            action_source,
-            row.direction,
-            direction_right,
-            executable,
-            fill_price,
-            exit_price,
-            realized_pnl_pct,
-            best_possible,
-            stale_chase,
-            no_fill_reason,
-            label,
-            feedback_action,
-            feedback_weight,
-            action_intent,
-            calibration_bucket,
-            regime_bucket,
-            fill_quality,
-            detail,
-        ])?;
-        inserted += 1;
-    }
 
     info!(rows = inserted, "algorithm_postmortem complete");
     Ok(inserted)

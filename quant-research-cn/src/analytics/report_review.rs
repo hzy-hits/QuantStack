@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{Duration, NaiveDate};
 use duckdb::Connection;
+use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 use crate::config::Settings;
@@ -19,6 +20,7 @@ struct DecisionRow {
     reference_close: Option<f64>,
 }
 
+#[derive(Clone)]
 struct FutureBar {
     trade_date: NaiveDate,
     open: Option<f64>,
@@ -172,71 +174,109 @@ fn compute_report_outcomes(db: &Connection, as_of: NaiveDate) -> Result<usize> {
         })
         .collect();
 
+    let symbols = decision_symbols(&rows);
+    let future_bars = load_future_bar_map(db, cutoff, &symbols)?;
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS report_outcomes_stage (
+            report_date VARCHAR,
+            session VARCHAR,
+            symbol VARCHAR,
+            selection_status VARCHAR,
+            evaluation_date VARCHAR,
+            next_trade_date VARCHAR,
+            second_trade_date VARCHAR,
+            reference_close DOUBLE,
+            next_open DOUBLE,
+            next_close DOUBLE,
+            best_high_2d DOUBLE,
+            worst_low_2d DOUBLE,
+            next_open_ret_pct DOUBLE,
+            next_close_ret_pct DOUBLE,
+            best_up_2d_pct DOUBLE,
+            best_down_2d_pct DOUBLE,
+            gap_vs_chase_limit DOUBLE,
+            data_ready BOOLEAN
+        );
+        DELETE FROM report_outcomes_stage;",
+    )?;
     let mut inserted = 0usize;
-    let mut insert_stmt = db.prepare(
+    let evaluation_date = as_of.to_string();
+    {
+        let mut appender = db.appender("report_outcomes_stage")?;
+        for row in rows {
+            let Some(reference_close) = row.reference_close.filter(|v| *v > 0.0) else {
+                continue;
+            };
+            let future = future_bars_for(&future_bars, &row.symbol, row.report_date);
+            if future.is_empty() {
+                continue;
+            }
+
+            let first = &future[0];
+            let second = future.get(1);
+            let best_high = future
+                .iter()
+                .filter_map(|bar| bar.high)
+                .fold(None, |acc: Option<f64>, v| {
+                    Some(acc.map_or(v, |m| m.max(v)))
+                });
+            let worst_low = future
+                .iter()
+                .filter_map(|bar| bar.low)
+                .fold(None, |acc: Option<f64>, v| {
+                    Some(acc.map_or(v, |m| m.min(v)))
+                });
+
+            let next_open_ret_pct = pct_change(first.open, reference_close);
+            let next_close_ret_pct = pct_change(first.close, reference_close);
+            let best_up_2d_pct = pct_change(best_high, reference_close);
+            let best_down_2d_pct = pct_change(worst_low, reference_close);
+            let gap_vs_chase_limit = match (next_open_ret_pct, row.max_chase_gap_pct) {
+                (Some(gap), Some(limit)) if limit > 0.0 => Some(gap / limit),
+                _ => None,
+            };
+            let report_date = row.report_date.to_string();
+            let second_trade_date = second.map(|bar| bar.trade_date.to_string());
+
+            appender.append_row(duckdb::params![
+                &report_date,
+                SESSION,
+                &row.symbol,
+                &row.selection_status,
+                &evaluation_date,
+                &first.trade_date.to_string(),
+                second_trade_date,
+                reference_close,
+                first.open,
+                first.close,
+                best_high,
+                worst_low,
+                next_open_ret_pct,
+                next_close_ret_pct,
+                best_up_2d_pct,
+                best_down_2d_pct,
+                gap_vs_chase_limit,
+                true,
+            ])?;
+            inserted += 1;
+        }
+    }
+
+    db.execute_batch(
         "INSERT OR REPLACE INTO report_outcomes (
             report_date, session, symbol, selection_status, evaluation_date,
             next_trade_date, second_trade_date, reference_close, next_open, next_close,
             best_high_2d, worst_low_2d, next_open_ret_pct, next_close_ret_pct,
             best_up_2d_pct, best_down_2d_pct, gap_vs_chase_limit, data_ready
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        SELECT
+            CAST(report_date AS DATE), session, symbol, selection_status,
+            CAST(evaluation_date AS DATE), CAST(next_trade_date AS DATE),
+            CAST(second_trade_date AS DATE), reference_close, next_open, next_close,
+            best_high_2d, worst_low_2d, next_open_ret_pct, next_close_ret_pct,
+            best_up_2d_pct, best_down_2d_pct, gap_vs_chase_limit, data_ready
+        FROM report_outcomes_stage",
     )?;
-
-    for row in rows {
-        let Some(reference_close) = row.reference_close.filter(|v| *v > 0.0) else {
-            continue;
-        };
-        let future = load_future_bars(db, &row.symbol, row.report_date)?;
-        if future.is_empty() {
-            continue;
-        }
-
-        let first = &future[0];
-        let second = future.get(1);
-        let best_high = future
-            .iter()
-            .filter_map(|bar| bar.high)
-            .fold(None, |acc: Option<f64>, v| {
-                Some(acc.map_or(v, |m| m.max(v)))
-            });
-        let worst_low = future
-            .iter()
-            .filter_map(|bar| bar.low)
-            .fold(None, |acc: Option<f64>, v| {
-                Some(acc.map_or(v, |m| m.min(v)))
-            });
-
-        let next_open_ret_pct = pct_change(first.open, reference_close);
-        let next_close_ret_pct = pct_change(first.close, reference_close);
-        let best_up_2d_pct = pct_change(best_high, reference_close);
-        let best_down_2d_pct = pct_change(worst_low, reference_close);
-        let gap_vs_chase_limit = match (next_open_ret_pct, row.max_chase_gap_pct) {
-            (Some(gap), Some(limit)) if limit > 0.0 => Some(gap / limit),
-            _ => None,
-        };
-
-        insert_stmt.execute(duckdb::params![
-            row.report_date.to_string(),
-            SESSION,
-            row.symbol,
-            row.selection_status,
-            as_of.to_string(),
-            first.trade_date.to_string(),
-            second.map(|bar| bar.trade_date.to_string()),
-            reference_close,
-            first.open,
-            first.close,
-            best_high,
-            worst_low,
-            next_open_ret_pct,
-            next_close_ret_pct,
-            best_up_2d_pct,
-            best_down_2d_pct,
-            gap_vs_chase_limit,
-            true,
-        ])?;
-        inserted += 1;
-    }
 
     Ok(inserted)
 }
@@ -321,87 +361,157 @@ fn compute_alpha_postmortem(db: &Connection, as_of: NaiveDate) -> Result<usize> 
         })
         .collect();
 
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS alpha_postmortem_stage (
+            report_date VARCHAR,
+            session VARCHAR,
+            symbol VARCHAR,
+            selection_status VARCHAR,
+            evaluation_date VARCHAR,
+            label VARCHAR,
+            review_note VARCHAR,
+            factor_feedback_action VARCHAR,
+            factor_feedback_weight DOUBLE,
+            best_ret_pct DOUBLE,
+            next_open_ret_pct DOUBLE,
+            next_close_ret_pct DOUBLE,
+            gap_vs_chase_limit DOUBLE
+        );
+        DELETE FROM alpha_postmortem_stage;",
+    )?;
+
     let mut inserted = 0usize;
-    let mut insert_stmt = db.prepare(
+    {
+        let mut appender = db.appender("alpha_postmortem_stage")?;
+        for row in rows {
+            let directional_best = directional_best_ret(
+                &row.signal_direction,
+                row.best_up_2d_pct,
+                row.best_down_2d_pct,
+            );
+            let directional_close =
+                directional_close_ret(&row.signal_direction, row.next_close_ret_pct);
+            let (label, review_note, action, weight) =
+                classify_postmortem(&row, directional_best, directional_close);
+            let report_date = row.report_date.to_string();
+            let evaluation_date = row.evaluation_date.to_string();
+
+            appender.append_row(duckdb::params![
+                &report_date,
+                SESSION,
+                &row.symbol,
+                &row.selection_status,
+                &evaluation_date,
+                &label,
+                &review_note,
+                action,
+                weight,
+                directional_best,
+                row.next_open_ret_pct,
+                row.next_close_ret_pct,
+                row.gap_vs_chase_limit,
+            ])?;
+            inserted += 1;
+        }
+    }
+
+    db.execute_batch(
         "INSERT OR REPLACE INTO alpha_postmortem (
             report_date, session, symbol, selection_status, evaluation_date,
             label, review_note, factor_feedback_action, factor_feedback_weight,
             best_ret_pct, next_open_ret_pct, next_close_ret_pct, gap_vs_chase_limit
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        SELECT
+            CAST(report_date AS DATE), session, symbol, selection_status,
+            CAST(evaluation_date AS DATE), label, review_note,
+            factor_feedback_action, factor_feedback_weight, best_ret_pct,
+            next_open_ret_pct, next_close_ret_pct, gap_vs_chase_limit
+        FROM alpha_postmortem_stage",
     )?;
-
-    for row in rows {
-        let directional_best = directional_best_ret(
-            &row.signal_direction,
-            row.best_up_2d_pct,
-            row.best_down_2d_pct,
-        );
-        let directional_close =
-            directional_close_ret(&row.signal_direction, row.next_close_ret_pct);
-        let (label, review_note, action, weight) =
-            classify_postmortem(&row, directional_best, directional_close);
-
-        insert_stmt.execute(duckdb::params![
-            row.report_date.to_string(),
-            SESSION,
-            row.symbol,
-            row.selection_status,
-            row.evaluation_date.to_string(),
-            label,
-            review_note,
-            action,
-            weight,
-            directional_best,
-            row.next_open_ret_pct,
-            row.next_close_ret_pct,
-            row.gap_vs_chase_limit,
-        ])?;
-        inserted += 1;
-    }
 
     Ok(inserted)
 }
 
-fn load_future_bars(
+fn decision_symbols(decisions: &[DecisionRow]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    decisions
+        .iter()
+        .filter_map(|decision| {
+            seen.insert(decision.symbol.clone())
+                .then(|| decision.symbol.clone())
+        })
+        .collect()
+}
+
+fn load_future_bar_map(
     db: &Connection,
-    symbol: &str,
-    report_date: NaiveDate,
-) -> Result<Vec<FutureBar>> {
+    cutoff: NaiveDate,
+    symbols: &[String],
+) -> Result<HashMap<String, Vec<FutureBar>>> {
+    if symbols.is_empty() {
+        return Ok(HashMap::new());
+    }
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS report_review_future_symbols (ts_code VARCHAR);
+         DELETE FROM report_review_future_symbols;",
+    )?;
+    {
+        let mut appender = db.appender("report_review_future_symbols")?;
+        for symbol in symbols {
+            appender.append_row(duckdb::params![symbol])?;
+        }
+    }
+
     let mut stmt = db.prepare(
-        "SELECT CAST(trade_date AS VARCHAR), open, high, low, close
-         FROM prices
-         WHERE ts_code = ?
-           AND trade_date > CAST(? AS DATE)
-         ORDER BY trade_date
-         LIMIT 2",
+        "SELECT p.ts_code, CAST(p.trade_date AS VARCHAR), p.open, p.high, p.low, p.close
+         FROM prices p
+         INNER JOIN report_review_future_symbols s ON s.ts_code = p.ts_code
+         WHERE p.trade_date > CAST(? AS DATE)
+         ORDER BY p.ts_code, p.trade_date",
     )?;
 
-    let rows = stmt.query_map(duckdb::params![symbol, report_date.to_string()], |row| {
+    let rows = stmt.query_map(duckdb::params![cutoff.to_string()], |row| {
         Ok((
             row.get::<_, String>(0)?,
-            row.get::<_, Option<f64>>(1)?,
+            row.get::<_, String>(1)?,
             row.get::<_, Option<f64>>(2)?,
             row.get::<_, Option<f64>>(3)?,
             row.get::<_, Option<f64>>(4)?,
+            row.get::<_, Option<f64>>(5)?,
         ))
     })?;
 
-    Ok(rows
-        .filter_map(|r| match r {
-            Ok((trade_date, open, high, low, close)) => {
-                parse_sql_date(trade_date)
-                    .ok()
-                    .map(|parsed_date| FutureBar {
-                        trade_date: parsed_date,
-                        open,
-                        high,
-                        low,
-                        close,
-                    })
-            }
-            Err(_) => None,
+    let mut out: HashMap<String, Vec<FutureBar>> = HashMap::new();
+    for row in rows.filter_map(|r| r.ok()) {
+        let Some(parsed_date) = parse_sql_date(row.1).ok() else {
+            continue;
+        };
+        out.entry(row.0).or_default().push(FutureBar {
+            trade_date: parsed_date,
+            open: row.2,
+            high: row.3,
+            low: row.4,
+            close: row.5,
+        });
+    }
+    Ok(out)
+}
+
+fn future_bars_for(
+    future_bars: &HashMap<String, Vec<FutureBar>>,
+    symbol: &str,
+    report_date: NaiveDate,
+) -> Vec<FutureBar> {
+    future_bars
+        .get(symbol)
+        .map(|bars| {
+            bars.iter()
+                .filter(|bar| bar.trade_date > report_date)
+                .take(2)
+                .cloned()
+                .collect()
         })
-        .collect())
+        .unwrap_or_default()
 }
 
 fn pct_change(target: Option<f64>, base: f64) -> Option<f64> {

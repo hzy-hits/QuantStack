@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{Duration, NaiveDate};
 use duckdb::Connection;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::info;
 
 const SESSION: &str = "daily";
@@ -512,6 +512,8 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     ensure_schema(db)?;
     let cutoff = as_of - Duration::days(LOOKBACK_DAYS);
     let decisions = load_decisions(db, cutoff, as_of)?;
+    let symbols = decision_symbols(&decisions);
+    let future_bars = load_future_bar_map(db, cutoff, as_of, &symbols)?;
     db.execute(
         "DELETE FROM paper_trades
          WHERE report_date >= CAST(? AS DATE)
@@ -522,7 +524,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
 
     let mut trades = Vec::new();
     for decision in decisions {
-        trades.push(build_trade(db, decision, as_of)?);
+        trades.push(build_trade(decision, &future_bars)?);
     }
     store_paper_trades(db, &trades, as_of)?;
     let ev_rows = store_strategy_ev(db, &trades, as_of)?;
@@ -541,7 +543,10 @@ fn ensure_schema(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn build_trade(db: &Connection, decision: Decision, as_of: NaiveDate) -> Result<PaperTrade> {
+fn build_trade(
+    decision: Decision,
+    future_bars: &HashMap<String, Vec<FutureBar>>,
+) -> Result<PaperTrade> {
     let strategy_family = StrategyFamily::classify(&decision);
     let intent = TradeIntent::from_decision(&decision);
     let execution_rule = ExecutionRule::from_intent(intent);
@@ -550,7 +555,7 @@ fn build_trade(db: &Connection, decision: Decision, as_of: NaiveDate) -> Result<
     let downside_stress = decision.detail_f64("downside_stress", 0.50);
     let stale_chase_risk = decision.detail_f64("stale_chase_risk", 0.35);
     let planned_entry = execution_rule.planned_entry(&decision);
-    let future = load_future_bars(db, &decision.symbol, decision.report_date, as_of)?;
+    let future = future_bars_for(future_bars, &decision.symbol, decision.report_date);
     let fill = execution_rule.simulate(&decision, &future);
     let result = TradeResult::from_fill(&fill, &future);
     let label = OutcomeLabel::from_trade(intent, &fill, &result);
@@ -704,7 +709,75 @@ fn load_decisions(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Resul
 }
 
 fn store_paper_trades(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -> Result<usize> {
-    let mut insert = db.prepare(
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS paper_trades_stage (
+            report_date VARCHAR,
+            session VARCHAR,
+            symbol VARCHAR,
+            selection_status VARCHAR,
+            strategy_family VARCHAR,
+            strategy_key VARCHAR,
+            execution_rule VARCHAR,
+            action_intent VARCHAR,
+            evaluation_date VARCHAR,
+            reference_close DOUBLE,
+            planned_entry DOUBLE,
+            fill_date VARCHAR,
+            fill_price DOUBLE,
+            exit_date VARCHAR,
+            exit_price DOUBLE,
+            fill_status VARCHAR,
+            realized_ret_pct DOUBLE,
+            max_favorable_pct DOUBLE,
+            max_adverse_pct DOUBLE,
+            shadow_alpha_prob DOUBLE,
+            downside_stress DOUBLE,
+            stale_chase_risk DOUBLE,
+            flow_conflict_flag BOOLEAN,
+            label VARCHAR,
+            detail_json VARCHAR
+        );
+        DELETE FROM paper_trades_stage;",
+    )?;
+
+    let evaluation_date = as_of.to_string();
+    {
+        let mut appender = db.appender("paper_trades_stage")?;
+        for trade in trades {
+            let report_date = trade.decision.report_date.to_string();
+            let fill_date = trade.fill.date.map(|v| v.to_string());
+            let exit_date = trade.result.exit_date.map(|v| v.to_string());
+            let detail = trade.detail.to_string();
+            appender.append_row(duckdb::params![
+                &report_date,
+                SESSION,
+                &trade.decision.symbol,
+                &trade.decision.selection_status_raw,
+                trade.strategy_family.as_str(),
+                &trade.strategy_key,
+                trade.execution_rule.as_str(),
+                trade.intent.as_str(),
+                &evaluation_date,
+                trade.decision.reference_close,
+                trade.planned_entry,
+                fill_date,
+                trade.fill.price,
+                exit_date,
+                trade.result.exit_price,
+                trade.fill.status.as_str(),
+                trade.result.realized_ret_pct,
+                trade.result.max_favorable_pct,
+                trade.result.max_adverse_pct,
+                trade.shadow_alpha_prob,
+                trade.downside_stress,
+                trade.stale_chase_risk,
+                trade.decision.flow_conflict_flag,
+                trade.label.as_str(),
+                &detail,
+            ])?;
+        }
+    }
+    db.execute_batch(
         "INSERT OR REPLACE INTO paper_trades (
             report_date, session, symbol, selection_status, strategy_family,
             strategy_key, execution_rule, action_intent, evaluation_date,
@@ -712,37 +785,16 @@ fn store_paper_trades(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) 
             fill_status, realized_ret_pct, max_favorable_pct, max_adverse_pct,
             shadow_alpha_prob, downside_stress, stale_chase_risk, flow_conflict_flag,
             label, detail_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        SELECT
+            CAST(report_date AS DATE), session, symbol, selection_status, strategy_family,
+            strategy_key, execution_rule, action_intent, CAST(evaluation_date AS DATE),
+            reference_close, planned_entry, CAST(fill_date AS DATE), fill_price,
+            CAST(exit_date AS DATE), exit_price, fill_status, realized_ret_pct,
+            max_favorable_pct, max_adverse_pct, shadow_alpha_prob, downside_stress,
+            stale_chase_risk, flow_conflict_flag, label, detail_json
+        FROM paper_trades_stage",
     )?;
-    for trade in trades {
-        insert.execute(duckdb::params![
-            trade.decision.report_date.to_string(),
-            SESSION,
-            trade.decision.symbol,
-            trade.decision.selection_status_raw,
-            trade.strategy_family.as_str(),
-            trade.strategy_key,
-            trade.execution_rule.as_str(),
-            trade.intent.as_str(),
-            as_of.to_string(),
-            trade.decision.reference_close,
-            trade.planned_entry,
-            trade.fill.date.map(|v| v.to_string()),
-            trade.fill.price,
-            trade.result.exit_date.map(|v| v.to_string()),
-            trade.result.exit_price,
-            trade.fill.status.as_str(),
-            trade.result.realized_ret_pct,
-            trade.result.max_favorable_pct,
-            trade.result.max_adverse_pct,
-            trade.shadow_alpha_prob,
-            trade.downside_stress,
-            trade.stale_chase_risk,
-            trade.decision.flow_conflict_flag,
-            trade.label.as_str(),
-            trade.detail.to_string(),
-        ])?;
-    }
     Ok(trades.len())
 }
 
@@ -941,44 +993,86 @@ fn load_ev_map(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, EvRo
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
-fn load_future_bars(
+fn decision_symbols(decisions: &[Decision]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    decisions
+        .iter()
+        .filter_map(|decision| {
+            seen.insert(decision.symbol.clone())
+                .then(|| decision.symbol.clone())
+        })
+        .collect()
+}
+
+fn load_future_bar_map(
     db: &Connection,
-    symbol: &str,
-    report_date: NaiveDate,
+    cutoff: NaiveDate,
     as_of: NaiveDate,
-) -> Result<Vec<FutureBar>> {
+    symbols: &[String],
+) -> Result<HashMap<String, Vec<FutureBar>>> {
+    if symbols.is_empty() {
+        return Ok(HashMap::new());
+    }
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS paper_trade_ev_symbols (ts_code VARCHAR);
+         DELETE FROM paper_trade_ev_symbols;",
+    )?;
+    {
+        let mut appender = db.appender("paper_trade_ev_symbols")?;
+        for symbol in symbols {
+            appender.append_row(duckdb::params![symbol])?;
+        }
+    }
+
     let mut stmt = db.prepare(
-        "SELECT CAST(trade_date AS VARCHAR), open, high, low, close
-         FROM prices
-         WHERE ts_code = ?
-           AND trade_date > CAST(? AS DATE)
-           AND trade_date <= CAST(? AS DATE)
-         ORDER BY trade_date
-         LIMIT 2",
+        "SELECT p.ts_code, CAST(p.trade_date AS VARCHAR), p.open, p.high, p.low, p.close
+         FROM prices p
+         INNER JOIN paper_trade_ev_symbols s ON s.ts_code = p.ts_code
+         WHERE p.trade_date > CAST(? AS DATE)
+           AND p.trade_date <= CAST(? AS DATE)
+         ORDER BY p.ts_code, p.trade_date",
     )?;
     let rows = stmt.query_map(
-        duckdb::params![symbol, report_date.to_string(), as_of.to_string()],
+        duckdb::params![cutoff.to_string(), as_of.to_string()],
         |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, f64>(1).unwrap_or(0.0),
+                row.get::<_, String>(1)?,
                 row.get::<_, f64>(2).unwrap_or(0.0),
                 row.get::<_, f64>(3).unwrap_or(0.0),
                 row.get::<_, f64>(4).unwrap_or(0.0),
+                row.get::<_, f64>(5).unwrap_or(0.0),
             ))
         },
     )?;
-    let mut out = Vec::new();
+    let mut out: HashMap<String, Vec<FutureBar>> = HashMap::new();
     for row in rows.filter_map(|r| r.ok()) {
-        out.push(FutureBar {
-            trade_date: parse_sql_date(&row.0)?,
-            open: row.1,
-            high: row.2,
-            low: row.3,
-            close: row.4,
+        out.entry(row.0).or_default().push(FutureBar {
+            trade_date: parse_sql_date(&row.1)?,
+            open: row.2,
+            high: row.3,
+            low: row.4,
+            close: row.5,
         });
     }
     Ok(out)
+}
+
+fn future_bars_for(
+    future_bars: &HashMap<String, Vec<FutureBar>>,
+    symbol: &str,
+    report_date: NaiveDate,
+) -> Vec<FutureBar> {
+    future_bars
+        .get(symbol)
+        .map(|bars| {
+            bars.iter()
+                .filter(|bar| bar.trade_date > report_date)
+                .take(2)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn strategy_key(
