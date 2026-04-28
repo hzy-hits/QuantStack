@@ -117,6 +117,26 @@ pub const CREATE_TABLES: &str = "
         PRIMARY KEY (ts_code, as_of, module, metric)
     );
 
+    CREATE TABLE IF NOT EXISTS price_features (
+        as_of              DATE NOT NULL,
+        ts_code            VARCHAR NOT NULL,
+        close_now          DOUBLE,
+        close_5d_ago       DOUBLE,
+        close_20d_ago      DOUBLE,
+        high_20d           DOUBLE,
+        low_20d            DOUBLE,
+        avg_vol_5          DOUBLE,
+        avg_vol_base       DOUBLE,
+        std5_ret           DOUBLE,
+        std20_ret          DOUBLE,
+        ret_5d             DOUBLE,
+        ret_20d            DOUBLE,
+        atr_pct_14         DOUBLE,
+        n_obs              INTEGER,
+        updated_at         TIMESTAMP DEFAULT current_timestamp,
+        PRIMARY KEY (as_of, ts_code)
+    );
+
     CREATE TABLE IF NOT EXISTS hmm_forecasts (
         forecast_id VARCHAR NOT NULL PRIMARY KEY,
         as_of       DATE NOT NULL,

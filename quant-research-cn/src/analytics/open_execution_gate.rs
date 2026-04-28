@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{Duration, NaiveDate};
+use chrono::NaiveDate;
 use duckdb::Connection;
 use serde_json::json;
 use tracing::info;
@@ -37,171 +37,165 @@ fn regime_sensitive_thresholds(
 }
 
 pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
+    crate::analytics::price_features::ensure(db, as_of)?;
     let date_str = as_of.to_string();
-    let history_start = (as_of - Duration::days(90)).to_string();
     let sql = "
-        WITH ranked AS (
-            SELECT ts_code, trade_date, close, high, low,
-                   ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
-            FROM prices
-            WHERE trade_date <= CAST(? AS DATE)
-              AND trade_date >= CAST(? AS DATE)
-        ),
-        latest AS (
+        WITH aux AS (
             SELECT
                 ts_code,
-                MAX(CASE WHEN rn = 1 THEN close END) AS close_now,
-                MAX(CASE WHEN rn = 6 THEN close END) AS close_5d_ago,
-                MAX(CASE WHEN rn = 21 THEN close END) AS close_20d_ago,
-                AVG(CASE WHEN rn <= 14 AND close > 0 THEN (high - low) / close * 100.0 END) AS atr_pct_14
-            FROM ranked
-            WHERE rn <= 25
+                MAX(CASE WHEN module = 'setup_alpha' AND metric = 'setup_score' THEN value END) AS setup_score,
+                MAX(CASE WHEN module = 'continuation_vs_fade' AND metric = 'continuation_score' THEN value END) AS continuation_score,
+                MAX(CASE WHEN module = 'continuation_vs_fade' AND metric = 'fade_risk' THEN value END) AS fade_risk,
+                MAX(CASE WHEN module = 'shadow_fast' AND metric = 'shadow_iv_30d' THEN value END) AS shadow_iv_30d,
+                MAX(CASE WHEN module = 'shadow_fast' AND metric = 'downside_stress' THEN value END) AS downside_stress,
+                MAX(CASE WHEN module = 'momentum' AND metric = 'regime' THEN value END) AS regime
+            FROM analytics
+            WHERE as_of = CAST(? AS DATE)
+              AND (
+                   (module = 'setup_alpha' AND metric = 'setup_score')
+                OR (module = 'continuation_vs_fade' AND metric IN ('continuation_score', 'fade_risk'))
+                OR (module = 'shadow_fast' AND metric IN ('shadow_iv_30d', 'downside_stress'))
+                OR (module = 'momentum' AND metric = 'regime')
+              )
             GROUP BY ts_code
         )
         SELECT
-            l.ts_code,
-            l.close_now,
-            CASE WHEN l.close_5d_ago > 0 THEN (l.close_now / l.close_5d_ago - 1.0) * 100.0 ELSE 0 END AS ret_5d,
-            CASE WHEN l.close_20d_ago > 0 THEN (l.close_now / l.close_20d_ago - 1.0) * 100.0 ELSE 0 END AS ret_20d,
-            COALESCE(l.atr_pct_14, 0) AS atr_pct_14,
-            COALESCE(sa.value, 0) AS setup_score,
-            COALESCE(cf.value, 0) AS continuation_score,
-            COALESCE(fr.value, 0) AS fade_risk,
-            COALESCE(si.value, 0) AS shadow_iv_30d,
-            COALESCE(ds.value, 0) AS downside_stress,
-            CAST(COALESCE(rg.value, 2) AS INTEGER) AS regime
-        FROM latest l
-        LEFT JOIN analytics sa
-          ON l.ts_code = sa.ts_code AND sa.as_of = ? AND sa.module = 'setup_alpha' AND sa.metric = 'setup_score'
-        LEFT JOIN analytics cf
-          ON l.ts_code = cf.ts_code AND cf.as_of = ? AND cf.module = 'continuation_vs_fade' AND cf.metric = 'continuation_score'
-        LEFT JOIN analytics fr
-          ON l.ts_code = fr.ts_code AND fr.as_of = ? AND fr.module = 'continuation_vs_fade' AND fr.metric = 'fade_risk'
-        LEFT JOIN analytics si
-          ON l.ts_code = si.ts_code AND si.as_of = ? AND si.module = 'shadow_fast' AND si.metric = 'shadow_iv_30d'
-        LEFT JOIN analytics ds
-          ON l.ts_code = ds.ts_code AND ds.as_of = ? AND ds.module = 'shadow_fast' AND ds.metric = 'downside_stress'
-        LEFT JOIN analytics rg
-          ON l.ts_code = rg.ts_code AND rg.as_of = ? AND rg.module = 'momentum' AND rg.metric = 'regime'
-        WHERE l.close_now IS NOT NULL
+            p.ts_code,
+            p.close_now,
+            COALESCE(p.ret_5d, 0) AS ret_5d,
+            COALESCE(p.ret_20d, 0) AS ret_20d,
+            COALESCE(p.atr_pct_14, 0) AS atr_pct_14,
+            COALESCE(aux.setup_score, 0) AS setup_score,
+            COALESCE(aux.continuation_score, 0) AS continuation_score,
+            COALESCE(aux.fade_risk, 0) AS fade_risk,
+            COALESCE(aux.shadow_iv_30d, 0) AS shadow_iv_30d,
+            COALESCE(aux.downside_stress, 0) AS downside_stress,
+            CAST(COALESCE(aux.regime, 2) AS INTEGER) AS regime
+        FROM price_features p
+        LEFT JOIN aux ON p.ts_code = aux.ts_code
+        WHERE p.as_of = CAST(? AS DATE)
+          AND p.close_now IS NOT NULL
     ";
 
     let mut stmt = db.prepare(sql)?;
     let rows: Vec<_> = stmt
-        .query_map(
-            duckdb::params![
-                date_str,
-                history_start,
-                date_str,
-                date_str,
-                date_str,
-                date_str,
-                date_str,
-                date_str
-            ],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, f64>(1).unwrap_or(0.0),
-                    row.get::<_, f64>(2).unwrap_or(0.0),
-                    row.get::<_, f64>(3).unwrap_or(0.0),
-                    row.get::<_, f64>(4).unwrap_or(0.0),
-                    row.get::<_, f64>(5).unwrap_or(0.0),
-                    row.get::<_, f64>(6).unwrap_or(0.0),
-                    row.get::<_, f64>(7).unwrap_or(0.0),
-                    row.get::<_, f64>(8).unwrap_or(0.0),
-                    row.get::<_, f64>(9).unwrap_or(0.0),
-                    row.get::<_, i32>(10).unwrap_or(2),
-                ))
-            },
-        )?
+        .query_map(duckdb::params![date_str, date_str], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, f64>(1).unwrap_or(0.0),
+                row.get::<_, f64>(2).unwrap_or(0.0),
+                row.get::<_, f64>(3).unwrap_or(0.0),
+                row.get::<_, f64>(4).unwrap_or(0.0),
+                row.get::<_, f64>(5).unwrap_or(0.0),
+                row.get::<_, f64>(6).unwrap_or(0.0),
+                row.get::<_, f64>(7).unwrap_or(0.0),
+                row.get::<_, f64>(8).unwrap_or(0.0),
+                row.get::<_, f64>(9).unwrap_or(0.0),
+                row.get::<_, i32>(10).unwrap_or(2),
+            ))
+        })?
         .filter_map(|r| r.ok())
         .collect();
 
-    let mut insert = db.prepare(
-        "INSERT OR REPLACE INTO analytics (ts_code, as_of, module, metric, value, detail)
-         VALUES (?, ?, ?, ?, ?, ?)",
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS open_execution_gate_stage (
+            ts_code VARCHAR,
+            as_of VARCHAR,
+            module VARCHAR,
+            metric VARCHAR,
+            value DOUBLE,
+            detail VARCHAR
+        );
+        DELETE FROM open_execution_gate_stage;",
     )?;
     let mut count = 0usize;
 
-    for (
-        ts_code,
-        close_now,
-        ret_5d,
-        ret_20d,
-        atr_pct_14,
-        setup_score,
-        continuation_score,
-        fade_risk,
-        shadow_iv_30d,
-        downside_stress,
-        regime,
-    ) in rows
     {
-        let (ret_penalty_denom, wait_pullback_threshold, do_not_chase_threshold) =
-            regime_sensitive_thresholds(regime, setup_score, continuation_score);
-        let max_chase_gap_pct = (0.45 * atr_pct_14
-            + 1.10 * continuation_score
-            + 0.70 * (1.0 - downside_stress.clamp(0.0, 1.0)))
-        .clamp(0.8, 4.5);
-        let pullback_trigger_pct = (0.45 * max_chase_gap_pct).clamp(0.4, 2.5);
-        let execution_score = (0.45 * continuation_score
-            + 0.25 * setup_score
-            + 0.15 * (1.0 - downside_stress.clamp(0.0, 1.0))
-            + 0.15 * (1.0 - (ret_5d.abs() / ret_penalty_denom).clamp(0.0, 1.0)))
-        .clamp(0.0, 1.0);
-
-        let execution_mode = if fade_risk > 0.65
-            || ret_5d.abs() > do_not_chase_threshold
-            || (shadow_iv_30d > 28.0 && downside_stress > 0.60)
+        let mut appender = db.appender("open_execution_gate_stage")?;
+        for (
+            ts_code,
+            close_now,
+            ret_5d,
+            ret_20d,
+            atr_pct_14,
+            setup_score,
+            continuation_score,
+            fade_risk,
+            shadow_iv_30d,
+            downside_stress,
+            regime,
+        ) in rows
         {
-            "do_not_chase"
-        } else if execution_score < 0.48 || ret_5d.abs() > wait_pullback_threshold {
-            "wait_pullback"
-        } else {
-            "executable"
-        };
+            let (ret_penalty_denom, wait_pullback_threshold, do_not_chase_threshold) =
+                regime_sensitive_thresholds(regime, setup_score, continuation_score);
+            let max_chase_gap_pct = (0.45 * atr_pct_14
+                + 1.10 * continuation_score
+                + 0.70 * (1.0 - downside_stress.clamp(0.0, 1.0)))
+            .clamp(0.8, 4.5);
+            let pullback_trigger_pct = (0.45 * max_chase_gap_pct).clamp(0.4, 2.5);
+            let execution_score = (0.45 * continuation_score
+                + 0.25 * setup_score
+                + 0.15 * (1.0 - downside_stress.clamp(0.0, 1.0))
+                + 0.15 * (1.0 - (ret_5d.abs() / ret_penalty_denom).clamp(0.0, 1.0)))
+            .clamp(0.0, 1.0);
 
-        let pullback_price = if close_now > 0.0 {
-            close_now * (1.0 - pullback_trigger_pct / 100.0)
-        } else {
-            0.0
-        };
+            let execution_mode = if fade_risk > 0.65
+                || ret_5d.abs() > do_not_chase_threshold
+                || (shadow_iv_30d > 28.0 && downside_stress > 0.60)
+            {
+                "do_not_chase"
+            } else if execution_score < 0.48 || ret_5d.abs() > wait_pullback_threshold {
+                "wait_pullback"
+            } else {
+                "executable"
+            };
 
-        let detail = json!({
-            "execution_mode": execution_mode,
-            "ret_5d": round2(ret_5d),
-            "ret_20d": round2(ret_20d),
-            "atr_pct_14": round2(atr_pct_14),
-            "setup_score": round3(setup_score),
-            "continuation_score": round3(continuation_score),
-            "fade_risk": round3(fade_risk),
-            "shadow_iv_30d": round2(shadow_iv_30d),
-            "downside_stress": round3(downside_stress),
-            "pullback_price": round2(pullback_price),
-            "ret_penalty_denom": round2(ret_penalty_denom),
-            "wait_pullback_threshold": round2(wait_pullback_threshold),
-            "do_not_chase_threshold": round2(do_not_chase_threshold),
-            "regime": regime,
-        })
-        .to_string();
+            let pullback_price = if close_now > 0.0 {
+                close_now * (1.0 - pullback_trigger_pct / 100.0)
+            } else {
+                0.0
+            };
 
-        for (metric, value) in [
-            ("execution_score", execution_score),
-            ("max_chase_gap_pct", max_chase_gap_pct),
-            ("pullback_trigger_pct", pullback_trigger_pct),
-        ] {
-            insert.execute(duckdb::params![
-                ts_code,
-                date_str,
-                MODULE,
-                metric,
-                value,
-                detail.clone()
-            ])?;
+            let detail = json!({
+                "execution_mode": execution_mode,
+                "ret_5d": round2(ret_5d),
+                "ret_20d": round2(ret_20d),
+                "atr_pct_14": round2(atr_pct_14),
+                "setup_score": round3(setup_score),
+                "continuation_score": round3(continuation_score),
+                "fade_risk": round3(fade_risk),
+                "shadow_iv_30d": round2(shadow_iv_30d),
+                "downside_stress": round3(downside_stress),
+                "pullback_price": round2(pullback_price),
+                "ret_penalty_denom": round2(ret_penalty_denom),
+                "wait_pullback_threshold": round2(wait_pullback_threshold),
+                "do_not_chase_threshold": round2(do_not_chase_threshold),
+                "regime": regime,
+            })
+            .to_string();
+
+            for (metric, value) in [
+                ("execution_score", execution_score),
+                ("max_chase_gap_pct", max_chase_gap_pct),
+                ("pullback_trigger_pct", pullback_trigger_pct),
+            ] {
+                appender.append_row(duckdb::params![
+                    &ts_code, &date_str, MODULE, metric, value, &detail
+                ])?;
+                count += 1;
+            }
         }
-        count += 1;
     }
+
+    db.execute(
+        "DELETE FROM analytics WHERE as_of = CAST(? AS DATE) AND module = ?",
+        duckdb::params![date_str.clone(), MODULE],
+    )?;
+    db.execute_batch(
+        "INSERT INTO analytics (ts_code, as_of, module, metric, value, detail)
+         SELECT ts_code, CAST(as_of AS DATE), module, metric, value, detail
+         FROM open_execution_gate_stage",
+    )?;
 
     info!(rows = count, "open_execution_gate complete");
     Ok(count)

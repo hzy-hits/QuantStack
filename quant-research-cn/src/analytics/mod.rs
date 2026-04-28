@@ -13,6 +13,7 @@ pub mod mean_reversion;
 pub mod momentum;
 pub mod open_execution_gate;
 pub mod paper_trade_ev;
+pub mod price_features;
 pub mod report_review;
 pub mod rv;
 pub mod sector_rotation;
@@ -45,6 +46,7 @@ pub fn run_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<()> 
         "mean_reversion",
         "breakout",
         "sector_rotation",
+        "price_features",
         "setup_alpha",
         "continuation_vs_fade",
         "limit_move_radar",
@@ -118,6 +120,10 @@ fn run_module_inner(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &
             let n = sector_rotation::compute(db, as_of)?;
             info!(rows = n, "sector_rotation complete");
         }
+        "price_features" => {
+            let n = price_features::compute(db, as_of)?;
+            info!(rows = n, "price_features complete");
+        }
         "setup_alpha" => {
             let n = setup_alpha::compute(db, as_of)?;
             info!(rows = n, "setup_alpha complete");
@@ -152,7 +158,7 @@ fn run_module_inner(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &
         }
         other => {
             return Err(anyhow!(
-                "unknown analytics module `{}`. supported: momentum, announcement, flow, flow_audit, unlock, shadow_option, hmm, vol_hmm, mean_reversion, breakout, sector_rotation, setup_alpha, continuation_vs_fade, limit_move_radar, open_execution_gate, shadow_option_alpha_calibration, paper_trade_ev, algorithm_postmortem, macro_gate",
+                "unknown analytics module `{}`. supported: momentum, announcement, flow, flow_audit, unlock, shadow_option, hmm, vol_hmm, mean_reversion, breakout, sector_rotation, price_features, setup_alpha, continuation_vs_fade, limit_move_radar, open_execution_gate, shadow_option_alpha_calibration, paper_trade_ev, algorithm_postmortem, macro_gate",
                 other
             ));
         }
