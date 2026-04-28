@@ -9,9 +9,11 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+STACK_ROOT = REPO_ROOT.parent
 SRC_ROOT = REPO_ROOT / "src"
 BUILD_AGENT_CONTEXT_PATH = REPO_ROOT / "scripts" / "build_agent_context.py"
 RUN_FULL_PATH = REPO_ROOT / "scripts" / "run_full.sh"
+US_DAILY_PATH = STACK_ROOT / "crates" / "quant-stack-cli" / "src" / "us_daily.rs"
 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
@@ -619,21 +621,33 @@ class FactorLabReportSyncTests(unittest.TestCase):
 
 
 class RunFullOrderingTests(unittest.TestCase):
-    def test_run_full_refreshes_us_factor_lab_before_import(self) -> None:
-        run_full_text = RUN_FULL_PATH.read_text(encoding="utf-8")
-        refresh_marker = 'bash scripts/daily_factors.sh --market us'
-        import_marker = 'src.mining.export_to_pipeline --market us --date "$DATE"'
-
-        self.assertIn(refresh_marker, run_full_text)
-        self.assertIn(import_marker, run_full_text)
-        self.assertLess(run_full_text.index(refresh_marker), run_full_text.index(import_marker))
-
-    def test_run_full_passes_session_to_run_daily_and_uses_session_payloads(self) -> None:
+    def test_run_full_delegates_to_rust_us_daily(self) -> None:
         run_full_text = RUN_FULL_PATH.read_text(encoding="utf-8")
 
-        self.assertIn('python scripts/run_daily.py --date "$DATE" --session "$SESSION"', run_full_text)
-        self.assertIn('PAYLOAD="reports/${DATE}_payload_${SESSION}.md"', run_full_text)
-        self.assertIn('python scripts/split_payload.py --date "$DATE" --session "$SESSION"', run_full_text)
+        self.assertIn("ARGS=(us-daily --stack-root", run_full_text)
+        self.assertIn('DELIVERY_MODE="${QUANT_DELIVERY_MODE:-test}"', run_full_text)
+        self.assertIn('--delivery-mode "$DELIVERY_MODE"', run_full_text)
+        self.assertIn("--test-recipient", run_full_text)
+        self.assertIn('exec "$STACK_ROOT/target/release/quant-stack"', run_full_text)
+
+    def test_us_daily_refreshes_us_factor_lab_before_import(self) -> None:
+        us_daily_text = US_DAILY_PATH.read_text(encoding="utf-8")
+        refresh_marker = "run_factor_lab_refresh(ctx)"
+        import_marker = "run_factor_lab_import(ctx)"
+
+        self.assertIn(refresh_marker, us_daily_text)
+        self.assertIn(import_marker, us_daily_text)
+        self.assertLess(us_daily_text.index(refresh_marker), us_daily_text.index(import_marker))
+        self.assertIn('arg("scripts/daily_factors.sh")', us_daily_text)
+        self.assertIn('arg("src.mining.export_to_pipeline")', us_daily_text)
+
+    def test_us_daily_passes_session_to_run_daily_and_uses_session_payloads(self) -> None:
+        us_daily_text = US_DAILY_PATH.read_text(encoding="utf-8")
+
+        self.assertIn('arg("scripts/run_daily.py")', us_daily_text)
+        self.assertIn('arg("--session")', us_daily_text)
+        self.assertIn('format!("{}_payload_{}.md", ctx.date, ctx.session)', us_daily_text)
+        self.assertIn('arg("scripts/split_payload.py")', us_daily_text)
 
 
 if __name__ == "__main__":

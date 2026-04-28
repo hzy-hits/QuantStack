@@ -26,6 +26,10 @@ payload markdown -> agents -> Chinese report -> Gmail
 Quant Stack stable alpha gate -> alpha_bulletin_us.md
 ```
 
+The full daily runner is now the Rust `quant-stack us-daily` state machine.
+`scripts/run_full.sh` remains for cron/watchdog compatibility, but it only
+normalizes legacy flags and delegates to `quant-stack us-daily`.
+
 The report renderer reads `alpha_bulletin_us.md` when present and skips it when
 missing, so the producer can still run while the shared gate is being repaired.
 
@@ -45,6 +49,17 @@ uv run python scripts/run_daily.py --date 2026-04-24 --session post
 
 # Full wrapper, default delivery mode is test.
 ./scripts/run_full.sh 2026-04-24 --test
+```
+
+Equivalent direct Rust entrypoint:
+
+```bash
+../target/release/quant-stack us-daily \
+  --stack-root .. \
+  --session post \
+  --delivery-mode test \
+  --test-recipient you@example.com \
+  2026-04-24
 ```
 
 Production send is explicit:

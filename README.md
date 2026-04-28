@@ -62,6 +62,22 @@ target/release/quant-stack daily \
   --lookback-days 30
 ```
 
+Run the full US report pipeline through the Rust state machine:
+
+```bash
+target/release/quant-stack us-daily \
+  --stack-root . \
+  --session post \
+  --delivery-mode test \
+  --test-recipient you@example.com \
+  2026-04-24
+```
+
+`us-daily` owns the US control-flow states: preflight, lock, data producer,
+Factor Lab refresh/import, payload split, Factor Lab injection, agents, report
+validation, and delivery. `quant-research-v1/scripts/run_full.sh` is now only a
+compatibility wrapper around this command.
+
 Send test email to the configured test recipient only:
 
 ```bash

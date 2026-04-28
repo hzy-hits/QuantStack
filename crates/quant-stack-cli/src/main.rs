@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use tracing::{info, warn};
 
+mod us_daily;
+
 #[derive(Parser)]
 #[command(name = "quant-stack", about = "Unified quant stack orchestration")]
 struct Cli {
@@ -35,6 +37,8 @@ enum Commands {
     },
     /// Unified daily orchestration wrapper.
     Daily(DailyArgs),
+    /// US equities full daily pipeline: data, split, agents, report, delivery.
+    UsDaily(us_daily::UsDailyArgs),
 }
 
 #[derive(Subcommand)]
@@ -128,13 +132,13 @@ struct DailyArgs {
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
-enum DeliveryMode {
+pub(crate) enum DeliveryMode {
     Test,
     Prod,
 }
 
 impl DeliveryMode {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             DeliveryMode::Test => "test",
             DeliveryMode::Prod => "prod",
@@ -208,6 +212,7 @@ fn main() -> Result<()> {
             }
         },
         Commands::Daily(args) => run_daily(args)?,
+        Commands::UsDaily(args) => us_daily::run(args)?,
     }
     Ok(())
 }
