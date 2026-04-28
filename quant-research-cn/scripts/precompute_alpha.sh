@@ -13,7 +13,10 @@ PROJ_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 STACK_ROOT="${QUANT_STACK_ROOT:-$(cd "$PROJ_DIR/.." && pwd)}"
 DATE="${1:-$(TZ=Asia/Shanghai date +%Y-%m-%d)}"
-REVIEW_BACKFILL_DAYS="${QUANT_CN_REVIEW_BACKFILL_DAYS:-7}"
+# This job is meant to run before the email path, so default to a full
+# evidence window. The daily email pipeline keeps its smaller post-email
+# maintenance window for latency.
+REVIEW_BACKFILL_DAYS="${QUANT_CN_REVIEW_BACKFILL_DAYS:-90}"
 
 cd "$PROJ_DIR"
 

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::NaiveDate;
+use chrono::{Duration, NaiveDate};
 use duckdb::Connection;
 use serde_json::json;
 use tracing::info;
@@ -8,12 +8,14 @@ const MODULE: &str = "setup_alpha";
 
 pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     let date_str = as_of.to_string();
+    let history_start = (as_of - Duration::days(60)).to_string();
     let sql = "
         WITH ranked AS (
             SELECT ts_code, trade_date, close, high, low, vol, pct_chg,
                    ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
             FROM prices
             WHERE trade_date <= CAST(? AS DATE)
+              AND trade_date >= CAST(? AS DATE)
         ),
         agg AS (
             SELECT
@@ -59,21 +61,24 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
 
     let mut stmt = db.prepare(sql)?;
     let rows: Vec<_> = stmt
-        .query_map(duckdb::params![date_str, date_str, date_str], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1).unwrap_or(0.0),
-                row.get::<_, f64>(2).unwrap_or(0.0),
-                row.get::<_, f64>(3).unwrap_or(0.0),
-                row.get::<_, f64>(4).unwrap_or(0.0),
-                row.get::<_, f64>(5).unwrap_or(0.0),
-                row.get::<_, f64>(6).unwrap_or(0.0),
-                row.get::<_, f64>(7).unwrap_or(0.0),
-                row.get::<_, f64>(8).unwrap_or(0.0),
-                row.get::<_, f64>(9).unwrap_or(0.0),
-                row.get::<_, f64>(10).unwrap_or(0.0),
-            ))
-        })?
+        .query_map(
+            duckdb::params![date_str, history_start, date_str, date_str],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1).unwrap_or(0.0),
+                    row.get::<_, f64>(2).unwrap_or(0.0),
+                    row.get::<_, f64>(3).unwrap_or(0.0),
+                    row.get::<_, f64>(4).unwrap_or(0.0),
+                    row.get::<_, f64>(5).unwrap_or(0.0),
+                    row.get::<_, f64>(6).unwrap_or(0.0),
+                    row.get::<_, f64>(7).unwrap_or(0.0),
+                    row.get::<_, f64>(8).unwrap_or(0.0),
+                    row.get::<_, f64>(9).unwrap_or(0.0),
+                    row.get::<_, f64>(10).unwrap_or(0.0),
+                ))
+            },
+        )?
         .filter_map(|r| r.ok())
         .collect();
 

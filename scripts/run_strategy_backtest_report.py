@@ -254,7 +254,9 @@ def load_evaluated_trades(
     con = duckdb.connect(str(db_path), read_only=True)
     try:
         rows: list[dict[str, Any]] = []
-        if table_exists(con, "algorithm_postmortem"):
+        if table_exists(con, "paper_trades"):
+            rows = load_paper_trade_rows(con, start, cutoff, as_of)
+        if (not rows or not any(is_fill(row) for row in rows)) and table_exists(con, "algorithm_postmortem"):
             rows = load_algorithm_postmortem_rows(con, start, cutoff, as_of)
         if (
             (not rows or not any(is_fill(row) for row in rows))
@@ -276,6 +278,72 @@ def load_evaluated_trades(
     if max_date:
         evaluated_through = min(evaluated_through, max_date)
     return rows, evaluated_through
+
+
+def load_paper_trade_rows(
+    con: duckdb.DuckDBPyConnection,
+    start: date,
+    cutoff: date,
+    as_of: date,
+) -> list[dict[str, Any]]:
+    p_cols = table_columns(con, "paper_trades")
+    d_cols = table_columns(con, "report_decisions") if table_exists(con, "report_decisions") else set()
+    if "realized_ret_pct" not in p_cols or "report_date" not in p_cols:
+        return []
+    join = (
+        """
+        LEFT JOIN report_decisions d
+          ON p.report_date = d.report_date
+         AND p.session = d.session
+         AND p.symbol = d.symbol
+         AND p.selection_status = d.selection_status
+        """
+        if d_cols
+        else ""
+    )
+    select_parts = [
+        sql_col("p", "report_date", p_cols),
+        sql_coalesce([("p", "exit_date", p_cols), ("p", "evaluation_date", p_cols)], "evaluation_date"),
+        sql_col("p", "symbol", p_cols),
+        sql_col("p", "selection_status", p_cols),
+        sql_coalesce([("d", "rank_order", d_cols)], "rank_order"),
+        sql_coalesce([("d", "report_bucket", d_cols)], "report_bucket"),
+        sql_coalesce([("d", "signal_direction", d_cols)], "signal_direction", default="'long'"),
+        sql_coalesce([("d", "signal_confidence", d_cols)], "signal_confidence"),
+        sql_coalesce([("d", "headline_mode", d_cols)], "headline_mode"),
+        sql_coalesce([("d", "execution_mode", d_cols)], "execution_mode"),
+        sql_coalesce([("d", "composite_score", d_cols)], "composite_score"),
+        sql_coalesce([("d", "rr_ratio", d_cols)], "rr_ratio"),
+        sql_coalesce([("d", "primary_reason", d_cols)], "primary_reason"),
+        sql_col("p", "action_intent", p_cols),
+        sql_col("p", "fill_status", p_cols),
+        sql_col("p", "realized_ret_pct", p_cols, "return_pct"),
+        sql_col("p", "max_favorable_pct", p_cols, "best_possible_ret_pct"),
+        sql_col("p", "label", p_cols),
+        sql_coalesce([("d", "details_json", d_cols), ("p", "detail_json", p_cols)], "details_json"),
+    ]
+    sql = f"""
+        SELECT {", ".join(select_parts)}
+        FROM paper_trades p
+        {join}
+        WHERE p.report_date >= ? AND p.report_date <= ?
+          AND (p.exit_date IS NULL OR p.exit_date <= ?)
+        ORDER BY p.report_date, p.symbol
+    """
+    rows = rows_as_dicts(con, sql, [start.isoformat(), cutoff.isoformat(), as_of.isoformat()])
+    for row in rows:
+        details = safe_json_loads(row.get("details_json"))
+        row["report_bucket"] = row.get("report_bucket") or details.get("report_bucket")
+        row["signal_confidence"] = row.get("signal_confidence") or details.get("signal_confidence")
+        row["execution_mode"] = row.get("execution_mode") or details.get("execution_mode")
+        row["signal_direction"] = row.get("signal_direction") or details.get("direction") or "long"
+        fill_status = str(row.get("fill_status") or "").lower()
+        row["executable"] = bool(
+            row.get("return_pct") is not None
+            and fill_status in {"filled_open", "filled_pullback"}
+            and str(row.get("action_intent") or "").upper() == "TRADE"
+        )
+    return rows
 
 
 def load_algorithm_postmortem_rows(

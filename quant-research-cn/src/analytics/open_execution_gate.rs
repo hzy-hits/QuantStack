@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::NaiveDate;
+use chrono::{Duration, NaiveDate};
 use duckdb::Connection;
 use serde_json::json;
 use tracing::info;
@@ -38,12 +38,14 @@ fn regime_sensitive_thresholds(
 
 pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     let date_str = as_of.to_string();
+    let history_start = (as_of - Duration::days(90)).to_string();
     let sql = "
         WITH ranked AS (
             SELECT ts_code, trade_date, close, high, low,
                    ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
             FROM prices
             WHERE trade_date <= CAST(? AS DATE)
+              AND trade_date >= CAST(? AS DATE)
         ),
         latest AS (
             SELECT
@@ -87,7 +89,16 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     let mut stmt = db.prepare(sql)?;
     let rows: Vec<_> = stmt
         .query_map(
-            duckdb::params![date_str, date_str, date_str, date_str, date_str, date_str, date_str],
+            duckdb::params![
+                date_str,
+                history_start,
+                date_str,
+                date_str,
+                date_str,
+                date_str,
+                date_str,
+                date_str
+            ],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,

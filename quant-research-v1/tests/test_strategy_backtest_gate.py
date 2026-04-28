@@ -342,6 +342,103 @@ class StrategyBacktestGateTests(unittest.TestCase):
             self.assertEqual(rows[0]["return_pct"], 0.75)
             self.assertTrue(rows[0]["executable"])
 
+    def test_paper_trades_are_preferred_when_execution_outcomes_exist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "market.duckdb"
+            con = duckdb.connect(str(db_path))
+            con.execute(
+                """
+                CREATE TABLE paper_trades (
+                    report_date DATE,
+                    session VARCHAR,
+                    symbol VARCHAR,
+                    selection_status VARCHAR,
+                    action_intent VARCHAR,
+                    evaluation_date DATE,
+                    exit_date DATE,
+                    fill_status VARCHAR,
+                    realized_ret_pct DOUBLE,
+                    max_favorable_pct DOUBLE,
+                    label VARCHAR,
+                    detail_json VARCHAR
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE algorithm_postmortem (
+                    report_date DATE,
+                    session VARCHAR,
+                    symbol VARCHAR,
+                    selection_status VARCHAR,
+                    evaluation_date DATE,
+                    direction VARCHAR,
+                    executable BOOLEAN,
+                    realized_pnl_pct DOUBLE
+                )
+                """
+            )
+            con.execute(
+                """
+                CREATE TABLE report_decisions (
+                    report_date DATE,
+                    session VARCHAR,
+                    symbol VARCHAR,
+                    selection_status VARCHAR,
+                    rank_order INTEGER,
+                    report_bucket VARCHAR,
+                    signal_direction VARCHAR,
+                    signal_confidence VARCHAR,
+                    execution_mode VARCHAR,
+                    composite_score DOUBLE,
+                    details_json VARCHAR
+                )
+                """
+            )
+            detail = json.dumps(
+                {
+                    "report_bucket": "CORE BOOK",
+                    "signal_confidence": "HIGH",
+                    "execution_mode": "executable",
+                }
+            )
+            con.execute(
+                """
+                INSERT INTO paper_trades
+                VALUES ('2026-04-21', 'daily', 'PAPER', 'selected', 'TRADE',
+                        '2026-04-24', '2026-04-23', 'filled_open',
+                        1.70, 2.20, 'won', ?)
+                """,
+                [detail],
+            )
+            con.execute(
+                """
+                INSERT INTO algorithm_postmortem
+                VALUES ('2026-04-21', 'daily', 'PAPER', 'selected',
+                        '2026-04-24', 'long', TRUE, -9.0)
+                """
+            )
+            con.execute(
+                """
+                INSERT INTO report_decisions
+                VALUES ('2026-04-21', 'daily', 'PAPER', 'selected', 1,
+                        'core', 'long', 'HIGH', 'executable_now', 0.9, '{}')
+                """
+            )
+            con.close()
+
+            rows, _ = gate.load_evaluated_trades(
+                db_path,
+                "cn",
+                date(2026, 4, 24),
+                lookback_days=10,
+                horizon_days=2,
+            )
+
+            self.assertEqual([row["symbol"] for row in rows], ["PAPER"])
+            self.assertEqual(rows[0]["return_pct"], 1.7)
+            self.assertTrue(rows[0]["executable"])
+
     def test_top_winner_concentration_blocks_policy(self) -> None:
         rows = []
         for idx in range(20):
