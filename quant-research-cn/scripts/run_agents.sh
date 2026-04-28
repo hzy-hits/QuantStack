@@ -627,6 +627,14 @@ if [[ -s "$OUT_DIR/outputs/merge-report.md" ]]; then
         --append-to "$FINAL_REPORT"; then
         echo "  Factor Lab section append failed (non-fatal)"
     fi
+    echo "  Syncing Strategy EV ledger..."
+    if ! "$PYTHON_BIN" "$PROJ_DIR/scripts/sync_strategy_ev_report.py" \
+        --date "$DATE" \
+        --report "$FINAL_REPORT" \
+        --db "$PROJ_DIR/data/quant_cn_report.duckdb" \
+        --reports-dir "$PROJ_DIR/reports"; then
+        echo "  Strategy EV section sync failed (non-fatal)"
+    fi
     if [[ "$SLOT" != "daily" ]]; then
         cp "$FINAL_REPORT" "$REPORTS_DIR/${DATE}_report_zh.md"
     fi
