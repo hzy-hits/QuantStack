@@ -367,6 +367,61 @@ class StrategyBacktestGateTests(unittest.TestCase):
         self.assertFalse(candidate["eligible"])
         self.assertIn("top1_winner_contribution>0.45", candidate["fail_reasons"])
 
+    def test_policy_evidence_metrics_show_statistical_support(self) -> None:
+        rows = []
+        for idx in range(25):
+            rows.append(
+                {
+                    "market": "us",
+                    "policy_id": "us:core:long:high_mod:executable_now:h3",
+                    "policy_label": "stable positive edge",
+                    "report_date": f"2026-03-{idx + 1:02d}",
+                    "return_pct": 0.8,
+                    "executable": True,
+                }
+            )
+
+        candidate = gate.evaluate_policy(
+            "us",
+            rows[0]["policy_id"],
+            "stable positive edge",
+            rows,
+            horizon_days=3,
+            lookback_days=30,
+        )
+
+        self.assertEqual(candidate["ev_probability_positive"], 1.0)
+        self.assertEqual(candidate["ev_lower_confidence_pct"], 0.8)
+        self.assertEqual(candidate["fills_required_for_95_lcb"], 25)
+
+    def test_noisy_positive_policy_needs_more_samples_for_proof(self) -> None:
+        rows = []
+        returns = [1.2, -0.2, 0.9, -0.1, 1.0, -0.3, 1.1, -0.4]
+        for idx, ret in enumerate(returns):
+            rows.append(
+                {
+                    "market": "cn",
+                    "policy_id": "cn:core:long:high_mod:executable_now:h2",
+                    "policy_label": "noisy positive edge",
+                    "report_date": f"2026-03-{idx + 1:02d}",
+                    "return_pct": ret,
+                    "executable": True,
+                }
+            )
+
+        candidate = gate.evaluate_policy(
+            "cn",
+            rows[0]["policy_id"],
+            "noisy positive edge",
+            rows,
+            horizon_days=2,
+            lookback_days=30,
+        )
+
+        self.assertGreater(candidate["ev_probability_positive"], 0.5)
+        self.assertLess(candidate["ev_lower_confidence_pct"], 0.0)
+        self.assertGreater(candidate["fills_required_for_95_lcb"], len(returns))
+
     def test_low_confidence_policy_cannot_be_execution_champion(self) -> None:
         rows = []
         for idx in range(25):

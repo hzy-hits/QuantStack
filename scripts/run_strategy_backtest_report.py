@@ -23,6 +23,7 @@ import duckdb
 STACK_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "strategy_backtest"
 HISTORY_DB = STACK_ROOT / "data" / "strategy_backtest_history.duckdb"
+ONE_SIDED_95_Z = 1.64
 
 
 STABILITY_THRESHOLDS = {
@@ -432,6 +433,51 @@ def top1_winner_contribution(returns: list[float]) -> float | None:
     return max(winners) / total
 
 
+def normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
+def ev_evidence_metrics(returns: list[float]) -> dict[str, Any]:
+    """Return statistical evidence for positive EV.
+
+    This is not a trading model. It is an auditable evidence layer over realized
+    walk-forward returns: if the lower confidence bound is still below zero, the
+    strategy has not statistically earned an execution upgrade.
+    """
+    n = len(returns)
+    if n == 0:
+        return {
+            "return_std_pct": None,
+            "ev_probability_positive": None,
+            "ev_lower_confidence_pct": None,
+            "fills_required_for_95_lcb": None,
+        }
+    mean = statistics.fmean(returns)
+    if n < 2:
+        return {
+            "return_std_pct": None,
+            "ev_probability_positive": 1.0 if mean > 0 else 0.0,
+            "ev_lower_confidence_pct": None,
+            "fills_required_for_95_lcb": None,
+        }
+    std = statistics.stdev(returns)
+    if std <= 0:
+        prob = 1.0 if mean > 0 else 0.0
+        lower = mean
+        required = n if lower > 0 else None
+    else:
+        se = std / math.sqrt(n)
+        prob = normal_cdf(mean / se) if se > 0 else (1.0 if mean > 0 else 0.0)
+        lower = mean - ONE_SIDED_95_Z * se
+        required = math.ceil((ONE_SIDED_95_Z * std / mean) ** 2) if mean > 0 else None
+    return {
+        "return_std_pct": round_or_none(std, 6),
+        "ev_probability_positive": round_or_none(prob, 6),
+        "ev_lower_confidence_pct": round_or_none(lower, 6),
+        "fills_required_for_95_lcb": required,
+    }
+
+
 def evaluate_policy(
     market: str,
     policy_id: str,
@@ -456,6 +502,7 @@ def evaluate_policy(
     win_rate = (sum(1 for ret in returns if ret > 0) / len(returns)) if returns else None
     max_dd = max_drawdown_pct(daily_returns)
     top1 = top1_winner_contribution(returns)
+    evidence = ev_evidence_metrics(returns)
     fail_reasons = stability_fail_reasons(
         fills=len(returns),
         active_buckets=len(active_dates),
@@ -485,10 +532,14 @@ def evaluate_policy(
         "fills": len(returns),
         "active_buckets": len(active_dates),
         "avg_trade_pct": round_or_none(avg_trade, 6),
+        "return_std_pct": evidence["return_std_pct"],
         "median_trade_pct": round_or_none(median_trade, 6),
         "strict_win_rate": round_or_none(win_rate, 6),
         "max_drawdown_pct": round_or_none(max_dd, 6),
         "top1_winner_contribution": round_or_none(top1, 6),
+        "ev_probability_positive": evidence["ev_probability_positive"],
+        "ev_lower_confidence_pct": evidence["ev_lower_confidence_pct"],
+        "fills_required_for_95_lcb": evidence["fills_required_for_95_lcb"],
         "stability_score": round_or_none(score, 6) or 0.0,
         "eligible": eligible,
         "fail_reasons": fail_reasons,
@@ -1052,9 +1103,13 @@ def build_bulletin(
                 "fills": c["fills"],
                 "active_buckets": c["active_buckets"],
                 "avg_trade_pct": c["avg_trade_pct"],
+                "return_std_pct": c.get("return_std_pct"),
                 "strict_win_rate": c["strict_win_rate"],
                 "max_drawdown_pct": c["max_drawdown_pct"],
                 "top1_winner_contribution": c["top1_winner_contribution"],
+                "ev_probability_positive": c.get("ev_probability_positive"),
+                "ev_lower_confidence_pct": c.get("ev_lower_confidence_pct"),
+                "fills_required_for_95_lcb": c.get("fills_required_for_95_lcb"),
                 "fail_reasons": c["fail_reasons"],
             }
             for c in candidates
@@ -1183,10 +1238,14 @@ def ensure_result_schema(con: duckdb.DuckDBPyConnection) -> None:
             fills INTEGER,
             active_buckets INTEGER,
             avg_trade_pct DOUBLE,
+            return_std_pct DOUBLE,
             median_trade_pct DOUBLE,
             strict_win_rate DOUBLE,
             max_drawdown_pct DOUBLE,
             top1_winner_contribution DOUBLE,
+            ev_probability_positive DOUBLE,
+            ev_lower_confidence_pct DOUBLE,
+            fills_required_for_95_lcb INTEGER,
             stability_score DOUBLE,
             eligible BOOLEAN,
             fail_reasons VARCHAR,
@@ -1195,6 +1254,13 @@ def ensure_result_schema(con: duckdb.DuckDBPyConnection) -> None:
         )
         """
     )
+    for column, column_type in [
+        ("return_std_pct", "DOUBLE"),
+        ("ev_probability_positive", "DOUBLE"),
+        ("ev_lower_confidence_pct", "DOUBLE"),
+        ("fills_required_for_95_lcb", "INTEGER"),
+    ]:
+        con.execute(f"ALTER TABLE playbook_candidates ADD COLUMN IF NOT EXISTS {column} {column_type}")
     con.execute(
         """
         CREATE TABLE IF NOT EXISTS playbook_selection (
@@ -1287,10 +1353,11 @@ def write_result_tables(
                     """
                     INSERT INTO playbook_candidates
                     (as_of, evaluated_through, market, policy_id, policy_label, horizon_days,
-                     lookback_days, fills, active_buckets, avg_trade_pct, median_trade_pct,
-                     strict_win_rate, max_drawdown_pct, top1_winner_contribution, stability_score,
-                     eligible, fail_reasons, selected)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     lookback_days, fills, active_buckets, avg_trade_pct, return_std_pct,
+                     median_trade_pct, strict_win_rate, max_drawdown_pct, top1_winner_contribution,
+                     ev_probability_positive, ev_lower_confidence_pct, fills_required_for_95_lcb,
+                     stability_score, eligible, fail_reasons, selected)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [
                         as_of_s,
@@ -1303,10 +1370,14 @@ def write_result_tables(
                         c["fills"],
                         c["active_buckets"],
                         c["avg_trade_pct"],
+                        c.get("return_std_pct"),
                         c["median_trade_pct"],
                         c["strict_win_rate"],
                         c["max_drawdown_pct"],
                         c["top1_winner_contribution"],
+                        c.get("ev_probability_positive"),
+                        c.get("ev_lower_confidence_pct"),
+                        c.get("fills_required_for_95_lcb"),
                         c["stability_score"],
                         c["eligible"],
                         json.dumps(c["fail_reasons"], ensure_ascii=False),
@@ -1498,16 +1569,21 @@ def strategy_report_md(
             lines += ["No evaluated policies found.", ""]
             continue
         lines += [
-            "| Selected | Eligible | Policy | Fills | Active buckets | Avg % | Median % | Win | Max DD % | Top1 | Score | Fails |",
-            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+            "| Selected | Eligible | Policy | Fills | Active buckets | Avg % | P(EV>0) | EV LCB % | n for LCB>0 | Median % | Win | Max DD % | Top1 | Score | Fails |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
         for c in candidates[:30]:
+            def fmt(value: Any) -> str:
+                return "-" if value is None else str(value)
+
             lines.append(
                 f"| {'yes' if c['selected'] else ''} | {'yes' if c['eligible'] else 'no'} | "
                 f"`{c['policy_id']}` | {c['fills']} | {c['active_buckets']} | "
-                f"{c['avg_trade_pct']} | {c['median_trade_pct']} | {c['strict_win_rate']} | "
-                f"{c['max_drawdown_pct']} | {c['top1_winner_contribution']} | "
-                f"{c['stability_score']} | {', '.join(c['fail_reasons'])} |"
+                f"{fmt(c['avg_trade_pct'])} | {fmt(c.get('ev_probability_positive'))} | "
+                f"{fmt(c.get('ev_lower_confidence_pct'))} | {fmt(c.get('fills_required_for_95_lcb'))} | "
+                f"{fmt(c['median_trade_pct'])} | {fmt(c['strict_win_rate'])} | {fmt(c['max_drawdown_pct'])} | "
+                f"{fmt(c['top1_winner_contribution'])} | "
+                f"{fmt(c['stability_score'])} | {', '.join(c['fail_reasons'])} |"
             )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
