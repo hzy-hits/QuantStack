@@ -59,8 +59,18 @@ target/release/quant-stack daily \
   --date 2026-04-24 \
   --markets us,cn \
   --session post \
+  --run-producers \
+  --with-narrative \
   --lookback-days 30
 ```
+
+For A-shares, `daily` now owns the production control flow that used to live in
+`quant-research-cn/scripts/daily_pipeline.sh`: AKShare bridge check, `quant-cn`
+producer, Factor Lab import, pre-alpha render, stable alpha bulletin, final
+render, Factor Lab research-prior append, payload snapshots, chart generation,
+Codex agent report generation, delivery, and post-email review maintenance.
+The shell script remains as a compatibility wrapper/reference path, not the
+preferred cron entry.
 
 Run the full US report pipeline through the Rust state machine:
 
@@ -85,6 +95,8 @@ target/release/quant-stack daily \
   --date 2026-04-24 \
   --markets us,cn \
   --session post \
+  --run-producers \
+  --with-narrative \
   --send-reports \
   --delivery-mode test
 ```
@@ -96,6 +108,8 @@ target/release/quant-stack daily \
   --date YYYY-MM-DD \
   --markets us,cn \
   --session post \
+  --run-producers \
+  --with-narrative \
   --send-reports \
   --delivery-mode prod
 ```
@@ -199,8 +213,9 @@ target/release/quant-stack daily \
 - Default delivery mode is `test`; prod must be explicit.
 - `QUANT_DELIVERY_MODE=prod` enables full recipient lists in wrapper scripts.
 - `QUANT_TEST_RECIPIENT=email@example.com` overrides the test recipient.
-- Daily pipeline order matters: producer -> review backfill -> alpha bulletin ->
-  final render -> delivery.
+- Daily pipeline order matters: producers -> CN Factor Lab import/render ->
+  alpha bulletin -> report model -> CN final render/agents -> delivery ->
+  review maintenance.
 
 ## License
 

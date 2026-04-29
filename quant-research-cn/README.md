@@ -37,8 +37,17 @@ cp config.example.yaml config.yaml
 
 cargo build --release
 
-# Full daily pipeline; default delivery mode is test.
-./scripts/daily_pipeline.sh evening 2026-04-24 --test
+# Preferred production entry: root quant-stack state machine.
+cd ..
+target/release/quant-stack daily \
+  --date 2026-04-24 \
+  --markets cn \
+  --session evening \
+  --run-producers \
+  --with-narrative \
+  --send-reports \
+  --delivery-mode test
+cd quant-research-cn
 
 # Rebuild review history from existing data.
 ./target/release/quant-cn review-backfill \
@@ -53,13 +62,22 @@ cargo build --release
 Production delivery is explicit:
 
 ```bash
-./scripts/daily_pipeline.sh --prod evening YYYY-MM-DD
+cd ..
+target/release/quant-stack daily \
+  --date YYYY-MM-DD \
+  --markets cn \
+  --session evening \
+  --run-producers \
+  --with-narrative \
+  --send-reports \
+  --delivery-mode prod
 ```
 
 ## Delivery Modes
 
+The root `quant-stack daily` command is the preferred orchestrator. The legacy
 `scripts/daily_pipeline.sh`, `scripts/run_agents.sh`, and `scripts/send_email.py`
-all support:
+still support:
 
 - `--test`: send only to one test recipient.
 - `--prod`: send to full `reporting.recipients`.
@@ -106,10 +124,10 @@ date before materializing the review ledger:
 This prevents historical rows from collapsing into all `OBSERVE/WAIT` because
 of missing `execution_score`.
 
-`daily_pipeline.sh` defaults to `QUANT_CN_REVIEW_BACKFILL_TIMING=post-email`.
-That keeps historical maintenance from delaying the report. Use
-`QUANT_CN_REVIEW_BACKFILL_TIMING=pre-alpha` only for manual backfills where
-latency is not important. Use `QUANT_CN_REVIEW_BACKFILL_DAYS=0` to skip it.
+Root `quant-stack daily` keeps review maintenance after delivery by default,
+matching the old `daily_pipeline.sh` latency behavior. Use
+`QUANT_CN_REVIEW_BACKFILL_TIMING=skip` to disable it, or
+`QUANT_CN_REVIEW_BACKFILL_DAYS=N` to change the maintenance window.
 
 ## Analytics
 
@@ -193,6 +211,8 @@ target/release/quant-stack daily \
   --date 2026-04-24 \
   --markets cn \
   --session post \
+  --run-producers \
+  --with-narrative \
   --send-reports \
   --delivery-mode test \
   --delivery-dry-run
