@@ -377,6 +377,7 @@ fn ensure_review_backfill_analytics(
         "setup_alpha",
         "continuation_vs_fade",
         "limit_move_radar",
+        "limit_up_model",
         "open_execution_gate",
     ] {
         if analytics_module_rows(db, as_of, module)? == 0 {

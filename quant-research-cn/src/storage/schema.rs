@@ -696,6 +696,57 @@ pub const CREATE_TABLES: &str = "
         PRIMARY KEY (as_of, metric, score_bucket, scope)
     );
 
+    CREATE TABLE IF NOT EXISTS limit_up_model_dataset (
+        model_as_of            DATE NOT NULL,
+        feature_date           DATE NOT NULL,
+        symbol                 VARCHAR NOT NULL,
+        board_scope            VARCHAR NOT NULL,
+        dataset_split          VARCHAR NOT NULL,
+        features_json          VARCHAR,
+        next_day_limit_up      BOOLEAN,
+        next_day_touch_limit   BOOLEAN,
+        next_day_failed_board  BOOLEAN,
+        next_day_ret_pct       DOUBLE,
+        next_day_drawdown_pct  DOUBLE,
+        updated_at             TIMESTAMP DEFAULT current_timestamp,
+        PRIMARY KEY (model_as_of, feature_date, symbol)
+    );
+
+    CREATE TABLE IF NOT EXISTS limit_up_model_predictions (
+        as_of                  DATE NOT NULL,
+        symbol                 VARCHAR NOT NULL,
+        board_scope            VARCHAR NOT NULL,
+        p_limit_up             DOUBLE,
+        p_touch_limit          DOUBLE,
+        p_failed_board         DOUBLE,
+        ev_after_cost_pct      DOUBLE,
+        ev_lcb_80_pct          DOUBLE,
+        probability_decile     INTEGER,
+        model_state            VARCHAR,
+        decision_state         VARCHAR,
+        detail_json            VARCHAR,
+        updated_at             TIMESTAMP DEFAULT current_timestamp,
+        PRIMARY KEY (as_of, symbol)
+    );
+
+    CREATE TABLE IF NOT EXISTS limit_up_model_performance (
+        as_of                  DATE NOT NULL PRIMARY KEY,
+        train_start            DATE,
+        train_end              DATE,
+        model_state            VARCHAR,
+        train_samples          INTEGER,
+        train_positives        INTEGER,
+        auc                    DOUBLE,
+        brier                  DOUBLE,
+        top_decile_hit_rate    DOUBLE,
+        top_decile_lift        DOUBLE,
+        failed_board_rate      DOUBLE,
+        avg_next_ret_pct       DOUBLE,
+        decile_table_json      VARCHAR,
+        detail_json            VARCHAR,
+        updated_at             TIMESTAMP DEFAULT current_timestamp
+    );
+
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS p_fill DOUBLE;
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS mu_ret_pct DOUBLE;
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS tail_loss_pct DOUBLE;

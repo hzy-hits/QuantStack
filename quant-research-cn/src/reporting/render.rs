@@ -10,6 +10,7 @@
 use anyhow::Result;
 use chrono::{FixedOffset, NaiveDate, Utc};
 use duckdb::Connection;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::Path;
@@ -1217,6 +1218,7 @@ fn render_structural(
     render_alpha_bulletin(&mut md, date_str, "cn")?;
     render_strategy_ev_summary(&mut md, db, date_str)?;
     render_setup_alpha_summary(&mut md, db, date_str, notable)?;
+    render_limit_up_model_summary(&mut md, db, date_str)?;
     render_limit_move_radar_summary(&mut md, db, date_str)?;
 
     // ── Report lanes ──────────────────────────────────────────────────────
@@ -1339,6 +1341,38 @@ struct LimitMoveBacktestView {
     samples: i64,
     hits: i64,
     hit_rate: f64,
+    failed_board_rate: f64,
+    avg_next_ret_pct: f64,
+}
+
+#[derive(Clone, Debug)]
+struct LimitUpModelPredictionView {
+    ts_code: String,
+    name: String,
+    industry: String,
+    board_scope: String,
+    p_limit_up: f64,
+    p_touch_limit: f64,
+    p_failed_board: f64,
+    raw_p_limit_up: f64,
+    ev_after_cost_pct: f64,
+    ev_lcb_80_pct: f64,
+    probability_decile: i64,
+    model_state: String,
+    decision_state: String,
+}
+
+#[derive(Clone, Debug)]
+struct LimitUpModelPerformanceView {
+    train_start: String,
+    train_end: String,
+    model_state: String,
+    train_samples: i64,
+    train_positives: i64,
+    auc: f64,
+    brier: f64,
+    top_decile_hit_rate: f64,
+    top_decile_lift: f64,
     failed_board_rate: f64,
     avg_next_ret_pct: f64,
 }
@@ -1815,6 +1849,279 @@ fn render_setup_alpha_summary(
     )?;
 
     Ok(())
+}
+
+fn render_limit_up_model_summary(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    let predictions = query_limit_up_model_predictions(db, date_str);
+    let performance = query_limit_up_model_performance(db, date_str);
+    if predictions.is_empty() && performance.is_none() {
+        return Ok(());
+    }
+
+    writeln!(md, "## Limit-Up Model / 涨停概率模型")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "该段是专门学习“次日涨停/触板/炸板”的日频概率模型，和 Execution Alpha 分开。模型用历史标签训练 `p_limit_up / p_touch_limit / p_failed_board`，再用训练分位桶的次日收益计算 EV 与 80% 置信下界；它不是手工热度分，也不是买入指令。"
+    )?;
+    writeln!(
+        md,
+        "当前版本只使用收盘后日频数据；没有 9:25 集合竞价、9:35 开盘确认、封单/开板质量前，只能产出候选池，不能替代实盘确认。"
+    )?;
+    writeln!(md)?;
+
+    if let Some(row) = performance.as_ref() {
+        if row.model_state == "trained" {
+            writeln!(
+                md,
+                "模型状态: trained；训练窗 {} -> {}，n={}，涨停样本={}，AUC={}，Brier={}，Top decile hit={}，lift={}，failed board={}，Top decile avg next ret={}%。",
+                row.train_start,
+                row.train_end,
+                row.train_samples,
+                row.train_positives,
+                fmt_opt_f64(Some(row.auc), 3),
+                fmt_opt_f64(Some(row.brier), 4),
+                fmt_pct(Some(row.top_decile_hit_rate * 100.0)),
+                fmt_opt_f64(Some(row.top_decile_lift), 2),
+                fmt_pct(Some(row.failed_board_rate * 100.0)),
+                fmt_pct(Some(row.avg_next_ret_pct)),
+            )?;
+        } else {
+            writeln!(
+                md,
+                "模型状态: {}；训练样本不足或标签不足，本期只输出 Research Radar，不允许升级为 Limit-Up Candidate。",
+                row.model_state
+            )?;
+        }
+        writeln!(md)?;
+    }
+
+    let limit_candidates = predictions
+        .iter()
+        .filter(|row| row.decision_state == "limit_up_candidate")
+        .collect::<Vec<_>>();
+    let research = predictions
+        .iter()
+        .filter(|row| row.decision_state == "research_radar" && row.board_scope == "mainboard_10cm")
+        .collect::<Vec<_>>();
+    let heat_only = predictions
+        .iter()
+        .filter(|row| row.decision_state == "heat_only" && row.board_scope != "mainboard_10cm")
+        .collect::<Vec<_>>();
+    let blocked_tail = predictions
+        .iter()
+        .filter(|row| row.decision_state == "blocked_tail")
+        .collect::<Vec<_>>();
+
+    render_limit_up_model_table(
+        md,
+        "Limit-Up Candidates / 主板10cm概率候选",
+        &limit_candidates,
+        "本期没有 EV 置信下界为正的主板涨停概率候选。",
+        "只表示日频模型认为次日涨停概率桶有正EV；仍需集合竞价和开盘承接确认。",
+        8,
+    )?;
+    render_limit_up_model_table(
+        md,
+        "Research Radar / 主板候选池",
+        &research,
+        "本期没有主板研究雷达候选。",
+        "这些票概率或触板概率靠前，但 EV 置信下界未放行，只能复核，不写成入场。",
+        8,
+    )?;
+    render_limit_up_model_table(
+        md,
+        "Heat Only / 策略外热区",
+        &heat_only,
+        "本期没有策略范围外高热度样本。",
+        "创业板/科创/ST/北交等只用于观察热区；因板型和账户约束不同，不进入主板候选。",
+        6,
+    )?;
+    render_limit_up_model_table(
+        md,
+        "Blocked Tail / 炸板风险",
+        &blocked_tail,
+        "本期没有被模型判为炸板风险占优的样本。",
+        "触板概率不低但炸板概率高于封板概率时，报告只能写成尾部风险。",
+        6,
+    )?;
+
+    Ok(())
+}
+
+fn render_limit_up_model_table(
+    md: &mut String,
+    title: &str,
+    rows: &[&LimitUpModelPredictionView],
+    empty: &str,
+    note: &str,
+    limit: usize,
+) -> Result<()> {
+    writeln!(md, "### {}", title)?;
+    writeln!(md)?;
+    writeln!(md, "- {}", note)?;
+    writeln!(md)?;
+    if rows.is_empty() {
+        writeln!(md, "- {}", empty)?;
+        writeln!(md)?;
+        return Ok(());
+    }
+    writeln!(
+        md,
+        "| 代码 | 名称 | 板型 | 行业 | decile | p板 | p触板 | p炸板 | EV% | EV80 LCB | 模型 | 状态 |"
+    )?;
+    writeln!(
+        md,
+        "|------|------|------|------|-------:|----:|------:|------:|----:|---------:|------|------|"
+    )?;
+    for row in rows.iter().take(limit) {
+        writeln!(
+            md,
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            row.ts_code,
+            row.name,
+            row.board_scope,
+            row.industry,
+            row.probability_decile,
+            fmt_pct(Some(row.p_limit_up * 100.0)),
+            fmt_pct(Some(row.p_touch_limit * 100.0)),
+            fmt_pct(Some(row.p_failed_board * 100.0)),
+            fmt_pct(Some(row.ev_after_cost_pct)),
+            fmt_pct(Some(row.ev_lcb_80_pct)),
+            row.model_state,
+            display_limit_up_decision_state(&row.decision_state),
+        )?;
+    }
+    writeln!(md)?;
+    Ok(())
+}
+
+fn query_limit_up_model_predictions(
+    db: &Connection,
+    date_str: &str,
+) -> Vec<LimitUpModelPredictionView> {
+    let sql = "
+        SELECT
+            p.symbol,
+            COALESCE(sb.name, json_extract_string(p.detail_json, '$.name'), '') AS name,
+            COALESCE(sb.industry, json_extract_string(p.detail_json, '$.industry'), '') AS industry,
+            p.board_scope,
+            COALESCE(p.p_limit_up, 0),
+            COALESCE(p.p_touch_limit, 0),
+            COALESCE(p.p_failed_board, 0),
+            COALESCE(p.ev_after_cost_pct, 0),
+            COALESCE(p.ev_lcb_80_pct, 0),
+            COALESCE(p.probability_decile, 0),
+            COALESCE(p.model_state, ''),
+            COALESCE(p.decision_state, ''),
+            COALESCE(p.detail_json, '')
+        FROM limit_up_model_predictions p
+        LEFT JOIN stock_basic sb ON sb.ts_code = p.symbol
+        WHERE p.as_of = CAST(? AS DATE)
+        ORDER BY p.symbol";
+    let Ok(mut stmt) = db.prepare(sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map(duckdb::params![date_str], |row| {
+        let detail_raw = row.get::<_, String>(12).unwrap_or_default();
+        let detail = serde_json::from_str::<serde_json::Value>(&detail_raw).unwrap_or_default();
+        Ok(LimitUpModelPredictionView {
+            ts_code: row.get::<_, String>(0).unwrap_or_default(),
+            name: row.get::<_, String>(1).unwrap_or_default(),
+            industry: row.get::<_, String>(2).unwrap_or_default(),
+            board_scope: row.get::<_, String>(3).unwrap_or_default(),
+            p_limit_up: row.get::<_, f64>(4).unwrap_or(0.0),
+            p_touch_limit: row.get::<_, f64>(5).unwrap_or(0.0),
+            p_failed_board: row.get::<_, f64>(6).unwrap_or(0.0),
+            raw_p_limit_up: detail
+                .get("raw_model_score")
+                .and_then(|v| v.get("p_limit_up"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or_else(|| row.get::<_, f64>(4).unwrap_or(0.0)),
+            ev_after_cost_pct: row.get::<_, f64>(7).unwrap_or(0.0),
+            ev_lcb_80_pct: row.get::<_, f64>(8).unwrap_or(0.0),
+            probability_decile: row.get::<_, i64>(9).unwrap_or(0),
+            model_state: row.get::<_, String>(10).unwrap_or_default(),
+            decision_state: row.get::<_, String>(11).unwrap_or_default(),
+        })
+    }) else {
+        return Vec::new();
+    };
+    let mut out = rows.filter_map(|row| row.ok()).collect::<Vec<_>>();
+    out.sort_by(|a, b| {
+        limit_up_decision_rank(&a.decision_state)
+            .cmp(&limit_up_decision_rank(&b.decision_state))
+            .then_with(|| b.probability_decile.cmp(&a.probability_decile))
+            .then_with(|| {
+                b.raw_p_limit_up
+                    .partial_cmp(&a.raw_p_limit_up)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| {
+                b.ev_lcb_80_pct
+                    .partial_cmp(&a.ev_lcb_80_pct)
+                    .unwrap_or(Ordering::Equal)
+            })
+            .then_with(|| a.ts_code.cmp(&b.ts_code))
+    });
+    out
+}
+
+fn query_limit_up_model_performance(
+    db: &Connection,
+    date_str: &str,
+) -> Option<LimitUpModelPerformanceView> {
+    let sql = "
+        SELECT
+            COALESCE(CAST(train_start AS VARCHAR), '-'),
+            COALESCE(CAST(train_end AS VARCHAR), '-'),
+            COALESCE(model_state, ''),
+            COALESCE(train_samples, 0),
+            COALESCE(train_positives, 0),
+            COALESCE(auc, 0),
+            COALESCE(brier, 0),
+            COALESCE(top_decile_hit_rate, 0),
+            COALESCE(top_decile_lift, 0),
+            COALESCE(failed_board_rate, 0),
+            COALESCE(avg_next_ret_pct, 0)
+        FROM limit_up_model_performance
+        WHERE as_of = CAST(? AS DATE)
+        LIMIT 1";
+    db.query_row(sql, duckdb::params![date_str], |row| {
+        Ok(LimitUpModelPerformanceView {
+            train_start: row.get::<_, String>(0).unwrap_or_else(|_| "-".to_string()),
+            train_end: row.get::<_, String>(1).unwrap_or_else(|_| "-".to_string()),
+            model_state: row.get::<_, String>(2).unwrap_or_default(),
+            train_samples: row.get::<_, i64>(3).unwrap_or(0),
+            train_positives: row.get::<_, i64>(4).unwrap_or(0),
+            auc: row.get::<_, f64>(5).unwrap_or(0.0),
+            brier: row.get::<_, f64>(6).unwrap_or(0.0),
+            top_decile_hit_rate: row.get::<_, f64>(7).unwrap_or(0.0),
+            top_decile_lift: row.get::<_, f64>(8).unwrap_or(0.0),
+            failed_board_rate: row.get::<_, f64>(9).unwrap_or(0.0),
+            avg_next_ret_pct: row.get::<_, f64>(10).unwrap_or(0.0),
+        })
+    })
+    .ok()
+}
+
+fn display_limit_up_decision_state(raw: &str) -> &'static str {
+    match raw {
+        "limit_up_candidate" => "Limit-Up Candidate",
+        "research_radar" => "Research Radar",
+        "blocked_tail" => "Blocked Tail",
+        "heat_only" => "Heat Only",
+        _ => "Research Radar",
+    }
+}
+
+fn limit_up_decision_rank(raw: &str) -> i32 {
+    match raw {
+        "limit_up_candidate" => 0,
+        "research_radar" => 1,
+        "blocked_tail" => 2,
+        _ => 3,
+    }
 }
 
 fn render_limit_move_radar_summary(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
