@@ -402,6 +402,9 @@ def run_overnight_gate(
 
     strategy_params = load_us_strategy_params()
     gate_params = get_us_strategy_param_section("overnight_gate")
+    price_params = _section(gate_params, "price_context")
+    atr_window = int(_p(price_params, "atr_window", 14))
+    prior_range_end = int(_p(price_params, "prior_range_window", 20)) + 1
     as_of_str = as_of.strftime("%Y-%m-%d")
     placeholders = ",".join("?" * len(symbols))
 
@@ -421,9 +424,9 @@ def run_overnight_gate(
         SELECT
             symbol,
             MAX(CASE WHEN rn = 1 THEN close END) AS last_close,
-            AVG(CASE WHEN rn BETWEEN 1 AND 14 THEN high - low END) AS atr_14,
-            MAX(CASE WHEN rn BETWEEN 2 AND 21 THEN high END) AS high_20d,
-            MIN(CASE WHEN rn BETWEEN 2 AND 21 THEN low END) AS low_20d
+            AVG(CASE WHEN rn BETWEEN 1 AND {atr_window} THEN high - low END) AS atr_14,
+            MAX(CASE WHEN rn BETWEEN 2 AND {prior_range_end} THEN high END) AS high_20d,
+            MIN(CASE WHEN rn BETWEEN 2 AND {prior_range_end} THEN low END) AS low_20d
         FROM ranked
         GROUP BY symbol
         """,
@@ -517,22 +520,31 @@ def run_overnight_gate(
 
         atm_iv = _safe_float(cur_opts_row.get("atm_iv"))
         hist_iv = _safe_float(hist_opts_row.get("atm_iv"))
+        delta_params = _section(gate_params, "delta_features")
         iv_delta = None
         if atm_iv and hist_iv and hist_iv > 0:
-            iv_delta = abs(math.log((atm_iv + 1e-6) / hist_iv)) / math.log(2.0)
+            iv_delta = abs(
+                math.log((atm_iv + _p(delta_params, "iv_epsilon", 1e-6)) / hist_iv)
+            ) / math.log(_p(delta_params, "iv_log_base", 2.0))
             iv_delta = _clamp01(iv_delta)
 
         cur_skew = _safe_float(cur_opts_row.get("iv_skew"))
         hist_skew = _safe_float(hist_opts_row.get("iv_skew"))
         skew_delta = None
         if cur_skew is not None and hist_skew is not None:
-            skew_delta = _clamp01(abs(cur_skew - hist_skew) / 0.35)
+            skew_delta = _clamp01(
+                abs(cur_skew - hist_skew) / _p(delta_params, "skew_delta_scale", 0.35)
+            )
 
         cur_pc = _safe_float(cur_opts_row.get("put_call_vol_ratio"))
         hist_pc = _safe_float(hist_opts_row.get("put_call_vol_ratio"))
         pc_delta = None
         if cur_pc is not None and hist_pc is not None:
-            pc_delta = _clamp01(abs(math.log((cur_pc + 0.25) / (hist_pc + 0.25))) / math.log(3.0))
+            pc_offset = _p(delta_params, "pc_offset", 0.25)
+            pc_delta = _clamp01(
+                abs(math.log((cur_pc + pc_offset) / (hist_pc + pc_offset)))
+                / math.log(_p(delta_params, "pc_log_base", 3.0))
+            )
 
         unusual = _parse_unusual(cur_opts_row.get("unusual_strikes"))
         total_vol = sum(_safe_float(u.get("volume"), 0.0) or 0.0 for u in unusual)
@@ -551,17 +563,17 @@ def run_overnight_gate(
 
         bias_signal = cur_opts_row.get("bias_signal") or "neutral"
         bias_dir = 1 if bias_signal == "bullish" else -1 if bias_signal == "bearish" else 0
-        bias_support = 0.5
+        sentiment_params = _section(gate_params, "sentiment")
+        bias_support = _p(sentiment_params, "neutral_support", 0.50)
         if gap_dir == 0:
-            bias_support = 0.5
+            bias_support = _p(sentiment_params, "neutral_support", 0.50)
         elif bias_dir == gap_dir:
-            bias_support = 1.0
+            bias_support = _p(sentiment_params, "aligned_bias_support", 1.0)
         elif bias_dir == -gap_dir:
-            bias_support = 0.0
+            bias_support = _p(sentiment_params, "opposed_bias_support", 0.0)
 
         trend_prob = _safe_float(mom_row.get("trend_prob"))
         trend_regime = mom_row.get("regime") or "unknown"
-        sentiment_params = _section(gate_params, "sentiment")
         trend_dir = (
             1
             if (trend_prob is not None and trend_prob > _p(sentiment_params, "trend_dir_upper", 0.56))
@@ -569,10 +581,20 @@ def run_overnight_gate(
             if (trend_prob is not None and trend_prob < _p(sentiment_params, "trend_dir_lower", 0.44))
             else 0
         )
+        trend_neutral = _p(sentiment_params, "trend_neutral_probability", 0.50)
+        trend_scale = _p(sentiment_params, "trend_support_scale", 2.0)
         if gap_dir == 0:
-            trend_support = abs((trend_prob or 0.5) - 0.5) * 2.0 if trend_prob is not None else 0.0
+            trend_support = (
+                abs((trend_prob or trend_neutral) - trend_neutral) * trend_scale
+                if trend_prob is not None
+                else 0.0
+            )
         elif trend_dir == gap_dir:
-            trend_support = abs((trend_prob or 0.5) - 0.5) * 2.0 if trend_prob is not None else 0.0
+            trend_support = (
+                abs((trend_prob or trend_neutral) - trend_neutral) * trend_scale
+                if trend_prob is not None
+                else 0.0
+            )
         else:
             trend_support = 0.0
         trend_support = _clamp01(trend_support)
@@ -585,21 +607,22 @@ def run_overnight_gate(
 
         pc_ratio_z = _safe_float(sent_row.get("pc_ratio_z"))
         skew_z = _safe_float(sent_row.get("skew_z"))
-        sentiment_support = 0.5
+        sentiment_support = _p(sentiment_params, "neutral_support", 0.50)
         vote_z = _p(sentiment_params, "vote_z_threshold", 0.50)
+        vote_weight = _p(sentiment_params, "vote_weight", 0.50)
         if gap_dir > 0:
             bullish_votes = 0.0
             if pc_ratio_z is not None and pc_ratio_z < -vote_z:
-                bullish_votes += 0.5
+                bullish_votes += vote_weight
             if skew_z is not None and skew_z < -vote_z:
-                bullish_votes += 0.5
+                bullish_votes += vote_weight
             sentiment_support = bullish_votes
         elif gap_dir < 0:
             bearish_votes = 0.0
             if pc_ratio_z is not None and pc_ratio_z > vote_z:
-                bearish_votes += 0.5
+                bearish_votes += vote_weight
             if skew_z is not None and skew_z > vote_z:
-                bearish_votes += 0.5
+                bearish_votes += vote_weight
             sentiment_support = bearish_votes
         discipline_support = _discipline_support_score(
             gap_dir=gap_dir,

@@ -115,7 +115,15 @@ DEFAULT_US_RUNTIME_PARAMS = {
         "provenance": "legacy_heuristic",
     },
     "overnight_gate": {
+        "price_context": {"atr_window": 14, "prior_range_window": 20},
         "historical_context": {"lo_days": 10, "hi_days": 5},
+        "delta_features": {
+            "iv_epsilon": 1e-6,
+            "iv_log_base": 2.0,
+            "skew_delta_scale": 0.35,
+            "pc_offset": 0.25,
+            "pc_log_base": 3.0,
+        },
         "trend_alignment": {
             "neutral_no_gap": 0.50,
             "missing_trend": 0.35,
@@ -196,8 +204,14 @@ DEFAULT_US_RUNTIME_PARAMS = {
         },
         "sentiment": {
             "vote_z_threshold": 0.50,
+            "vote_weight": 0.50,
+            "neutral_support": 0.50,
+            "aligned_bias_support": 1.0,
+            "opposed_bias_support": 0.0,
             "trend_dir_upper": 0.56,
             "trend_dir_lower": 0.44,
+            "trend_neutral_probability": 0.50,
+            "trend_support_scale": 2.0,
             "trend_support_weight": 0.50,
         },
         "stretch": {
