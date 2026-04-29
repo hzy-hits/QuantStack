@@ -139,9 +139,11 @@ runtime loads, in order:
 
 The wired runtime sections are `risk_params`, `options_alpha`,
 `overnight_gate`, and `overnight_continuation_alpha`. Defaults remain
-conservative legacy heuristics, but every value is now in one artifact and can
-be replaced by weekend walk-forward calibration once OOS lower-confidence EV
-improves.
+conservative legacy heuristics unless the calibration artifact can prove an OOS
+improvement. The US calibration job reads `algorithm_postmortem`,
+`alpha_postmortem`, `analysis_daily`, and `options_alpha`, then only activates a
+candidate parameter set when the walk-forward OOS EV80 lower-confidence bound is
+positive and better than the current default.
 
 Generate the US artifact:
 
@@ -149,6 +151,11 @@ Generate the US artifact:
 cd ..
 python factor-lab/scripts/calibrate_strategy_params.py --market us
 ```
+
+The same command is called by `factor-lab/scripts/weekly_maintenance.py` for
+both CN and US. If the data is not strong enough, the artifact still refreshes
+but keeps `provenance: legacy_heuristic`; that is intentional and prevents a
+single noisy week from rewriting production gates.
 
 ## Shared Alpha Gate
 

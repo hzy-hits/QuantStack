@@ -10,6 +10,7 @@ legacy heuristics still waiting to be replaced.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 from datetime import datetime, timezone
@@ -43,6 +44,8 @@ DEFAULT_PAPER_PARAMS = {
     "provenance": "built_in_default",
 }
 MIN_ACTIVATION_IMPROVEMENT_PCT = 0.05
+MIN_US_GATE_OOS_TRADES = 20
+MIN_US_OPTIONS_OOS_ROWS = 20
 DEFAULT_US_RUNTIME_PARAMS = {
     "risk_params": {
         "atr_stop_multiple": 2.0,
@@ -355,6 +358,90 @@ def _policy_stats(rows: list[dict[str, Any]], params: dict[str, Any]) -> dict[st
         "oos_std_pct": std,
         "oos_ev_lcb_80_pct": lcb80,
     }
+
+
+def _finite_float(value: Any, default: float | None = None) -> float | None:
+    if value is None:
+        return default
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return default
+    return out if math.isfinite(out) else default
+
+
+def _safe_json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _deep_merge_dict(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    out = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge_dict(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def _ev_stats(values: list[float]) -> dict[str, Any]:
+    clean = [float(v) for v in values if math.isfinite(float(v))]
+    if not clean:
+        return {
+            "n": 0,
+            "avg_ret_pct": None,
+            "std_pct": None,
+            "ev_lcb_80_pct": None,
+            "win_rate": None,
+        }
+    avg = sum(clean) / len(clean)
+    if len(clean) > 1:
+        variance = sum((v - avg) ** 2 for v in clean) / (len(clean) - 1)
+        std = math.sqrt(max(variance, 0.0))
+    else:
+        std = abs(avg)
+    lcb80 = avg - EV80_Z * max(std, 0.50) / math.sqrt(len(clean))
+    return {
+        "n": len(clean),
+        "avg_ret_pct": avg,
+        "std_pct": std,
+        "ev_lcb_80_pct": lcb80,
+        "win_rate": sum(1 for v in clean if v > 0.0) / len(clean),
+    }
+
+
+def _train_oos_split(rows: list[dict[str, Any]], date_key: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    dates = sorted({str(row.get(date_key)) for row in rows if row.get(date_key)})
+    if len(dates) < 4:
+        return rows, rows
+    cutoff_idx = max(1, int(len(dates) * 0.65))
+    cutoff = dates[min(cutoff_idx, len(dates) - 1)]
+    train = [row for row in rows if str(row.get(date_key)) < cutoff]
+    oos = [row for row in rows if str(row.get(date_key)) >= cutoff]
+    return train or rows, oos or rows
+
+
+def _stats_for_filter(rows: list[dict[str, Any]], predicate) -> dict[str, Any]:
+    selected = []
+    for row in rows:
+        try:
+            keep = predicate(row)
+        except Exception:
+            keep = False
+        if not keep:
+            continue
+        ret = _finite_float(row.get("realized_ret_pct"))
+        if ret is not None:
+            selected.append(ret)
+    return _ev_stats(selected)
 
 
 def _load_release_outcomes(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
@@ -750,6 +837,329 @@ def fetch_us_options_alpha(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     }
 
 
+def _load_us_gate_outcomes(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
+    if not table_exists(con, "algorithm_postmortem") or not table_exists(con, "analysis_daily"):
+        return []
+    rows = con.execute(
+        """
+        SELECT
+            CAST(ap.report_date AS VARCHAR) AS report_date,
+            ap.symbol,
+            ap.realized_pnl_pct,
+            ap.label,
+            ap.fill_quality,
+            ap.detail_json AS postmortem_detail_json,
+            ad.trend_prob,
+            ad.p_downside,
+            ad.details AS gate_detail_json
+        FROM algorithm_postmortem ap
+        INNER JOIN analysis_daily ad
+          ON ad.date = ap.report_date
+         AND ad.symbol = ap.symbol
+         AND ad.module_name = 'overnight_gate'
+        WHERE ap.action_intent = 'TRADE'
+          AND ap.realized_pnl_pct IS NOT NULL
+        """
+    ).fetchall()
+    out: list[dict[str, Any]] = []
+    keys = [
+        "report_date",
+        "symbol",
+        "realized_ret_pct",
+        "label",
+        "fill_quality",
+        "postmortem_detail_json",
+        "trend_prob",
+        "p_downside",
+        "gate_detail_json",
+    ]
+    for row in rows:
+        item = dict(zip(keys, row))
+        gate = _safe_json_dict(item.pop("gate_detail_json", None))
+        pm = _safe_json_dict(item.pop("postmortem_detail_json", None))
+        item.update(
+            {
+                "p_continue": _finite_float(item.get("trend_prob"), _finite_float(gate.get("p_continue"), 0.0)) or 0.0,
+                "p_fade": _finite_float(item.get("p_downside"), _finite_float(gate.get("p_fade"), 0.0)) or 0.0,
+                "support_score": _finite_float(gate.get("support_score"), 0.5) or 0.5,
+                "effective_stretch_score": _finite_float(gate.get("effective_stretch_score"), _finite_float(gate.get("stretch_score"), 0.0)) or 0.0,
+                "gap_vs_expected_move": _finite_float(gate.get("gap_vs_expected_move"), 0.0) or 0.0,
+                "continuation_relief": _finite_float(gate.get("continuation_relief"), 0.0) or 0.0,
+                "rr_ratio": _finite_float(pm.get("rr_ratio")),
+                "expected_move_pct": _finite_float(pm.get("expected_move_pct")),
+            }
+        )
+        out.append(item)
+    return out
+
+
+def _simulate_us_gate_action(row: dict[str, Any], action_params: dict[str, Any]) -> str:
+    p_continue = _finite_float(row.get("p_continue"), 0.0) or 0.0
+    p_fade = _finite_float(row.get("p_fade"), 0.0) or 0.0
+    support_score = _finite_float(row.get("support_score"), 0.5) or 0.5
+    effective_stretch = _finite_float(row.get("effective_stretch_score"), 0.0) or 0.0
+    gap_vs_expected = _finite_float(row.get("gap_vs_expected_move"), 0.0) or 0.0
+    relief = _finite_float(row.get("continuation_relief"), 0.0) or 0.0
+
+    wait_gap_threshold = _finite_float(action_params.get("wait_gap_base"), 0.65) + (
+        _finite_float(action_params.get("wait_gap_relief"), 0.35) * relief
+    )
+    do_not_chase_gap_threshold = _finite_float(action_params.get("do_not_chase_gap_base"), 1.00) + (
+        _finite_float(action_params.get("do_not_chase_gap_relief"), 0.45) * relief
+    )
+
+    if effective_stretch >= _finite_float(action_params.get("do_not_chase_stretch"), 0.78) or (
+        gap_vs_expected > do_not_chase_gap_threshold
+        and support_score < _finite_float(action_params.get("do_not_chase_support_max"), 0.48)
+    ):
+        return "do_not_chase"
+    if effective_stretch >= _finite_float(action_params.get("wait_stretch"), 0.50) or (
+        gap_vs_expected > wait_gap_threshold
+        and p_continue < _finite_float(action_params.get("wait_p_continue_max"), 0.68)
+    ):
+        return "wait_pullback"
+    if p_continue >= _finite_float(action_params.get("continue_min"), 0.58):
+        return "executable_now"
+    if p_fade >= _finite_float(action_params.get("fade_min"), 0.58):
+        return "wait_pullback"
+    return "executable_now"
+
+
+def calibrate_us_overnight_gate(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    rows = _load_us_gate_outcomes(con)
+    default_action = copy.deepcopy(DEFAULT_US_RUNTIME_PARAMS["overnight_gate"]["action"])
+    train, oos = _train_oos_split(rows, "report_date")
+    default_stats = _stats_for_filter(
+        oos,
+        lambda row: _simulate_us_gate_action(row, default_action) == "executable_now",
+    )
+
+    best_action = copy.deepcopy(default_action)
+    best_train_stats = _stats_for_filter(
+        train,
+        lambda row: _simulate_us_gate_action(row, default_action) == "executable_now",
+    )
+    best_oos_stats = default_stats
+    best_score = float(default_stats["ev_lcb_80_pct"]) if default_stats.get("ev_lcb_80_pct") is not None else float("-inf")
+
+    grids = {
+        "continue_min": [0.52, 0.56, 0.58, 0.62, 0.66],
+        "wait_stretch": [0.40, 0.50, 0.60, 0.70],
+        "do_not_chase_stretch": [0.65, 0.78, 0.90],
+        "do_not_chase_support_max": [0.40, 0.48, 0.56],
+        "wait_p_continue_max": [0.60, 0.68, 0.76],
+    }
+    for continue_min in grids["continue_min"]:
+        for wait_stretch in grids["wait_stretch"]:
+            for do_not_chase_stretch in grids["do_not_chase_stretch"]:
+                if do_not_chase_stretch < wait_stretch:
+                    continue
+                for do_not_chase_support_max in grids["do_not_chase_support_max"]:
+                    for wait_p_continue_max in grids["wait_p_continue_max"]:
+                        candidate = copy.deepcopy(default_action)
+                        candidate.update(
+                            {
+                                "continue_min": continue_min,
+                                "wait_stretch": wait_stretch,
+                                "do_not_chase_stretch": do_not_chase_stretch,
+                                "do_not_chase_support_max": do_not_chase_support_max,
+                                "wait_p_continue_max": wait_p_continue_max,
+                            }
+                        )
+                        train_stats = _stats_for_filter(
+                            train,
+                            lambda row, params=candidate: _simulate_us_gate_action(row, params) == "executable_now",
+                        )
+                        if int(train_stats.get("n") or 0) < MIN_US_GATE_OOS_TRADES:
+                            continue
+                        oos_stats = _stats_for_filter(
+                            oos,
+                            lambda row, params=candidate: _simulate_us_gate_action(row, params) == "executable_now",
+                        )
+                        if int(oos_stats.get("n") or 0) < MIN_US_GATE_OOS_TRADES:
+                            continue
+                        score = oos_stats.get("ev_lcb_80_pct")
+                        if score is None:
+                            continue
+                        if float(score) > best_score:
+                            best_score = float(score)
+                            best_action = candidate
+                            best_train_stats = train_stats
+                            best_oos_stats = oos_stats
+
+    default_lcb = default_stats.get("ev_lcb_80_pct")
+    candidate_lcb = best_oos_stats.get("ev_lcb_80_pct")
+    use_candidate = (
+        candidate_lcb is not None
+        and default_lcb is not None
+        and int(best_oos_stats.get("n") or 0) >= MIN_US_GATE_OOS_TRADES
+        and float(candidate_lcb) > 0.0
+        and float(candidate_lcb) >= float(default_lcb) + MIN_ACTIVATION_IMPROVEMENT_PCT
+        and best_action != default_action
+    )
+
+    selected_action = best_action if use_candidate else default_action
+    selected_payload = copy.deepcopy(DEFAULT_US_RUNTIME_PARAMS["overnight_gate"])
+    selected_payload["action"] = selected_action
+    selected_payload["provenance"] = "calibrated_walk_forward" if use_candidate else "legacy_heuristic"
+    return {
+        "status": "ok" if rows else "missing",
+        "rows": len(rows),
+        "train_rows": len(train),
+        "oos_rows": len(oos),
+        "selected": "candidate" if use_candidate else "default",
+        "selected_params": selected_payload,
+        "activation": {
+            "use_candidate": use_candidate,
+            "reason": (
+                "candidate_oos_ev_lcb80_improved"
+                if use_candidate
+                else "default_retained_until_candidate_lcb80_improves"
+            ),
+            "min_oos_trades": MIN_US_GATE_OOS_TRADES,
+            "min_improvement_pct": MIN_ACTIVATION_IMPROVEMENT_PCT,
+            "default_oos": default_stats,
+            "candidate_train": best_train_stats,
+            "candidate_oos": best_oos_stats,
+        },
+    }
+
+
+def _load_us_options_outcomes(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
+    if not table_exists(con, "options_alpha") or not table_exists(con, "alpha_postmortem"):
+        return []
+    rows = con.execute(
+        """
+        SELECT
+            CAST(oa.as_of AS VARCHAR) AS report_date,
+            oa.symbol,
+            oa.directional_edge,
+            oa.vol_edge,
+            oa.vrp_edge,
+            oa.flow_edge,
+            oa.liquidity_gate,
+            ap.best_ret_pct
+        FROM options_alpha oa
+        INNER JOIN alpha_postmortem ap
+          ON ap.report_date = oa.as_of
+         AND ap.symbol = oa.symbol
+        WHERE ap.best_ret_pct IS NOT NULL
+        """
+    ).fetchall()
+    keys = [
+        "report_date",
+        "symbol",
+        "directional_edge",
+        "vol_edge",
+        "vrp_edge",
+        "flow_edge",
+        "liquidity_gate",
+        "realized_ret_pct",
+    ]
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def _us_options_signal(row: dict[str, Any], params: dict[str, Any]) -> bool:
+    if str(row.get("liquidity_gate") or "") != "pass":
+        return False
+    directional_edge = abs(_finite_float(row.get("directional_edge"), 0.0) or 0.0)
+    vol_edge = _finite_float(row.get("vol_edge"), 0.0) or 0.0
+    return directional_edge >= _finite_float(params.get("directional_edge_threshold"), 0.45) and vol_edge >= _finite_float(
+        params.get("vol_edge_threshold"), 0.10
+    )
+
+
+def calibrate_us_options_alpha(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    rows = _load_us_options_outcomes(con)
+    default_params = copy.deepcopy(DEFAULT_US_RUNTIME_PARAMS["options_alpha"])
+    train, oos = _train_oos_split(rows, "report_date")
+    default_stats = _stats_for_filter(oos, lambda row: _us_options_signal(row, default_params))
+    best_params = copy.deepcopy(default_params)
+    best_train_stats = _stats_for_filter(train, lambda row: _us_options_signal(row, default_params))
+    best_oos_stats = default_stats
+    best_score = float(default_stats["ev_lcb_80_pct"]) if default_stats.get("ev_lcb_80_pct") is not None else float("-inf")
+
+    for directional_threshold in [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]:
+        for vol_threshold in [-0.10, 0.0, 0.10, 0.20, 0.30]:
+            candidate = copy.deepcopy(default_params)
+            candidate.update(
+                {
+                    "directional_edge_threshold": directional_threshold,
+                    "vol_edge_threshold": vol_threshold,
+                    "provenance": "calibrated_walk_forward",
+                }
+            )
+            train_stats = _stats_for_filter(train, lambda row, params=candidate: _us_options_signal(row, params))
+            if int(train_stats.get("n") or 0) < MIN_US_OPTIONS_OOS_ROWS:
+                continue
+            oos_stats = _stats_for_filter(oos, lambda row, params=candidate: _us_options_signal(row, params))
+            if int(oos_stats.get("n") or 0) < MIN_US_OPTIONS_OOS_ROWS:
+                continue
+            score = oos_stats.get("ev_lcb_80_pct")
+            if score is None:
+                continue
+            if float(score) > best_score:
+                best_score = float(score)
+                best_params = candidate
+                best_train_stats = train_stats
+                best_oos_stats = oos_stats
+
+    default_lcb = default_stats.get("ev_lcb_80_pct")
+    candidate_lcb = best_oos_stats.get("ev_lcb_80_pct")
+    use_candidate = (
+        candidate_lcb is not None
+        and default_lcb is not None
+        and int(best_oos_stats.get("n") or 0) >= MIN_US_OPTIONS_OOS_ROWS
+        and float(candidate_lcb) > 0.0
+        and float(candidate_lcb) >= float(default_lcb) + MIN_ACTIVATION_IMPROVEMENT_PCT
+        and best_params != default_params
+    )
+    selected = best_params if use_candidate else default_params
+    selected["provenance"] = "calibrated_walk_forward" if use_candidate else "legacy_heuristic"
+    return {
+        "status": "ok" if rows else "missing",
+        "rows": len(rows),
+        "train_rows": len(train),
+        "oos_rows": len(oos),
+        "selected": "candidate" if use_candidate else "default",
+        "selected_params": selected,
+        "activation": {
+            "use_candidate": use_candidate,
+            "reason": (
+                "candidate_oos_ev_lcb80_improved"
+                if use_candidate
+                else "default_retained_until_candidate_lcb80_improves"
+            ),
+            "min_oos_rows": MIN_US_OPTIONS_OOS_ROWS,
+            "min_improvement_pct": MIN_ACTIVATION_IMPROVEMENT_PCT,
+            "default_oos": default_stats,
+            "candidate_train": best_train_stats,
+            "candidate_oos": best_oos_stats,
+        },
+    }
+
+
+def calibrate_us_runtime_params(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    gate = calibrate_us_overnight_gate(con)
+    options = calibrate_us_options_alpha(con)
+    selected = copy.deepcopy(DEFAULT_US_RUNTIME_PARAMS)
+    if isinstance(gate.get("selected_params"), dict):
+        selected["overnight_gate"] = _deep_merge_dict(
+            selected["overnight_gate"],
+            gate["selected_params"],
+        )
+    if isinstance(options.get("selected_params"), dict):
+        selected["options_alpha"] = _deep_merge_dict(
+            selected["options_alpha"],
+            options["selected_params"],
+        )
+    return {
+        "selected_params": selected,
+        "overnight_gate": gate,
+        "options_alpha": options,
+    }
+
+
 def build_cn_artifact(db_path: Path) -> dict[str, Any]:
     con = duckdb.connect(str(db_path), read_only=True)
     try:
@@ -792,6 +1202,7 @@ def build_cn_artifact(db_path: Path) -> dict[str, Any]:
 def build_us_artifact(db_path: Path) -> dict[str, Any]:
     con = duckdb.connect(str(db_path), read_only=True)
     try:
+        runtime_calibration = calibrate_us_runtime_params(con)
         return {
             "schema_version": 1,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -803,7 +1214,17 @@ def build_us_artifact(db_path: Path) -> dict[str, Any]:
                 "Legacy heuristics remain defaults until OOS postmortem LCB improves.",
                 "Headline/news context can explain a setup but cannot prove alpha.",
             ],
-            "us_runtime_params": DEFAULT_US_RUNTIME_PARAMS,
+            "ev80_lcb": {
+                "definition": "one-sided 80% lower confidence bound of realized strategy return",
+                "formula": "ev_lcb_80 = avg_return - 1.2816 * max(std_return, 0.50) / sqrt(n)",
+                "z": EV80_Z,
+                "interpretation": "A conservative OOS haircut. Candidate params activate only when this improves and stays positive.",
+            },
+            "us_runtime_params": runtime_calibration["selected_params"],
+            "runtime_calibration": {
+                "overnight_gate": runtime_calibration["overnight_gate"],
+                "options_alpha": runtime_calibration["options_alpha"],
+            },
             "latest": {
                 "postmortem": fetch_us_postmortem(con),
                 "options_alpha": fetch_us_options_alpha(con),

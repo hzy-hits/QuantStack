@@ -158,17 +158,18 @@ def backfill_table(pro, con, table: str, cfg: dict, dates: list[str], dry_run: b
 
 def run_strategy_calibration(dry_run: bool) -> None:
     script = Path(__file__).with_name("calibrate_strategy_params.py")
-    cmd = [sys.executable, str(script), "--market", "cn"]
-    if dry_run:
-        cmd.append("--dry-run")
     print("\n--- strategy parameter calibration ---")
-    result = subprocess.run(cmd, cwd=FACTOR_LAB_ROOT, check=False)
-    if result.returncode != 0:
-        print(f"  WARNING: calibration failed with exit code {result.returncode}")
-    elif dry_run:
-        print("  Dry-run calibration completed")
-    else:
-        print("  Calibration artifact refreshed")
+    for market in ("cn", "us"):
+        cmd = [sys.executable, str(script), "--market", market]
+        if dry_run:
+            cmd.append("--dry-run")
+        result = subprocess.run(cmd, cwd=FACTOR_LAB_ROOT, check=False)
+        if result.returncode != 0:
+            print(f"  WARNING: {market} calibration failed with exit code {result.returncode}")
+        elif dry_run:
+            print(f"  {market} dry-run calibration completed")
+        else:
+            print(f"  {market} calibration artifact refreshed")
 
 
 def main():
