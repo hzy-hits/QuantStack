@@ -23,11 +23,13 @@ from __future__ import annotations
 import json
 import math
 from datetime import date
+from typing import Any
 
 import duckdb
 import polars as pl
 import structlog
 
+from quant_bot.config.strategy_params import get_us_strategy_param_section, load_us_strategy_params
 from quant_bot.filtering._common import _parse_unusual
 
 log = structlog.get_logger()
@@ -59,29 +61,45 @@ def _safe_float(v, default: float | None = None) -> float | None:
     return out
 
 
+def _section(params: dict[str, Any] | None, name: str) -> dict[str, Any]:
+    if not isinstance(params, dict):
+        return {}
+    value = params.get(name)
+    return value if isinstance(value, dict) else {}
+
+
+def _p(params: dict[str, Any] | None, key: str, default: float) -> float:
+    value = _safe_float((params or {}).get(key), default)
+    return default if value is None else value
+
+
 def _trend_alignment_score(
     *,
     gap_dir: int,
     trend_prob: float | None,
     trend_regime: str | None,
+    params: dict[str, Any] | None = None,
 ) -> float:
+    p = _section(params, "trend_alignment")
     if gap_dir == 0:
-        return 0.5
+        return _p(p, "neutral_no_gap", 0.5)
     if trend_prob is None:
-        return 0.35
+        return _p(p, "missing_trend", 0.35)
 
     signed_edge = gap_dir * (trend_prob - 0.5)
-    base = _clamp01(0.5 + signed_edge / 0.25)
+    base = _clamp01(0.5 + signed_edge / _p(p, "signed_edge_scale", 0.25))
     if signed_edge <= 0.0:
         return base
 
     regime_bonus = 0.0
     if trend_regime == "trending":
-        regime_bonus = 0.03
+        regime_bonus = _p(p, "trending_bonus", 0.03)
     elif trend_regime == "noisy":
-        regime_bonus = 0.02
-    elif trend_regime == "mean_reverting" and abs(trend_prob - 0.5) <= 0.08:
-        regime_bonus = 0.025
+        regime_bonus = _p(p, "noisy_bonus", 0.02)
+    elif trend_regime == "mean_reverting" and abs(trend_prob - 0.5) <= _p(
+        p, "mean_reverting_neutral_band", 0.08
+    ):
+        regime_bonus = _p(p, "mean_reverting_bonus", 0.025)
     return _clamp01(base + regime_bonus)
 
 
@@ -90,23 +108,38 @@ def _discipline_support_score(
     gap_dir: int,
     gap_vs_expected_move: float | None,
     cone_position_68: float | None,
+    params: dict[str, Any] | None = None,
 ) -> float:
+    p = _section(params, "discipline")
     if gap_dir == 0:
-        return 0.55
+        return _p(p, "no_gap_support", 0.55)
 
     if gap_vs_expected_move is None:
-        gap_comfort = 0.60
+        gap_comfort = _p(p, "missing_gap_comfort", 0.60)
     else:
-        gap_comfort = 1.0 - _clamp01(((gap_vs_expected_move or 0.0) - 0.15) / 0.85)
+        gap_comfort = 1.0 - _clamp01(
+            ((gap_vs_expected_move or 0.0) - _p(p, "gap_offset", 0.15))
+            / _p(p, "gap_span", 0.85)
+        )
 
     if cone_position_68 is None:
-        cone_comfort = 0.60
+        cone_comfort = _p(p, "missing_cone_comfort", 0.60)
     elif gap_dir > 0:
-        cone_comfort = 1.0 - _clamp01((cone_position_68 - 0.58) / 0.32)
+        cone_comfort = 1.0 - _clamp01(
+            (cone_position_68 - _p(p, "cone_upper_mid", 0.58)) / _p(p, "cone_span", 0.32)
+        )
     else:
-        cone_comfort = 1.0 - _clamp01((0.42 - cone_position_68) / 0.32)
+        cone_comfort = 1.0 - _clamp01(
+            (_p(p, "cone_lower_mid", 0.42) - cone_position_68) / _p(p, "cone_span", 0.32)
+        )
 
-    return min(_clamp01(0.60 * gap_comfort + 0.40 * cone_comfort), 0.85)
+    return min(
+        _clamp01(
+            _p(p, "gap_weight", 0.60) * gap_comfort
+            + _p(p, "cone_weight", 0.40) * cone_comfort
+        ),
+        _p(p, "cap", 0.85),
+    )
 
 
 def _support_regime_bonus(
@@ -117,15 +150,28 @@ def _support_regime_bonus(
     discipline_support: float,
     flow_intensity: float,
     bias_support: float,
+    params: dict[str, Any] | None = None,
 ) -> float:
+    p = _section(params, "support_regime_bonus")
     if gap_dir == 0:
         return 0.0
-    if trend_regime == "trending" and trend_alignment >= 0.62:
-        return 0.03
-    if trend_regime == "noisy" and discipline_support >= 0.74 and (flow_intensity >= 0.30 or bias_support >= 0.75):
-        return 0.02
-    if trend_regime == "mean_reverting" and trend_alignment >= 0.55 and discipline_support >= 0.72:
-        return 0.035
+    if trend_regime == "trending" and trend_alignment >= _p(p, "trending_alignment_min", 0.62):
+        return _p(p, "trending_bonus", 0.03)
+    if (
+        trend_regime == "noisy"
+        and discipline_support >= _p(p, "noisy_discipline_min", 0.74)
+        and (
+            flow_intensity >= _p(p, "noisy_flow_min", 0.30)
+            or bias_support >= _p(p, "noisy_bias_min", 0.75)
+        )
+    ):
+        return _p(p, "noisy_bonus", 0.02)
+    if (
+        trend_regime == "mean_reverting"
+        and trend_alignment >= _p(p, "mean_reverting_alignment_min", 0.55)
+        and discipline_support >= _p(p, "mean_reverting_discipline_min", 0.72)
+    ):
+        return _p(p, "mean_reverting_bonus", 0.035)
     return 0.0
 
 
@@ -140,16 +186,18 @@ def _compute_support_score(
     discipline_support: float,
     sentiment_support: float,
     regime_bonus: float,
+    params: dict[str, Any] | None = None,
 ) -> float:
+    p = _section(params, "support_weights")
     support_score = (
-        0.20 * flow_intensity
-        + 0.12 * (iv_delta or 0.0)
-        + 0.08 * (skew_delta or 0.0)
-        + 0.06 * (pc_delta or 0.0)
-        + 0.10 * bias_support
-        + 0.18 * trend_alignment
-        + 0.14 * discipline_support
-        + 0.12 * sentiment_support
+        _p(p, "flow_intensity", 0.20) * flow_intensity
+        + _p(p, "iv_delta", 0.12) * (iv_delta or 0.0)
+        + _p(p, "skew_delta", 0.08) * (skew_delta or 0.0)
+        + _p(p, "pc_delta", 0.06) * (pc_delta or 0.0)
+        + _p(p, "bias_support", 0.10) * bias_support
+        + _p(p, "trend_alignment", 0.18) * trend_alignment
+        + _p(p, "discipline_support", 0.14) * discipline_support
+        + _p(p, "sentiment_support", 0.12) * sentiment_support
         + regime_bonus
     )
     return _clamp01(support_score)
@@ -163,22 +211,30 @@ def _compute_continuation_probability(
     stretch_score: float,
     trend_regime: str | None,
     gap_dir: int,
+    params: dict[str, Any] | None = None,
 ) -> float:
+    p = _section(params, "continuation_probability")
     regime_bonus = 0.0
     if gap_dir != 0:
-        if trend_regime == "trending" and trend_alignment >= 0.62:
-            regime_bonus = 0.03
-        elif trend_regime == "mean_reverting" and discipline_support >= 0.72:
-            regime_bonus = 0.035
-        elif trend_regime == "noisy" and support_score >= 0.48 and discipline_support >= 0.74:
-            regime_bonus = 0.02
+        if trend_regime == "trending" and trend_alignment >= _p(p, "trending_alignment_min", 0.62):
+            regime_bonus = _p(p, "trending_bonus", 0.03)
+        elif trend_regime == "mean_reverting" and discipline_support >= _p(
+            p, "mean_reverting_discipline_min", 0.72
+        ):
+            regime_bonus = _p(p, "mean_reverting_bonus", 0.035)
+        elif (
+            trend_regime == "noisy"
+            and support_score >= _p(p, "noisy_support_min", 0.48)
+            and discipline_support >= _p(p, "noisy_discipline_min", 0.74)
+        ):
+            regime_bonus = _p(p, "noisy_bonus", 0.02)
     return _clamp01(
-        0.14
-        + 0.50 * support_score
-        + 0.12 * trend_alignment
-        + 0.08 * discipline_support
+        _p(p, "base", 0.14)
+        + _p(p, "support_score", 0.50) * support_score
+        + _p(p, "trend_alignment", 0.12) * trend_alignment
+        + _p(p, "discipline_support", 0.08) * discipline_support
         + regime_bonus
-        - 0.22 * stretch_score
+        + _p(p, "stretch_score", -0.22) * stretch_score
     )
 
 
@@ -191,22 +247,44 @@ def _continuation_relief(
     support_score: float,
     trend_alignment: float,
     discipline_support: float,
+    params: dict[str, Any] | None = None,
 ) -> float:
+    p = _section(params, "continuation_relief")
     if gap_dir == 0:
         return 0.0
 
     relief = 0.0
     if trend_regime == "trending" and trend_dir == gap_dir:
-        relief += 0.10
-    elif trend_alignment >= 0.65:
-        relief += 0.06
-    if p_continue >= 0.60:
-        relief += min((p_continue - 0.60) / 0.20, 1.0) * 0.08
-    if support_score >= 0.52:
-        relief += min((support_score - 0.52) / 0.28, 1.0) * 0.06
-    if discipline_support >= 0.75:
-        relief += min((discipline_support - 0.75) / 0.10, 1.0) * 0.03
-    return min(relief, 0.22)
+        relief += _p(p, "trend_match_bonus", 0.10)
+    elif trend_alignment >= _p(p, "alignment_min", 0.65):
+        relief += _p(p, "alignment_bonus", 0.06)
+    if p_continue >= _p(p, "p_continue_min", 0.60):
+        relief += (
+            min(
+                (p_continue - _p(p, "p_continue_min", 0.60))
+                / _p(p, "p_continue_span", 0.20),
+                1.0,
+            )
+            * _p(p, "p_continue_bonus", 0.08)
+        )
+    if support_score >= _p(p, "support_min", 0.52):
+        relief += (
+            min(
+                (support_score - _p(p, "support_min", 0.52)) / _p(p, "support_span", 0.28),
+                1.0,
+            )
+            * _p(p, "support_bonus", 0.06)
+        )
+    if discipline_support >= _p(p, "discipline_min", 0.75):
+        relief += (
+            min(
+                (discipline_support - _p(p, "discipline_min", 0.75))
+                / _p(p, "discipline_span", 0.10),
+                1.0,
+            )
+            * _p(p, "discipline_bonus", 0.03)
+        )
+    return min(relief, _p(p, "cap", 0.22))
 
 
 def _nearest_options_current(
@@ -256,11 +334,17 @@ def _nearest_options_current(
 def _historical_options_context(
     con: duckdb.DuckDBPyConnection,
     as_of_str: str,
+    params: dict[str, Any] | None = None,
 ):
     try:
         as_of_dt = date.fromisoformat(as_of_str)
-        lo = as_of_dt.fromordinal(as_of_dt.toordinal() - 10).strftime("%Y-%m-%d")
-        hi = as_of_dt.fromordinal(as_of_dt.toordinal() - 5).strftime("%Y-%m-%d")
+        p = _section(params, "historical_context")
+        lo = as_of_dt.fromordinal(as_of_dt.toordinal() - int(_p(p, "lo_days", 10))).strftime(
+            "%Y-%m-%d"
+        )
+        hi = as_of_dt.fromordinal(as_of_dt.toordinal() - int(_p(p, "hi_days", 5))).strftime(
+            "%Y-%m-%d"
+        )
         return con.execute(
             """
             WITH hist_dates AS (
@@ -316,6 +400,8 @@ def run_overnight_gate(
     if not symbols:
         return pl.DataFrame()
 
+    strategy_params = load_us_strategy_params()
+    gate_params = get_us_strategy_param_section("overnight_gate")
     as_of_str = as_of.strftime("%Y-%m-%d")
     placeholders = ",".join("?" * len(symbols))
 
@@ -378,7 +464,7 @@ def run_overnight_gate(
     cur_opts_df = _nearest_options_current(con, as_of_str)
     cur_opts_map = {r["symbol"]: r for _, r in cur_opts_df.iterrows()} if cur_opts_df is not None and not cur_opts_df.empty else {}
 
-    hist_opts_df = _historical_options_context(con, as_of_str)
+    hist_opts_df = _historical_options_context(con, as_of_str, gate_params)
     hist_opts_map = {r["symbol"]: r for _, r in hist_opts_df.iterrows()} if hist_opts_df is not None and not hist_opts_df.empty else {}
 
     rows: list[dict] = []
@@ -451,9 +537,16 @@ def run_overnight_gate(
         unusual = _parse_unusual(cur_opts_row.get("unusual_strikes"))
         total_vol = sum(_safe_float(u.get("volume"), 0.0) or 0.0 for u in unusual)
         max_vol_oi = max((_safe_float(u.get("vol_oi_ratio"), 0.0) or 0.0 for u in unusual), default=0.0)
+        flow_params = _section(gate_params, "flow")
         flow_intensity = _clamp01(
-            0.55 * min(math.log10(max(total_vol, 1.0)) / math.log10(50000.0), 1.0)
-            + 0.45 * min(max_vol_oi / 40.0, 1.0)
+            _p(flow_params, "volume_weight", 0.55)
+            * min(
+                math.log10(max(total_vol, 1.0))
+                / math.log10(max(_p(flow_params, "volume_norm", 50_000.0), 10.0)),
+                1.0,
+            )
+            + _p(flow_params, "ratio_weight", 0.45)
+            * min(max_vol_oi / max(_p(flow_params, "vol_oi_norm", 40.0), 1.0), 1.0)
         ) if unusual else 0.0
 
         bias_signal = cur_opts_row.get("bias_signal") or "neutral"
@@ -468,7 +561,14 @@ def run_overnight_gate(
 
         trend_prob = _safe_float(mom_row.get("trend_prob"))
         trend_regime = mom_row.get("regime") or "unknown"
-        trend_dir = 1 if (trend_prob is not None and trend_prob > 0.56) else -1 if (trend_prob is not None and trend_prob < 0.44) else 0
+        sentiment_params = _section(gate_params, "sentiment")
+        trend_dir = (
+            1
+            if (trend_prob is not None and trend_prob > _p(sentiment_params, "trend_dir_upper", 0.56))
+            else -1
+            if (trend_prob is not None and trend_prob < _p(sentiment_params, "trend_dir_lower", 0.44))
+            else 0
+        )
         if gap_dir == 0:
             trend_support = abs((trend_prob or 0.5) - 0.5) * 2.0 if trend_prob is not None else 0.0
         elif trend_dir == gap_dir:
@@ -480,29 +580,32 @@ def run_overnight_gate(
             gap_dir=gap_dir,
             trend_prob=trend_prob,
             trend_regime=trend_regime,
+            params=gate_params,
         )
 
         pc_ratio_z = _safe_float(sent_row.get("pc_ratio_z"))
         skew_z = _safe_float(sent_row.get("skew_z"))
         sentiment_support = 0.5
+        vote_z = _p(sentiment_params, "vote_z_threshold", 0.50)
         if gap_dir > 0:
             bullish_votes = 0.0
-            if pc_ratio_z is not None and pc_ratio_z < -0.5:
+            if pc_ratio_z is not None and pc_ratio_z < -vote_z:
                 bullish_votes += 0.5
-            if skew_z is not None and skew_z < -0.5:
+            if skew_z is not None and skew_z < -vote_z:
                 bullish_votes += 0.5
             sentiment_support = bullish_votes
         elif gap_dir < 0:
             bearish_votes = 0.0
-            if pc_ratio_z is not None and pc_ratio_z > 0.5:
+            if pc_ratio_z is not None and pc_ratio_z > vote_z:
                 bearish_votes += 0.5
-            if skew_z is not None and skew_z > 0.5:
+            if skew_z is not None and skew_z > vote_z:
                 bearish_votes += 0.5
             sentiment_support = bearish_votes
         discipline_support = _discipline_support_score(
             gap_dir=gap_dir,
             gap_vs_expected_move=gap_vs_expected_move,
             cone_position_68=cone_position_68,
+            params=gate_params,
         )
         regime_support_bonus = _support_regime_bonus(
             gap_dir=gap_dir,
@@ -511,6 +614,7 @@ def run_overnight_gate(
             discipline_support=discipline_support,
             flow_intensity=flow_intensity,
             bias_support=bias_support,
+            params=gate_params,
         )
 
         support_score = _compute_support_score(
@@ -521,23 +625,40 @@ def run_overnight_gate(
             bias_support=bias_support,
             trend_alignment=trend_alignment,
             discipline_support=discipline_support,
-            sentiment_support=max(sentiment_support, 0.5 * trend_support),
+            sentiment_support=max(
+                sentiment_support,
+                _p(sentiment_params, "trend_support_weight", 0.50) * trend_support,
+            ),
             regime_bonus=regime_support_bonus,
+            params=gate_params,
         )
 
-        gap_consumed = _clamp01(((gap_vs_expected_move or 0.0) - 0.55) / 0.60)
-        gap_vs_atr_norm = _clamp01(((gap_vs_atr or 0.0) - 0.75) / 0.75)
+        stretch_params = _section(gate_params, "stretch")
+        gap_consumed = _clamp01(
+            ((gap_vs_expected_move or 0.0) - _p(stretch_params, "gap_consumed_offset", 0.55))
+            / _p(stretch_params, "gap_consumed_span", 0.60)
+        )
+        gap_vs_atr_norm = _clamp01(
+            ((gap_vs_atr or 0.0) - _p(stretch_params, "gap_atr_offset", 0.75))
+            / _p(stretch_params, "gap_atr_span", 0.75)
+        )
         cone_stretch = 0.0
         if cone_position_68 is not None:
             if gap_dir >= 0:
-                cone_stretch = _clamp01((cone_position_68 - 0.78) / 0.18)
+                cone_stretch = _clamp01(
+                    (cone_position_68 - _p(stretch_params, "cone_upper", 0.78))
+                    / _p(stretch_params, "cone_span", 0.18)
+                )
             else:
-                cone_stretch = _clamp01((0.22 - cone_position_68) / 0.18)
+                cone_stretch = _clamp01(
+                    (_p(stretch_params, "cone_lower", 0.22) - cone_position_68)
+                    / _p(stretch_params, "cone_span", 0.18)
+                )
 
         stretch_score = _clamp01(
-            0.45 * gap_consumed
-            + 0.30 * gap_vs_atr_norm
-            + 0.25 * cone_stretch
+            _p(stretch_params, "gap_weight", 0.45) * gap_consumed
+            + _p(stretch_params, "atr_weight", 0.30) * gap_vs_atr_norm
+            + _p(stretch_params, "cone_weight", 0.25) * cone_stretch
         )
 
         p_continue = _compute_continuation_probability(
@@ -547,28 +668,51 @@ def run_overnight_gate(
             stretch_score=stretch_score,
             trend_regime=trend_regime,
             gap_dir=gap_dir,
+            params=gate_params,
         )
+        fade_params = _section(gate_params, "fade_probability")
         p_fade = _clamp01(
-            0.10
-            + 0.62 * stretch_score
-            + 0.16 * (1.0 - bias_support)
-            + 0.08 * (1.0 - trend_alignment)
-            + 0.04 * (1.0 - discipline_support)
+            _p(fade_params, "base", 0.10)
+            + _p(fade_params, "stretch_score", 0.62) * stretch_score
+            + _p(fade_params, "bias_gap", 0.16) * (1.0 - bias_support)
+            + _p(fade_params, "trend_alignment_gap", 0.08) * (1.0 - trend_alignment)
+            + _p(fade_params, "discipline_gap", 0.04) * (1.0 - discipline_support)
         )
 
         max_chase_gap_pct = None
+        chase_params = _section(gate_params, "chase_gap")
         if expected_move_pct and expected_move_pct > 0:
-            max_chase_gap_pct = max(0.75, min(4.0, expected_move_pct * (0.55 + 0.20 * support_score)))
+            max_chase_gap_pct = max(
+                _p(chase_params, "min_pct", 0.75),
+                min(
+                    _p(chase_params, "max_pct", 4.0),
+                    expected_move_pct
+                    * (
+                        _p(chase_params, "expected_move_base", 0.55)
+                        + _p(chase_params, "expected_move_support", 0.20) * support_score
+                    ),
+                ),
+            )
         elif atr_pct and atr_pct > 0:
-            max_chase_gap_pct = max(0.75, min(4.0, atr_pct * (0.80 + 0.20 * support_score)))
+            max_chase_gap_pct = max(
+                _p(chase_params, "min_pct", 0.75),
+                min(
+                    _p(chase_params, "max_pct", 4.0),
+                    atr_pct
+                    * (
+                        _p(chase_params, "atr_base", 0.80)
+                        + _p(chase_params, "atr_support", 0.20) * support_score
+                    ),
+                ),
+            )
 
         gap_abs = abs(ref_price - last_close)
         pullback_price = ref_price
         if gap_abs > 0:
             if gap_dir >= 0:
-                pullback_price = ref_price - 0.35 * gap_abs
+                pullback_price = ref_price - _p(chase_params, "pullback_gap_fraction", 0.35) * gap_abs
             else:
-                pullback_price = ref_price + 0.35 * gap_abs
+                pullback_price = ref_price + _p(chase_params, "pullback_gap_fraction", 0.35) * gap_abs
 
         continuation_relief = _continuation_relief(
             gap_dir=gap_dir,
@@ -578,25 +722,33 @@ def run_overnight_gate(
             support_score=support_score,
             trend_alignment=trend_alignment,
             discipline_support=discipline_support,
+            params=gate_params,
         )
         effective_stretch_score = _clamp01(stretch_score - continuation_relief)
-        wait_gap_threshold = 0.65 + 0.35 * continuation_relief
-        do_not_chase_gap_threshold = 1.00 + 0.45 * continuation_relief
+        action_params = _section(gate_params, "action")
+        wait_gap_threshold = _p(action_params, "wait_gap_base", 0.65) + _p(
+            action_params, "wait_gap_relief", 0.35
+        ) * continuation_relief
+        do_not_chase_gap_threshold = _p(
+            action_params, "do_not_chase_gap_base", 1.00
+        ) + _p(action_params, "do_not_chase_gap_relief", 0.45) * continuation_relief
 
-        if effective_stretch_score >= 0.78 or (
-            (gap_vs_expected_move or 0.0) > do_not_chase_gap_threshold and support_score < 0.48
+        if effective_stretch_score >= _p(action_params, "do_not_chase_stretch", 0.78) or (
+            (gap_vs_expected_move or 0.0) > do_not_chase_gap_threshold
+            and support_score < _p(action_params, "do_not_chase_support_max", 0.48)
         ):
             action = "do_not_chase"
             regime = "stretched"
-        elif effective_stretch_score >= 0.50 or (
-            (gap_vs_expected_move or 0.0) > wait_gap_threshold and p_continue < 0.68
+        elif effective_stretch_score >= _p(action_params, "wait_stretch", 0.50) or (
+            (gap_vs_expected_move or 0.0) > wait_gap_threshold
+            and p_continue < _p(action_params, "wait_p_continue_max", 0.68)
         ):
             action = "wait_pullback"
             regime = "fade" if p_fade >= p_continue else "neutral"
-        elif p_continue >= 0.58:
+        elif p_continue >= _p(action_params, "continue_min", 0.58):
             action = "executable_now"
             regime = "continue"
-        elif p_fade >= 0.58:
+        elif p_fade >= _p(action_params, "fade_min", 0.58):
             action = "wait_pullback"
             regime = "fade"
         else:
@@ -604,8 +756,8 @@ def run_overnight_gate(
             regime = "neutral"
 
         strength_bucket = (
-            "strong" if action == "executable_now" and p_continue >= 0.65
-            else "moderate" if action != "do_not_chase" and p_continue >= 0.52
+            "strong" if action == "executable_now" and p_continue >= _p(action_params, "strong_continue_min", 0.65)
+            else "moderate" if action != "do_not_chase" and p_continue >= _p(action_params, "moderate_continue_min", 0.52)
             else "weak" if action == "wait_pullback"
             else "inconclusive"
         )
@@ -638,6 +790,8 @@ def run_overnight_gate(
             "action": action,
             "max_chase_gap_pct": round(max_chase_gap_pct, 3) if max_chase_gap_pct is not None else None,
             "pullback_price": round(pullback_price, 4),
+            "param_source": strategy_params.get("_source", "built_in_default"),
+            "param_provenance": gate_params.get("provenance", "legacy_heuristic"),
         }
 
         rows.append(

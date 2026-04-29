@@ -137,10 +137,11 @@ runtime loads, in order:
 - `config/strategy_params.yaml`
 - `../factor-lab/runtime/strategy_calibration/us/strategy_params.generated.yaml`
 
-The first wired runtime sections are `risk_params`, `options_alpha`, and
-`overnight_continuation_alpha`. Defaults remain conservative legacy heuristics,
-but every value is now in one artifact and can be replaced by weekend
-walk-forward calibration once OOS lower-confidence EV improves.
+The wired runtime sections are `risk_params`, `options_alpha`,
+`overnight_gate`, and `overnight_continuation_alpha`. Defaults remain
+conservative legacy heuristics, but every value is now in one artifact and can
+be replaced by weekend walk-forward calibration once OOS lower-confidence EV
+improves.
 
 Generate the US artifact:
 
