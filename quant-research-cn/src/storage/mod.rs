@@ -10,8 +10,27 @@ pub fn open(path: &str) -> Result<Connection> {
         std::fs::create_dir_all(parent)?;
     }
     let con = Connection::open(path)?;
+    configure_connection(&con)?;
     init_schema(&con)?;
     Ok(con)
+}
+
+pub fn configure_connection(con: &Connection) -> Result<()> {
+    let threads = std::env::var("QUANT_CN_DUCKDB_THREADS")
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get().saturating_sub(2).max(1))
+                .unwrap_or(4)
+                .min(20)
+        });
+    con.execute_batch(&format!(
+        "PRAGMA threads={threads};
+         PRAGMA preserve_insertion_order=false;"
+    ))?;
+    Ok(())
 }
 
 pub fn init_schema(con: &Connection) -> Result<()> {
@@ -67,6 +86,7 @@ pub fn restore_report_review_history(src: &str, dst: &str) -> Result<()> {
     }
 
     let con = Connection::open(dst)?;
+    configure_connection(&con)?;
     init_schema(&con)?;
 
     let escaped = src.replace('\'', "''");
@@ -112,6 +132,7 @@ pub fn restore_report_review_history(src: &str, dst: &str) -> Result<()> {
         copy_attached_table_compatible(&con, "limit_up_model_dataset")?;
         copy_attached_table_compatible(&con, "limit_up_model_predictions")?;
         copy_attached_table_compatible(&con, "limit_up_model_performance")?;
+        copy_attached_table_compatible(&con, "pipeline_stage_runs")?;
         Ok(())
     })();
     con.execute_batch("DETACH report_history;")?;

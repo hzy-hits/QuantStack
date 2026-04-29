@@ -253,15 +253,16 @@ async fn main() -> Result<()> {
                 ) {
                     let rows = filtering::materialize_shadow_full(&research_db, &cfg, as_of)?;
                     analytics::run_module(&research_db, &cfg, as_of, module_name)?;
-                    rows
+                    Some(rows)
                 } else {
                     analytics::run_module(&research_db, &cfg, as_of, module_name)?;
-                    filtering::materialize_shadow_full(&research_db, &cfg, as_of)?
+                    None
                 };
-                info!(
-                    rows = shadow_full_rows,
-                    "shadow_full shortlist pricing complete"
-                );
+                if let Some(rows) = shadow_full_rows {
+                    info!(rows = rows, "shadow_full shortlist pricing complete");
+                } else {
+                    info!(module = module_name, "shadow_full skipped for module");
+                }
             } else {
                 stage_raw_to_research(&cfg)?;
                 let research_db = storage::open(cfg.data.research_path())?;

@@ -747,6 +747,20 @@ pub const CREATE_TABLES: &str = "
         updated_at             TIMESTAMP DEFAULT current_timestamp
     );
 
+    CREATE TABLE IF NOT EXISTS pipeline_stage_runs (
+        as_of                  DATE NOT NULL,
+        stage                  VARCHAR NOT NULL,
+        started_at             TIMESTAMP NOT NULL,
+        ended_at               TIMESTAMP,
+        duration_ms            BIGINT,
+        rows_written           BIGINT,
+        status                 VARCHAR,
+        cache_hit              BOOLEAN DEFAULT FALSE,
+        detail_json            VARCHAR,
+        updated_at             TIMESTAMP DEFAULT current_timestamp,
+        PRIMARY KEY (as_of, stage, started_at)
+    );
+
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS p_fill DOUBLE;
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS mu_ret_pct DOUBLE;
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS tail_loss_pct DOUBLE;

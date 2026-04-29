@@ -12,6 +12,7 @@ Cron:
     17 10 * * 6 cd $FACTOR_LAB_ROOT && python3 scripts/weekly_maintenance.py >> logs/maintenance.log 2>&1
 """
 import argparse
+import subprocess
 import sys
 import time
 from datetime import date, timedelta
@@ -24,7 +25,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.paths import QUANT_CN_DB, QUANT_CN_ROOT
+from src.paths import FACTOR_LAB_ROOT, QUANT_CN_DB, QUANT_CN_ROOT
 
 # ── Config ───────────────────────────────────────────────────────────────────
 
@@ -155,6 +156,21 @@ def backfill_table(pro, con, table: str, cfg: dict, dates: list[str], dry_run: b
     return total_rows
 
 
+def run_strategy_calibration(dry_run: bool) -> None:
+    script = Path(__file__).with_name("calibrate_strategy_params.py")
+    cmd = [sys.executable, str(script), "--market", "cn"]
+    if dry_run:
+        cmd.append("--dry-run")
+    print("\n--- strategy parameter calibration ---")
+    result = subprocess.run(cmd, cwd=FACTOR_LAB_ROOT, check=False)
+    if result.returncode != 0:
+        print(f"  WARNING: calibration failed with exit code {result.returncode}")
+    elif dry_run:
+        print("  Dry-run calibration completed")
+    else:
+        print("  Calibration artifact refreshed")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Weekly data maintenance")
     parser.add_argument("--dry-run", action="store_true", help="Check only, no writes")
@@ -211,6 +227,8 @@ def main():
             print("  Complete — no gaps found")
 
     con.close()
+
+    run_strategy_calibration(args.dry_run)
 
     print(f"\n{'=' * 60}")
     print(f"  Total rows backfilled: {total_backfilled}")
