@@ -46,4 +46,14 @@ factor-lab/runtime/strategy_calibration/cn/strategy_params.generated.yaml
 quant-research-cn/config/strategy_params.generated.yaml
 ```
 
-The current artifact records strategy EV, limit-up model diagnostics, and the list of remaining legacy heuristic constants. Runtime code should only consume calibrated parameters after OOS EV LCB improves versus the current production default.
+Runtime loading order:
+
+```text
+QUANT_CN_STRATEGY_PARAMS
+config/strategy_params.generated.yaml
+quant-research-cn/config/strategy_params.generated.yaml
+../factor-lab/runtime/strategy_calibration/cn/strategy_params.generated.yaml
+factor-lab/runtime/strategy_calibration/cn/strategy_params.generated.yaml
+```
+
+The current artifact records strategy EV, limit-up model diagnostics, and the list of remaining legacy heuristic constants. Runtime code only activates calibrated `paper_trade_ev` parameters when the artifact says `selected: candidate`, `activation.use_candidate: true`, and candidate OOS `EV80 LCB` beats the default by the configured margin. Otherwise the artifact is read but built-in defaults remain effective.

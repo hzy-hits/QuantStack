@@ -22,3 +22,5 @@ run-*/
 codex-*/
 .codex-runs/
 runs/
+factor-lab/runtime/strategy_calibration/
+quant-research-cn/config/strategy_params.generated.yaml

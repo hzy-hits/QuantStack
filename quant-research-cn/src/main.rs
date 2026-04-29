@@ -7,6 +7,7 @@ mod fetcher;
 mod filtering;
 mod reporting;
 mod storage;
+mod strategy_params;
 
 use anyhow::{Context, Result};
 use chrono::{Duration, NaiveDate};

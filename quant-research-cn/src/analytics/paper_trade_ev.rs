@@ -5,11 +5,9 @@ use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use tracing::info;
 
+use crate::strategy_params::{PaperTradeEvParams, StrategyParams};
+
 const SESSION: &str = "daily";
-const LOOKBACK_DAYS: i64 = 90;
-const SLIPPAGE_PCT: f64 = 0.18;
-const WIN_THRESHOLD_PCT: f64 = 0.50;
-const LOSS_THRESHOLD_PCT: f64 = -1.00;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionStatus {
@@ -343,14 +341,19 @@ enum OutcomeLabel {
 }
 
 impl OutcomeLabel {
-    fn from_trade(intent: TradeIntent, fill: &Fill, result: &TradeResult) -> Self {
+    fn from_trade(
+        intent: TradeIntent,
+        fill: &Fill,
+        result: &TradeResult,
+        params: &PaperTradeEvParams,
+    ) -> Self {
         match (intent, fill.status, result.realized_ret_pct) {
             (TradeIntent::Observe, _, _) => Self::Observe,
             (TradeIntent::Avoid, _, _) => Self::Avoid,
             (_, FillStatus::Pending, _) => Self::Pending,
             (_, FillStatus::NoFill | FillStatus::NotPlanned, _) => Self::NoFill,
-            (_, _, Some(ret)) if ret >= WIN_THRESHOLD_PCT => Self::Won,
-            (_, _, Some(ret)) if ret <= LOSS_THRESHOLD_PCT => Self::Lost,
+            (_, _, Some(ret)) if ret >= params.win_threshold_pct => Self::Won,
+            (_, _, Some(ret)) if ret <= params.loss_threshold_pct => Self::Lost,
             (_, _, Some(_)) if result.max_favorable_pct.unwrap_or(0.0) >= 2.0 => {
                 Self::RightButExitFlat
             }
@@ -424,7 +427,7 @@ struct TradeResult {
 }
 
 impl TradeResult {
-    fn from_fill(fill: &Fill, future: &[FutureBar]) -> Self {
+    fn from_fill(fill: &Fill, future: &[FutureBar], slippage_pct: f64) -> Self {
         let Some(fill_date) = fill.date else {
             return Self::default();
         };
@@ -440,7 +443,7 @@ impl TradeResult {
             .find(|bar| bar.trade_date > fill_date)
             .copied();
         let exit_price = exit_bar.map(|bar| bar.close);
-        let realized_ret_pct = exit_price.map(|exit| pct_change(exit, fill_price) - SLIPPAGE_PCT);
+        let realized_ret_pct = exit_price.map(|exit| pct_change(exit, fill_price) - slippage_pct);
         let max_favorable_pct = finite_fold(
             active_bars
                 .iter()
@@ -519,7 +522,15 @@ struct EvRow {
 
 pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     ensure_schema(db)?;
-    let cutoff = as_of - Duration::days(LOOKBACK_DAYS);
+    let params = StrategyParams::load().paper_trade_ev;
+    info!(
+        source = params.source,
+        lookback_days = params.lookback_days,
+        min_ev_pct = params.min_ev_pct,
+        min_ev_lcb_80_pct = params.min_ev_lcb_80_pct,
+        "paper_trade_ev params loaded"
+    );
+    let cutoff = as_of - Duration::days(params.lookback_days);
     let decisions = load_decisions(db, cutoff, as_of)?;
     let symbols = decision_symbols(&decisions);
     let future_bars = load_future_bar_map(db, cutoff, as_of, &symbols)?;
@@ -533,10 +544,10 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
 
     let mut trades = Vec::new();
     for decision in decisions {
-        trades.push(build_trade(decision, &future_bars)?);
+        trades.push(build_trade(decision, &future_bars, &params)?);
     }
     store_paper_trades(db, &trades, as_of)?;
-    let ev_rows = store_strategy_ev(db, &trades, as_of)?;
+    let ev_rows = store_strategy_ev(db, &trades, as_of, &params)?;
     store_strategy_model_dataset(db, &trades, as_of)?;
     write_current_analytics(db, &trades, as_of)?;
 
@@ -556,6 +567,7 @@ fn ensure_schema(db: &Connection) -> Result<()> {
 fn build_trade(
     decision: Decision,
     future_bars: &HashMap<String, Vec<FutureBar>>,
+    params: &PaperTradeEvParams,
 ) -> Result<PaperTrade> {
     let strategy_family = StrategyFamily::classify(&decision);
     let intent = TradeIntent::from_decision(&decision);
@@ -567,8 +579,8 @@ fn build_trade(
     let planned_entry = execution_rule.planned_entry(&decision);
     let future = future_bars_for(future_bars, &decision.symbol, decision.report_date);
     let fill = execution_rule.simulate(&decision, &future);
-    let result = TradeResult::from_fill(&fill, &future);
-    let label = OutcomeLabel::from_trade(intent, &fill, &result);
+    let result = TradeResult::from_fill(&fill, &future, params.slippage_pct);
+    let label = OutcomeLabel::from_trade(intent, &fill, &result, params);
 
     let detail = json!({
         "strategy_family": strategy_family.as_str(),
@@ -586,7 +598,8 @@ fn build_trade(
         "stale_chase_risk": round3(stale_chase_risk),
         "flow_conflict_flag": decision.flow_conflict_flag,
         "fill_reason": fill.reason,
-        "slippage_pct": SLIPPAGE_PCT,
+        "slippage_pct": params.slippage_pct,
+        "strategy_params_source": params.source,
         "data_scope": "paper_trade_ev_walk_forward",
     });
 
@@ -808,7 +821,12 @@ fn store_paper_trades(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) 
     Ok(trades.len())
 }
 
-fn store_strategy_ev(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -> Result<usize> {
+fn store_strategy_ev(
+    db: &Connection,
+    trades: &[PaperTrade],
+    as_of: NaiveDate,
+    params: &PaperTradeEvParams,
+) -> Result<usize> {
     db.execute(
         "DELETE FROM strategy_ev WHERE as_of = CAST(? AS DATE)",
         duckdb::params![as_of.to_string()],
@@ -829,11 +847,11 @@ fn store_strategy_ev(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -
             stats.ret_sum += ret;
             stats.ret_sq_sum += ret * ret;
             match ret {
-                r if r >= WIN_THRESHOLD_PCT => {
+                r if r >= params.win_threshold_pct => {
                     stats.wins += 1;
                     stats.win_sum += r;
                 }
-                r if r <= LOSS_THRESHOLD_PCT => {
+                r if r <= params.loss_threshold_pct => {
                     stats.losses += 1;
                     stats.loss_sum_abs += r.abs();
                 }
@@ -875,22 +893,45 @@ fn store_strategy_ev(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -
             0.20 * (avg_tail - avg_loss).max(0.0) + 0.55 * avg_downside + 0.35 * avg_stale;
         let ev_pct = win_rate_bayes * avg_win
             - (1.0 - win_rate_bayes) * avg_loss
-            - SLIPPAGE_PCT
+            - params.slippage_pct
             - tail_penalty;
         let (risk_unit_pct, ev_per_risk, ev_norm_score) =
-            normalized_ev_metrics(ev_pct, avg_loss, avg_tail, avg_downside, avg_stale);
-        let ev_lcb_80 = confidence_lcb(ev_pct, realized_std, risk_unit_pct, fills, 1.2816);
-        let ev_lcb_95 = confidence_lcb(ev_pct, realized_std, risk_unit_pct, fills, 1.6449);
+            normalized_ev_metrics(ev_pct, avg_loss, avg_tail, avg_downside, avg_stale, params);
+        let ev_lcb_80 = confidence_lcb(
+            ev_pct,
+            realized_std,
+            risk_unit_pct,
+            fills,
+            params.ev_lcb_80_z,
+        );
+        let ev_lcb_95 = confidence_lcb(
+            ev_pct,
+            realized_std,
+            risk_unit_pct,
+            fills,
+            params.ev_lcb_95_z,
+        );
         let ev_norm_lcb_80 = normalized_ev_score(ev_lcb_80, risk_unit_pct);
         let ev_norm_lcb_95 = normalized_ev_score(ev_lcb_95, risk_unit_pct);
 
-        let fail = ev_fail_reasons(stats.samples, fills, fill_rate, ev_pct, ev_lcb_80, avg_tail);
+        let fail = ev_fail_reasons(
+            stats.samples,
+            fills,
+            fill_rate,
+            ev_pct,
+            ev_lcb_80,
+            avg_tail,
+            params,
+        );
         let eligible = fail.is_empty();
         let detail = json!({
             "ev_formula": "p_win_bayes*avg_win - (1-p_win_bayes)*avg_loss - slippage - tail_penalty",
             "confidence_formula": "ev_lcb = ev_pct - z * max(realized_std, risk_unit_pct) / sqrt(fills)",
             "normalized_ev_formula": "ev_per_risk = ev_pct / risk_unit_pct; ev_norm_score = sigmoid(ev_per_risk) mapped to 0-100",
-            "slippage_pct": SLIPPAGE_PCT,
+            "strategy_params_source": params.source,
+            "slippage_pct": params.slippage_pct,
+            "win_threshold_pct": params.win_threshold_pct,
+            "loss_threshold_pct": params.loss_threshold_pct,
             "p_fill": round3(p_fill),
             "mu_ret_pct": round3(mu_ret),
             "realized_std_pct": round3(realized_std),
@@ -903,11 +944,12 @@ fn store_strategy_ev(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -
             "ev_lcb_95_pct": round3(ev_lcb_95),
             "ev_norm_lcb_80": round3(ev_norm_lcb_80),
             "ev_norm_lcb_95": round3(ev_norm_lcb_95),
-            "min_samples": 8,
-            "min_fills": 4,
-            "min_fill_rate": 0.35,
-            "min_ev_pct": 0.15,
-            "min_ev_lcb_80_pct": 0.0,
+            "min_samples": params.min_samples,
+            "min_fills": params.min_fills,
+            "min_fill_rate": params.min_fill_rate,
+            "min_ev_pct": params.min_ev_pct,
+            "min_ev_lcb_80_pct": params.min_ev_lcb_80_pct,
+            "max_tail_loss_pct": params.max_tail_loss_pct,
             "state_machine": "Decision->StrategyFamily->TradeIntent->ExecutionRule->Fill->Outcome->EV",
         })
         .to_string();
@@ -1330,14 +1372,36 @@ fn ev_fail_reasons(
     ev_pct: f64,
     ev_lcb_80_pct: f64,
     avg_tail: f64,
-) -> Vec<&'static str> {
+    params: &PaperTradeEvParams,
+) -> Vec<String> {
     [
-        (samples < 8, "samples_lt_8"),
-        (fills < 4, "fills_lt_4"),
-        (fill_rate < 0.35, "fill_rate_lt_35pct"),
-        (ev_pct <= 0.15, "ev_not_positive_enough"),
-        (ev_lcb_80_pct <= 0.0, "ev_lcb80_not_positive"),
-        (avg_tail > 5.5, "tail_loss_gt_5_5pct"),
+        (
+            samples < params.min_samples,
+            format!("samples_lt_{}", params.min_samples),
+        ),
+        (
+            fills < params.min_fills,
+            format!("fills_lt_{}", params.min_fills),
+        ),
+        (
+            fill_rate < params.min_fill_rate,
+            format!(
+                "fill_rate_lt_{}pct",
+                pct_label(params.min_fill_rate * 100.0)
+            ),
+        ),
+        (
+            ev_pct <= params.min_ev_pct,
+            format!("ev_lte_{}pct", pct_label(params.min_ev_pct)),
+        ),
+        (
+            ev_lcb_80_pct <= params.min_ev_lcb_80_pct,
+            format!("ev_lcb80_lte_{}pct", pct_label(params.min_ev_lcb_80_pct)),
+        ),
+        (
+            avg_tail > params.max_tail_loss_pct,
+            format!("tail_loss_gt_{}pct", pct_label(params.max_tail_loss_pct)),
+        ),
     ]
     .into_iter()
     .filter_map(|(failed, reason)| failed.then_some(reason))
@@ -1403,11 +1467,12 @@ fn normalized_ev_metrics(
     avg_tail_loss_pct: f64,
     avg_downside_stress: f64,
     avg_stale_chase_risk: f64,
+    params: &PaperTradeEvParams,
 ) -> (f64, f64, f64) {
     let risk_unit_pct = avg_loss_pct.max(avg_tail_loss_pct).max(0.50)
         + 0.60 * avg_downside_stress
         + 0.35 * avg_stale_chase_risk
-        + SLIPPAGE_PCT;
+        + params.slippage_pct;
     let ev_per_risk = ev_pct / risk_unit_pct.max(0.25);
     let ev_norm_score = normalized_ev_score(ev_pct, risk_unit_pct);
     (risk_unit_pct, ev_per_risk, ev_norm_score)
@@ -1437,6 +1502,15 @@ fn round2(v: f64) -> f64 {
 
 fn round3(v: f64) -> f64 {
     (v * 1000.0).round() / 1000.0
+}
+
+fn pct_label(v: f64) -> String {
+    let rounded = round3(v);
+    if (rounded.fract()).abs() < 0.0005 {
+        format!("{rounded:.0}")
+    } else {
+        format!("{rounded:.3}").replace('.', "_")
+    }
 }
 
 #[cfg(test)]

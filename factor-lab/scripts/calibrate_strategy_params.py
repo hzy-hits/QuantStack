@@ -15,6 +15,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+import math
 
 import duckdb
 import yaml
@@ -26,6 +27,22 @@ from src.paths import FACTOR_LAB_ROOT, QUANT_CN_REPORT_DB, QUANT_CN_ROOT
 
 EV80_Z = 1.2816
 EV95_Z = 1.6449
+DEFAULT_PAPER_PARAMS = {
+    "lookback_days": 90,
+    "slippage_pct": 0.18,
+    "win_threshold_pct": 0.50,
+    "loss_threshold_pct": -1.00,
+    "ev_lcb_80_z": EV80_Z,
+    "ev_lcb_95_z": EV95_Z,
+    "min_samples": 8,
+    "min_fills": 4,
+    "min_fill_rate": 0.35,
+    "min_ev_pct": 0.15,
+    "min_ev_lcb_80_pct": 0.0,
+    "max_tail_loss_pct": 5.5,
+    "provenance": "built_in_default",
+}
+MIN_ACTIVATION_IMPROVEMENT_PCT = 0.05
 
 
 def table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
@@ -87,6 +104,162 @@ def fetch_strategy_ev(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
             }
         )
     return {"status": "ok", "as_of": as_of, "families": families}
+
+
+def _policy_pass(row: dict[str, Any], params: dict[str, Any]) -> bool:
+    return (
+        int(row["samples"] or 0) >= int(params["min_samples"])
+        and int(row["fills"] or 0) >= int(params["min_fills"])
+        and float(row["fill_rate"] or 0.0) >= float(params["min_fill_rate"])
+        and float(row["ev_pct"] or 0.0) > float(params["min_ev_pct"])
+        and float(row["ev_lcb_80_pct"] or 0.0) > float(params["min_ev_lcb_80_pct"])
+        and float(row["avg_tail_loss_pct"] or 0.0) <= float(params["max_tail_loss_pct"])
+    )
+
+
+def _policy_stats(rows: list[dict[str, Any]], params: dict[str, Any]) -> dict[str, Any]:
+    selected = [float(row["realized_ret_pct"]) for row in rows if _policy_pass(row, params)]
+    if not selected:
+        return {
+            "oos_trades": 0,
+            "oos_avg_ret_pct": None,
+            "oos_std_pct": None,
+            "oos_ev_lcb_80_pct": None,
+        }
+    avg = sum(selected) / len(selected)
+    if len(selected) > 1:
+        variance = sum((v - avg) ** 2 for v in selected) / (len(selected) - 1)
+        std = math.sqrt(max(variance, 0.0))
+    else:
+        std = abs(avg)
+    lcb80 = avg - EV80_Z * max(std, 0.50) / math.sqrt(len(selected))
+    return {
+        "oos_trades": len(selected),
+        "oos_avg_ret_pct": avg,
+        "oos_std_pct": std,
+        "oos_ev_lcb_80_pct": lcb80,
+    }
+
+
+def _load_release_outcomes(con: duckdb.DuckDBPyConnection) -> list[dict[str, Any]]:
+    if not table_exists(con, "strategy_ev") or not table_exists(con, "paper_trades"):
+        return []
+    rows = con.execute(
+        """
+        SELECT
+            CAST(ev.as_of AS VARCHAR) AS as_of,
+            ev.strategy_key,
+            ev.samples,
+            ev.fills,
+            ev.fill_rate,
+            ev.ev_pct,
+            ev.ev_lcb_80_pct,
+            ev.avg_tail_loss_pct,
+            pt.realized_ret_pct
+        FROM strategy_ev ev
+        INNER JOIN paper_trades pt
+          ON pt.report_date = ev.as_of
+         AND pt.strategy_key = ev.strategy_key
+        WHERE lower(pt.action_intent) = 'trade'
+          AND pt.realized_ret_pct IS NOT NULL
+        """
+    ).fetchall()
+    keys = [
+        "as_of",
+        "strategy_key",
+        "samples",
+        "fills",
+        "fill_rate",
+        "ev_pct",
+        "ev_lcb_80_pct",
+        "avg_tail_loss_pct",
+        "realized_ret_pct",
+    ]
+    return [dict(zip(keys, row)) for row in rows]
+
+
+def calibrate_paper_trade_params(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    rows = _load_release_outcomes(con)
+    default_params = dict(DEFAULT_PAPER_PARAMS)
+    default_stats = _policy_stats(rows, default_params)
+
+    grids = {
+        "min_samples": [4, 8, 12, 20],
+        "min_fills": [2, 4, 8, 12],
+        "min_fill_rate": [0.25, 0.35, 0.50],
+        "min_ev_pct": [-0.10, 0.0, 0.15, 0.30, 0.50],
+        "min_ev_lcb_80_pct": [-0.50, -0.25, 0.0, 0.10],
+        "max_tail_loss_pct": [3.5, 5.5, 8.0],
+    }
+    best_params = dict(default_params)
+    best_stats = dict(default_stats)
+    best_score = default_stats.get("oos_ev_lcb_80_pct")
+    best_score = float("-inf") if best_score is None else float(best_score)
+
+    for min_samples in grids["min_samples"]:
+        for min_fills in grids["min_fills"]:
+            if min_fills > min_samples:
+                continue
+            for min_fill_rate in grids["min_fill_rate"]:
+                for min_ev_pct in grids["min_ev_pct"]:
+                    for min_ev_lcb in grids["min_ev_lcb_80_pct"]:
+                        for max_tail in grids["max_tail_loss_pct"]:
+                            candidate = dict(default_params)
+                            candidate.update(
+                                {
+                                    "min_samples": min_samples,
+                                    "min_fills": min_fills,
+                                    "min_fill_rate": min_fill_rate,
+                                    "min_ev_pct": min_ev_pct,
+                                    "min_ev_lcb_80_pct": min_ev_lcb,
+                                    "max_tail_loss_pct": max_tail,
+                                    "provenance": "calibrated_walk_forward",
+                                }
+                            )
+                            stats = _policy_stats(rows, candidate)
+                            if int(stats["oos_trades"] or 0) < 20:
+                                continue
+                            score = stats.get("oos_ev_lcb_80_pct")
+                            if score is None:
+                                continue
+                            if float(score) > best_score:
+                                best_score = float(score)
+                                best_params = candidate
+                                best_stats = stats
+
+    default_lcb = default_stats.get("oos_ev_lcb_80_pct")
+    candidate_lcb = best_stats.get("oos_ev_lcb_80_pct")
+    use_candidate = (
+        candidate_lcb is not None
+        and default_lcb is not None
+        and int(best_stats.get("oos_trades") or 0) >= 20
+        and float(candidate_lcb) > 0.0
+        and float(candidate_lcb) >= float(default_lcb) + MIN_ACTIVATION_IMPROVEMENT_PCT
+        and best_params != default_params
+    )
+
+    return {
+        "default": default_params,
+        "candidate": best_params,
+        "selected": "candidate" if use_candidate else "default",
+        "selected_params": best_params if use_candidate else default_params,
+        "activation": {
+            "use_candidate": use_candidate,
+            "reason": (
+                "candidate_oos_ev_lcb80_improved"
+                if use_candidate
+                else "default_retained_until_candidate_lcb80_improves"
+            ),
+            "min_improvement_pct": MIN_ACTIVATION_IMPROVEMENT_PCT,
+            "default_oos_ev_lcb_80_pct": default_lcb,
+            "candidate_oos_ev_lcb_80_pct": candidate_lcb,
+            "default_oos_trades": default_stats.get("oos_trades"),
+            "candidate_oos_trades": best_stats.get("oos_trades"),
+            "default_oos_avg_ret_pct": default_stats.get("oos_avg_ret_pct"),
+            "candidate_oos_avg_ret_pct": best_stats.get("oos_avg_ret_pct"),
+            "data_rows": len(rows),
+        },
+    }
 
 
 def fetch_limit_up_model(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
@@ -241,6 +414,7 @@ def build_artifact(market: str, db_path: Path) -> dict[str, Any]:
         raise ValueError("Only --market cn is wired for this calibration artifact today.")
     con = duckdb.connect(str(db_path), read_only=True)
     try:
+        runtime_params = calibrate_paper_trade_params(con)
         return {
             "schema_version": 1,
             "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -261,11 +435,12 @@ def build_artifact(market: str, db_path: Path) -> dict[str, Any]:
             },
             "paper_trade_ev": {
                 "current_release_rule": {
-                    "min_ev_pct": 0.15,
-                    "min_ev_lcb_80_pct": 0.0,
-                    "min_fill_rate": 0.35,
+                    "min_ev_pct": DEFAULT_PAPER_PARAMS["min_ev_pct"],
+                    "min_ev_lcb_80_pct": DEFAULT_PAPER_PARAMS["min_ev_lcb_80_pct"],
+                    "min_fill_rate": DEFAULT_PAPER_PARAMS["min_fill_rate"],
                     "provenance": "mixed: statistical confidence bound plus legacy engineering guards",
                 },
+                "runtime_params": runtime_params,
                 "latest": fetch_strategy_ev(con),
             },
             "limit_up_model": fetch_limit_up_model(con),

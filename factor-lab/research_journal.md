@@ -216,3 +216,28 @@ Legend: . = tested weak, + = decent IC, ++ = strong IC, +++ = promoted, ! = stro
 - Experiments run: 25
 - OOS passed: 3/3
 - Passing factors: anti_autocorr_floatflow_weekly_smooth_20, anti_autocorr_relvol_weekly_smooth_20, anti_autocorr_float_stability_20
+
+## Session 20260428_140002_78c607 — CN
+- Timestamp: 2026-04-28 14:55
+- Experiments run: 24
+- OOS passed: 3/3
+- Passing factors: anti_autocorr_weekly_amount_stability_20, anti_autocorr_openclose_stability_20, anti_autocorr_turnover_stability_20
+
+## Session 20260429_060001_1474fc — CN
+- Timestamp: 2026-04-29 06:56
+- Experiments run: 24
+- OOS passed: 3/3
+- Passing factors: anti_autocorr_weekly_amount_stability_20, anti_autocorr_weekly_turnover_corridor_20, anti_autocorr_weekly_float_corridor_20
+
+## Session 20260429_140002_505112 — CN
+- Timestamp: 2026-04-29 14:57
+- Experiments run: 25
+- OOS passed: 3/3
+- Passing factors: anti_autocorr_weekly_turnover_corridor_20, anti_autocorr20_weekly_float_evenness, anti_autocorr_weekly_relvol_floor_20
+
+## Autoresearch Rollup — CN 2026-04
+- Consolidated experiments: 150
+- IS gates pass: 102
+- OOS pass: 17
+- Rollup: `research_rollups/autoresearch_cn_2026-04.md`
+- Main repeated motif: stability/evenness + anti-autocorrelation on turnover, amount, and float-normalized flow.
