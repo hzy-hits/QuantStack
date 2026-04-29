@@ -131,6 +131,25 @@ matching the old `daily_pipeline.sh` latency behavior. Use
 
 ## Analytics
 
+Analytics run through an explicit dependency DAG. DuckDB writes stay serialized
+on one connection to avoid write-lock churn, while CPU-heavy model work can use
+Rayon inside a stage. DuckDB connections are configured with
+`PRAGMA threads=<auto>` by default; override with `QUANT_CN_DUCKDB_THREADS=N`
+when the box is shared.
+
+Optional rerun cache:
+
+```bash
+QUANT_CN_ANALYTICS_CACHE=1 ./target/release/quant-cn analyze \
+  --date 2026-04-24 \
+  --module limit_up_model
+```
+
+The cache is intentionally opt-in. Fresh daily fetches should recompute modules;
+rerenders, test-email retries, and review repair jobs can skip modules whose
+same-date outputs already exist. Every stage records duration, row count, and
+cache status in `pipeline_stage_runs`.
+
 | Module | Purpose |
 |---|---|
 | `momentum` | multi-horizon return and trend context |

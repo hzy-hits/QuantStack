@@ -2683,6 +2683,7 @@ dependencies = [
  "nalgebra 0.33.2",
  "ndarray",
  "polars",
+ "rayon",
  "reqwest",
  "serde",
  "serde_json",

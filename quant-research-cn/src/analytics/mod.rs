@@ -34,10 +34,8 @@ use tracing::info;
 
 use crate::config::Settings;
 
-/// Run all analytics modules. Order matters: some modules depend on others.
-pub fn run_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<()> {
-    info!("analytics start");
-    for module in [
+const ANALYTICS_DAG: &[&[&str]] = &[
+    &[
         "momentum",
         "announcement",
         "flow",
@@ -50,15 +48,28 @@ pub fn run_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<()> 
         "breakout",
         "sector_rotation",
         "price_features",
-        "setup_alpha",
-        "continuation_vs_fade",
-        "limit_move_radar",
-        "limit_up_model",
-        "open_execution_gate",
-        "shadow_option_alpha_calibration",
-        "macro_gate",
-    ] {
-        run_module(db, cfg, as_of, module)?;
+    ],
+    &["setup_alpha"],
+    &["continuation_vs_fade"],
+    &["limit_move_radar"],
+    &["limit_up_model"],
+    &["open_execution_gate"],
+    &["shadow_option_alpha_calibration"],
+    &["macro_gate"],
+];
+
+/// Run all analytics modules. Order matters: some modules depend on others.
+pub fn run_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<()> {
+    info!("analytics start");
+    for (layer_idx, layer) in ANALYTICS_DAG.iter().enumerate() {
+        info!(
+            layer = layer_idx,
+            modules = layer.join(","),
+            "analytics DAG layer start"
+        );
+        for module in *layer {
+            run_module(db, cfg, as_of, module)?;
+        }
     }
 
     info!("analytics complete");
@@ -70,6 +81,31 @@ pub fn run_module(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &st
     let stage = format!("analytics::{module}");
     let started_at = Utc::now().naive_utc();
     let timer = Instant::now();
+    if let Some(cache_rows) = cached_module_rows(db, as_of, module)? {
+        let ended_at = Utc::now().naive_utc();
+        let duration_ms = timer.elapsed().as_millis().min(i64::MAX as u128) as i64;
+        record_stage_run(
+            db,
+            as_of,
+            &stage,
+            &started_at.to_string(),
+            &ended_at.to_string(),
+            duration_ms,
+            cache_rows,
+            "cached",
+            true,
+            Some(json!({ "cache": "analytics_rows" }).to_string()),
+        );
+        info!(
+            module,
+            %as_of,
+            rows = cache_rows,
+            duration_ms,
+            "analytics module cache hit"
+        );
+        return Ok(());
+    }
+
     let result = with_transaction(db, &stage, |db| run_module_inner(db, cfg, as_of, module));
     let ended_at = Utc::now().naive_utc();
     let duration_ms = timer.elapsed().as_millis().min(i64::MAX as u128) as i64;
@@ -84,6 +120,7 @@ pub fn run_module(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &st
                 duration_ms,
                 rows as i64,
                 "ok",
+                false,
                 None,
             );
             info!(module, %as_of, rows, duration_ms, "analytics module complete");
@@ -99,6 +136,7 @@ pub fn run_module(db: &Connection, cfg: &Settings, as_of: NaiveDate, module: &st
                 duration_ms,
                 0,
                 "failed",
+                false,
                 Some(json!({ "error": err.to_string() }).to_string()),
             );
             Err(err)
@@ -238,13 +276,14 @@ fn record_stage_run(
     duration_ms: i64,
     rows_written: i64,
     status: &str,
+    cache_hit: bool,
     detail_json: Option<String>,
 ) {
     let _ = db.execute(
         "INSERT OR REPLACE INTO pipeline_stage_runs (
             as_of, stage, started_at, ended_at, duration_ms, rows_written,
             status, cache_hit, detail_json
-        ) VALUES (CAST(? AS DATE), ?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?, ?, FALSE, ?)",
+        ) VALUES (CAST(? AS DATE), ?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP), ?, ?, ?, ?, ?)",
         duckdb::params![
             as_of.to_string(),
             stage,
@@ -253,9 +292,74 @@ fn record_stage_run(
             duration_ms,
             rows_written,
             status,
+            cache_hit,
             detail_json,
         ],
     );
+}
+
+fn cached_module_rows(db: &Connection, as_of: NaiveDate, module: &str) -> Result<Option<i64>> {
+    if !analytics_cache_enabled() {
+        return Ok(None);
+    }
+    if module == "limit_up_model" {
+        let rows: i64 = db.query_row(
+            "SELECT COUNT(*) FROM limit_up_model_predictions WHERE as_of = CAST(? AS DATE)",
+            duckdb::params![as_of.to_string()],
+            |row| row.get(0),
+        )?;
+        return Ok((rows > 0).then_some(rows));
+    }
+    let Some(cache_modules) = cache_module_names(module) else {
+        return Ok(None);
+    };
+    let module_list = cache_modules
+        .iter()
+        .map(|name| format!("'{}'", name.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT COUNT(*) FROM analytics WHERE as_of = CAST(? AS DATE) AND module IN ({module_list})"
+    );
+    let rows: i64 = db.query_row(&sql, duckdb::params![as_of.to_string()], |row| row.get(0))?;
+    if rows > 0 {
+        Ok(Some(rows))
+    } else {
+        Ok(None)
+    }
+}
+
+fn analytics_cache_enabled() -> bool {
+    std::env::var("QUANT_CN_ANALYTICS_CACHE")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+        .unwrap_or(false)
+}
+
+fn cache_module_names(module: &str) -> Option<&'static [&'static str]> {
+    match module {
+        "momentum" => Some(&["momentum"]),
+        "announcement" | "announcement_risk" => Some(&["announcement_risk"]),
+        "flow" | "flow_score" => Some(&["flow_score"]),
+        "flow_audit" => Some(&["flow_audit"]),
+        "unlock" | "unlock_risk" => Some(&["unlock_risk"]),
+        "shadow_option" | "shadow_fast" => Some(&["shadow_option"]),
+        "hmm" | "hmm_regime" => Some(&["hmm_regime"]),
+        "vol_hmm" => Some(&["vol_hmm", "tobit_vol"]),
+        "mean_reversion" => Some(&["mean_reversion"]),
+        "breakout" => Some(&["breakout"]),
+        "sector_rotation" => Some(&["sector_rotation"]),
+        "price_features" => Some(&["price_features"]),
+        "setup_alpha" => Some(&["setup_alpha"]),
+        "continuation_vs_fade" => Some(&["continuation_vs_fade"]),
+        "limit_move_radar" => Some(&["limit_move_radar"]),
+        "limit_up_model" => Some(&["limit_up_model"]),
+        "open_execution_gate" => Some(&["open_execution_gate"]),
+        // This module is rerun after shadow_full materialization in the daily command, so
+        // analytics-row cache hits would be stale inside the same pipeline.
+        "shadow_option_alpha_calibration" | "shadow_option_alpha" => None,
+        "macro_gate" => Some(&["macro_gate"]),
+        _ => None,
+    }
 }
 
 fn with_transaction<T, F>(db: &Connection, label: &str, f: F) -> Result<T>

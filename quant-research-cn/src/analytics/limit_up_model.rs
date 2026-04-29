@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::{Duration, NaiveDate};
 use duckdb::Connection;
+use rayon::prelude::*;
 use serde_json::json;
 use std::cmp::Ordering;
 use std::collections::BTreeSet;
@@ -194,7 +195,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
         .max()
         .unwrap_or(as_of);
     let training_rows: Vec<ModelRow> = rows
-        .iter()
+        .par_iter()
         .filter(|row| {
             row.feature_date < prediction_date
                 && row.board_scope == "mainboard_10cm"
@@ -203,12 +204,13 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
         .cloned()
         .collect();
     let prediction_rows: Vec<ModelRow> = rows
-        .into_iter()
+        .par_iter()
         .filter(|row| row.feature_date == prediction_date)
+        .cloned()
         .collect();
 
     let train_positives = training_rows
-        .iter()
+        .par_iter()
         .filter(|row| row.next_day_limit_up == Some(true))
         .count();
     let model_state =
@@ -223,7 +225,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     let predictions = if model_state == "trained" {
         let pack = train_model_pack(&training_rows)?;
         let predictions = prediction_rows
-            .into_iter()
+            .into_par_iter()
             .map(|row| predict_row(row, &pack))
             .collect::<Vec<_>>();
         store_performance(db, as_of, &pack)?;
@@ -231,7 +233,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     } else {
         store_empty_performance(db, as_of, model_state)?;
         prediction_rows
-            .into_iter()
+            .into_par_iter()
             .map(|row| Prediction {
                 row,
                 raw_p_limit_up: 0.0,
@@ -271,12 +273,12 @@ fn train_model_pack(rows: &[ModelRow]) -> Result<ModelPack> {
     let split_idx = (dates.len() * 4 / 5).clamp(1, dates.len().saturating_sub(1));
     let validation_start = dates[split_idx];
     let fit_rows_full = rows
-        .iter()
+        .par_iter()
         .filter(|row| row.feature_date < validation_start)
         .cloned()
         .collect::<Vec<_>>();
     let validation_rows = rows
-        .iter()
+        .par_iter()
         .filter(|row| row.feature_date >= validation_start)
         .cloned()
         .collect::<Vec<_>>();
@@ -290,30 +292,42 @@ fn train_model_pack(rows: &[ModelRow]) -> Result<ModelPack> {
         model_rows = model_rows.len(),
         "limit_up_model sampled rare-event training rows"
     );
-    let limit_up = train_binary_model(
-        &model_rows,
-        &standardizer,
-        |row| row.next_day_limit_up.unwrap_or(false),
-        lambda,
-        70,
-    );
-    let touch_limit = train_binary_model(
-        &model_rows,
-        &standardizer,
-        |row| row.next_day_touch_limit.unwrap_or(false),
-        lambda,
-        60,
-    );
-    let failed_board = train_binary_model(
-        &model_rows,
-        &standardizer,
-        |row| row.next_day_failed_board.unwrap_or(false),
-        lambda,
-        60,
+    let (limit_up, (touch_limit, failed_board)) = rayon::join(
+        || {
+            train_binary_model(
+                &model_rows,
+                &standardizer,
+                |row| row.next_day_limit_up.unwrap_or(false),
+                lambda,
+                70,
+            )
+        },
+        || {
+            rayon::join(
+                || {
+                    train_binary_model(
+                        &model_rows,
+                        &standardizer,
+                        |row| row.next_day_touch_limit.unwrap_or(false),
+                        lambda,
+                        60,
+                    )
+                },
+                || {
+                    train_binary_model(
+                        &model_rows,
+                        &standardizer,
+                        |row| row.next_day_failed_board.unwrap_or(false),
+                        lambda,
+                        60,
+                    )
+                },
+            )
+        },
     );
 
     let validation_probs = validation_rows
-        .iter()
+        .par_iter()
         .map(|row| limit_up.predict(&standardizer.transform(&row.features)))
         .collect::<Vec<_>>();
     let thresholds = decile_thresholds(validation_probs.clone());
@@ -323,7 +337,7 @@ fn train_model_pack(rows: &[ModelRow]) -> Result<ModelPack> {
         buckets[decile as usize].add(row);
     }
     let labels = validation_rows
-        .iter()
+        .par_iter()
         .map(|row| row.next_day_limit_up.unwrap_or(false))
         .collect::<Vec<_>>();
     let brier = brier_score(&validation_probs, &labels);
@@ -367,7 +381,7 @@ fn sample_training_rows(rows: &[ModelRow]) -> Vec<ModelRow> {
     if rows.len() <= 50_000 {
         return rows.to_vec();
     }
-    rows.iter()
+    rows.par_iter()
         .filter(|row| {
             row.next_day_limit_up.unwrap_or(false)
                 || row.next_day_touch_limit.unwrap_or(false)
@@ -510,24 +524,38 @@ fn train_binary_model<F>(
     iterations: usize,
 ) -> BinaryModel
 where
-    F: Fn(&ModelRow) -> bool,
+    F: Fn(&ModelRow) -> bool + Sync,
 {
     let width = FEATURE_NAMES.len() + 1;
     let mut weights = vec![0.0; width];
     let lr = 0.18;
     let n = rows.len().max(1) as f64;
     for _ in 0..iterations {
-        let mut grad = vec![0.0; width];
-        for row in rows {
-            let x = standardizer.transform(&row.features);
-            let y = if label_fn(row) { 1.0 } else { 0.0 };
-            let p = sigmoid(weights[0] + dot(&weights[1..], &x));
-            let err = p - y;
-            grad[0] += err;
-            for (idx, value) in x.iter().enumerate() {
-                grad[idx + 1] += err * value;
-            }
-        }
+        let grad = rows
+            .par_iter()
+            .fold(
+                || vec![0.0; width],
+                |mut grad, row| {
+                    let x = standardizer.transform(&row.features);
+                    let y = if label_fn(row) { 1.0 } else { 0.0 };
+                    let p = sigmoid(weights[0] + dot(&weights[1..], &x));
+                    let err = p - y;
+                    grad[0] += err;
+                    for (idx, value) in x.iter().enumerate() {
+                        grad[idx + 1] += err * value;
+                    }
+                    grad
+                },
+            )
+            .reduce(
+                || vec![0.0; width],
+                |mut left, right| {
+                    for idx in 0..width {
+                        left[idx] += right[idx];
+                    }
+                    left
+                },
+            );
         weights[0] -= lr * grad[0] / n;
         for idx in 1..width {
             weights[idx] -= lr * (grad[idx] / n + l2 * weights[idx]);
@@ -545,23 +573,54 @@ impl BinaryModel {
 impl Standardizer {
     fn fit(rows: &[ModelRow]) -> Self {
         let width = FEATURE_NAMES.len();
-        let mut mean = vec![0.0; width];
         let n = rows.len().max(1) as f64;
-        for row in rows {
-            for (idx, value) in row.features.iter().enumerate() {
-                mean[idx] += *value / n;
-            }
-        }
-        let mut var = vec![0.0; width];
-        for row in rows {
-            for (idx, value) in row.features.iter().enumerate() {
-                let diff = *value - mean[idx];
-                var[idx] += diff * diff / n;
-            }
-        }
+        let mean = rows
+            .par_iter()
+            .fold(
+                || vec![0.0; width],
+                |mut acc, row| {
+                    for (idx, value) in row.features.iter().enumerate() {
+                        acc[idx] += *value;
+                    }
+                    acc
+                },
+            )
+            .reduce(
+                || vec![0.0; width],
+                |mut left, right| {
+                    for idx in 0..width {
+                        left[idx] += right[idx];
+                    }
+                    left
+                },
+            )
+            .into_iter()
+            .map(|sum| sum / n)
+            .collect::<Vec<_>>();
+        let var = rows
+            .par_iter()
+            .fold(
+                || vec![0.0; width],
+                |mut acc, row| {
+                    for (idx, value) in row.features.iter().enumerate() {
+                        let diff = *value - mean[idx];
+                        acc[idx] += diff * diff;
+                    }
+                    acc
+                },
+            )
+            .reduce(
+                || vec![0.0; width],
+                |mut left, right| {
+                    for idx in 0..width {
+                        left[idx] += right[idx];
+                    }
+                    left
+                },
+            );
         let std = var
             .into_iter()
-            .map(|v| v.sqrt().max(1e-6))
+            .map(|v| (v / n).sqrt().max(1e-6))
             .collect::<Vec<_>>();
         Self { mean, std }
     }

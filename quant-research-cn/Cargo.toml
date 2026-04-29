@@ -24,6 +24,7 @@ ndarray     = "0.16"
 statrs      = "0.17"                # Beta distribution, statistical functions
 nalgebra    = "0.33"                # Linear algebra (Ledoit-Wolf, PCA)
 polars      = { version = "0.46", features = ["lazy", "csv", "json"] }
+rayon       = "1.10"
 
 [profile.release]
 opt-level = 3
