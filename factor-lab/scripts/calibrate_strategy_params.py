@@ -1069,6 +1069,96 @@ def _us_options_signal(row: dict[str, Any], params: dict[str, Any]) -> bool:
     )
 
 
+def _bucket_rsi(value: Any) -> str:
+    rsi = _finite_float(value, 50.0) or 50.0
+    if rsi < 35.0:
+        return "rsi_oversold"
+    if rsi <= 55.0:
+        return "rsi_neutral"
+    if rsi <= 70.0:
+        return "rsi_warm"
+    return "rsi_hot"
+
+
+def _bucket_vix(value: Any) -> str:
+    vix = _finite_float(value)
+    if vix is None:
+        return "vix_unknown"
+    if vix >= 30.0:
+        return "extreme_fear"
+    if vix >= 22.0:
+        return "fear"
+    if vix >= 16.0:
+        return "neutral"
+    return "greed"
+
+
+def _bucket_stats(rows: list[dict[str, Any]], bucket_key: str) -> list[dict[str, Any]]:
+    grouped: dict[str, list[float]] = {}
+    for row in rows:
+        bucket = str(row.get(bucket_key) or "unknown")
+        ret = _finite_float(row.get("realized_ret_pct"))
+        if ret is None:
+            continue
+        grouped.setdefault(bucket, []).append(ret)
+    out = []
+    for bucket, values in grouped.items():
+        stats = _ev_stats(values)
+        stats["bucket"] = bucket
+        out.append(stats)
+    return sorted(out, key=lambda row: (row.get("ev_lcb_80_pct") is None, -(row.get("ev_lcb_80_pct") or -999)))
+
+
+def fetch_us_feature_diagnostics(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    if not table_exists(con, "algorithm_postmortem") or not table_exists(con, "analysis_daily"):
+        return {"status": "missing"}
+    rows = con.execute(
+        """
+        SELECT
+            CAST(ap.report_date AS VARCHAR) AS report_date,
+            ap.symbol,
+            ap.realized_pnl_pct,
+            mr.details AS mean_reversion_detail,
+            vix.adj_close AS vix_level
+        FROM algorithm_postmortem ap
+        LEFT JOIN analysis_daily mr
+          ON mr.date = ap.report_date
+         AND mr.symbol = ap.symbol
+         AND mr.module_name = 'mean_reversion'
+        LEFT JOIN prices_daily vix
+          ON vix.date = ap.report_date
+         AND vix.symbol = '^VIX'
+        WHERE ap.action_intent = 'TRADE'
+          AND ap.realized_pnl_pct IS NOT NULL
+        """
+    ).fetchall()
+    parsed = []
+    for report_date, symbol, ret, mean_reversion_detail, vix_level in rows:
+        detail = _safe_json_dict(mean_reversion_detail)
+        rsi = detail.get("rsi_14")
+        parsed.append(
+            {
+                "report_date": report_date,
+                "symbol": symbol,
+                "realized_ret_pct": ret,
+                "rsi_14": rsi,
+                "rsi_bucket": _bucket_rsi(rsi),
+                "vix_level": vix_level,
+                "vix_bucket": _bucket_vix(vix_level),
+            }
+        )
+    return {
+        "status": "ok",
+        "rows": len(parsed),
+        "rsi_buckets": _bucket_stats(parsed, "rsi_bucket"),
+        "vix_buckets": _bucket_stats(parsed, "vix_bucket"),
+        "notes": [
+            "Diagnostics only: these buckets do not automatically alter production gates.",
+            "RSI buckets use conventional technical ranges; VIX buckets proxy the internal fear/greed state.",
+        ],
+    }
+
+
 def calibrate_us_options_alpha(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     rows = _load_us_options_outcomes(con)
     default_params = copy.deepcopy(DEFAULT_US_RUNTIME_PARAMS["options_alpha"])
@@ -1225,6 +1315,7 @@ def build_us_artifact(db_path: Path) -> dict[str, Any]:
                 "overnight_gate": runtime_calibration["overnight_gate"],
                 "options_alpha": runtime_calibration["options_alpha"],
             },
+            "feature_diagnostics": fetch_us_feature_diagnostics(con),
             "latest": {
                 "postmortem": fetch_us_postmortem(con),
                 "options_alpha": fetch_us_options_alpha(con),

@@ -76,6 +76,26 @@ def render_header_and_context(bundle: dict) -> list[str]:
         "",
     ]
 
+    fear_greed = ctx.get("fear_greed") or {}
+    if fear_greed:
+        components = fear_greed.get("components") or {}
+        lines += [
+            "### Internal Fear/Greed Composite",
+            "",
+            f"Score: **{_fmt_val(fear_greed.get('score'), 1)} / 100** ({str(fear_greed.get('label', 'unknown')).replace('_', ' ')})",
+            f"Inputs: VIX={_fmt_val((fear_greed.get('inputs') or {}).get('vix_level'), 2)}, "
+            f"SPY 20D={_fmt_pct((fear_greed.get('inputs') or {}).get('spy_20d_pct'))}, "
+            f"breadth={_fmt_val((fear_greed.get('inputs') or {}).get('breadth_above_200ma_pct'), 1)}%, "
+            f"credit appetite={_fmt_pct((fear_greed.get('inputs') or {}).get('credit_risk_appetite_pct'))}",
+            f"Components: VIX level={_fmt_val(components.get('vix_level'), 1)}, "
+            f"VIX trend={_fmt_val(components.get('vix_trend'), 1)}, "
+            f"SPY momentum={_fmt_val(components.get('spy_momentum'), 1)}, "
+            f"breadth={_fmt_val(components.get('breadth'), 1)}, "
+            f"credit={_fmt_val(components.get('credit_risk_appetite'), 1)}",
+            "*Internal proxy from as-of market data, not an external CNN Fear & Greed feed. Use as regime context, not an alpha proof.*",
+            "",
+        ]
+
     # Headline gate
     lines += _render_headline_gate(bundle)
 

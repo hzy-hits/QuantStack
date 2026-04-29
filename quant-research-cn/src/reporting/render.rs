@@ -1307,6 +1307,7 @@ struct SetupAlphaView {
     ret_5d: f64,
     ret_20d: f64,
     trend_prob: f64,
+    rsi_14: f64,
     setup_score: f64,
     event_score: f64,
     priced_in_score: f64,
@@ -2448,16 +2449,16 @@ fn render_setup_bucket(
 
     writeln!(
         md,
-        "| 代码 | 名称 | lane | execution | 1D% | 5D% | 20D% | trend_prob | setup | priced-in | 回踩价 | 原因 |"
+        "| 代码 | 名称 | lane | execution | 1D% | 5D% | 20D% | trend_prob | RSI14 | setup | priced-in | 回踩价 | 原因 |"
     )?;
     writeln!(
         md,
-        "|------|------|------|-----------|-----|-----|------|------------|-------|-----------|--------|------|"
+        "|------|------|------|-----------|-----|-----|------|------------|-------|-------|-----------|--------|------|"
     )?;
     for row in rows.iter().take(limit) {
         writeln!(
             md,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             row.ts_code,
             row.name,
             row.lane,
@@ -2466,6 +2467,7 @@ fn render_setup_bucket(
             fmt_pct(Some(row.ret_5d)),
             fmt_pct(Some(row.ret_20d)),
             fmt_opt_f64(Some(row.trend_prob), 3),
+            fmt_opt_f64(Some(row.rsi_14), 1),
             fmt_opt_f64(Some(row.setup_score), 3),
             fmt_opt_f64(Some(row.priced_in_score), 2),
             fmt_f64(row.pullback_price),
@@ -2511,6 +2513,7 @@ fn setup_alpha_view(item: &NotableItem, daily_pct_chg: Option<f64>) -> SetupAlph
     let ret_5d = detail_f64(&item.detail, "ret_5d", 0.0);
     let ret_20d = detail_f64(&item.detail, "ret_20d", 0.0);
     let trend_prob = detail_f64(&item.detail, "trend_prob", 0.5);
+    let rsi_14 = detail_f64(&item.detail, "rsi_14", 50.0);
     let setup_score = detail_f64(&item.detail, "setup_score", 0.0);
     let setup_direction = detail_str(&item.detail, "setup_direction");
     let execution_mode = detail_str(&item.detail, "execution_mode")
@@ -2592,6 +2595,7 @@ fn setup_alpha_view(item: &NotableItem, daily_pct_chg: Option<f64>) -> SetupAlph
         ret_5d,
         ret_20d,
         trend_prob,
+        rsi_14,
         setup_score,
         event_score,
         priced_in_score,

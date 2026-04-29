@@ -212,6 +212,7 @@ struct AnalyticsAsOfDates {
     open_execution_gate: String,
     shadow_option_alpha: String,
     macro_gate: String,
+    vol_hmm: String,
     sector_flow: String,
 }
 
@@ -523,6 +524,8 @@ pub fn build_review_decisions(
         .cloned()
         .unwrap_or_else(|| "方向性优势不足".to_string());
     let reference_close = load_reference_close_map(db, &as_of.to_string());
+    let effective_dates = resolve_analytics_as_of_dates(db, as_of);
+    let market_vol_context = load_market_vol_context(db, &effective_dates.vol_hmm);
     let uncertain_selection = if headline_gate.mode == "uncertain" {
         Some(plan_uncertain_headline_candidates(&candidates))
     } else {
@@ -600,6 +603,10 @@ pub fn build_review_decisions(
                 "trend_prob_n": c.trend_prob_n,
                 "ret_5d": c.ret_5d,
                 "ret_20d": c.ret_20d,
+                "rsi_14": c.rsi_14,
+                "bb_position": c.bb_position,
+                "reversion_score": c.reversion_score,
+                "reversion_direction": c.reversion_direction,
                 "lab_is_fresh": c.lab_is_fresh,
                 "shadow_alpha_score": c.shadow_alpha_score,
                 "shadow_rank_score": c.shadow_rank_score,
@@ -625,6 +632,7 @@ pub fn build_review_decisions(
                 "entry_quality_score": c.entry_quality_score,
                 "shadow_option_calibration_bucket_id": c.calibration_bucket_id,
                 "shadow_option_alpha": c.shadow_option_alpha_detail,
+                "market_vol": market_vol_context,
             })
             .to_string(),
         });
@@ -2046,6 +2054,7 @@ fn resolve_analytics_as_of_dates(db: &Connection, as_of: NaiveDate) -> Analytics
         open_execution_gate: resolve_module_as_of(db, as_of, "open_execution_gate").to_string(),
         shadow_option_alpha: resolve_module_as_of(db, as_of, "shadow_option_alpha").to_string(),
         macro_gate: resolve_module_as_of(db, as_of, "macro_gate").to_string(),
+        vol_hmm: resolve_module_as_of(db, as_of, "vol_hmm").to_string(),
         sector_flow: resolve_sector_flow_as_of(db, as_of).to_string(),
     }
 }
@@ -2067,6 +2076,40 @@ fn load_gate_multiplier(db: &Connection, date_str: &str) -> f64 {
         |row| row.get::<_, f64>(0),
     );
     result.unwrap_or(1.0)
+}
+
+fn load_market_vol_context(db: &Connection, date_str: &str) -> serde_json::Value {
+    let metric = |name: &str| -> Option<f64> {
+        db.query_row(
+            "SELECT value FROM analytics
+             WHERE ts_code = '_MARKET'
+               AND as_of = ?
+               AND module = 'vol_hmm'
+               AND metric = ?",
+            duckdb::params![date_str, name],
+            |row| row.get::<_, f64>(0),
+        )
+        .ok()
+    };
+    let p_high_vol = metric("p_high_vol");
+    let p_high_vol_tomorrow = metric("p_high_vol_tomorrow");
+    let rv_tobit_20d = metric("rv_tobit_20d");
+    let rv_raw_20d = metric("rv_raw_20d");
+    let censor_ratio_20d = metric("limit_censor_ratio_20d");
+    let tobit_adjustment_ratio = match (rv_tobit_20d, rv_raw_20d) {
+        (Some(tobit), Some(raw)) if raw > 0.0 => Some(tobit / raw),
+        _ => None,
+    };
+    serde_json::json!({
+        "as_of": date_str,
+        "p_high_vol": p_high_vol,
+        "p_high_vol_tomorrow": p_high_vol_tomorrow,
+        "rv_tobit_20d": rv_tobit_20d,
+        "rv_raw_20d": rv_raw_20d,
+        "limit_censor_ratio_20d": censor_ratio_20d,
+        "tobit_adjustment_ratio": tobit_adjustment_ratio,
+        "source": "vol_hmm_cross_section_limit_tobit",
+    })
 }
 
 fn load_sector_alignment(db: &Connection, date_str: &str) -> f64 {

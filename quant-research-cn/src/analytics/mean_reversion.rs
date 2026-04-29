@@ -16,7 +16,9 @@ use tracing::info;
 pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     let date_str = as_of.to_string();
 
-    // Need 60 bars for SMA60 + RSI14 + Bollinger
+    // RSI14 and 20D Bollinger only need a short recent window. SMA60 is kept as a
+    // contextual average when available, but it must not suppress RSI coverage in
+    // the report DB where many active candidates only carry a recent snapshot.
     let sql = "
         WITH bars AS (
             SELECT ts_code, trade_date, close,
@@ -37,7 +39,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
                    COUNT(CASE WHEN rn <= 60 THEN 1 END) AS n_bars
             FROM stock_bars
             GROUP BY ts_code
-            HAVING n_bars >= 40  -- need enough bars for meaningful SMA60
+            HAVING n_bars >= 20
         )
         SELECT ts_code, close_now, sma20, sma60, std20, n_bars
         FROM agg
@@ -62,7 +64,17 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     // Load RSI data (need close prices for gain/loss calculation)
     let rsi_map = compute_rsi_batch(db, &date_str, 14)?;
 
-    let mut count = 0usize;
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS mean_reversion_stage (
+            ts_code VARCHAR,
+            as_of VARCHAR,
+            module VARCHAR,
+            metric VARCHAR,
+            value DOUBLE,
+            detail VARCHAR
+        );
+        DELETE FROM mean_reversion_stage;",
+    )?;
 
     // Cross-sectional z-scores for MA distances
     let ma20_dists: Vec<f64> = rows
@@ -71,113 +83,123 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
         .collect();
     let (ma20_mean, ma20_std) = cross_stats(&ma20_dists);
 
-    // Insert analytics
-    let insert_sql = "INSERT OR REPLACE INTO analytics (ts_code, as_of, module, metric, value, detail) VALUES (?, ?, 'mean_reversion', ?, ?, ?)";
-    let mut insert_stmt = db.prepare(insert_sql)?;
+    let mut symbol_count = 0usize;
+    let mut row_count = 0usize;
 
-    for (ts_code, close, sma20, sma60, std20, n_bars) in &rows {
-        // MA distance (z-scored cross-sectionally)
-        let ma20_pct = (close - sma20) / sma20;
-        let ma20_z = if ma20_std > 1e-10 {
-            ((ma20_pct - ma20_mean) / ma20_std).clamp(-3.0, 3.0)
-        } else {
-            0.0
-        };
+    {
+        let mut appender = db.appender("mean_reversion_stage")?;
 
-        let ma60_pct = if sma60.abs() > 1e-10 {
-            (close - sma60) / sma60
-        } else {
-            0.0
-        };
-
-        // Bollinger Band position: (close - lower) / (upper - lower)
-        let bb_upper = sma20 + 2.0 * std20;
-        let bb_lower = sma20 - 2.0 * std20;
-        let bb_width = bb_upper - bb_lower;
-        let bb_position = if bb_width > 1e-10 {
-            ((close - bb_lower) / bb_width).clamp(0.0, 1.0)
-        } else {
-            0.5
-        };
-
-        // RSI
-        let rsi = rsi_map.get(ts_code.as_str()).copied().unwrap_or(50.0);
-
-        // Signed reversion score: DIRECTION matters, not just extremeness.
-        // Positive = oversold (expect up), Negative = overbought (expect down)
-        // Range: [-1, +1], where magnitude = conviction strength
-        //
-        // Previous bug: unsigned score mixed oversold+overbought → IC was negative
-        // because "extreme stocks continue their direction" (momentum at tails).
-        // Fix: score the REVERSAL direction, so IC should be positive.
-        let rsi_signal = (50.0 - rsi) / 50.0; // +1 when RSI=0 (oversold), -1 when RSI=100
-        let bb_signal = 0.5 - bb_position; // +0.5 at lower band, -0.5 at upper band
-        let ma_signal = -ma20_z / 3.0; // positive when below MA (oversold)
-
-        // Weighted signed combination: [-1, +1]
-        let reversion_score =
-            (0.35 * rsi_signal + 0.35 * bb_signal * 2.0 + 0.30 * ma_signal).clamp(-1.0, 1.0);
-
-        // Direction from sign
-        let reversion_direction = if reversion_score > 0.2 {
-            "bullish_reversion" // oversold → expect up
-        } else if reversion_score < -0.2 {
-            "bearish_reversion" // overbought → expect down
-        } else {
-            "neutral"
-        };
-
-        let detail = serde_json::json!({
-            "ma20_pct": round3(ma20_pct * 100.0),
-            "ma60_pct": round3(ma60_pct * 100.0),
-            "ma20_z": round3(ma20_z),
-            "rsi_14": round1(rsi),
-            "bb_position": round3(bb_position),
-            "bb_width_pct": round3(bb_width / sma20 * 100.0),
-            "direction": reversion_direction,
-            "n_bars": n_bars,
-        });
-        let detail_str = detail.to_string();
-
-        insert_stmt.execute(duckdb::params![
-            ts_code,
-            date_str,
-            "reversion_score",
-            reversion_score,
-            detail_str
-        ])?;
-        insert_stmt.execute(duckdb::params![
-            ts_code, date_str, "rsi_14", rsi, detail_str
-        ])?;
-        insert_stmt.execute(duckdb::params![
-            ts_code,
-            date_str,
-            "bb_position",
-            bb_position,
-            detail_str
-        ])?;
-        insert_stmt.execute(duckdb::params![
-            ts_code, date_str, "ma20_z", ma20_z, detail_str
-        ])?;
-        insert_stmt.execute(duckdb::params![
-            ts_code,
-            date_str,
-            "reversion_direction",
-            if reversion_direction == "bullish_reversion" {
-                1.0
-            } else if reversion_direction == "bearish_reversion" {
-                -1.0
+        for (ts_code, close, sma20, sma60, std20, n_bars) in &rows {
+            // MA distance (z-scored cross-sectionally)
+            let ma20_pct = (close - sma20) / sma20;
+            let ma20_z = if ma20_std > 1e-10 {
+                ((ma20_pct - ma20_mean) / ma20_std).clamp(-3.0, 3.0)
             } else {
                 0.0
-            },
-            detail_str
-        ])?;
+            };
 
-        count += 1;
+            let ma60_pct = if sma60.abs() > 1e-10 {
+                (close - sma60) / sma60
+            } else {
+                0.0
+            };
+
+            // Bollinger Band position: (close - lower) / (upper - lower)
+            let bb_upper = sma20 + 2.0 * std20;
+            let bb_lower = sma20 - 2.0 * std20;
+            let bb_width = bb_upper - bb_lower;
+            let bb_position = if bb_width > 1e-10 {
+                ((close - bb_lower) / bb_width).clamp(0.0, 1.0)
+            } else {
+                0.5
+            };
+
+            // RSI
+            let rsi = rsi_map.get(ts_code.as_str()).copied().unwrap_or(50.0);
+
+            // Signed reversion score: DIRECTION matters, not just extremeness.
+            // Positive = oversold (expect up), Negative = overbought (expect down)
+            // Range: [-1, +1], where magnitude = conviction strength
+            //
+            // Previous bug: unsigned score mixed oversold+overbought -> IC was negative
+            // because "extreme stocks continue their direction" (momentum at tails).
+            // Fix: score the REVERSAL direction, so IC should be positive.
+            let rsi_signal = (50.0 - rsi) / 50.0; // +1 when RSI=0 (oversold), -1 when RSI=100
+            let bb_signal = 0.5 - bb_position; // +0.5 at lower band, -0.5 at upper band
+            let ma_signal = -ma20_z / 3.0; // positive when below MA (oversold)
+
+            // Weighted signed combination: [-1, +1]
+            let reversion_score =
+                (0.35 * rsi_signal + 0.35 * bb_signal * 2.0 + 0.30 * ma_signal).clamp(-1.0, 1.0);
+
+            // Direction from sign
+            let reversion_direction = if reversion_score > 0.2 {
+                "bullish_reversion" // oversold -> expect up
+            } else if reversion_score < -0.2 {
+                "bearish_reversion" // overbought -> expect down
+            } else {
+                "neutral"
+            };
+
+            let detail = serde_json::json!({
+                "ma20_pct": round3(ma20_pct * 100.0),
+                "ma60_pct": round3(ma60_pct * 100.0),
+                "ma20_z": round3(ma20_z),
+                "rsi_14": round1(rsi),
+                "bb_position": round3(bb_position),
+                "bb_width_pct": round3(bb_width / sma20 * 100.0),
+                "direction": reversion_direction,
+                "n_bars": n_bars,
+            });
+            let detail_str = detail.to_string();
+
+            for (metric, value) in [
+                ("reversion_score", reversion_score),
+                ("rsi_14", rsi),
+                ("bb_position", bb_position),
+                ("ma20_z", ma20_z),
+                (
+                    "reversion_direction",
+                    if reversion_direction == "bullish_reversion" {
+                        1.0
+                    } else if reversion_direction == "bearish_reversion" {
+                        -1.0
+                    } else {
+                        0.0
+                    },
+                ),
+            ] {
+                appender.append_row(duckdb::params![
+                    ts_code,
+                    &date_str,
+                    "mean_reversion",
+                    metric,
+                    value,
+                    &detail_str
+                ])?;
+                row_count += 1;
+            }
+
+            symbol_count += 1;
+        }
     }
 
-    info!(rows = count, "mean_reversion complete");
-    Ok(count)
+    db.execute(
+        "DELETE FROM analytics WHERE as_of = CAST(? AS DATE) AND module = 'mean_reversion'",
+        duckdb::params![date_str],
+    )?;
+    db.execute_batch(
+        "INSERT INTO analytics (ts_code, as_of, module, metric, value, detail)
+         SELECT ts_code, CAST(as_of AS DATE), module, metric, value, detail
+         FROM mean_reversion_stage",
+    )?;
+
+    info!(
+        symbols = symbol_count,
+        rows = row_count,
+        "mean_reversion complete"
+    );
+    Ok(row_count)
 }
 
 /// Compute RSI-14 for all stocks as a batch.

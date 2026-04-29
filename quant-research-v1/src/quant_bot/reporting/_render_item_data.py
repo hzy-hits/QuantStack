@@ -50,6 +50,7 @@ def _price_summary(item: dict) -> list[str]:
 def _price_momentum_table(item: dict) -> list[str]:
     """Merged price + momentum table (saves one table header)."""
     mom = item.get("momentum") or {}
+    mean_reversion = item.get("mean_reversion") or {}
     gate = item.get("execution_gate") or {}
     overnight_alpha = item.get("overnight_alpha") or {}
     headline_mode = str(item.get("_headline_mode") or "unknown").lower()
@@ -67,6 +68,12 @@ def _price_momentum_table(item: dict) -> list[str]:
         f"| Relative Volume | {_fmt_val(item.get('rel_volume'), 2)}\u00d7 avg |",
         f"| ATR (14D) | ${_fmt_val(item.get('atr'), 2)} |",
     ]
+    if mean_reversion:
+        lines += [
+            f"| RSI (14D) | {_fmt_val(mean_reversion.get('rsi_14'), 1)} |",
+            f"| Bollinger position | {_fmt_val(mean_reversion.get('bb_position'), 3)} |",
+            f"| Mean-reversion read | {mean_reversion.get('reversion_direction', _DASH)} / {_fmt_val(mean_reversion.get('reversion_score'), 3)} |",
+        ]
     if gate and report_session == "post":
         lines += [
             "| Execution reference | Regular close; overnight/pre-open gate hidden for post-market consistency |",

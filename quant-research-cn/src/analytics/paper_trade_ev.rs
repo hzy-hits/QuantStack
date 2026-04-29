@@ -406,6 +406,15 @@ impl Decision {
             .and_then(|v| v.as_f64())
             .unwrap_or(default)
     }
+
+    fn detail_nested_f64(&self, object_key: &str, key: &str, default: f64) -> f64 {
+        self.details
+            .as_ref()
+            .and_then(|v| v.get(object_key))
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_f64())
+            .unwrap_or(default)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -576,6 +585,12 @@ fn build_trade(
     let shadow_alpha_prob = decision.detail_f64("shadow_option_alpha_prob", 0.50);
     let downside_stress = decision.detail_f64("downside_stress", 0.50);
     let stale_chase_risk = decision.detail_f64("stale_chase_risk", 0.35);
+    let rsi_14 = decision.detail_f64("rsi_14", 50.0);
+    let p_high_vol = decision.detail_nested_f64("market_vol", "p_high_vol", 0.5);
+    let rv_tobit_20d = decision.detail_nested_f64("market_vol", "rv_tobit_20d", 0.0);
+    let rv_raw_20d = decision.detail_nested_f64("market_vol", "rv_raw_20d", 0.0);
+    let tobit_adjustment_ratio =
+        decision.detail_nested_f64("market_vol", "tobit_adjustment_ratio", 1.0);
     let planned_entry = execution_rule.planned_entry(&decision);
     let future = future_bars_for(future_bars, &decision.symbol, decision.report_date);
     let fill = execution_rule.simulate(&decision, &future);
@@ -596,6 +611,11 @@ fn build_trade(
         "shadow_alpha_prob": round3(shadow_alpha_prob),
         "downside_stress": round3(downside_stress),
         "stale_chase_risk": round3(stale_chase_risk),
+        "rsi_14": round3(rsi_14),
+        "market_p_high_vol": round3(p_high_vol),
+        "rv_tobit_20d": round3(rv_tobit_20d),
+        "rv_raw_20d": round3(rv_raw_20d),
+        "tobit_adjustment_ratio": round3(tobit_adjustment_ratio),
         "flow_conflict_flag": decision.flow_conflict_flag,
         "fill_reason": fill.reason,
         "slippage_pct": params.slippage_pct,
@@ -1055,6 +1075,14 @@ fn store_strategy_model_dataset(
                 "fade_risk": round3(trade.decision.fade_risk),
                 "max_chase_gap_pct": round3(trade.decision.max_chase_gap_pct),
                 "pullback_trigger_pct": round3(trade.decision.pullback_trigger_pct),
+                "rsi_14": round3(trade.decision.detail_f64("rsi_14", 50.0)),
+                "rsi_bucket": rsi_bucket(trade.decision.detail_f64("rsi_14", 50.0)),
+                "market_p_high_vol": round3(trade.decision.detail_nested_f64("market_vol", "p_high_vol", 0.5)),
+                "rv_tobit_20d": round3(trade.decision.detail_nested_f64("market_vol", "rv_tobit_20d", 0.0)),
+                "rv_raw_20d": round3(trade.decision.detail_nested_f64("market_vol", "rv_raw_20d", 0.0)),
+                "limit_censor_ratio_20d": round3(trade.decision.detail_nested_f64("market_vol", "limit_censor_ratio_20d", 0.0)),
+                "tobit_adjustment_ratio": round3(trade.decision.detail_nested_f64("market_vol", "tobit_adjustment_ratio", 1.0)),
+                "market_vol_bucket": market_vol_bucket(&trade.decision),
                 "shadow_alpha_prob": round3(trade.shadow_alpha_prob),
                 "downside_stress": round3(trade.downside_stress),
                 "stale_chase_risk": round3(trade.stale_chase_risk),
@@ -1355,14 +1383,38 @@ fn strategy_key(
         v if v >= 0.50 => "setup_mixed",
         _ => "setup_weak",
     };
+    let rsi_bucket = rsi_bucket(decision.detail_f64("rsi_14", 50.0));
+    let market_vol_bucket = market_vol_bucket(decision);
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         family.as_str(),
         decision.report_lane.key(),
         execution_rule.as_str(),
         shadow_bucket,
-        setup_bucket
+        setup_bucket,
+        rsi_bucket,
+        market_vol_bucket
     )
+}
+
+fn rsi_bucket(rsi: f64) -> &'static str {
+    match rsi {
+        v if v < 35.0 => "rsi_oversold",
+        v if v <= 55.0 => "rsi_neutral",
+        v if v <= 70.0 => "rsi_warm",
+        _ => "rsi_hot",
+    }
+}
+
+fn market_vol_bucket(decision: &Decision) -> &'static str {
+    let p_high = decision.detail_nested_f64("market_vol", "p_high_vol", 0.5);
+    let tobit_ratio = decision.detail_nested_f64("market_vol", "tobit_adjustment_ratio", 1.0);
+    match (p_high >= 0.50, tobit_ratio >= 1.10) {
+        (true, true) => "vol_high_censored",
+        (true, false) => "vol_high",
+        (false, true) => "vol_low_censored",
+        (false, false) => "vol_low",
+    }
 }
 
 fn ev_fail_reasons(

@@ -62,6 +62,12 @@ class Tier1Builder:
             return None
         return round((c / p - 1.0) * 100.0, 2)
 
+    @staticmethod
+    def _scale(value: float | None, low: float, high: float) -> float | None:
+        if value is None or high == low:
+            return None
+        return max(0.0, min(100.0, (float(value) - low) / (high - low) * 100.0))
+
     def _to_date(self, v: Any) -> date | None:
         if self._is_null(v):
             return None
@@ -235,6 +241,77 @@ class Tier1Builder:
                   stale=(n_stale_b > 0))
         return breadth
 
+    def build_fear_greed(self, vix: dict[str, Any], breadth: dict[str, Any]) -> dict[str, Any]:
+        """Internal market fear/greed composite built only from as-of data.
+
+        This is a deterministic proxy, not CNN's external Fear & Greed index.
+        Higher score means risk appetite; lower score means stress/fear.
+        """
+        spy_row, _, spy_miss, spy_stale, spy_sd = self._sym_info("SPY")
+        hyg_row, _, hyg_miss, hyg_stale, hyg_sd = self._sym_info("HYG")
+        tlt_row, _, tlt_miss, tlt_stale, tlt_sd = self._sym_info("TLT")
+
+        spy_20d = self._pct(spy_row["adj_close"], spy_row["prev_20d"]) if spy_row is not None else None
+        hyg_20d = self._pct(hyg_row["adj_close"], hyg_row["prev_20d"]) if hyg_row is not None else None
+        tlt_20d = self._pct(tlt_row["adj_close"], tlt_row["prev_20d"]) if tlt_row is not None else None
+        credit_momentum = (
+            round(hyg_20d - tlt_20d, 2)
+            if hyg_20d is not None and tlt_20d is not None
+            else None
+        )
+
+        vix_level = self._f(vix.get("level"))
+        vix_change_20d = self._f(vix.get("change_20d_pct"))
+        components = {
+            "vix_level": self._scale(vix_level, 35.0, 12.0),
+            "vix_trend": self._scale(-(vix_change_20d or 0.0) if vix_change_20d is not None else None, -35.0, 35.0),
+            "spy_momentum": self._scale(spy_20d, -8.0, 8.0),
+            "breadth": self._f(breadth.get("sp500_above_200ma_pct")),
+            "credit_risk_appetite": self._scale(credit_momentum, -5.0, 5.0),
+        }
+        weights = {
+            "vix_level": 0.30,
+            "vix_trend": 0.15,
+            "spy_momentum": 0.25,
+            "breadth": 0.20,
+            "credit_risk_appetite": 0.10,
+        }
+        usable = [(weights[k], v) for k, v in components.items() if v is not None]
+        score = round(sum(w * v for w, v in usable) / sum(w for w, _ in usable), 1) if usable else None
+        if score is None:
+            label = "unknown"
+        elif score < 25:
+            label = "extreme_fear"
+        elif score < 45:
+            label = "fear"
+        elif score < 55:
+            label = "neutral"
+        elif score < 75:
+            label = "greed"
+        else:
+            label = "extreme_greed"
+
+        self._register("fear_greed.score", present=score is not None, missing=score is None, stale=spy_stale or hyg_stale or tlt_stale)
+        self._register("fear_greed.vix_level_component", present=components["vix_level"] is not None, missing=components["vix_level"] is None, stale=bool(vix.get("price_date") is None))
+        self._register("fear_greed.spy_momentum", present=spy_20d is not None, missing=(spy_20d is None or spy_miss), stale=spy_stale, source_date=spy_sd)
+        self._register("fear_greed.credit_risk_appetite", present=credit_momentum is not None, missing=(credit_momentum is None or hyg_miss or tlt_miss), stale=(hyg_stale or tlt_stale), source_date=hyg_sd or tlt_sd)
+        return {
+            "score": score,
+            "label": label,
+            "source": "internal_proxy_vix_spy_breadth_credit",
+            "components": {k: round(v, 1) if v is not None else None for k, v in components.items()},
+            "inputs": {
+                "vix_level": vix_level,
+                "vix_change_20d_pct": vix_change_20d,
+                "spy_20d_pct": spy_20d,
+                "breadth_above_200ma_pct": breadth.get("sp500_above_200ma_pct"),
+                "hyg_20d_pct": hyg_20d,
+                "tlt_20d_pct": tlt_20d,
+                "credit_risk_appetite_pct": credit_momentum,
+            },
+            "price_date": spy_sd or vix.get("price_date"),
+        }
+
     def build_polymarket(self) -> list[dict]:
         polymarket_events: list[dict] = []
         poly_latest: date | None = None
@@ -322,13 +399,16 @@ class Tier1Builder:
 
     def build(self) -> dict:
         """Return the full Tier 1 dict (same structure as old ``_market_context_tier1``)."""
+        vix = self.build_vix()
+        breadth = self.build_breadth()
         return {
             "major_indices":     self.build_indices(),
-            "vix":               self.build_vix(),
+            "vix":               vix,
+            "fear_greed":        self.build_fear_greed(vix, breadth),
             "sectors":           self.build_sectors(),
             "rates_credit":      self.build_rates_credit(),
             "commodities":       self.build_commodities(),
             "polymarket_events": self.build_polymarket(),
-            "breadth":           self.build_breadth(),
+            "breadth":           breadth,
             "uncertainty":       self.uncertainty,
         }
