@@ -22,7 +22,8 @@
 
 - 输出语言：中文
 - 格式：固定标题 + 表格 + 列表
-- 先读 `Headline Gate` section；它只约束市场叙事强度，如果 mode 不是 `trend`，不要把市场概括成牛市/熊市
+- 先读 `内部恐惧/贪婪面板（A股）`、大盘 RSI、宽度、资金和 `Headline Gate`；HMM 只作为模型证据，不能单独决定牛市/熊市
+- A股没有单一 VIX 等价物；payload 的 A股恐惧/贪婪是内部风险偏好代理，必须保留该口径
 - 数据缺失写 `[缺失]`，不分析缺失原因
 - 不给交易建议，不做叙事
 - 禁用词：综合考量、谨慎乐观、值得关注、密切跟踪、不确定性较大
@@ -43,8 +44,10 @@
 
 ## Regime
 - state: [trend|range|uncertain]
-- hmm_state: [rally|selloff|consolidation|其他]
-- P(bull): [值], n=[观测数], duration=[天数]
+- fear_greed: [score/100 + label + 口径]
+- market_rsi: [沪深300/上证50/创业板 RSI14]
+- breadth: [20D上涨占比/当日上涨占比/行业资金净流入占比]
+- hmm_evidence: [model_state_label + model_label_p_bull；明确写“非牛熊裁判”]
 - Brier: [值], hit_rate: [百分比], n=[观测数]
 - p_ret_positive: [值]
 
@@ -80,4 +83,4 @@
 - yield_state: [normal|inverted]
 
 ## 判断
-（恰好3句话，每句必须包含一个来自payload的数字。领域：宏观/regime/跨市场解读。如果 gate 不是 trend，判断里必须明确写“不能 headline 成牛/熊”。）
+（恰好3句话，每句必须包含一个来自payload的数字。领域：宏观/regime/跨市场解读。必须明确说明方向判断来自恐惧/贪婪、RSI、宽度、资金和波动的合成证据，而不是 HMM 单独决定。）

@@ -95,10 +95,13 @@ fn render_macro(
     // ── 大盘概览 ──────────────────────────────────────────────────────────
     render_benchmark_overview(&mut md, db, date_str)?;
 
+    // ── A股内部恐惧/贪婪面板 ─────────────────────────────────────────────
+    render_market_sentiment_dashboard(&mut md, db, date_str)?;
+
     // ── Headline Gate ────────────────────────────────────────────────────
     render_headline_gate(&mut md, &headline_gate)?;
 
-    // ── HMM 市场状态 ──────────────────────────────────────────────────────
+    // ── HMM 模型证据 ──────────────────────────────────────────────────────
     render_hmm_state(&mut md, db, date_str)?;
 
     // ── 波动率HMM ─────────────────────────────────────────────────────────
@@ -181,8 +184,227 @@ fn render_benchmark_overview(md: &mut String, db: &Connection, date_str: &str) -
     Ok(())
 }
 
+fn render_market_sentiment_dashboard(
+    md: &mut String,
+    db: &Connection,
+    date_str: &str,
+) -> Result<()> {
+    writeln!(md, "### 内部恐惧/贪婪面板（A股）")?;
+    writeln!(md)?;
+
+    let p_high_vol = query_market_metric(db, date_str, "vol_hmm", "p_high_vol");
+    let p_high_vol_tomorrow = query_market_metric(db, date_str, "vol_hmm", "p_high_vol_tomorrow");
+    let rv_tobit_20d = query_market_metric(db, date_str, "vol_hmm", "rv_tobit_20d");
+    let rv_raw_20d = query_market_metric(db, date_str, "vol_hmm", "rv_raw_20d");
+    let tobit_ratio = match (rv_tobit_20d, rv_raw_20d) {
+        (Some(tobit), Some(raw)) if raw > 0.0 => Some(tobit / raw),
+        _ => None,
+    };
+
+    let hs300_rsi = query_symbol_metric(db, date_str, "000300.SH", "mean_reversion", "rsi_14");
+    let sz50_rsi = query_symbol_metric(db, date_str, "000016.SH", "mean_reversion", "rsi_14");
+    let gem_rsi = query_symbol_metric(db, date_str, "399006.SZ", "mean_reversion", "rsi_14");
+    let rsi_values: Vec<f64> = [hs300_rsi, sz50_rsi, gem_rsi]
+        .into_iter()
+        .flatten()
+        .collect();
+    let market_rsi = average(&rsi_values);
+
+    let breadth_20d =
+        query_price_feature_ratio(db, date_str, "COALESCE(ret_20d, 0) > 0 AND n_obs >= 20");
+    let advance_ratio = query_price_ratio(db, date_str, "COALESCE(pct_chg, 0) > 0");
+    let sector_positive_ratio = query_sector_ratio(db, date_str, "COALESCE(main_net_in, 0) > 0");
+
+    let components = [
+        (
+            "vol_stress",
+            p_high_vol.map(|v| (1.0 - v).clamp(0.0, 1.0) * 100.0),
+            0.25,
+        ),
+        (
+            "tobit_vol",
+            rv_tobit_20d.and_then(|v| scale(v, 85.0, 20.0)),
+            0.15,
+        ),
+        (
+            "market_rsi",
+            market_rsi.and_then(|v| scale(v, 30.0, 70.0)),
+            0.20,
+        ),
+        (
+            "breadth_20d",
+            breadth_20d.map(|v| scale(v * 100.0, 25.0, 75.0).unwrap_or(50.0)),
+            0.20,
+        ),
+        (
+            "advance_decline",
+            advance_ratio.map(|v| scale(v * 100.0, 25.0, 75.0).unwrap_or(50.0)),
+            0.10,
+        ),
+        (
+            "sector_flow",
+            sector_positive_ratio.map(|v| scale(v * 100.0, 20.0, 70.0).unwrap_or(50.0)),
+            0.10,
+        ),
+    ];
+    let usable: Vec<(f64, f64)> = components
+        .iter()
+        .filter_map(|(_, value, weight)| value.map(|v| (*weight, v)))
+        .collect();
+    let score = if usable.is_empty() {
+        None
+    } else {
+        let weighted = usable.iter().map(|(w, v)| w * v).sum::<f64>();
+        let weight_sum = usable.iter().map(|(w, _)| w).sum::<f64>();
+        Some(weighted / weight_sum)
+    };
+    let label = sentiment_label(score);
+
+    writeln!(
+        md,
+        "- score = {} / 100 | label = {} | source = internal_a_share_proxy",
+        fmt_opt_f64(score, 1),
+        label
+    )?;
+    writeln!(
+        md,
+        "- inputs: P(high_vol)={}，P(high_vol明日)={}，RV(Tobit,20d)={}%，Tobit/raw={}，沪深300 RSI14={}，上证50 RSI14={}，创业板 RSI14={}",
+        fmt_opt_f64(p_high_vol, 3),
+        fmt_opt_f64(p_high_vol_tomorrow, 3),
+        fmt_opt_f64(rv_tobit_20d, 2),
+        fmt_opt_f64(tobit_ratio, 3),
+        fmt_opt_f64(hs300_rsi, 1),
+        fmt_opt_f64(sz50_rsi, 1),
+        fmt_opt_f64(gem_rsi, 1)
+    )?;
+    writeln!(
+        md,
+        "- breadth: 20D上涨占比={}%，当日上涨占比={}%，行业资金净流入占比={}%",
+        fmt_opt_f64(breadth_20d.map(|v| v * 100.0), 1),
+        fmt_opt_f64(advance_ratio.map(|v| v * 100.0), 1),
+        fmt_opt_f64(sector_positive_ratio.map(|v| v * 100.0), 1)
+    )?;
+    writeln!(
+        md,
+        "- components: vol_stress={}，tobit_vol={}，market_rsi={}，breadth_20d={}，advance_decline={}，sector_flow={}",
+        fmt_opt_f64(component_value(&components, "vol_stress"), 1),
+        fmt_opt_f64(component_value(&components, "tobit_vol"), 1),
+        fmt_opt_f64(component_value(&components, "market_rsi"), 1),
+        fmt_opt_f64(component_value(&components, "breadth_20d"), 1),
+        fmt_opt_f64(component_value(&components, "advance_decline"), 1),
+        fmt_opt_f64(component_value(&components, "sector_flow"), 1),
+    )?;
+    writeln!(
+        md,
+        "> 注: A股没有单一 VIX 等价物；该面板是内部风险偏好代理。HMM 只作为模型证据，不单独决定牛/熊。宏观 agent 必须结合本面板、资金、利率和事件后再写方向判断。"
+    )?;
+    writeln!(md)?;
+    Ok(())
+}
+
+fn query_market_metric(db: &Connection, date_str: &str, module: &str, metric: &str) -> Option<f64> {
+    query_symbol_metric(db, date_str, "_MARKET", module, metric)
+}
+
+fn query_symbol_metric(
+    db: &Connection,
+    date_str: &str,
+    ts_code: &str,
+    module: &str,
+    metric: &str,
+) -> Option<f64> {
+    db.query_row(
+        "SELECT value FROM analytics
+         WHERE ts_code = ?
+           AND module = ?
+           AND metric = ?
+           AND as_of = (
+               SELECT MAX(as_of) FROM analytics
+               WHERE ts_code = ?
+                 AND module = ?
+                 AND metric = ?
+                 AND as_of <= CAST(? AS DATE)
+           )",
+        duckdb::params![ts_code, module, metric, ts_code, module, metric, date_str],
+        |row| row.get::<_, f64>(0),
+    )
+    .ok()
+}
+
+fn query_price_feature_ratio(db: &Connection, date_str: &str, condition: &str) -> Option<f64> {
+    let sql = format!(
+        "SELECT CAST(SUM(CASE WHEN {} THEN 1 ELSE 0 END) AS DOUBLE) / NULLIF(COUNT(*), 0)
+         FROM price_features
+         WHERE as_of = (
+             SELECT MAX(as_of) FROM price_features WHERE as_of <= CAST(? AS DATE)
+         )",
+        condition
+    );
+    db.query_row(&sql, duckdb::params![date_str], |row| row.get::<_, f64>(0))
+        .ok()
+}
+
+fn query_price_ratio(db: &Connection, date_str: &str, condition: &str) -> Option<f64> {
+    let sql = format!(
+        "SELECT CAST(SUM(CASE WHEN {} THEN 1 ELSE 0 END) AS DOUBLE) / NULLIF(COUNT(*), 0)
+         FROM prices
+         WHERE trade_date = (
+             SELECT MAX(trade_date) FROM prices WHERE trade_date <= CAST(? AS DATE)
+         )",
+        condition
+    );
+    db.query_row(&sql, duckdb::params![date_str], |row| row.get::<_, f64>(0))
+        .ok()
+}
+
+fn query_sector_ratio(db: &Connection, date_str: &str, condition: &str) -> Option<f64> {
+    let sql = format!(
+        "SELECT CAST(SUM(CASE WHEN {} THEN 1 ELSE 0 END) AS DOUBLE) / NULLIF(COUNT(*), 0)
+         FROM sector_fund_flow
+         WHERE trade_date = (
+             SELECT MAX(trade_date) FROM sector_fund_flow WHERE trade_date <= CAST(? AS DATE)
+         )",
+        condition
+    );
+    db.query_row(&sql, duckdb::params![date_str], |row| row.get::<_, f64>(0))
+        .ok()
+}
+
+fn average(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
+    }
+}
+
+fn scale(value: f64, low: f64, high: f64) -> Option<f64> {
+    if (high - low).abs() < 1e-9 {
+        return None;
+    }
+    Some(((value - low) / (high - low) * 100.0).clamp(0.0, 100.0))
+}
+
+fn component_value(components: &[(&str, Option<f64>, f64)], name: &str) -> Option<f64> {
+    components
+        .iter()
+        .find(|(component_name, _, _)| *component_name == name)
+        .and_then(|(_, value, _)| *value)
+}
+
+fn sentiment_label(score: Option<f64>) -> &'static str {
+    match score {
+        None => "unknown",
+        Some(v) if v < 25.0 => "extreme_fear",
+        Some(v) if v < 45.0 => "fear",
+        Some(v) if v < 55.0 => "neutral",
+        Some(v) if v < 75.0 => "greed",
+        Some(_) => "extreme_greed",
+    }
+}
+
 fn render_hmm_state(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
-    writeln!(md, "### HMM 市场状态")?;
+    writeln!(md, "### HMM 模型证据（非牛熊裁判）")?;
     writeln!(md)?;
 
     // Query all HMM metrics from analytics
@@ -237,12 +459,16 @@ fn render_hmm_state(md: &mut String, db: &Connection, date_str: &str) -> Result<
                     match metric.as_str() {
                         "p_bull" => {
                             if n_samples > 0 {
-                                writeln!(md, "- P(bull) = {:.3} (n={}个交易日)", value, n_samples)?;
+                                writeln!(
+                                    md,
+                                    "- model_label_p_bull = {:.3} (n={}个交易日)",
+                                    value, n_samples
+                                )?;
                             } else {
-                                writeln!(md, "- P(bull) = {:.3}", value)?;
+                                writeln!(md, "- model_label_p_bull = {:.3}", value)?;
                             }
                             if !regime_label.is_empty() {
-                                writeln!(md, "- current_regime = {}", regime_label)?;
+                                writeln!(md, "- model_state_label = {}", regime_label)?;
                             }
                         }
                         "p_ret_positive" => {
@@ -262,6 +488,10 @@ fn render_hmm_state(md: &mut String, db: &Connection, date_str: &str) -> Result<
             writeln!(md, "- HMM 数据缺失")?;
         }
     }
+    writeln!(
+        md,
+        "> 注: HMM 只提供模型状态标签和校准证据，不能单独决定牛市/熊市；宏观方向由恐惧/贪婪面板、资金、波动、利率和事件共同判断。"
+    )?;
     writeln!(md)?;
     Ok(())
 }
@@ -3566,7 +3796,11 @@ fn render_headline_gate(md: &mut String, gate: &HeadlineGateSummary) -> Result<(
         "- mode = {} | bias = {} | directional_regime_allowed = {}",
         gate.mode, gate.bias, gate.allow_directional_regime,
     )?;
-    writeln!(md, "- reporting_rule = {}", gate.reporting_rule)?;
+    writeln!(
+        md,
+        "- reporting_rule = {} HMM 不能单独决定牛/熊，宏观 agent 必须结合恐惧/贪婪、RSI、宽度、资金、利率和事件。",
+        gate.reporting_rule
+    )?;
     writeln!(
         md,
         "- p_ret_positive = {} | brier_score = {} | calibration_n = {} | regime_duration = {}天",

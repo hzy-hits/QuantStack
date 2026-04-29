@@ -301,6 +301,7 @@ ${PREV_CONTEXT}
 先读 Headline Gate。它是市场叙事上下文，不是个股执行门禁：
 - 如果 Headline mode = TREND，你可以承认市场存在方向偏置。
 - 如果 Headline mode = RANGE / UNCERTAIN，你必须明确写“不能 headline 成牛/熊”，但不能仅凭 headline 否决通过执行约束的个股 alpha。
+- HMM 只作为模型证据，不能单独决定牛/熊；必须结合 Internal Fear/Greed、VIX、SPY RSI、市场宽度、利率和信用。
 
 输出格式严格遵守：
 
@@ -312,9 +313,10 @@ ${PREV_CONTEXT}
 - key_reasons: [最多2条]
 
 ## Regime
-- HMM: [state + 证据强弱 + P(ret>0) 的大致区间]
+- Internal Fear/Greed: [score + label + VIX/SPY RSI/breadth/credit 的关键输入]
+- HMM: [model state + 证据强弱 + P(ret>0) 的大致区间；明确它不是牛熊裁判]
 - Breadth: [上涨/下跌分布、sector breadth、advance/decline]
-- 核心结论: [趋势 / 震荡 / 不确定，必须与 gate 一致]
+- 核心结论: [趋势 / 震荡 / 不确定；必须来自 Fear/Greed、RSI、宽度、利率/信用的合成证据，而不是 HMM 单独决定]
 
 ## Rates / Credit / Vol
 | 指标 | 当前值 | 变化/滞后 | 解释 |
@@ -338,7 +340,7 @@ ${PREV_CONTEXT}
 恰好 3 句话：
 - 每句必须包含至少 1 个数字
 - 至少 1 句必须直接回答“今天能不能 headline 成牛/熊”
-- 至少 1 句必须说明 HMM 为什么可用或不可用
+- 至少 1 句必须说明 HMM 为什么只能作为辅助证据
 
 规则：
 - 只能引用 payload 中已有数字
@@ -636,7 +638,7 @@ cat > "$OUT_DIR/prompts/merge-report.txt" <<PROMPT
 写作风格要求（极其重要）：
 - 写作风格：像顶级对冲基金的晨会纪要。冷静、精准、有攻击性。每句话都有信息量。
 - 数字驱动：每个判断必须附数字。不说"资金流出明显"，说"净流出8.5亿，连续3天"。
-- Headline Gate 只约束市场 headline 强度：只有当 payload 明确给出 "Headline mode = TREND" 时，才允许把市场 headline 成牛/熊或强单边方向；它不是个股执行否决器。
+- Headline Gate 只约束市场 headline 强度；HMM 不能单独决定牛/熊。是否能写成强单边，必须由 Fear/Greed、SPY RSI、VIX、宽度、利率/信用和事件共同支持；它不是个股执行否决器。
 - 有观点，但不要强行选边：如果 "Headline mode = RANGE/UNCERTAIN"，就直接写震荡/等待确认/暂不下主方向，并给触发条件。
 - 禁用词：综合考量、谨慎乐观、值得关注、密切跟踪、不确定性较大。
 - 上次错了一句话说清楚，不要包装。
@@ -676,7 +678,7 @@ ${PREV_MERGE_CONTEXT}
    - "## 信号记分卡"
      上次 HIGH 信号对还是错。没有可追踪就写“本期无可追踪信号”。结尾必须补一句：近期主问题到底是“漏 alpha”“追晚了”“判断错了”还是“edge 太薄”。
    - "## 今日市场"
-     一段连贯叙事，必须回答“今天能不能下主方向判断”。必须包含：联邦基金利率、10年美债收益率、10Y-2Y利差、高收益利差、VIX，并说明 HMM 是否可信。
+     一段连贯叙事，必须回答“今天能不能下主方向判断”。必须包含：Internal Fear/Greed、SPY RSI、联邦基金利率、10年美债收益率、10Y-2Y利差、高收益利差、VIX，并说明 HMM 只能作为辅助证据。
    - "## 交易地图"
      - "### 做多"：只允许写真正还能做的名字。
      - "### Setup Alpha"：先写 Early/Pullback/Post-event/Breakout Acceptance 的系统分组结论；Breakout Acceptance 是条件式突破承接，不等于追高。
@@ -727,7 +729,7 @@ ${PREV_MERGE_CONTEXT}
 13. Tactical Event Tape 如果主要由小盘/高波动标的构成，必须明确写成“战术观察”
 14. 专业直白，有观点。只用分析师提供的数字，不编造。
 15. 如果没有符合条件的多头机会，就明确写“今天没有可直接做的多头，别追价”
-16. 如果 payload 的 "Headline Gate" 不是 "TREND"，禁止把全文主线写成“熊市延续”或“牛市确认”；但不能仅凭 headline 否决通过执行硬规则的个股 alpha。
+16. 禁止因为 HMM 的 state 或 P(bull) 单独把全文主线写成“熊市延续”或“牛市确认”；必须由 Fear/Greed、SPY RSI、VIX、宽度、利率/信用共同支持。不能仅凭 headline 否决通过执行硬规则的个股 alpha。
 17. 如果 Report Review 说主问题是“追晚了”或“edge 太薄”，不要把当天的失败解释成“判断正确，只是市场太快”。那仍然是今天不能追的理由。
 18. 如果 Report Review 说主问题是“漏 alpha”，就要在交易地图或风险与展望里明确写出：系统更容易漏掉 follow-through，而不是只会追已经走完的名字。
 19. 这是 long-only 日报。禁止写“做空”“反手空”“空头对冲可以做”“双杀可空”这类可执行空头语言；如果市场偏弱，只能写成“空仓/减仓/回避/等待更优买点”。
@@ -741,7 +743,7 @@ ${PREV_MERGE_CONTEXT}
      (3) 风险中性概率：期权价格隐含（非真实世界概率）
    - 样本量小于30时必须标注。"基于8次历史盈利事件"比"上行概率 62.5%"更诚实
    - 引用 Polymarket 数据时注明抓取时间和成交量——概率是时间截面快照
-   - 如果 HMM 校准数据存在，讨论状态置信度时必须引用 Brier 分数和命中率
+   - 如果 HMM 校准数据存在，讨论状态置信度时必须引用 Brier 分数和命中率，并明确它不是牛熊裁判
    - 不得把 regime day-count 当作稳定性证明；最多写成“状态刚切换/已持续一段时间”
    - 情景概率必须标注为主观估计，不是计算值
 PROMPT

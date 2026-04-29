@@ -240,6 +240,8 @@ def compute_headline_gate(bundle: dict[str, Any]) -> dict[str, Any]:
     """
     hmm = bundle.get("hmm_regime") or {}
     cal = hmm.get("calibration") or {}
+    fear_greed = (bundle.get("market_context") or {}).get("fear_greed") or {}
+    fg_inputs = fear_greed.get("inputs") or {}
 
     p_ret = hmm.get("p_ret_positive_tomorrow")
     days = int(hmm.get("days_in_current_regime") or 0)
@@ -290,9 +292,9 @@ def compute_headline_gate(bundle: dict[str, Any]) -> dict[str, Any]:
         "bias": bias if mode != "uncertain" else "neutral",
         "allow_directional_regime": mode == "trend",
         "reporting_rule": (
-            "Use trend framing only."
+            "Use trend framing only if the full macro evidence panel confirms it; HMM alone is not a bull/bear referee."
             if mode == "trend"
-            else "Do not headline bull/bear; describe the market as range-bound or uncertain."
+            else "Do not headline bull/bear from HMM alone; describe the market from Fear/Greed, VIX, RSI, breadth, rates, and credit."
         ),
         "inputs": {
             "p_ret_positive_tomorrow": round(float(p_ret), 4) if p_ret is not None else None,
@@ -302,6 +304,9 @@ def compute_headline_gate(bundle: dict[str, Any]) -> dict[str, Any]:
             "brier_skill_score": brier_skill,
             "regime_days": days,
             "hmm_regime": hmm.get("regime"),
+            "fear_greed_score": fear_greed.get("score"),
+            "fear_greed_label": fear_greed.get("label"),
+            "spy_rsi_14": fg_inputs.get("spy_rsi_14"),
         },
         "reasons": reasons,
     }

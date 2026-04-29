@@ -85,14 +85,16 @@ def render_header_and_context(bundle: dict) -> list[str]:
             f"Score: **{_fmt_val(fear_greed.get('score'), 1)} / 100** ({str(fear_greed.get('label', 'unknown')).replace('_', ' ')})",
             f"Inputs: VIX={_fmt_val((fear_greed.get('inputs') or {}).get('vix_level'), 2)}, "
             f"SPY 20D={_fmt_pct((fear_greed.get('inputs') or {}).get('spy_20d_pct'))}, "
+            f"SPY RSI14={_fmt_val((fear_greed.get('inputs') or {}).get('spy_rsi_14'), 1)}, "
             f"breadth={_fmt_val((fear_greed.get('inputs') or {}).get('breadth_above_200ma_pct'), 1)}%, "
             f"credit appetite={_fmt_pct((fear_greed.get('inputs') or {}).get('credit_risk_appetite_pct'))}",
             f"Components: VIX level={_fmt_val(components.get('vix_level'), 1)}, "
             f"VIX trend={_fmt_val(components.get('vix_trend'), 1)}, "
             f"SPY momentum={_fmt_val(components.get('spy_momentum'), 1)}, "
+            f"SPY RSI={_fmt_val(components.get('spy_rsi'), 1)}, "
             f"breadth={_fmt_val(components.get('breadth'), 1)}, "
             f"credit={_fmt_val(components.get('credit_risk_appetite'), 1)}",
-            "*Internal proxy from as-of market data, not an external CNN Fear & Greed feed. Use as regime context, not an alpha proof.*",
+            "*Internal proxy from as-of market data, not an external CNN Fear & Greed feed. Macro agent must judge the market direction from this panel, rates/credit, breadth, and news; HMM is not a bull/bear referee.*",
             "",
         ]
 
@@ -139,9 +141,9 @@ def _render_hmm_regime(bundle: dict) -> list[str]:
     p_ret_pos_tomorrow = hmm.get("p_ret_positive_tomorrow")
 
     lines = [
-        "### HMM Market Regime",
+        "### HMM Model Evidence",
         "",
-        f"Current state inference: **{regime.upper()}** "
+        f"Model state label: **{regime.upper()}** "
         f"(posterior: P={p_bull:.3f} bull / {p_bear:.3f} bear)",
     ]
 
@@ -187,9 +189,9 @@ def _render_hmm_regime(bundle: dict) -> list[str]:
 
     lines += [
         "",
-        "*HMM is a market-level overlay (SPY+VIX). "
+        "*HMM is a market-level overlay (SPY+VIX), not a market-direction judge. "
         "Per-symbol autocorrelation regime is separate. "
-        "Posterior probabilities carry estimation error — do not treat as exact.*",
+        "Posterior probabilities carry estimation error; use Fear/Greed, VIX, market RSI, breadth, rates, and credit to form the macro judgment.*",
         "",
     ]
     return lines
@@ -210,15 +212,20 @@ def _render_headline_gate(bundle: dict) -> list[str]:
     cal_n = inputs.get("calibration_n")
     regime_days = inputs.get("regime_days")
     hmm_regime = inputs.get("hmm_regime") or "unknown"
+    fear_greed_score = inputs.get("fear_greed_score")
+    fear_greed_label = inputs.get("fear_greed_label") or "unknown"
+    spy_rsi = inputs.get("spy_rsi_14")
 
     lines = [
         "### Headline Gate",
         "",
         f"Headline mode: **{mode}** (bias={bias}, directional_regime_allowed={gate.get('allow_directional_regime', False)})",
-        f"Inputs: hmm_regime={hmm_regime}, P(SPY up tomorrow)={_fmt_val(p_ret, 4)}, "
+        f"Inputs: HMM model label={hmm_regime}, model-implied P(SPY up tomorrow)={_fmt_val(p_ret, 4)}, "
         f"edge_vs_coinflip={_fmt_val(edge, 4)}, Brier={_fmt_val(brier, 4)}, "
-        f"Brier skill={_fmt_val(bss, 4)}, calibration_n={cal_n}, regime_days={regime_days}",
-        f"Reporting rule: {gate.get('reporting_rule', 'N/A')}",
+        f"Brier skill={_fmt_val(bss, 4)}, calibration_n={cal_n}, regime_days={regime_days}, "
+        f"Fear/Greed={_fmt_val(fear_greed_score, 1)} ({str(fear_greed_label).replace('_', ' ')}), "
+        f"SPY RSI14={_fmt_val(spy_rsi, 1)}",
+        f"Reporting rule: {gate.get('reporting_rule', 'N/A')} HMM alone must not decide bull/bear framing.",
     ]
     reasons = gate.get("reasons") or []
     if reasons:
@@ -227,7 +234,7 @@ def _render_headline_gate(bundle: dict) -> list[str]:
             lines.append(f"- {reason}")
     if gate.get("mode") != "trend":
         lines.append(
-            "- Treat HMM as background context only; do not lead the report with a bull/bear claim."
+            "- Treat HMM as background context only; macro direction must come from the full evidence panel."
         )
     lines += ["", ""]
     return lines

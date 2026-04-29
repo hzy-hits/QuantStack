@@ -6,6 +6,7 @@ that was formerly the 238-line ``_market_context_tier1()`` closure soup.
 """
 from __future__ import annotations
 
+import json
 from datetime import date
 from typing import Any
 
@@ -115,6 +116,34 @@ class Tier1Builder:
         if ac is None or sma is None or self._is_null(n) or int(n) < 200:
             return None
         return ac > sma
+
+    def _analysis_detail(self, symbol: str, module_name: str) -> dict[str, Any]:
+        try:
+            row = self.con.execute(
+                """
+                SELECT details
+                FROM analysis_daily
+                WHERE symbol = ?
+                  AND module_name = ?
+                  AND date = (
+                      SELECT MAX(date)
+                      FROM analysis_daily
+                      WHERE symbol = ?
+                        AND module_name = ?
+                        AND date <= ?
+                  )
+                """,
+                [symbol, module_name, symbol, module_name, self.as_of_str],
+            ).fetchone()
+        except Exception:
+            return {}
+        if not row or not row[0]:
+            return {}
+        try:
+            parsed = json.loads(row[0])
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
 
     # ------------------------------------------------------------------
     # Price loading
@@ -260,21 +289,27 @@ class Tier1Builder:
             else None
         )
 
+        spy_mr = self._analysis_detail("SPY", "mean_reversion")
+        spy_rsi = self._f(spy_mr.get("rsi_14"))
+        spy_bb_position = self._f(spy_mr.get("bb_position"))
+
         vix_level = self._f(vix.get("level"))
         vix_change_20d = self._f(vix.get("change_20d_pct"))
         components = {
             "vix_level": self._scale(vix_level, 35.0, 12.0),
             "vix_trend": self._scale(-(vix_change_20d or 0.0) if vix_change_20d is not None else None, -35.0, 35.0),
             "spy_momentum": self._scale(spy_20d, -8.0, 8.0),
+            "spy_rsi": self._scale(spy_rsi, 30.0, 70.0),
             "breadth": self._f(breadth.get("sp500_above_200ma_pct")),
             "credit_risk_appetite": self._scale(credit_momentum, -5.0, 5.0),
         }
         weights = {
-            "vix_level": 0.30,
+            "vix_level": 0.25,
             "vix_trend": 0.15,
-            "spy_momentum": 0.25,
+            "spy_momentum": 0.20,
+            "spy_rsi": 0.15,
             "breadth": 0.20,
-            "credit_risk_appetite": 0.10,
+            "credit_risk_appetite": 0.05,
         }
         usable = [(weights[k], v) for k, v in components.items() if v is not None]
         score = round(sum(w * v for w, v in usable) / sum(w for w, _ in usable), 1) if usable else None
@@ -293,6 +328,7 @@ class Tier1Builder:
 
         self._register("fear_greed.score", present=score is not None, missing=score is None, stale=spy_stale or hyg_stale or tlt_stale)
         self._register("fear_greed.vix_level_component", present=components["vix_level"] is not None, missing=components["vix_level"] is None, stale=bool(vix.get("price_date") is None))
+        self._register("fear_greed.spy_rsi", present=spy_rsi is not None, missing=spy_rsi is None, stale=False)
         self._register("fear_greed.spy_momentum", present=spy_20d is not None, missing=(spy_20d is None or spy_miss), stale=spy_stale, source_date=spy_sd)
         self._register("fear_greed.credit_risk_appetite", present=credit_momentum is not None, missing=(credit_momentum is None or hyg_miss or tlt_miss), stale=(hyg_stale or tlt_stale), source_date=hyg_sd or tlt_sd)
         return {
@@ -304,6 +340,8 @@ class Tier1Builder:
                 "vix_level": vix_level,
                 "vix_change_20d_pct": vix_change_20d,
                 "spy_20d_pct": spy_20d,
+                "spy_rsi_14": spy_rsi,
+                "spy_bb_position": spy_bb_position,
                 "breadth_above_200ma_pct": breadth.get("sp500_above_200ma_pct"),
                 "hyg_20d_pct": hyg_20d,
                 "tlt_20d_pct": tlt_20d,
