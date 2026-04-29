@@ -1149,19 +1149,249 @@ fn round4(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{config::Settings, storage};
+    use crate::{
+        config::{
+            ApiConfig, AssetClassConfig, DataConfig, EnrichmentConfig, FilterConfig, MacroConfig,
+            OutputConfig, ReportingConfig, RuntimeConfig, ScanConfig, Settings, SignalsConfig,
+            UniverseConfig,
+        },
+        storage,
+    };
+
+    fn test_settings() -> Settings {
+        Settings {
+            api: ApiConfig {
+                tushare_token: String::new(),
+                deepseek_key: String::new(),
+            },
+            runtime: RuntimeConfig {
+                timezone: "Asia/Shanghai".to_string(),
+                random_seed: 1,
+            },
+            universe: UniverseConfig {
+                benchmark: "000300.SH".to_string(),
+                scan: ScanConfig {
+                    csi300: true,
+                    csi500: false,
+                    csi1000: false,
+                    sse50: false,
+                },
+                asset_classes: AssetClassConfig {
+                    sector_etfs: false,
+                    bond_etfs: false,
+                    commodity_etfs: false,
+                    cross_border: false,
+                },
+                watchlist: Vec::new(),
+                filters: FilterConfig {
+                    min_avg_volume_shares: 0,
+                    min_price: 0.0,
+                },
+            },
+            output: OutputConfig {
+                max_notable_items: 10,
+                min_notable_items: 1,
+            },
+            data: DataConfig {
+                db_path: String::new(),
+                raw_db_path: String::new(),
+                research_db_path: String::new(),
+                report_db_path: String::new(),
+                dev_db_path: String::new(),
+                use_dev_for_research: false,
+                constituent_refresh_days: 7,
+            },
+            signals: SignalsConfig {
+                momentum_windows: vec![5, 20],
+                atr_period: 14,
+                ma_filter_window: 120,
+                flow_ewma_halflife: 10,
+                unlock_lookahead_days: 30,
+            },
+            reporting: ReportingConfig {
+                anthropic_model: String::new(),
+                anthropic_temperature: 0.0,
+                max_tokens: 0,
+                recipients: Vec::new(),
+            },
+            r#macro: MacroConfig::default(),
+            enrichment: EnrichmentConfig::default(),
+        }
+    }
+
+    fn seed_shadow_fixture(db: &Connection, as_of: NaiveDate) -> Result<()> {
+        storage::init_schema(db)?;
+        db.execute(
+            "INSERT INTO macro_cn (date, series_id, series_name, value)
+             VALUES (?, 'SHIBOR_1M', 'Shibor 1M', 1.5)",
+            duckdb::params![as_of.to_string()],
+        )?;
+        for (code, name, industry, market) in [
+            ("000001.SZ", "平安银行", "银行", "主板"),
+            ("600000.SH", "浦发银行", "银行", "主板"),
+        ] {
+            db.execute(
+                "INSERT INTO stock_basic
+                 (ts_code, symbol, name, area, industry, market, list_date, list_status)
+                 VALUES (?, ?, ?, 'CN', ?, ?, '20000101', 'L')",
+                duckdb::params![
+                    code,
+                    code.split('.').next().unwrap_or(code),
+                    name,
+                    industry,
+                    market
+                ],
+            )?;
+        }
+        for index_code in ["000016.SH", "000300.SH", "000905.SH", "399006.SZ"] {
+            for symbol in ["000001.SZ", "600000.SH"] {
+                db.execute(
+                    "INSERT INTO index_weight (index_code, con_code, trade_date, weight)
+                     VALUES (?, ?, ?, 50.0)",
+                    duckdb::params![index_code, symbol, as_of.to_string()],
+                )?;
+            }
+        }
+        for i in 0..70 {
+            let d = as_of - chrono::Duration::days(69 - i);
+            let wave = (i as f64 / 5.0).sin();
+            for (idx, code) in ["000016.SH", "000300.SH", "000905.SH", "399006.SZ"]
+                .iter()
+                .enumerate()
+            {
+                let close = 1000.0 + i as f64 * (1.0 + idx as f64 * 0.1) + wave * 3.0;
+                let pre_close = close - 1.0;
+                db.execute(
+                    "INSERT INTO prices
+                     (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100000, 1000000, 1.0)",
+                    duckdb::params![
+                        *code,
+                        d.to_string(),
+                        close - 0.4,
+                        close + 1.0,
+                        close - 1.0,
+                        close,
+                        pre_close,
+                        close - pre_close,
+                        (close / pre_close - 1.0) * 100.0,
+                    ],
+                )?;
+            }
+            for (idx, code) in ["000001.SZ", "600000.SH"].iter().enumerate() {
+                let close = 10.0 + i as f64 * 0.03 + wave * 0.05 + idx as f64;
+                let pre_close = close - 0.02;
+                db.execute(
+                    "INSERT INTO prices
+                     (ts_code, trade_date, open, high, low, close, pre_close, change, pct_chg, vol, amount, adj_factor)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 100000, 1000000, 1.0)",
+                    duckdb::params![
+                        *code,
+                        d.to_string(),
+                        close - 0.03,
+                        close + 0.12,
+                        close - 0.10,
+                        close,
+                        pre_close,
+                        close - pre_close,
+                        (close / pre_close - 1.0) * 100.0,
+                    ],
+                )?;
+            }
+        }
+        for (maturity, tenor_scale) in [
+            (as_of + chrono::Duration::days(60), 1.0),
+            (as_of + chrono::Duration::days(120), 1.35),
+        ] {
+            for (strike, call_settle, put_settle) in [
+                (90.0, 12.0 * tenor_scale, 1.0 * tenor_scale),
+                (100.0, 5.0 * tenor_scale, 5.0 * tenor_scale),
+                (110.0, 1.0 * tenor_scale, 12.0 * tenor_scale),
+            ] {
+                for (call_put, settle) in [("C", call_settle), ("P", put_settle)] {
+                    let ts_code = format!(
+                        "MOCK{}{}{}",
+                        maturity.format("%m%d"),
+                        call_put,
+                        strike as i32
+                    );
+                    db.execute(
+                        "INSERT INTO opt_basic
+                         (ts_code, name, call_put, exercise_price, maturity_date, list_date, delist_date, opt_code, per_unit, exercise_type)
+                         VALUES (?, 'mock', ?, ?, ?, ?, ?, 'OP510300MOCK', 10000, 'E')",
+                        duckdb::params![
+                            ts_code,
+                            call_put,
+                            strike,
+                            maturity.to_string(),
+                            (as_of - chrono::Duration::days(30)).to_string(),
+                            maturity.to_string(),
+                        ],
+                    )?;
+                    db.execute(
+                        "INSERT INTO opt_daily
+                         (ts_code, trade_date, exchange, pre_settle, pre_close, open, high, low, close, settle, vol, amount, oi)
+                         VALUES (?, ?, 'SSE', ?, ?, ?, ?, ?, ?, ?, 1000, 1000000, 1000)",
+                        duckdb::params![
+                            ts_code,
+                            as_of.to_string(),
+                            settle,
+                            settle,
+                            settle,
+                            settle,
+                            settle,
+                            settle,
+                            settle,
+                        ],
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn shadow_option_pipeline_runs_on_small_fixture() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        let cfg = test_settings();
+        let as_of = NaiveDate::from_ymd_opt(2026, 4, 29).unwrap();
+        seed_shadow_fixture(&db, as_of)?;
+
+        let curves = compute_market_curves(&db, as_of)?;
+        assert!(!curves.is_empty(), "expected fixture option curve");
+
+        let features = load_stock_features(&db, as_of)?;
+        assert_eq!(features.len(), 2);
+
+        let fast = compute_fast(&db, &cfg, as_of)?;
+        assert_eq!(fast, 2);
+
+        let shortlist = vec!["000001.SZ".to_string()];
+        let full = enrich_symbols_full(&db, as_of, &shortlist)?;
+        assert_eq!(full, 1);
+
+        let loaded = load_full_metrics(&db, as_of, &shortlist);
+        assert!(loaded
+            .values()
+            .any(|metrics| metrics.put_90_3m.unwrap_or(0.0) > 0.0));
+        Ok(())
+    }
 
     #[test]
     #[ignore = "integration smoke uses local full DuckDB snapshot and is too slow for default cargo test"]
     fn smoke_shadow_option_pipeline() {
         let cfg = Settings::load("config.yaml").expect("config");
         let as_of = NaiveDate::from_ymd_opt(2026, 4, 14).unwrap();
-        if storage::exists(cfg.data.research_path()) {
-            let _ = std::fs::remove_file(cfg.data.research_path());
-        }
-        storage::copy_database(cfg.data.raw_path(), cfg.data.research_path())
-            .expect("stage research");
-        let db = storage::open(cfg.data.research_path()).expect("db");
+        let smoke_db = std::env::temp_dir().join(format!(
+            "quant_cn_shadow_smoke_{}.duckdb",
+            std::process::id()
+        ));
+        let smoke_db_wal = smoke_db.with_extension("duckdb.wal");
+        let _ = std::fs::remove_file(&smoke_db);
+        let _ = std::fs::remove_file(&smoke_db_wal);
+        let smoke_db_str = smoke_db.to_str().expect("utf-8 smoke db path");
+        storage::copy_database(cfg.data.raw_path(), smoke_db_str).expect("stage smoke research");
+        let db = storage::open(smoke_db_str).expect("db");
 
         let curves = compute_market_curves(&db, as_of).expect("curves");
         assert!(!curves.is_empty(), "expected non-empty option curves");
@@ -1203,5 +1433,8 @@ mod tests {
             loaded.values().any(|m| m.put_90_3m.unwrap_or(0.0) > 0.0),
             "expected non-empty shadow_full metrics"
         );
+        drop(db);
+        let _ = std::fs::remove_file(smoke_db);
+        let _ = std::fs::remove_file(smoke_db_wal);
     }
 }
