@@ -490,6 +490,8 @@ struct EvStats {
     fills: usize,
     wins: usize,
     losses: usize,
+    ret_sum: f64,
+    ret_sq_sum: f64,
     win_sum: f64,
     loss_sum_abs: f64,
     tail_sum_abs: f64,
@@ -500,10 +502,17 @@ struct EvStats {
 #[derive(Debug)]
 struct EvRow {
     samples: i64,
+    p_fill: f64,
+    mu_ret_pct: f64,
+    tail_loss_pct: f64,
     ev_pct: f64,
+    ev_lcb_80_pct: f64,
+    ev_lcb_95_pct: f64,
     risk_unit_pct: f64,
     ev_per_risk: f64,
     ev_norm_score: f64,
+    ev_norm_lcb_80: f64,
+    ev_norm_lcb_95: f64,
     eligible: bool,
     fail_reasons: String,
 }
@@ -528,6 +537,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     }
     store_paper_trades(db, &trades, as_of)?;
     let ev_rows = store_strategy_ev(db, &trades, as_of)?;
+    store_strategy_model_dataset(db, &trades, as_of)?;
     write_current_analytics(db, &trades, as_of)?;
 
     info!(
@@ -816,6 +826,8 @@ fn store_strategy_ev(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -
         stats.stale_sum += trade.stale_chase_risk;
         if let Some(ret) = trade.result.realized_ret_pct {
             stats.fills += 1;
+            stats.ret_sum += ret;
+            stats.ret_sq_sum += ret * ret;
             match ret {
                 r if r >= WIN_THRESHOLD_PCT => {
                     stats.wins += 1;
@@ -837,10 +849,12 @@ fn store_strategy_ev(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -
         "INSERT OR REPLACE INTO strategy_ev (
             as_of, strategy_key, strategy_family, samples, planned_trades, fills,
             wins, losses, fill_rate, win_rate_raw, win_rate_bayes, avg_win_pct,
-            avg_loss_pct, avg_tail_loss_pct, avg_downside_stress, ev_pct,
-            risk_unit_pct, ev_per_risk, ev_norm_score,
+            avg_loss_pct, avg_tail_loss_pct, avg_downside_stress, p_fill,
+            mu_ret_pct, tail_loss_pct, ev_pct, ev_lcb_80_pct, ev_lcb_95_pct,
+            risk_unit_pct, ev_per_risk, ev_norm_score, ev_norm_lcb_80,
+            ev_norm_lcb_95,
             eligible, fail_reasons, detail_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )?;
 
     let mut count = 0usize;
@@ -854,6 +868,9 @@ fn store_strategy_ev(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -
         let avg_tail = average_or(stats.tail_sum_abs, fills, 1.0);
         let avg_downside = average_or(stats.downside_sum, stats.samples, 0.5);
         let avg_stale = average_or(stats.stale_sum, stats.samples, 0.35);
+        let p_fill = fill_rate;
+        let mu_ret = average_or(stats.ret_sum, fills, 0.0);
+        let realized_std = sample_std(stats.ret_sum, stats.ret_sq_sum, fills);
         let tail_penalty =
             0.20 * (avg_tail - avg_loss).max(0.0) + 0.55 * avg_downside + 0.35 * avg_stale;
         let ev_pct = win_rate_bayes * avg_win
@@ -862,22 +879,35 @@ fn store_strategy_ev(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -
             - tail_penalty;
         let (risk_unit_pct, ev_per_risk, ev_norm_score) =
             normalized_ev_metrics(ev_pct, avg_loss, avg_tail, avg_downside, avg_stale);
+        let ev_lcb_80 = confidence_lcb(ev_pct, realized_std, risk_unit_pct, fills, 1.2816);
+        let ev_lcb_95 = confidence_lcb(ev_pct, realized_std, risk_unit_pct, fills, 1.6449);
+        let ev_norm_lcb_80 = normalized_ev_score(ev_lcb_80, risk_unit_pct);
+        let ev_norm_lcb_95 = normalized_ev_score(ev_lcb_95, risk_unit_pct);
 
-        let fail = ev_fail_reasons(stats.samples, fills, fill_rate, ev_pct, avg_tail);
+        let fail = ev_fail_reasons(stats.samples, fills, fill_rate, ev_pct, ev_lcb_80, avg_tail);
         let eligible = fail.is_empty();
         let detail = json!({
             "ev_formula": "p_win_bayes*avg_win - (1-p_win_bayes)*avg_loss - slippage - tail_penalty",
+            "confidence_formula": "ev_lcb = ev_pct - z * max(realized_std, risk_unit_pct) / sqrt(fills)",
             "normalized_ev_formula": "ev_per_risk = ev_pct / risk_unit_pct; ev_norm_score = sigmoid(ev_per_risk) mapped to 0-100",
             "slippage_pct": SLIPPAGE_PCT,
+            "p_fill": round3(p_fill),
+            "mu_ret_pct": round3(mu_ret),
+            "realized_std_pct": round3(realized_std),
             "avg_stale_chase_risk": round3(avg_stale),
             "tail_penalty_pct": round3(tail_penalty),
             "risk_unit_pct": round3(risk_unit_pct),
             "ev_per_risk": round3(ev_per_risk),
             "ev_norm_score": round3(ev_norm_score),
+            "ev_lcb_80_pct": round3(ev_lcb_80),
+            "ev_lcb_95_pct": round3(ev_lcb_95),
+            "ev_norm_lcb_80": round3(ev_norm_lcb_80),
+            "ev_norm_lcb_95": round3(ev_norm_lcb_95),
             "min_samples": 8,
             "min_fills": 4,
             "min_fill_rate": 0.35,
             "min_ev_pct": 0.15,
+            "min_ev_lcb_80_pct": 0.0,
             "state_machine": "Decision->StrategyFamily->TradeIntent->ExecutionRule->Fill->Outcome->EV",
         })
         .to_string();
@@ -898,10 +928,17 @@ fn store_strategy_ev(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -
             avg_loss,
             avg_tail,
             avg_downside,
+            p_fill,
+            mu_ret,
+            avg_tail,
             ev_pct,
+            ev_lcb_80,
+            ev_lcb_95,
             risk_unit_pct,
             ev_per_risk,
             ev_norm_score,
+            ev_norm_lcb_80,
+            ev_norm_lcb_95,
             eligible,
             fail.join(","),
             detail,
@@ -909,6 +946,139 @@ fn store_strategy_ev(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -
         count += 1;
     }
     Ok(count)
+}
+
+fn store_strategy_model_dataset(
+    db: &Connection,
+    trades: &[PaperTrade],
+    as_of: NaiveDate,
+) -> Result<usize> {
+    let ev_map = load_ev_map(db, as_of)?;
+    db.execute(
+        "DELETE FROM strategy_model_dataset
+         WHERE evaluation_date = CAST(? AS DATE)
+           AND session = ?",
+        duckdb::params![as_of.to_string(), SESSION],
+    )?;
+    db.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS strategy_model_dataset_stage (
+            evaluation_date VARCHAR,
+            report_date VARCHAR,
+            session VARCHAR,
+            symbol VARCHAR,
+            selection_status VARCHAR,
+            strategy_family VARCHAR,
+            strategy_key VARCHAR,
+            execution_rule VARCHAR,
+            action_intent VARCHAR,
+            alpha_state VARCHAR,
+            features_json VARCHAR,
+            reference_close DOUBLE,
+            planned_entry DOUBLE,
+            fill_status VARCHAR,
+            fill_date VARCHAR,
+            fill_price DOUBLE,
+            exit_date VARCHAR,
+            exit_price DOUBLE,
+            realized_ret_pct DOUBLE,
+            max_favorable_pct DOUBLE,
+            max_adverse_pct DOUBLE,
+            p_fill DOUBLE,
+            mu_ret_pct DOUBLE,
+            tail_loss_pct DOUBLE,
+            ev_pct DOUBLE,
+            ev_lcb_80_pct DOUBLE,
+            ev_lcb_95_pct DOUBLE,
+            risk_unit_pct DOUBLE,
+            ev_norm_score DOUBLE,
+            ev_norm_lcb_80 DOUBLE,
+            ev_norm_lcb_95 DOUBLE,
+            detail_json VARCHAR
+        );
+        DELETE FROM strategy_model_dataset_stage;",
+    )?;
+
+    let evaluation_date = as_of.to_string();
+    {
+        let mut appender = db.appender("strategy_model_dataset_stage")?;
+        for trade in trades {
+            let ev = ev_map.get(&trade.strategy_key);
+            let alpha_state = alpha_state(trade, ev);
+            let features = json!({
+                "signal_confidence": trade.decision.signal_confidence,
+                "report_bucket": trade.decision.report_lane.as_str(),
+                "execution_mode": trade.decision.execution_mode.as_str(),
+                "setup_score": round3(trade.decision.setup_score),
+                "continuation_score": round3(trade.decision.continuation_score),
+                "fade_risk": round3(trade.decision.fade_risk),
+                "max_chase_gap_pct": round3(trade.decision.max_chase_gap_pct),
+                "pullback_trigger_pct": round3(trade.decision.pullback_trigger_pct),
+                "shadow_alpha_prob": round3(trade.shadow_alpha_prob),
+                "downside_stress": round3(trade.downside_stress),
+                "stale_chase_risk": round3(trade.stale_chase_risk),
+                "flow_conflict_flag": trade.decision.flow_conflict_flag,
+                "details": trade.decision.details,
+            })
+            .to_string();
+            appender.append_row(duckdb::params![
+                &evaluation_date,
+                trade.decision.report_date.to_string(),
+                SESSION,
+                &trade.decision.symbol,
+                &trade.decision.selection_status_raw,
+                trade.strategy_family.as_str(),
+                &trade.strategy_key,
+                trade.execution_rule.as_str(),
+                trade.intent.as_str(),
+                alpha_state,
+                &features,
+                trade.decision.reference_close,
+                trade.planned_entry,
+                trade.fill.status.as_str(),
+                trade.fill.date.map(|v| v.to_string()),
+                trade.fill.price,
+                trade.result.exit_date.map(|v| v.to_string()),
+                trade.result.exit_price,
+                trade.result.realized_ret_pct,
+                trade.result.max_favorable_pct,
+                trade.result.max_adverse_pct,
+                ev.map(|row| row.p_fill),
+                ev.map(|row| row.mu_ret_pct),
+                ev.map(|row| row.tail_loss_pct),
+                ev.map(|row| row.ev_pct),
+                ev.map(|row| row.ev_lcb_80_pct),
+                ev.map(|row| row.ev_lcb_95_pct),
+                ev.map(|row| row.risk_unit_pct),
+                ev.map(|row| row.ev_norm_score),
+                ev.map(|row| row.ev_norm_lcb_80),
+                ev.map(|row| row.ev_norm_lcb_95),
+                trade.detail.to_string(),
+            ])?;
+        }
+    }
+    db.execute_batch(
+        "INSERT OR REPLACE INTO strategy_model_dataset (
+            evaluation_date, report_date, session, symbol, selection_status,
+            strategy_family, strategy_key, execution_rule, action_intent,
+            alpha_state, features_json, reference_close, planned_entry,
+            fill_status, fill_date, fill_price, exit_date, exit_price,
+            realized_ret_pct, max_favorable_pct, max_adverse_pct, p_fill,
+            mu_ret_pct, tail_loss_pct, ev_pct, ev_lcb_80_pct, ev_lcb_95_pct,
+            risk_unit_pct, ev_norm_score, ev_norm_lcb_80, ev_norm_lcb_95,
+            detail_json
+        )
+        SELECT
+            CAST(evaluation_date AS DATE), CAST(report_date AS DATE), session, symbol,
+            selection_status, strategy_family, strategy_key, execution_rule,
+            action_intent, alpha_state, features_json, reference_close, planned_entry,
+            fill_status, CAST(fill_date AS DATE), fill_price, CAST(exit_date AS DATE),
+            exit_price, realized_ret_pct, max_favorable_pct, max_adverse_pct,
+            p_fill, mu_ret_pct, tail_loss_pct, ev_pct, ev_lcb_80_pct,
+            ev_lcb_95_pct, risk_unit_pct, ev_norm_score, ev_norm_lcb_80,
+            ev_norm_lcb_95, detail_json
+        FROM strategy_model_dataset_stage",
+    )?;
+    Ok(trades.len())
 }
 
 fn write_current_analytics(db: &Connection, trades: &[PaperTrade], as_of: NaiveDate) -> Result<()> {
@@ -924,21 +1094,34 @@ fn write_current_analytics(db: &Connection, trades: &[PaperTrade], as_of: NaiveD
     for trade in trades.iter().filter(|t| t.decision.report_date == as_of) {
         let ev = ev_map.get(&trade.strategy_key);
         let ev_pct = ev.map(|row| row.ev_pct).unwrap_or(0.0);
+        let ev_lcb_80 = ev.map(|row| row.ev_lcb_80_pct).unwrap_or(0.0);
+        let ev_lcb_95 = ev.map(|row| row.ev_lcb_95_pct).unwrap_or(0.0);
         let risk_unit_pct = ev.map(|row| row.risk_unit_pct).unwrap_or(0.0);
         let ev_per_risk = ev.map(|row| row.ev_per_risk).unwrap_or(0.0);
         let ev_norm_score = ev.map(|row| row.ev_norm_score).unwrap_or(0.0);
+        let ev_norm_lcb_80 = ev.map(|row| row.ev_norm_lcb_80).unwrap_or(0.0);
+        let ev_norm_lcb_95 = ev.map(|row| row.ev_norm_lcb_95).unwrap_or(0.0);
         let eligible = ev.map(|row| row.eligible).unwrap_or(false);
         let samples = ev.map(|row| row.samples as f64).unwrap_or(0.0);
+        let state = alpha_state(trade, ev);
         let detail = json!({
             "strategy_family": trade.strategy_family.as_str(),
             "strategy_key": trade.strategy_key,
             "execution_rule": trade.execution_rule.as_str(),
             "action_intent": trade.intent.as_str(),
+            "alpha_state": state,
             "planned_entry": trade.planned_entry.map(round2),
+            "p_fill": ev.map(|row| round3(row.p_fill)).unwrap_or(0.0),
+            "mu_ret_pct": ev.map(|row| round3(row.mu_ret_pct)).unwrap_or(0.0),
+            "tail_loss_pct": ev.map(|row| round3(row.tail_loss_pct)).unwrap_or(0.0),
             "ev_pct": round3(ev_pct),
+            "ev_lcb_80_pct": round3(ev_lcb_80),
+            "ev_lcb_95_pct": round3(ev_lcb_95),
             "risk_unit_pct": round3(risk_unit_pct),
             "ev_per_risk": round3(ev_per_risk),
             "ev_norm_score": round3(ev_norm_score),
+            "ev_norm_lcb_80": round3(ev_norm_lcb_80),
+            "ev_norm_lcb_95": round3(ev_norm_lcb_95),
             "strategy_samples": samples,
             "eligible": eligible,
             "fail_reasons": ev.map(|row| row.fail_reasons.clone()).unwrap_or_else(|| "no_history".to_string()),
@@ -950,9 +1133,13 @@ fn write_current_analytics(db: &Connection, trades: &[PaperTrade], as_of: NaiveD
         .to_string();
         for (metric, value) in [
             ("ev_pct", ev_pct),
+            ("ev_lcb_80_pct", ev_lcb_80),
+            ("ev_lcb_95_pct", ev_lcb_95),
             ("risk_unit_pct", risk_unit_pct),
             ("ev_per_risk", ev_per_risk),
             ("ev_norm_score", ev_norm_score),
+            ("ev_norm_lcb_80", ev_norm_lcb_80),
+            ("ev_norm_lcb_95", ev_norm_lcb_95),
             ("strategy_samples", samples),
             ("eligible", if eligible { 1.0 } else { 0.0 }),
         ] {
@@ -968,11 +1155,40 @@ fn write_current_analytics(db: &Connection, trades: &[PaperTrade], as_of: NaiveD
     Ok(())
 }
 
+fn alpha_state(trade: &PaperTrade, ev: Option<&EvRow>) -> &'static str {
+    if trade.intent == TradeIntent::Avoid {
+        return "blocked_out_of_scope";
+    }
+    if trade.intent == TradeIntent::Observe {
+        return "research_setup";
+    }
+    let Some(ev) = ev else {
+        return "research_setup";
+    };
+    if ev.eligible {
+        return "positive_ev_setup";
+    }
+    if ev.ev_pct <= 0.0 || ev.fail_reasons.contains("ev_not_positive_enough") {
+        return "blocked_negative_ev";
+    }
+    if ev.fail_reasons.contains("samples_lt") || ev.fail_reasons.contains("fills_lt") {
+        return "research_setup";
+    }
+    if ev.fail_reasons.contains("tail_loss") {
+        return "blocked_tail_risk";
+    }
+    "research_setup"
+}
+
 fn load_ev_map(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, EvRow>> {
     let mut stmt = db.prepare(
-        "SELECT strategy_key, COALESCE(samples, 0), COALESCE(ev_pct, 0),
-                COALESCE(risk_unit_pct, 0), COALESCE(ev_per_risk, 0),
-                COALESCE(ev_norm_score, 0), eligible, COALESCE(fail_reasons, '')
+        "SELECT strategy_key, COALESCE(samples, 0), COALESCE(p_fill, 0),
+                COALESCE(mu_ret_pct, 0), COALESCE(tail_loss_pct, 0),
+                COALESCE(ev_pct, 0), COALESCE(ev_lcb_80_pct, 0),
+                COALESCE(ev_lcb_95_pct, 0), COALESCE(risk_unit_pct, 0),
+                COALESCE(ev_per_risk, 0), COALESCE(ev_norm_score, 0),
+                COALESCE(ev_norm_lcb_80, 0), COALESCE(ev_norm_lcb_95, 0),
+                eligible, COALESCE(fail_reasons, '')
          FROM strategy_ev
          WHERE as_of = CAST(? AS DATE)",
     )?;
@@ -981,12 +1197,19 @@ fn load_ev_map(db: &Connection, as_of: NaiveDate) -> Result<HashMap<String, EvRo
             row.get::<_, String>(0)?,
             EvRow {
                 samples: row.get::<_, i64>(1).unwrap_or(0),
-                ev_pct: row.get::<_, f64>(2).unwrap_or(0.0),
-                risk_unit_pct: row.get::<_, f64>(3).unwrap_or(0.0),
-                ev_per_risk: row.get::<_, f64>(4).unwrap_or(0.0),
-                ev_norm_score: row.get::<_, f64>(5).unwrap_or(0.0),
-                eligible: row.get::<_, bool>(6).unwrap_or(false),
-                fail_reasons: row.get::<_, String>(7).unwrap_or_default(),
+                p_fill: row.get::<_, f64>(2).unwrap_or(0.0),
+                mu_ret_pct: row.get::<_, f64>(3).unwrap_or(0.0),
+                tail_loss_pct: row.get::<_, f64>(4).unwrap_or(0.0),
+                ev_pct: row.get::<_, f64>(5).unwrap_or(0.0),
+                ev_lcb_80_pct: row.get::<_, f64>(6).unwrap_or(0.0),
+                ev_lcb_95_pct: row.get::<_, f64>(7).unwrap_or(0.0),
+                risk_unit_pct: row.get::<_, f64>(8).unwrap_or(0.0),
+                ev_per_risk: row.get::<_, f64>(9).unwrap_or(0.0),
+                ev_norm_score: row.get::<_, f64>(10).unwrap_or(0.0),
+                ev_norm_lcb_80: row.get::<_, f64>(11).unwrap_or(0.0),
+                ev_norm_lcb_95: row.get::<_, f64>(12).unwrap_or(0.0),
+                eligible: row.get::<_, bool>(13).unwrap_or(false),
+                fail_reasons: row.get::<_, String>(14).unwrap_or_default(),
             },
         ))
     })?;
@@ -1105,6 +1328,7 @@ fn ev_fail_reasons(
     fills: usize,
     fill_rate: f64,
     ev_pct: f64,
+    ev_lcb_80_pct: f64,
     avg_tail: f64,
 ) -> Vec<&'static str> {
     [
@@ -1112,6 +1336,7 @@ fn ev_fail_reasons(
         (fills < 4, "fills_lt_4"),
         (fill_rate < 0.35, "fill_rate_lt_35pct"),
         (ev_pct <= 0.15, "ev_not_positive_enough"),
+        (ev_lcb_80_pct <= 0.0, "ev_lcb80_not_positive"),
         (avg_tail > 5.5, "tail_loss_gt_5_5pct"),
     ]
     .into_iter()
@@ -1149,6 +1374,29 @@ fn average_or(sum: f64, n: usize, default: f64) -> f64 {
     }
 }
 
+fn sample_std(sum: f64, sq_sum: f64, n: usize) -> f64 {
+    if n < 2 {
+        return 0.0;
+    }
+    let mean = sum / n as f64;
+    let variance = (sq_sum / n as f64 - mean * mean).max(0.0);
+    variance.sqrt()
+}
+
+fn confidence_lcb(
+    ev_pct: f64,
+    realized_std_pct: f64,
+    risk_unit_pct: f64,
+    fills: usize,
+    z: f64,
+) -> f64 {
+    if fills == 0 {
+        return ev_pct - z * risk_unit_pct.max(1.0);
+    }
+    let conservative_std = realized_std_pct.max(risk_unit_pct).max(0.50);
+    ev_pct - z * conservative_std / (fills as f64).sqrt()
+}
+
 fn normalized_ev_metrics(
     ev_pct: f64,
     avg_loss_pct: f64,
@@ -1161,8 +1409,13 @@ fn normalized_ev_metrics(
         + 0.35 * avg_stale_chase_risk
         + SLIPPAGE_PCT;
     let ev_per_risk = ev_pct / risk_unit_pct.max(0.25);
-    let ev_norm_score = 100.0 / (1.0 + (-3.0 * ev_per_risk).exp());
+    let ev_norm_score = normalized_ev_score(ev_pct, risk_unit_pct);
     (risk_unit_pct, ev_per_risk, ev_norm_score)
+}
+
+fn normalized_ev_score(ev_pct: f64, risk_unit_pct: f64) -> f64 {
+    let ev_per_risk = ev_pct / risk_unit_pct.max(0.25);
+    100.0 / (1.0 + (-3.0 * ev_per_risk).exp())
 }
 
 fn pct_change(target: f64, base: f64) -> f64 {

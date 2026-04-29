@@ -30,6 +30,29 @@ def fmt(value: Any, digits: int = 2) -> str:
         return str(value)
 
 
+def price_plan(
+    planned_entry: Any,
+    reference_close: Any,
+    risk_unit_pct: Any,
+) -> tuple[str, str, str, str, str]:
+    """Build a 1R execution band from the strategy family's realized risk unit."""
+    try:
+        entry = float(planned_entry if planned_entry is not None else reference_close)
+        risk = float(risk_unit_pct)
+        if not (entry > 0 and risk > 0):
+            raise ValueError
+    except Exception:
+        entry_str = fmt(planned_entry if planned_entry is not None else reference_close)
+        return entry_str, "-", "-", "-", "等EV样本补齐后再给1R带"
+    return (
+        fmt(entry),
+        f"{risk:.2f}%",
+        fmt(entry * (1.0 - risk / 100.0)),
+        fmt(entry * (1.0 + risk / 100.0)),
+        "T+2未越过+1R则退出复核",
+    )
+
+
 def compact_key(key: str) -> str:
     parts = key.split("|")
     if len(parts) >= 5:
@@ -62,6 +85,7 @@ def fail_zh(fail: str) -> str:
         "fills_lt_4": "成交样本少于4",
         "fill_rate_lt_35pct": "成交率不足35%",
         "ev_not_positive_enough": "历史EV不够",
+        "ev_lcb80_not_positive": "EV置信下界仍为负",
         "tail_loss_gt_5_5pct": "尾部亏损偏大",
     }
     return "、".join(labels.get(part, part) for part in fail.split(",") if part)
@@ -104,31 +128,70 @@ def query_rows(
     if missing:
         return [], [], (0, 0, 0), f"missing table(s): {', '.join(missing)}"
 
+    has_model_dataset = table_exists(con, "strategy_model_dataset")
     strategies = con.execute(
         """
-        SELECT strategy_key, samples, fills, win_rate_bayes, ev_pct, risk_unit_pct,
-               ev_per_risk, ev_norm_score, eligible, COALESCE(fail_reasons, '')
+        SELECT strategy_key, samples, fills, win_rate_bayes, ev_pct,
+               COALESCE(ev_lcb_80_pct, NULL) AS ev_lcb_80_pct,
+               risk_unit_pct, ev_per_risk, ev_norm_score,
+               COALESCE(ev_norm_lcb_80, ev_norm_score) AS ev_norm_lcb_80,
+               eligible, COALESCE(fail_reasons, '')
         FROM strategy_ev
         WHERE as_of = CAST(? AS DATE)
-        ORDER BY eligible DESC, ev_norm_score DESC, samples DESC
+        ORDER BY eligible DESC, ev_norm_lcb_80 DESC, ev_pct DESC, samples DESC
         LIMIT 8
         """,
         [date],
     ).fetchall()
-    candidates = con.execute(
-        """
-        SELECT p.symbol, COALESCE(s.name, ''), p.strategy_family, p.action_intent,
-               p.execution_rule, p.fill_status, p.label, p.planned_entry,
-               ev.ev_pct, ev.ev_norm_score, ev.samples, ev.eligible, COALESCE(ev.fail_reasons, '')
-        FROM paper_trades p
-        LEFT JOIN stock_basic s ON s.ts_code = p.symbol
-        LEFT JOIN strategy_ev ev ON ev.as_of = CAST(? AS DATE) AND ev.strategy_key = p.strategy_key
-        WHERE p.report_date = CAST(? AS DATE) AND p.action_intent = 'TRADE'
-        ORDER BY COALESCE(ev.eligible, FALSE) DESC, COALESCE(ev.ev_norm_score, -999) DESC, p.symbol
-        LIMIT 12
-        """,
-        [date, date],
-    ).fetchall()
+    if has_model_dataset:
+        candidates = con.execute(
+            """
+            SELECT p.symbol, COALESCE(s.name, ''), p.strategy_family, p.action_intent,
+                   p.execution_rule, p.fill_status, p.label, p.planned_entry,
+                   p.reference_close, ev.ev_pct, COALESCE(ev.ev_lcb_80_pct, NULL),
+                   ev.risk_unit_pct, ev.ev_norm_score,
+                   COALESCE(ev.ev_norm_lcb_80, ev.ev_norm_score), ev.samples,
+                   ev.eligible, COALESCE(ev.fail_reasons, ''), m.alpha_state
+            FROM paper_trades p
+            LEFT JOIN stock_basic s ON s.ts_code = p.symbol
+            LEFT JOIN strategy_ev ev ON ev.as_of = CAST(? AS DATE) AND ev.strategy_key = p.strategy_key
+            LEFT JOIN strategy_model_dataset m
+              ON m.evaluation_date = CAST(? AS DATE)
+             AND m.report_date = p.report_date
+             AND m.session = p.session
+             AND m.symbol = p.symbol
+             AND m.selection_status = p.selection_status
+             AND m.strategy_key = p.strategy_key
+             AND m.execution_rule = p.execution_rule
+            WHERE p.report_date = CAST(? AS DATE) AND p.action_intent = 'TRADE'
+            ORDER BY COALESCE(ev.eligible, FALSE) DESC,
+                     COALESCE(ev.ev_norm_lcb_80, ev.ev_norm_score, -999) DESC,
+                     COALESCE(ev.ev_pct, -999) DESC,
+                     p.symbol
+            LIMIT 12
+            """,
+            [date, date, date],
+        ).fetchall()
+    else:
+        candidates = con.execute(
+            """
+            SELECT p.symbol, COALESCE(s.name, ''), p.strategy_family, p.action_intent,
+                   p.execution_rule, p.fill_status, p.label, p.planned_entry,
+                   p.reference_close, ev.ev_pct, NULL AS ev_lcb_80_pct,
+                   ev.risk_unit_pct, ev.ev_norm_score,
+                   ev.ev_norm_score AS ev_norm_lcb_80, ev.samples,
+                   ev.eligible, COALESCE(ev.fail_reasons, ''), NULL AS alpha_state
+            FROM paper_trades p
+            LEFT JOIN stock_basic s ON s.ts_code = p.symbol
+            LEFT JOIN strategy_ev ev ON ev.as_of = CAST(? AS DATE) AND ev.strategy_key = p.strategy_key
+            WHERE p.report_date = CAST(? AS DATE) AND p.action_intent = 'TRADE'
+            ORDER BY COALESCE(ev.eligible, FALSE) DESC,
+                     COALESCE(ev.ev_norm_score, -999) DESC,
+                     p.symbol
+            LIMIT 12
+            """,
+            [date, date],
+        ).fetchall()
     counts = con.execute(
         """
         SELECT
@@ -147,26 +210,43 @@ def build_section(reports_dir: Path, db_path: Path, date: str) -> str:
     ev_status, selected, evaluated = load_bulletin_status(reports_dir, date)
     strategies, candidates, counts, db_status = query_rows(db_path, date)
     total, trade_count, observe_count = counts or (0, 0, 0)
-    local_eligible = sum(1 for row in strategies if bool(row[8]))
-    eligible_strategies = [row for row in strategies if bool(row[8])]
-    eligible_candidates = [row for row in candidates if bool(row[11])]
+    eligible_strategies = [row for row in strategies if bool(row[10])]
+    eligible_candidates = [row for row in candidates if bool(row[15])]
+    blocked_candidates = [row for row in candidates if str(row[17] or "") == "blocked_negative_ev"]
     best_strategy = eligible_strategies[0] if eligible_strategies else (strategies[0] if strategies else None)
 
     if ev_status == "passed":
-        execution_state = "30日稳定门禁已放行，可按执行层规则筛出正式候选。"
+        execution_state = "正式执行层已开放；仍需看当日执行约束。"
     elif ev_status == "pending":
-        execution_state = "30日稳定门禁还没跑完，不能把候选写成正式执行信号。"
+        execution_state = "历史EV评估未完成；今天只能看候选，不能写成正式买入。"
     elif ev_status == "failed":
-        execution_state = "30日稳定门禁未放行，所以今天没有正式执行信号。"
+        execution_state = "没有正式执行信号；候选只允许做回踩/盘口复核。"
     else:
-        execution_state = f"30日稳定门禁状态为 `{ev_status}`，需要人工复核。"
+        execution_state = f"历史EV状态为 `{ev_status}`，需要人工复核。"
 
     if best_strategy is not None:
-        best_key, samples, fills, p_win, ev_pct, risk_unit, ev_per_risk, ev_norm, eligible, fail = best_strategy
+        (
+            best_key,
+            samples,
+            fills,
+            _p_win,
+            ev_pct,
+            ev_lcb80,
+            _risk_unit,
+            _ev_per_risk,
+            ev_norm,
+            ev_norm_lcb80,
+            eligible,
+            fail,
+        ) = best_strategy
+        confidence_text = (
+            "置信下界也为正"
+            if ev_lcb80 is not None and float(ev_lcb80) > 0
+            else f"但80%置信下界仍为 {fmt(ev_lcb80)}%"
+        )
         best_line = (
-            f"本地纸面回放里，最好的一族是「{compact_key_zh(str(best_key))}」："
-            f"样本 {samples}、成交 {fills}、历史EV {fmt(ev_pct)}%、EV得分 {fmt(ev_norm, 1)}，"
-            f"{'可进入复核层' if eligible else '仍未过本地EV'}。"
+            f"最接近放行的是「{compact_key_zh(str(best_key))}」："
+            f"样本 {samples}、成交 {fills}、EV点估计 {fmt(ev_pct)}%、{confidence_text}。"
         )
     else:
         best_line = "本地纸面回放暂无可用策略族。"
@@ -178,20 +258,23 @@ def build_section(reports_dir: Path, db_path: Path, date: str) -> str:
         "",
         f"结论：{execution_state}",
         "",
-        f"- 今天不是没有候选：系统记录了 {total or 0} 个候选，其中 {trade_count or 0} 个进入纸面交易、{observe_count or 0} 个只观察。",
-        f"- 今天不是正式买入清单：30日门禁截至 {evaluated} 仍未选出可稳定复用的执行策略。",
-        f"- 本地有正向线索：{best_line}",
-        f"- 可复核但未升级执行的代码：{candidate_codes}。",
-        "- A股同日候选显示 pending 是正常的：T+1 还没到可评价窗口，不代表信号没生成。",
+        f"- 候选池：{total or 0} 个候选，{trade_count or 0} 个进入纸面交易，{observe_count or 0} 个只观察。",
+        f"- 正式执行：0。历史EV评估截至 {evaluated}，没有策略族同时满足正EV和置信下界。",
+        f"- 复核层：{candidate_codes}。这些只看回踩、集合竞价和开盘承接，不是买入清单。",
+        f"- 阻断层：{len(blocked_candidates)} 个纸面交易候选被标为历史EV不足或置信下界为负。",
+        f"- 口径解释：{best_line}",
+        "- T+1说明：当天候选显示 pending 是正常的，未到可退出日不能算胜负。",
         "",
     ]
 
-    if eligible_candidates:
+    display_candidates = eligible_candidates or candidates[:6]
+    if display_candidates:
+        candidate_title = "### 复核名单" if eligible_candidates else "### 纸面候选处理线（非执行）"
         lines += [
-            "### 复核名单",
+            candidate_title,
             "",
-            "| 代码 | 名称 | 系统分组 | 计划观察价 | 历史EV | 样本 | 状态 |",
-            "|---|---|---|---:|---:|---:|---|",
+            "| 代码 | 名称 | 系统分组 | 入场 | 1R波动 | 处理线 | +1R复核 | 时间规则 | EV | EV80下界 | 样本 | 状态 |",
+            "|---|---|---|---:|---:|---:|---:|---|---:|---:|---:|---|",
         ]
         for (
             symbol,
@@ -202,34 +285,47 @@ def build_section(reports_dir: Path, db_path: Path, date: str) -> str:
             fill_status,
             label,
             planned_entry,
+            reference_close,
             ev_pct,
+            ev_lcb80,
+            risk_unit_pct,
             ev_norm,
+            ev_norm_lcb80,
             samples,
             eligible,
             fail,
-        ) in eligible_candidates:
+            alpha_state,
+        ) in display_candidates:
+            entry, risk, lower, upper, time_rule = price_plan(
+                planned_entry, reference_close, risk_unit_pct
+            )
+            state = (
+                "回踩/盘口复核，不是执行信号"
+                if eligible
+                else f"非执行；{fail_zh(str(fail or ''))}"
+            )
             lines.append(
-                f"| {symbol} | {name or '-'} | {family} | {fmt(planned_entry)} | "
-                f"{fmt(ev_pct)}% | {samples or '-'} | 回踩/盘口复核，不是执行信号 |"
+                f"| {symbol} | {name or '-'} | {family} | {entry} | {risk} | {lower} | {upper} | "
+                f"{time_rule} | {fmt(ev_pct)}% | {fmt(ev_lcb80)}% | {samples or '-'} | {state} |"
             )
         lines.append("")
 
     if strategies:
         lines += [
-            "### 系统审计",
+            "### 口径审计",
             "",
-            "| 策略族 | 样本 | 成交 | 历史EV | EV得分 | 结论 |",
+            "| 策略族 | 样本 | 成交 | EV | EV80下界 | 结论 |",
             "|---|---:|---:|---:|---:|---|",
         ]
-        for key, samples, fills, p_win, ev_pct, risk_unit, ev_per_risk, ev_norm, eligible, fail in strategies[:6]:
+        for key, samples, fills, _p_win, ev_pct, ev_lcb80, _risk_unit, _ev_per_risk, ev_norm, ev_norm_lcb80, eligible, fail in strategies[:6]:
             lines.append(
                 f"| {compact_key_zh(str(key))} | {samples} | {fills} | {fmt(ev_pct)}% | "
-                f"{fmt(ev_norm, 1)} | {'复核层通过' if eligible else fail_zh(fail)} |"
+                f"{fmt(ev_lcb80)}% | {'复核层通过' if eligible else fail_zh(fail)} |"
             )
         lines.append("")
 
     lines.append(
-        f"内部审计：db_status=`{db_status}`，selected_policy=`{selected}`。这两个字段只用于排错，不应被当成交易结论。"
+        f"技术审计：db_status=`{db_status}`，selected_policy=`{selected}`。这两个字段只用于排错。"
     )
     return "\n".join(lines).rstrip() + "\n"
 
@@ -238,24 +334,25 @@ def build_scorecard_section(reports_dir: Path, db_path: Path, date: str) -> str:
     ev_status, _selected, evaluated = load_bulletin_status(reports_dir, date)
     strategies, candidates, counts, db_status = query_rows(db_path, date)
     total, trade_count, observe_count = counts or (0, 0, 0)
-    eligible_candidates = [row for row in candidates if bool(row[11])]
-    eligible_strategies = [row for row in strategies if bool(row[8])]
+    eligible_candidates = [row for row in candidates if bool(row[15])]
+    blocked_candidates = [row for row in candidates if str(row[17] or "") == "blocked_negative_ev"]
+    eligible_strategies = [row for row in strategies if bool(row[10])]
     best_strategy = eligible_strategies[0] if eligible_strategies else (strategies[0] if strategies else None)
 
     if ev_status == "failed":
-        gate_sentence = f"30日稳定门禁已评估到 {evaluated}，但没有放行正式执行策略。"
+        gate_sentence = f"历史EV评估到 {evaluated}，没有放行正式执行策略。"
     elif ev_status == "pending":
-        gate_sentence = "30日稳定门禁尚未完成评估，当前不能把候选写成正式执行信号。"
+        gate_sentence = "历史EV评估尚未完成，当前不能把候选写成正式执行信号。"
     elif ev_status == "passed":
-        gate_sentence = "30日稳定门禁已放行，正式执行候选仍需满足当日执行约束。"
+        gate_sentence = "历史EV层已放行，正式执行候选仍需满足当日执行约束。"
     else:
-        gate_sentence = f"30日稳定门禁状态为 `{ev_status}`，需要人工复核。"
+        gate_sentence = f"历史EV状态为 `{ev_status}`，需要人工复核。"
 
     if best_strategy is not None:
-        key, samples, fills, _p_win, ev_pct, _risk_unit, _ev_per_risk, ev_norm, eligible, fail = best_strategy
+        key, samples, fills, _p_win, ev_pct, ev_lcb80, _risk_unit, _ev_per_risk, ev_norm, ev_norm_lcb80, eligible, fail = best_strategy
         best_sentence = (
-            f"本地纸面回放最好的一族是「{compact_key_zh(str(key))}」，"
-            f"样本 {samples}、成交 {fills}、历史EV {fmt(ev_pct)}%、EV得分 {fmt(ev_norm, 1)}；"
+            f"最接近放行的一族是「{compact_key_zh(str(key))}」，"
+            f"样本 {samples}、成交 {fills}、EV {fmt(ev_pct)}%、EV80下界 {fmt(ev_lcb80)}%；"
             f"{'可进入复核层' if eligible else fail_zh(fail)}。"
         )
     else:
@@ -271,7 +368,8 @@ def build_scorecard_section(reports_dir: Path, db_path: Path, date: str) -> str:
                 f"{gate_sentence}"
                 f"{best_sentence}"
                 f"可复核但未升级执行的代码：{codes}。"
-                "因此今天的问题不是“没有股票”，而是“有候选，但还没有通过历史EV和稳定门禁成为正式执行信号”。"
+                f"另有 {len(blocked_candidates)} 个纸面交易候选因历史EV或置信下界不足被阻断。"
+                "因此今天的问题不是“没有股票”，而是“有候选，但还没有通过历史EV成为正式执行信号”。"
             ),
         ]
     ).rstrip() + "\n"
@@ -328,7 +426,7 @@ def sanitize_report_language(report_text: str, reports_dir: Path, db_path: Path,
                 [
                     "### 做多",
                     "",
-                    "本期无可执行做多。原因不是没有候选，而是30日稳定门禁未放行；当前正EV候选只能进入回踩/盘口复核层。Headline=uncertain、gate_multiplier=0.70 时，个股线索不能上升成市场主线。",
+                    "本期无可执行做多。原因不是没有候选，而是历史EV层未放行；当前候选只能进入回踩/盘口复核层。Headline=uncertain、gate_multiplier=0.70 时，个股线索不能上升成市场主线。",
                 ]
             )
             + "\n",

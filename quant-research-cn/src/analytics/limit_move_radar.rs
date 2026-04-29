@@ -71,9 +71,35 @@ struct NextDayLabelRow {
     evaluation_date: String,
     name: String,
     pct_chg: f64,
+    high_ret_pct: f64,
     high: f64,
     low: f64,
     close: f64,
+}
+
+#[derive(Debug, Clone)]
+struct ScoreSnapshot {
+    ts_code: String,
+    metric: &'static str,
+    score: f64,
+    scope: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NextDayOutcome {
+    ret_pct: f64,
+    limit_up: bool,
+    limit_down: bool,
+    touched_limit_up: bool,
+    failed_board: bool,
+}
+
+#[derive(Debug, Default)]
+struct BacktestBucket {
+    samples: usize,
+    hits: usize,
+    failed_board: usize,
+    ret_sum: f64,
 }
 
 pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
@@ -85,6 +111,10 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
 
     let industry_heat = compute_industry_heat(&rows);
     let next_day_labels = load_next_day_labels(db, as_of)?;
+    let next_day_outcomes: HashMap<String, NextDayOutcome> = next_day_labels
+        .iter()
+        .map(|row| (row.ts_code.clone(), next_day_outcome(row)))
+        .collect();
 
     db.execute_batch(
         "CREATE TEMP TABLE IF NOT EXISTS limit_move_radar_stage (
@@ -99,6 +129,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     )?;
 
     let mut written = 0usize;
+    let mut score_snapshots = Vec::new();
     {
         let mut appender = db.appender("limit_move_radar_stage")?;
         for row in rows {
@@ -189,6 +220,12 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
                 ("limit_up_radar_score", up_score),
                 ("limit_down_risk_score", down_score),
             ] {
+                score_snapshots.push(ScoreSnapshot {
+                    ts_code: row.ts_code.clone(),
+                    metric,
+                    score: value,
+                    scope: board_scope(&row.ts_code, &row.name),
+                });
                 appender.append_row(duckdb::params![
                     &row.ts_code,
                     &date_str,
@@ -212,8 +249,9 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     db.execute_batch(
         "INSERT INTO analytics (ts_code, as_of, module, metric, value, detail)
          SELECT ts_code, CAST(as_of AS DATE), module, metric, value, detail
-         FROM limit_move_radar_stage",
+        FROM limit_move_radar_stage",
     )?;
+    store_limit_move_backtest(db, as_of, &score_snapshots, &next_day_outcomes)?;
 
     info!(symbols = written, "limit_move_radar complete");
     Ok(written)
@@ -232,14 +270,18 @@ fn append_next_day_label(
         row.low,
         row.close,
     );
+    let outcome = next_day_outcome(row);
     let detail = json!({
         "data_scope": "post_close_label_only_not_for_signal_generation",
         "evaluation_date": row.evaluation_date,
         "name": row.name,
         "price_limit_pct": round2(price_limit_pct(&row.ts_code, &row.name)),
         "next_day_ret_pct": round2(row.pct_chg),
+        "next_day_high_ret_pct": round2(row.high_ret_pct),
         "next_day_limit_up": censor == CensorSide::Right,
         "next_day_limit_down": censor == CensorSide::Left,
+        "next_day_touched_limit_up": outcome.touched_limit_up,
+        "next_day_failed_board": outcome.failed_board,
     })
     .to_string();
 
@@ -255,6 +297,14 @@ fn append_next_day_label(
         (
             "next_day_limit_down_label",
             if censor == CensorSide::Left { 1.0 } else { 0.0 },
+        ),
+        (
+            "next_day_touched_limit_up_label",
+            if outcome.touched_limit_up { 1.0 } else { 0.0 },
+        ),
+        (
+            "next_day_failed_board_label",
+            if outcome.failed_board { 1.0 } else { 0.0 },
         ),
         ("next_day_ret_pct", row.pct_chg),
     ] {
@@ -449,6 +499,10 @@ fn load_next_day_labels(db: &Connection, as_of: NaiveDate) -> Result<Vec<NextDay
                 CAST(p.trade_date AS VARCHAR),
                 COALESCE(sb.name, ''),
                 COALESCE(p.pct_chg, 0),
+                CASE WHEN COALESCE(p.pre_close, 0) > 0
+                     THEN (COALESCE(p.high, 0) / p.pre_close - 1) * 100
+                     ELSE COALESCE(p.pct_chg, 0)
+                END AS high_ret_pct,
                 COALESCE(p.high, 0),
                 COALESCE(p.low, 0),
                 COALESCE(p.close, 0)
@@ -464,13 +518,137 @@ fn load_next_day_labels(db: &Connection, as_of: NaiveDate) -> Result<Vec<NextDay
             evaluation_date: row.get::<_, String>(1)?,
             name: row.get::<_, String>(2).unwrap_or_default(),
             pct_chg: row.get::<_, f64>(3).unwrap_or(0.0),
-            high: row.get::<_, f64>(4).unwrap_or(0.0),
-            low: row.get::<_, f64>(5).unwrap_or(0.0),
-            close: row.get::<_, f64>(6).unwrap_or(0.0),
+            high_ret_pct: row.get::<_, f64>(4).unwrap_or(0.0),
+            high: row.get::<_, f64>(5).unwrap_or(0.0),
+            low: row.get::<_, f64>(6).unwrap_or(0.0),
+            close: row.get::<_, f64>(7).unwrap_or(0.0),
         })
     })?;
 
     Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+fn next_day_outcome(row: &NextDayLabelRow) -> NextDayOutcome {
+    let limit = price_limit_pct(&row.ts_code, &row.name);
+    let censor = infer_censor_side(
+        &row.ts_code,
+        &row.name,
+        row.pct_chg,
+        row.high,
+        row.low,
+        row.close,
+    );
+    let touched_limit_up = row.high_ret_pct >= limit - 0.20;
+    let limit_up = censor == CensorSide::Right;
+    NextDayOutcome {
+        ret_pct: row.pct_chg,
+        limit_up,
+        limit_down: censor == CensorSide::Left,
+        touched_limit_up,
+        failed_board: touched_limit_up && !limit_up,
+    }
+}
+
+fn store_limit_move_backtest(
+    db: &Connection,
+    as_of: NaiveDate,
+    scores: &[ScoreSnapshot],
+    outcomes: &HashMap<String, NextDayOutcome>,
+) -> Result<()> {
+    db.execute(
+        "DELETE FROM limit_move_radar_backtest WHERE as_of = CAST(? AS DATE)",
+        duckdb::params![as_of.to_string()],
+    )?;
+    if outcomes.is_empty() {
+        return Ok(());
+    }
+
+    let mut buckets: HashMap<(String, String, String), BacktestBucket> = HashMap::new();
+    for score in scores {
+        let Some(outcome) = outcomes.get(&score.ts_code) else {
+            continue;
+        };
+        for scope in ["all", scope_group(score.scope)] {
+            let key = (
+                score.metric.to_string(),
+                score_bucket(score.score).to_string(),
+                scope.to_string(),
+            );
+            let bucket = buckets.entry(key).or_default();
+            bucket.samples += 1;
+            bucket.ret_sum += outcome.ret_pct;
+            let hit = match score.metric {
+                "limit_up_radar_score" => outcome.limit_up,
+                "limit_down_risk_score" => outcome.limit_down,
+                _ => false,
+            };
+            if hit {
+                bucket.hits += 1;
+            }
+            if score.metric == "limit_up_radar_score" && outcome.failed_board {
+                bucket.failed_board += 1;
+            }
+        }
+    }
+
+    let mut insert = db.prepare(
+        "INSERT OR REPLACE INTO limit_move_radar_backtest (
+            as_of, metric, score_bucket, scope, samples, hits, hit_rate,
+            failed_board_count, failed_board_rate, avg_next_ret_pct, detail_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )?;
+    for ((metric, bucket_name, scope), bucket) in buckets {
+        if bucket.samples == 0 {
+            continue;
+        }
+        let hit_rate = bucket.hits as f64 / bucket.samples as f64;
+        let failed_board_rate = bucket.failed_board as f64 / bucket.samples as f64;
+        let avg_next_ret = bucket.ret_sum / bucket.samples as f64;
+        let detail = json!({
+            "data_scope": "post_close_label_backtest_only",
+            "metric": metric,
+            "score_bucket": bucket_name,
+            "scope": scope,
+            "samples": bucket.samples,
+            "hits": bucket.hits,
+            "hit_rate": round3(hit_rate),
+            "failed_board_count": bucket.failed_board,
+            "failed_board_rate": round3(failed_board_rate),
+            "avg_next_ret_pct": round3(avg_next_ret),
+        })
+        .to_string();
+        insert.execute(duckdb::params![
+            as_of.to_string(),
+            metric,
+            bucket_name,
+            scope,
+            bucket.samples as i64,
+            bucket.hits as i64,
+            hit_rate,
+            bucket.failed_board as i64,
+            failed_board_rate,
+            avg_next_ret,
+            detail,
+        ])?;
+    }
+    Ok(())
+}
+
+fn scope_group(scope: &str) -> &'static str {
+    if scope == "mainboard_10cm" {
+        "mainboard_10cm"
+    } else {
+        "out_of_scope"
+    }
+}
+
+fn score_bucket(score: f64) -> &'static str {
+    match score {
+        v if v >= 0.75 => ">=0.75",
+        v if v >= 0.65 => "0.65-0.75",
+        v if v >= 0.55 => "0.55-0.65",
+        _ => "<0.55",
+    }
 }
 
 fn latest_closed_cst_date() -> NaiveDate {

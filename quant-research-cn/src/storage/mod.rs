@@ -107,6 +107,8 @@ pub fn restore_report_review_history(src: &str, dst: &str) -> Result<()> {
         copy_attached_table_compatible(&con, "algorithm_postmortem")?;
         copy_attached_table_compatible(&con, "paper_trades")?;
         copy_attached_table_compatible(&con, "strategy_ev")?;
+        copy_attached_table_compatible(&con, "strategy_model_dataset")?;
+        copy_attached_table_compatible(&con, "limit_move_radar_backtest")?;
         Ok(())
     })();
     con.execute_batch("DETACH report_history;")?;

@@ -625,10 +625,17 @@ pub const CREATE_TABLES: &str = "
         avg_loss_pct           DOUBLE,
         avg_tail_loss_pct      DOUBLE,
         avg_downside_stress    DOUBLE,
+        p_fill                 DOUBLE,
+        mu_ret_pct             DOUBLE,
+        tail_loss_pct          DOUBLE,
         ev_pct                 DOUBLE,
+        ev_lcb_80_pct          DOUBLE,
+        ev_lcb_95_pct          DOUBLE,
         risk_unit_pct          DOUBLE,
         ev_per_risk            DOUBLE,
         ev_norm_score          DOUBLE,
+        ev_norm_lcb_80         DOUBLE,
+        ev_norm_lcb_95         DOUBLE,
         eligible              BOOLEAN DEFAULT FALSE,
         fail_reasons           VARCHAR,
         detail_json            VARCHAR,
@@ -636,7 +643,67 @@ pub const CREATE_TABLES: &str = "
         PRIMARY KEY (as_of, strategy_key)
     );
 
+    CREATE TABLE IF NOT EXISTS strategy_model_dataset (
+        evaluation_date        DATE NOT NULL,
+        report_date            DATE NOT NULL,
+        session                VARCHAR NOT NULL,
+        symbol                 VARCHAR NOT NULL,
+        selection_status       VARCHAR NOT NULL,
+        strategy_family        VARCHAR NOT NULL,
+        strategy_key           VARCHAR NOT NULL,
+        execution_rule         VARCHAR NOT NULL,
+        action_intent          VARCHAR NOT NULL,
+        alpha_state            VARCHAR NOT NULL,
+        features_json          VARCHAR,
+        reference_close        DOUBLE,
+        planned_entry          DOUBLE,
+        fill_status            VARCHAR,
+        fill_date              DATE,
+        fill_price             DOUBLE,
+        exit_date              DATE,
+        exit_price             DOUBLE,
+        realized_ret_pct       DOUBLE,
+        max_favorable_pct      DOUBLE,
+        max_adverse_pct        DOUBLE,
+        p_fill                 DOUBLE,
+        mu_ret_pct             DOUBLE,
+        tail_loss_pct          DOUBLE,
+        ev_pct                 DOUBLE,
+        ev_lcb_80_pct          DOUBLE,
+        ev_lcb_95_pct          DOUBLE,
+        risk_unit_pct          DOUBLE,
+        ev_norm_score          DOUBLE,
+        ev_norm_lcb_80         DOUBLE,
+        ev_norm_lcb_95         DOUBLE,
+        detail_json            VARCHAR,
+        updated_at             TIMESTAMP DEFAULT current_timestamp,
+        PRIMARY KEY (evaluation_date, report_date, session, symbol, selection_status, strategy_key, execution_rule)
+    );
+
+    CREATE TABLE IF NOT EXISTS limit_move_radar_backtest (
+        as_of                  DATE NOT NULL,
+        metric                 VARCHAR NOT NULL,
+        score_bucket           VARCHAR NOT NULL,
+        scope                  VARCHAR NOT NULL,
+        samples                INTEGER,
+        hits                   INTEGER,
+        hit_rate               DOUBLE,
+        failed_board_count     INTEGER,
+        failed_board_rate      DOUBLE,
+        avg_next_ret_pct       DOUBLE,
+        detail_json            VARCHAR,
+        updated_at             TIMESTAMP DEFAULT current_timestamp,
+        PRIMARY KEY (as_of, metric, score_bucket, scope)
+    );
+
+    ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS p_fill DOUBLE;
+    ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS mu_ret_pct DOUBLE;
+    ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS tail_loss_pct DOUBLE;
+    ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_lcb_80_pct DOUBLE;
+    ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_lcb_95_pct DOUBLE;
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS risk_unit_pct DOUBLE;
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_per_risk DOUBLE;
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_norm_score DOUBLE;
+    ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_norm_lcb_80 DOUBLE;
+    ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_norm_lcb_95 DOUBLE;
 ";

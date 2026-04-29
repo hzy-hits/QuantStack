@@ -1331,19 +1331,34 @@ struct LimitMoveRadarView {
     labels: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct LimitMoveBacktestView {
+    metric: String,
+    score_bucket: String,
+    scope: String,
+    samples: i64,
+    hits: i64,
+    hit_rate: f64,
+    failed_board_rate: f64,
+    avg_next_ret_pct: f64,
+}
+
 struct StrategyEvView {
     strategy_key: String,
     strategy_family: String,
     samples: i64,
     fills: i64,
+    p_fill: f64,
     win_rate_bayes: f64,
-    avg_win_pct: f64,
-    avg_loss_pct: f64,
+    mu_ret_pct: f64,
     avg_tail_loss_pct: f64,
     ev_pct: f64,
+    ev_lcb_80_pct: f64,
+    ev_lcb_95_pct: f64,
     risk_unit_pct: f64,
     ev_per_risk: f64,
     ev_norm_score: f64,
+    ev_norm_lcb_80: f64,
     eligible: bool,
     fail_reasons: String,
 }
@@ -1356,15 +1371,17 @@ struct PaperTradeLifecycleView {
     action_intent: String,
     execution_rule: String,
     planned_entry: Option<f64>,
+    reference_close: Option<f64>,
     fill_status: String,
     label: String,
     realized_ret_pct: Option<f64>,
     max_adverse_pct: Option<f64>,
     ev_pct: Option<f64>,
-    ev_norm_score: Option<f64>,
+    ev_lcb_80_pct: Option<f64>,
+    risk_unit_pct: Option<f64>,
     strategy_samples: Option<i64>,
-    eligible: Option<bool>,
     fail_reasons: Option<String>,
+    alpha_state: Option<String>,
 }
 
 fn render_strategy_ev_summary(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
@@ -1386,32 +1403,53 @@ fn render_strategy_ev_summary(md: &mut String, db: &Connection, date_str: &str) 
     if !active.is_empty() {
         writeln!(md, "### 当前候选状态")?;
         writeln!(md)?;
+        let positive_ev = active
+            .iter()
+            .filter(|row| row.alpha_state.as_deref() == Some("positive_ev_setup"))
+            .count();
+        let blocked_negative = active
+            .iter()
+            .filter(|row| row.alpha_state.as_deref() == Some("blocked_negative_ev"))
+            .count();
+        let research = active
+            .iter()
+            .filter(|row| row.alpha_state.as_deref() == Some("research_setup"))
+            .count();
         writeln!(
             md,
-            "| 代码 | 名称 | 策略族 | 意图 | 执行规则 | 计划价 | EV% | EV norm | n | eligible | 阻断 |"
+            "状态机汇总: Positive EV Setup={}，Research Setup={}，Blocked Negative EV={}。`CORE BOOK` 只代表结构筛选来源；若本地 EV 或置信下界为负，报告必须降级为 Blocked/Research，不能写成执行主书。",
+            positive_ev, research, blocked_negative
+        )?;
+        writeln!(md)?;
+        writeln!(
+            md,
+            "| 状态 | 代码 | 名称 | 策略族 | 意图 | 执行规则 | 入场 | 1R波动 | 处理线 | 复核上沿 | 时间规则 | EV% | EV80 LCB | n | 阻断 |"
         )?;
         writeln!(
             md,
-            "|------|------|--------|------|----------|-------:|----:|--------:|--:|----------|------|"
+            "|------|------|------|--------|------|----------|-----:|-------:|-------:|---------:|----------|----:|---------:|--:|------|"
         )?;
         for row in active.iter().take(12) {
+            let plan = execution_plan_view(row);
             writeln!(
                 md,
-                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                display_alpha_state(row.alpha_state.as_deref()),
                 row.ts_code,
                 row.name,
                 row.strategy_family,
                 display_paper_intent(&row.action_intent),
                 row.execution_rule,
-                fmt_f64(row.planned_entry),
+                plan.entry,
+                plan.risk_unit,
+                plan.stop,
+                plan.upper,
+                plan.time_rule,
                 fmt_f64(row.ev_pct),
-                fmt_f64(row.ev_norm_score),
+                fmt_f64(row.ev_lcb_80_pct),
                 row.strategy_samples
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "-".to_string()),
-                row.eligible
-                    .map(|v| if v { "yes" } else { "no" })
-                    .unwrap_or("-"),
                 row.fail_reasons.as_deref().unwrap_or("no_history"),
             )?;
         }
@@ -1423,28 +1461,31 @@ fn render_strategy_ev_summary(md: &mut String, db: &Connection, date_str: &str) 
         writeln!(md)?;
         writeln!(
             md,
-            "| 策略族 | strategy_key | samples | fills | p_win_bayes | avg_win | avg_loss | tail | risk unit | EV% | EV/risk | EV norm | eligible | fail |"
+            "| 策略族 | strategy_key | samples | fills | p_fill | p_win_bayes | mu | tail | EV% | EV80 LCB | EV95 LCB | risk unit | EV/risk | EV norm | norm80 | eligible | fail |"
         )?;
         writeln!(
             md,
-            "|--------|--------------|--------:|------:|------------:|--------:|---------:|-----:|----------:|----:|--------:|--------:|----------|------|"
+            "|--------|--------------|--------:|------:|-------:|------------:|---:|-----:|----:|---------:|---------:|----------:|--------:|--------:|-------:|----------|------|"
         )?;
         for row in ev_rows.iter().take(10) {
             writeln!(
                 md,
-                "| {} | `{}` | {} | {} | {:.3} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.1} | {} | {} |",
+                "| {} | `{}` | {} | {} | {:.3} | {:.3} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.2} | {:.1} | {:.1} | {} | {} |",
                 row.strategy_family,
                 row.strategy_key,
                 row.samples,
                 row.fills,
+                row.p_fill,
                 row.win_rate_bayes,
-                row.avg_win_pct,
-                row.avg_loss_pct,
+                row.mu_ret_pct,
                 row.avg_tail_loss_pct,
-                row.risk_unit_pct,
                 row.ev_pct,
+                row.ev_lcb_80_pct,
+                row.ev_lcb_95_pct,
+                row.risk_unit_pct,
                 row.ev_per_risk,
                 row.ev_norm_score,
+                row.ev_norm_lcb_80,
                 if row.eligible { "yes" } else { "no" },
                 if row.fail_reasons.is_empty() {
                     "-"
@@ -1491,14 +1532,15 @@ fn render_strategy_ev_summary(md: &mut String, db: &Connection, date_str: &str) 
 fn query_strategy_ev_rows(db: &Connection, date_str: &str) -> Vec<StrategyEvView> {
     let sql = "
         SELECT strategy_key, strategy_family, COALESCE(samples, 0), COALESCE(fills, 0),
-               COALESCE(win_rate_bayes, 0), COALESCE(avg_win_pct, 0),
-               COALESCE(avg_loss_pct, 0), COALESCE(avg_tail_loss_pct, 0),
-               COALESCE(ev_pct, 0), COALESCE(risk_unit_pct, 0),
+               COALESCE(p_fill, 0), COALESCE(win_rate_bayes, 0),
+               COALESCE(mu_ret_pct, 0), COALESCE(avg_tail_loss_pct, 0),
+               COALESCE(ev_pct, 0), COALESCE(ev_lcb_80_pct, 0),
+               COALESCE(ev_lcb_95_pct, 0), COALESCE(risk_unit_pct, 0),
                COALESCE(ev_per_risk, 0), COALESCE(ev_norm_score, 0),
-               eligible, COALESCE(fail_reasons, '')
+               COALESCE(ev_norm_lcb_80, 0), eligible, COALESCE(fail_reasons, '')
         FROM strategy_ev
         WHERE as_of = CAST(? AS DATE)
-        ORDER BY eligible DESC, ev_norm_score DESC, ev_pct DESC, samples DESC
+        ORDER BY eligible DESC, ev_norm_lcb_80 DESC, ev_pct DESC, samples DESC
         LIMIT 12";
     let Ok(mut stmt) = db.prepare(sql) else {
         return Vec::new();
@@ -1509,16 +1551,19 @@ fn query_strategy_ev_rows(db: &Connection, date_str: &str) -> Vec<StrategyEvView
             strategy_family: row.get::<_, String>(1).unwrap_or_default(),
             samples: row.get::<_, i64>(2).unwrap_or(0),
             fills: row.get::<_, i64>(3).unwrap_or(0),
-            win_rate_bayes: row.get::<_, f64>(4).unwrap_or(0.0),
-            avg_win_pct: row.get::<_, f64>(5).unwrap_or(0.0),
-            avg_loss_pct: row.get::<_, f64>(6).unwrap_or(0.0),
+            p_fill: row.get::<_, f64>(4).unwrap_or(0.0),
+            win_rate_bayes: row.get::<_, f64>(5).unwrap_or(0.0),
+            mu_ret_pct: row.get::<_, f64>(6).unwrap_or(0.0),
             avg_tail_loss_pct: row.get::<_, f64>(7).unwrap_or(0.0),
             ev_pct: row.get::<_, f64>(8).unwrap_or(0.0),
-            risk_unit_pct: row.get::<_, f64>(9).unwrap_or(0.0),
-            ev_per_risk: row.get::<_, f64>(10).unwrap_or(0.0),
-            ev_norm_score: row.get::<_, f64>(11).unwrap_or(0.0),
-            eligible: row.get::<_, bool>(12).unwrap_or(false),
-            fail_reasons: row.get::<_, String>(13).unwrap_or_default(),
+            ev_lcb_80_pct: row.get::<_, f64>(9).unwrap_or(0.0),
+            ev_lcb_95_pct: row.get::<_, f64>(10).unwrap_or(0.0),
+            risk_unit_pct: row.get::<_, f64>(11).unwrap_or(0.0),
+            ev_per_risk: row.get::<_, f64>(12).unwrap_or(0.0),
+            ev_norm_score: row.get::<_, f64>(13).unwrap_or(0.0),
+            ev_norm_lcb_80: row.get::<_, f64>(14).unwrap_or(0.0),
+            eligible: row.get::<_, bool>(15).unwrap_or(false),
+            fail_reasons: row.get::<_, String>(16).unwrap_or_default(),
         })
     }) else {
         return Vec::new();
@@ -1531,20 +1576,36 @@ fn query_current_paper_trades(db: &Connection, date_str: &str) -> Vec<PaperTrade
         SELECT
             CAST(p.report_date AS VARCHAR), p.symbol, COALESCE(sb.name, ''),
             p.strategy_family, p.action_intent, p.execution_rule, p.planned_entry,
-            p.fill_status, p.label, p.realized_ret_pct, p.max_adverse_pct,
-            ev.ev_pct, ev.ev_norm_score, ev.samples, ev.eligible, ev.fail_reasons
+            p.reference_close, p.fill_status, p.label, p.realized_ret_pct, p.max_adverse_pct,
+            ev.ev_pct, ev.ev_lcb_80_pct, ev.risk_unit_pct, ev.samples, ev.fail_reasons,
+            m.alpha_state
         FROM paper_trades p
         LEFT JOIN stock_basic sb ON sb.ts_code = p.symbol
         LEFT JOIN strategy_ev ev ON ev.as_of = CAST(? AS DATE) AND ev.strategy_key = p.strategy_key
+        LEFT JOIN strategy_model_dataset m
+          ON m.evaluation_date = CAST(? AS DATE)
+         AND m.report_date = p.report_date
+         AND m.session = p.session
+         AND m.symbol = p.symbol
+         AND m.selection_status = p.selection_status
+         AND m.strategy_key = p.strategy_key
+         AND m.execution_rule = p.execution_rule
         WHERE p.report_date = CAST(? AS DATE)
           AND p.session = 'daily'
           AND p.selection_status = 'selected'
         ORDER BY
+            CASE COALESCE(m.alpha_state, '')
+                WHEN 'positive_ev_setup' THEN 0
+                WHEN 'blocked_negative_ev' THEN 1
+                WHEN 'blocked_tail_risk' THEN 2
+                WHEN 'research_setup' THEN 3
+                ELSE 3
+            END,
             CASE p.action_intent WHEN 'TRADE' THEN 0 WHEN 'SETUP' THEN 1 WHEN 'OBSERVE' THEN 2 ELSE 3 END,
-            COALESCE(ev.ev_norm_score, -999) DESC,
+            COALESCE(ev.ev_norm_lcb_80, ev.ev_norm_score, -999) DESC,
             COALESCE(ev.ev_pct, -999) DESC,
             p.strategy_family";
-    query_paper_trade_rows(db, sql, [date_str, date_str])
+    query_paper_trade_rows(db, sql, [date_str, date_str, date_str])
 }
 
 fn query_recent_paper_trades(db: &Connection, date_str: &str) -> Vec<PaperTradeLifecycleView> {
@@ -1552,30 +1613,33 @@ fn query_recent_paper_trades(db: &Connection, date_str: &str) -> Vec<PaperTradeL
         SELECT
             CAST(p.report_date AS VARCHAR), p.symbol, COALESCE(sb.name, ''),
             p.strategy_family, p.action_intent, p.execution_rule, p.planned_entry,
-            p.fill_status, p.label, p.realized_ret_pct, p.max_adverse_pct,
-            NULL::DOUBLE AS ev_pct, NULL::DOUBLE AS ev_norm_score, NULL::INTEGER AS samples,
-            NULL::BOOLEAN AS eligible, NULL::VARCHAR AS fail_reasons
+            p.reference_close, p.fill_status, p.label, p.realized_ret_pct, p.max_adverse_pct,
+            NULL::DOUBLE AS ev_pct, NULL::DOUBLE AS ev_lcb_80_pct,
+            NULL::DOUBLE AS risk_unit_pct,
+            NULL::INTEGER AS samples, NULL::VARCHAR AS fail_reasons,
+            NULL::VARCHAR AS alpha_state
         FROM paper_trades p
         LEFT JOIN stock_basic sb ON sb.ts_code = p.symbol
         WHERE p.report_date < CAST(? AS DATE)
           AND p.report_date >= CAST(? AS DATE) - INTERVAL 7 DAY
+          AND CAST(? AS DATE) IS NOT NULL
           AND p.session = 'daily'
           AND p.selection_status = 'selected'
         ORDER BY p.report_date DESC,
             CASE p.action_intent WHEN 'TRADE' THEN 0 WHEN 'SETUP' THEN 1 WHEN 'OBSERVE' THEN 2 ELSE 3 END,
             p.symbol";
-    query_paper_trade_rows(db, sql, [date_str, date_str])
+    query_paper_trade_rows(db, sql, [date_str, date_str, date_str])
 }
 
 fn query_paper_trade_rows(
     db: &Connection,
     sql: &str,
-    params: [&str; 2],
+    params: [&str; 3],
 ) -> Vec<PaperTradeLifecycleView> {
     let Ok(mut stmt) = db.prepare(sql) else {
         return Vec::new();
     };
-    let Ok(rows) = stmt.query_map([&params[0], &params[1]], |row| {
+    let Ok(rows) = stmt.query_map([&params[0], &params[1], &params[2]], |row| {
         Ok(PaperTradeLifecycleView {
             report_date: row.get::<_, String>(0).unwrap_or_default(),
             ts_code: row.get::<_, String>(1).unwrap_or_default(),
@@ -1584,20 +1648,51 @@ fn query_paper_trade_rows(
             action_intent: row.get::<_, String>(4).unwrap_or_default(),
             execution_rule: row.get::<_, String>(5).unwrap_or_default(),
             planned_entry: row.get::<_, Option<f64>>(6).ok().flatten(),
-            fill_status: row.get::<_, String>(7).unwrap_or_default(),
-            label: row.get::<_, String>(8).unwrap_or_default(),
-            realized_ret_pct: row.get::<_, Option<f64>>(9).ok().flatten(),
-            max_adverse_pct: row.get::<_, Option<f64>>(10).ok().flatten(),
-            ev_pct: row.get::<_, Option<f64>>(11).ok().flatten(),
-            ev_norm_score: row.get::<_, Option<f64>>(12).ok().flatten(),
-            strategy_samples: row.get::<_, Option<i64>>(13).ok().flatten(),
-            eligible: row.get::<_, Option<bool>>(14).ok().flatten(),
-            fail_reasons: row.get::<_, Option<String>>(15).ok().flatten(),
+            reference_close: row.get::<_, Option<f64>>(7).ok().flatten(),
+            fill_status: row.get::<_, String>(8).unwrap_or_default(),
+            label: row.get::<_, String>(9).unwrap_or_default(),
+            realized_ret_pct: row.get::<_, Option<f64>>(10).ok().flatten(),
+            max_adverse_pct: row.get::<_, Option<f64>>(11).ok().flatten(),
+            ev_pct: row.get::<_, Option<f64>>(12).ok().flatten(),
+            ev_lcb_80_pct: row.get::<_, Option<f64>>(13).ok().flatten(),
+            risk_unit_pct: row.get::<_, Option<f64>>(14).ok().flatten(),
+            strategy_samples: row.get::<_, Option<i64>>(15).ok().flatten(),
+            fail_reasons: row.get::<_, Option<String>>(16).ok().flatten(),
+            alpha_state: row.get::<_, Option<String>>(17).ok().flatten(),
         })
     }) else {
         return Vec::new();
     };
     rows.filter_map(|row| row.ok()).collect()
+}
+
+struct ExecutionPlanView {
+    entry: String,
+    risk_unit: String,
+    stop: String,
+    upper: String,
+    time_rule: &'static str,
+}
+
+fn execution_plan_view(row: &PaperTradeLifecycleView) -> ExecutionPlanView {
+    let entry = row.planned_entry.or(row.reference_close);
+    let risk_unit = row.risk_unit_pct.filter(|v| v.is_finite() && *v > 0.0);
+    let (stop, upper) = match (entry, risk_unit) {
+        (Some(price), Some(risk)) => (
+            fmt_f64(Some(price * (1.0 - risk / 100.0))),
+            fmt_f64(Some(price * (1.0 + risk / 100.0))),
+        ),
+        _ => ("-".to_string(), "-".to_string()),
+    };
+    ExecutionPlanView {
+        entry: fmt_f64(entry),
+        risk_unit: risk_unit
+            .map(|v| format!("{:.2}%", v))
+            .unwrap_or_else(|| "-".to_string()),
+        stop,
+        upper,
+        time_rule: "T+2未放量越过+1R则退出复核",
+    }
 }
 
 fn display_paper_intent(raw: &str) -> &'static str {
@@ -1607,6 +1702,17 @@ fn display_paper_intent(raw: &str) -> &'static str {
         "OBSERVE" => "observe",
         "AVOID" => "avoid",
         _ => "unknown",
+    }
+}
+
+fn display_alpha_state(raw: Option<&str>) -> &'static str {
+    match raw.unwrap_or("") {
+        "positive_ev_setup" => "Positive EV Setup",
+        "research_setup" => "Research Setup",
+        "blocked_negative_ev" => "Blocked Negative EV",
+        "blocked_tail_risk" => "Blocked Tail Risk",
+        "blocked_out_of_scope" => "Blocked / Out-of-scope",
+        _ => "Research Setup",
     }
 }
 
@@ -1714,6 +1820,7 @@ fn render_setup_alpha_summary(
 fn render_limit_move_radar_summary(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
     let up_rows = query_limit_move_radar_rows(db, date_str, "limit_up_radar_score", 120);
     let down_rows = query_limit_move_radar_rows(db, date_str, "limit_down_risk_score", 8);
+    let backtest_rows = query_limit_move_backtest_rows(db, date_str);
     if up_rows.is_empty() && down_rows.is_empty() {
         return Ok(());
     }
@@ -1736,6 +1843,7 @@ fn render_limit_move_radar_summary(md: &mut String, db: &Connection, date_str: &
         "`Tradable Limit Radar` 只保留主板10cm且账户可做的候选；`Out-of-scope Heat Radar` 包含创业板/科创板/ST/北交所，只用于观察热区和风险，不当作候选。"
     )?;
     writeln!(md)?;
+    render_limit_move_backtest_table(md, &backtest_rows)?;
 
     render_limit_move_radar_table(
         md,
@@ -1764,6 +1872,43 @@ fn render_limit_move_radar_summary(md: &mut String, db: &Connection, date_str: &
         false,
         6,
     )?;
+    Ok(())
+}
+
+fn render_limit_move_backtest_table(md: &mut String, rows: &[LimitMoveBacktestView]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    writeln!(md, "### 次日标签回测")?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "该表是分数桶命中率账本，只使用已有次日收盘后的标签；样本少时不能外推。`failed board` 表示次日触及涨停附近但未封住。"
+    )?;
+    writeln!(md)?;
+    writeln!(
+        md,
+        "| metric | bucket | scope | n | hits | hit% | failed board% | avg next ret% |"
+    )?;
+    writeln!(
+        md,
+        "|--------|--------|-------|--:|-----:|-----:|--------------:|--------------:|"
+    )?;
+    for row in rows.iter().take(12) {
+        writeln!(
+            md,
+            "| {} | {} | {} | {} | {} | {} | {} | {} |",
+            row.metric,
+            row.score_bucket,
+            row.scope,
+            row.samples,
+            row.hits,
+            fmt_pct(Some(row.hit_rate * 100.0)),
+            fmt_pct(Some(row.failed_board_rate * 100.0)),
+            fmt_pct(Some(row.avg_next_ret_pct)),
+        )?;
+    }
+    writeln!(md)?;
     Ok(())
 }
 
@@ -1859,6 +2004,41 @@ fn query_limit_move_radar_rows(
         return Vec::new();
     };
 
+    rows.filter_map(|row| row.ok()).collect()
+}
+
+fn query_limit_move_backtest_rows(db: &Connection, date_str: &str) -> Vec<LimitMoveBacktestView> {
+    let sql = "
+        SELECT metric, score_bucket, scope, COALESCE(samples, 0), COALESCE(hits, 0),
+               COALESCE(hit_rate, 0), COALESCE(failed_board_rate, 0),
+               COALESCE(avg_next_ret_pct, 0)
+        FROM limit_move_radar_backtest
+        WHERE as_of = CAST(? AS DATE)
+          AND scope IN ('mainboard_10cm', 'all')
+          AND score_bucket <> '<0.55'
+        ORDER BY
+            CASE metric WHEN 'limit_up_radar_score' THEN 0 ELSE 1 END,
+            CASE score_bucket WHEN '>=0.75' THEN 0 WHEN '0.65-0.75' THEN 1 ELSE 2 END,
+            CASE scope WHEN 'mainboard_10cm' THEN 0 ELSE 1 END
+        LIMIT 16
+    ";
+    let Ok(mut stmt) = db.prepare(sql) else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map(duckdb::params![date_str], |row| {
+        Ok(LimitMoveBacktestView {
+            metric: row.get::<_, String>(0).unwrap_or_default(),
+            score_bucket: row.get::<_, String>(1).unwrap_or_default(),
+            scope: row.get::<_, String>(2).unwrap_or_default(),
+            samples: row.get::<_, i64>(3).unwrap_or(0),
+            hits: row.get::<_, i64>(4).unwrap_or(0),
+            hit_rate: row.get::<_, f64>(5).unwrap_or(0.0),
+            failed_board_rate: row.get::<_, f64>(6).unwrap_or(0.0),
+            avg_next_ret_pct: row.get::<_, f64>(7).unwrap_or(0.0),
+        })
+    }) else {
+        return Vec::new();
+    };
     rows.filter_map(|row| row.ok()).collect()
 }
 
