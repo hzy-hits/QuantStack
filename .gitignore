@@ -24,3 +24,4 @@ codex-*/
 runs/
 factor-lab/runtime/strategy_calibration/
 quant-research-cn/config/strategy_params.generated.yaml
+quant-research-v1/config/strategy_params.generated.yaml

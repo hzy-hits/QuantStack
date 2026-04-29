@@ -24,6 +24,8 @@ from typing import Any
 import duckdb
 import polars as pl
 
+from quant_bot.config.strategy_params import get_us_strategy_param_section, load_us_strategy_params
+
 
 MODULE_NAME = "overnight_continuation_alpha"
 LOOKBACK_DAYS = 90
@@ -113,8 +115,9 @@ def _wilson_interval(successes: int, n: int, z: float = 1.96) -> tuple[float, fl
     return (_clamp01((centre - margin) / denom), _clamp01((centre + margin) / denom))
 
 
-def _shrunk_rate(successes: int, n: int, prior: float = 0.50) -> float:
-    return (successes + prior * PRIOR_N) / (n + PRIOR_N) if n > 0 else prior
+def _shrunk_rate(successes: int, n: int, prior: float = 0.50, prior_n: float | None = None) -> float:
+    prior_n = PRIOR_N if prior_n is None else prior_n
+    return (successes + prior * prior_n) / (n + prior_n) if n > 0 else prior
 
 
 def _calibration_payload(stats: CalibrationStats) -> dict[str, Any]:
@@ -139,7 +142,8 @@ def _load_history(
     con: duckdb.DuckDBPyConnection,
     as_of: date,
 ) -> dict[str, CalibrationStats]:
-    cutoff = as_of - timedelta(days=LOOKBACK_DAYS)
+    params = get_us_strategy_param_section("overnight_continuation_alpha")
+    cutoff = as_of - timedelta(days=int(params.get("lookback_days", LOOKBACK_DAYS)))
     df = _query_df(
         con,
         """
@@ -316,6 +320,7 @@ def _score_current(
     current: dict[str, Any],
     stats: CalibrationStats,
 ) -> dict[str, Any]:
+    params = get_us_strategy_param_section("overnight_continuation_alpha")
     gate = current.get("gate") or {}
     options = current.get("options") or {}
     lab = current.get("lab_factor") or {}
@@ -333,58 +338,76 @@ def _score_current(
     continuation_hits = int(stats.labels.get("continuation", 0))
     stale_hits = int(stats.labels.get("alpha_already_paid", 0))
     fade_hits = int(stats.labels.get("fade", 0))
-    hist_continue = _shrunk_rate(continuation_hits, stats.n, prior=0.50)
-    hist_stale = _shrunk_rate(stale_hits, stats.n, prior=0.25)
-    hist_fade = _shrunk_rate(fade_hits, stats.n, prior=0.25)
+    prior_n = _safe_float(params.get("prior_n"), PRIOR_N) or PRIOR_N
+    hist_continue = _shrunk_rate(continuation_hits, stats.n, prior=0.50, prior_n=prior_n)
+    hist_stale = _shrunk_rate(stale_hits, stats.n, prior=0.25, prior_n=prior_n)
+    hist_fade = _shrunk_rate(fade_hits, stats.n, prior=0.25, prior_n=prior_n)
 
     lab_composite = abs(_safe_float(lab.get("composite"), 0.0) or 0.0)
     event_count = int(current.get("event_count") or 0)
     news_count = int(current.get("news_count") or 0)
-    event_boost = 0.035 if event_count or news_count >= 2 else 0.0
+    event_boost = _safe_float(params.get("event_boost"), 0.035) if event_count or news_count >= 2 else 0.0
 
     option_liquidity = str(options.get("liquidity_score") or "")
-    liquidity_adj = 0.025 if option_liquidity == "good" else -0.025 if option_liquidity == "poor" else 0.0
+    liquidity_adj = (
+        _safe_float(params.get("liquidity_good_adj"), 0.025)
+        if option_liquidity == "good"
+        else _safe_float(params.get("liquidity_poor_adj"), -0.025)
+        if option_liquidity == "poor"
+        else 0.0
+    )
+    continuation_weights = params.get("continuation_weights") if isinstance(params.get("continuation_weights"), dict) else {}
+    fade_weights = params.get("fade_weights") if isinstance(params.get("fade_weights"), dict) else {}
+    paid_weights = params.get("paid_risk_weights") if isinstance(params.get("paid_risk_weights"), dict) else {}
+    entry_weights = params.get("entry_quality_weights") if isinstance(params.get("entry_quality_weights"), dict) else {}
 
     continuation_score = _clamp01(
-        0.38 * p_gate_continue
-        + 0.18 * support
-        + 0.12 * trend_alignment
-        + 0.17 * hist_continue
-        + 0.06 * lab_composite
+        (_safe_float(continuation_weights.get("p_gate_continue"), 0.38) or 0.38) * p_gate_continue
+        + (_safe_float(continuation_weights.get("support"), 0.18) or 0.18) * support
+        + (_safe_float(continuation_weights.get("trend_alignment"), 0.12) or 0.12) * trend_alignment
+        + (_safe_float(continuation_weights.get("hist_continue"), 0.17) or 0.17) * hist_continue
+        + (_safe_float(continuation_weights.get("lab_composite"), 0.06) or 0.06) * lab_composite
         + event_boost
         + liquidity_adj
-        - 0.16 * effective_stretch
-        - 0.10 * hist_stale
+        + (_safe_float(continuation_weights.get("effective_stretch"), -0.16) or -0.16) * effective_stretch
+        + (_safe_float(continuation_weights.get("hist_stale"), -0.10) or -0.10) * hist_stale
     )
     fade_score = _clamp01(
-        0.42 * p_gate_fade
-        + 0.22 * hist_fade
-        + 0.18 * effective_stretch
-        + 0.10 * (1.0 - support)
-        + 0.08 * (1.0 - discipline)
+        (_safe_float(fade_weights.get("p_gate_fade"), 0.42) or 0.42) * p_gate_fade
+        + (_safe_float(fade_weights.get("hist_fade"), 0.22) or 0.22) * hist_fade
+        + (_safe_float(fade_weights.get("effective_stretch"), 0.18) or 0.18) * effective_stretch
+        + (_safe_float(fade_weights.get("support_gap"), 0.10) or 0.10) * (1.0 - support)
+        + (_safe_float(fade_weights.get("discipline_gap"), 0.08) or 0.08) * (1.0 - discipline)
     )
     paid_risk = _clamp01(
-        0.40 * effective_stretch
-        + 0.30 * hist_stale
-        + 0.18 * _clamp01((gap_vs_move - 0.65) / 0.55)
-        + 0.12 * (1.0 - discipline)
+        (_safe_float(paid_weights.get("effective_stretch"), 0.40) or 0.40) * effective_stretch
+        + (_safe_float(paid_weights.get("hist_stale"), 0.30) or 0.30) * hist_stale
+        + (_safe_float(paid_weights.get("gap_overpaid"), 0.18) or 0.18)
+        * _clamp01((gap_vs_move - 0.65) / 0.55)
+        + (_safe_float(paid_weights.get("discipline_gap"), 0.12) or 0.12) * (1.0 - discipline)
     )
     entry_quality = _clamp01(
-        0.38 * continuation_score
-        + 0.24 * discipline
-        + 0.18 * support
-        + 0.12 * (1.0 - paid_risk)
-        + 0.08 * (1.0 - fade_score)
+        (_safe_float(entry_weights.get("continuation_score"), 0.38) or 0.38) * continuation_score
+        + (_safe_float(entry_weights.get("discipline"), 0.24) or 0.24) * discipline
+        + (_safe_float(entry_weights.get("support"), 0.18) or 0.18) * support
+        + (_safe_float(entry_weights.get("paid_risk_gap"), 0.12) or 0.12) * (1.0 - paid_risk)
+        + (_safe_float(entry_weights.get("fade_score_gap"), 0.08) or 0.08) * (1.0 - fade_score)
     )
 
     gate_action = gate.get("action") or "unknown"
-    if gate_action == "do_not_chase" or paid_risk >= 0.62:
+    if gate_action == "do_not_chase" or paid_risk >= (_safe_float(params.get("paid_risk_do_not_chase"), 0.62) or 0.62):
         advice = "do_not_chase"
         regime = "alpha_already_paid"
-    elif gate_action == "wait_pullback" or paid_risk >= 0.44 or entry_quality < 0.52:
+    elif (
+        gate_action == "wait_pullback"
+        or paid_risk >= (_safe_float(params.get("paid_risk_wait"), 0.44) or 0.44)
+        or entry_quality < (_safe_float(params.get("entry_quality_min_wait"), 0.52) or 0.52)
+    ):
         advice = "wait_pullback"
         regime = "conditional"
-    elif continuation_score >= 0.55 and entry_quality >= 0.56:
+    elif continuation_score >= (_safe_float(params.get("continuation_min"), 0.55) or 0.55) and entry_quality >= (
+        _safe_float(params.get("entry_quality_min_continue"), 0.56) or 0.56
+    ):
         advice = "continue"
         regime = "continuation"
     else:
@@ -410,6 +433,8 @@ def run_overnight_continuation_alpha(
     if not symbols:
         return pl.DataFrame()
 
+    strategy_params = load_us_strategy_params()
+    runtime_params = get_us_strategy_param_section("overnight_continuation_alpha")
     history = _load_history(con, as_of)
     current_rows = _load_current_rows(con, symbols, as_of)
     overall = history.get("_overall", CalibrationStats())
@@ -465,6 +490,8 @@ def run_overnight_continuation_alpha(
             "calibration": calibration,
             "event_count": int(current.get("event_count") or 0),
             "news_count": int(current.get("news_count") or 0),
+            "param_source": strategy_params.get("_source", "built_in_default"),
+            "param_provenance": runtime_params.get("provenance", "legacy_heuristic"),
         }
 
         rows.append(
@@ -482,7 +509,8 @@ def run_overnight_continuation_alpha(
                 "p_value_bonf": None,
                 "strength_bucket": (
                     "strong"
-                    if score["advice"] == "continue" and score["entry_quality"] >= 0.62
+                    if score["advice"] == "continue"
+                    and score["entry_quality"] >= (_safe_float(runtime_params.get("strong_entry_quality"), 0.62) or 0.62)
                     else "moderate"
                     if score["advice"] != "do_not_chase"
                     else "weak"

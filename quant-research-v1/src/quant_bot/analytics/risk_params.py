@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from quant_bot.config.strategy_params import get_us_strategy_param_section
+
 
 def compute_risk_params(item: dict) -> dict[str, Any]:
     """
@@ -23,6 +25,9 @@ def compute_risk_params(item: dict) -> dict[str, Any]:
     atr = item.get("atr")
     if price is None or atr is None or price <= 0 or atr <= 0:
         return {}
+    params = get_us_strategy_param_section("risk_params")
+    stop_atr_multiple = float(params.get("atr_stop_multiple", 2.0))
+    fallback_move_atr_multiple = float(params.get("fallback_expected_move_atr_multiple", 2.0))
 
     # Direction from signal classification
     sig = item.get("signal", {})
@@ -37,8 +42,7 @@ def compute_risk_params(item: dict) -> dict[str, Any]:
         expected_move_pct = item["momentum"]["expected_move_pct"]
 
     if expected_move_pct is None:
-        # Fallback: 2 ATR as percentage
-        expected_move_pct = (2.0 * atr / price) * 100.0
+        expected_move_pct = (fallback_move_atr_multiple * atr / price) * 100.0
 
     expected_move_usd = price * expected_move_pct / 100.0
 
@@ -57,7 +61,7 @@ def compute_risk_params(item: dict) -> dict[str, Any]:
             entry_price = price
 
     entry = round(entry_price, 2)
-    stop_distance = 2.0 * atr  # 2-ATR stop
+    stop_distance = stop_atr_multiple * atr
 
     if direction == "short":
         stop = round(entry_price + stop_distance, 2)
@@ -77,11 +81,12 @@ def compute_risk_params(item: dict) -> dict[str, Any]:
         "stop": stop,
         "target": target,
         "rr_ratio": rr_ratio,
-        "stop_distance_atr": 2.0,
+        "stop_distance_atr": stop_atr_multiple,
         "expected_move_pct": round(expected_move_pct, 2),
         "execution_mode": execution_mode,
         "reference_price": execution_gate.get("ref_price"),
         "gap_pct": execution_gate.get("gap_pct"),
+        "param_source": params.get("provenance", "built_in_default"),
     }
 
     # Half-life from cointegration if available

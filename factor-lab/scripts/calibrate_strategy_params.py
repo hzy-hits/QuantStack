@@ -22,7 +22,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.paths import FACTOR_LAB_ROOT, QUANT_CN_REPORT_DB, QUANT_CN_ROOT
+from src.paths import FACTOR_LAB_ROOT, QUANT_CN_REPORT_DB, QUANT_CN_ROOT, QUANT_US_REPORT_DB, QUANT_US_ROOT
 
 
 EV80_Z = 1.2816
@@ -43,6 +43,78 @@ DEFAULT_PAPER_PARAMS = {
     "provenance": "built_in_default",
 }
 MIN_ACTIVATION_IMPROVEMENT_PCT = 0.05
+DEFAULT_US_RUNTIME_PARAMS = {
+    "risk_params": {
+        "atr_stop_multiple": 2.0,
+        "fallback_expected_move_atr_multiple": 2.0,
+        "provenance": "legacy_heuristic",
+    },
+    "options_alpha": {
+        "min_days_to_exp": 3.0,
+        "max_days_to_exp": 120.0,
+        "max_spread_pct": 25.0,
+        "min_chain_width": 6.0,
+        "min_atm_iv_pct": 5.0,
+        "directional_edge_threshold": 0.45,
+        "vol_edge_threshold": 0.10,
+        "vol_edge_wait_threshold": 0.55,
+        "pc_z_scale": 2.5,
+        "skew_z_scale": 2.5,
+        "vrp_z_scale": 2.5,
+        "vrp_raw_scale": 0.20,
+        "cheapness_scale": 0.35,
+        "flow_volume_norm": 50_000.0,
+        "flow_vol_oi_norm": 50.0,
+        "flow_volume_weight": 0.70,
+        "flow_ratio_weight": 0.30,
+        "direction_weights": {"bias": 0.35, "pc": 0.25, "skew": 0.25, "flow": 0.15},
+        "vol_weights": {"vrp": 0.65, "cheapness": 0.25, "flow": 0.10},
+        "provenance": "legacy_heuristic",
+    },
+    "overnight_continuation_alpha": {
+        "lookback_days": 90,
+        "prior_n": 12.0,
+        "event_boost": 0.035,
+        "liquidity_good_adj": 0.025,
+        "liquidity_poor_adj": -0.025,
+        "continuation_weights": {
+            "p_gate_continue": 0.38,
+            "support": 0.18,
+            "trend_alignment": 0.12,
+            "hist_continue": 0.17,
+            "lab_composite": 0.06,
+            "effective_stretch": -0.16,
+            "hist_stale": -0.10,
+        },
+        "fade_weights": {
+            "p_gate_fade": 0.42,
+            "hist_fade": 0.22,
+            "effective_stretch": 0.18,
+            "support_gap": 0.10,
+            "discipline_gap": 0.08,
+        },
+        "paid_risk_weights": {
+            "effective_stretch": 0.40,
+            "hist_stale": 0.30,
+            "gap_overpaid": 0.18,
+            "discipline_gap": 0.12,
+        },
+        "entry_quality_weights": {
+            "continuation_score": 0.38,
+            "discipline": 0.24,
+            "support": 0.18,
+            "paid_risk_gap": 0.12,
+            "fade_score_gap": 0.08,
+        },
+        "paid_risk_do_not_chase": 0.62,
+        "paid_risk_wait": 0.44,
+        "entry_quality_min_wait": 0.52,
+        "continuation_min": 0.55,
+        "entry_quality_min_continue": 0.56,
+        "strong_entry_quality": 0.62,
+        "provenance": "legacy_heuristic",
+    },
+}
 
 
 def table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
@@ -307,7 +379,7 @@ def fetch_limit_up_model(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     }
 
 
-def parameter_registry() -> list[dict[str, Any]]:
+def cn_parameter_registry() -> list[dict[str, Any]]:
     return [
         {
             "file": "quant-research-cn/src/analytics/paper_trade_ev.rs",
@@ -409,16 +481,139 @@ def parameter_registry() -> list[dict[str, Any]]:
     ]
 
 
-def build_artifact(market: str, db_path: Path) -> dict[str, Any]:
-    if market != "cn":
-        raise ValueError("Only --market cn is wired for this calibration artifact today.")
+def us_parameter_registry() -> list[dict[str, Any]]:
+    return [
+        {
+            "file": "quant-research-v1/src/quant_bot/analytics/risk_params.py",
+            "params": [
+                {
+                    "name": "atr_stop_multiple",
+                    "value": 2.0,
+                    "provenance": "legacy_heuristic",
+                    "migration": "walk_forward_rr_and_mae_calibration",
+                },
+                {
+                    "name": "fallback_expected_move_atr_multiple",
+                    "value": 2.0,
+                    "provenance": "legacy_heuristic",
+                    "migration": "options_expected_move_or_realized_cone_calibration",
+                },
+            ],
+        },
+        {
+            "file": "quant-research-v1/src/quant_bot/analytics/options_alpha.py",
+            "params": [
+                {
+                    "name": "directional_edge_threshold / vol_edge_threshold",
+                    "value": "0.45 / 0.10",
+                    "provenance": "legacy_heuristic",
+                    "migration": "options_expression_outcome_calibration",
+                },
+                {
+                    "name": "liquidity gate",
+                    "value": "spread<=25%, chain_width>=6, days_to_exp>=3",
+                    "provenance": "cost_assumption",
+                    "migration": "options_fill_quality_audit",
+                },
+            ],
+        },
+        {
+            "file": "quant-research-v1/src/quant_bot/analytics/overnight_continuation_alpha.py",
+            "params": [
+                {
+                    "name": "continuation/fade/paid-risk weights",
+                    "provenance": "legacy_heuristic",
+                    "migration": "bucketed_postmortem_walk_forward",
+                },
+                {
+                    "name": "paid_risk_do_not_chase / paid_risk_wait",
+                    "value": "0.62 / 0.44",
+                    "provenance": "legacy_heuristic",
+                    "migration": "stale_chase_false_positive_lcb",
+                },
+            ],
+        },
+        {
+            "file": "quant-research-v1/src/quant_bot/analytics/overnight_gate.py",
+            "params": [
+                {
+                    "name": "support/stretch/action thresholds",
+                    "provenance": "legacy_heuristic",
+                    "migration": "next_open_fill_and_next_close_ev_calibration",
+                    "notes": "Registered as debt; not fully runtime-loaded yet.",
+                }
+            ],
+        },
+    ]
+
+
+def fetch_us_postmortem(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    if not table_exists(con, "algorithm_postmortem"):
+        return {"status": "missing"}
+    rows = con.execute(
+        """
+        SELECT
+            COUNT(*) AS n,
+            SUM(CASE WHEN executable THEN 1 ELSE 0 END) AS executable_n,
+            AVG(realized_pnl_pct) FILTER (WHERE executable AND realized_pnl_pct IS NOT NULL) AS avg_pnl,
+            AVG(CASE WHEN direction_right THEN 1.0 ELSE 0.0 END)
+                FILTER (WHERE executable AND direction_right IS NOT NULL) AS direction_hit_rate,
+            SUM(CASE WHEN stale_chase THEN 1 ELSE 0 END) AS stale_chase_n,
+            MAX(CAST(evaluation_date AS VARCHAR)) AS latest_evaluation_date
+        FROM algorithm_postmortem
+        """
+    ).fetchone()
+    return {
+        "status": "ok",
+        "rows": rows[0],
+        "executable_rows": rows[1],
+        "avg_realized_pnl_pct": rows[2],
+        "direction_hit_rate": rows[3],
+        "stale_chase_rows": rows[4],
+        "latest_evaluation_date": rows[5],
+    }
+
+
+def fetch_us_options_alpha(con: duckdb.DuckDBPyConnection) -> dict[str, Any]:
+    if not table_exists(con, "options_alpha"):
+        return {"status": "missing"}
+    as_of = latest_as_of(con, "options_alpha")
+    if not as_of:
+        return {"status": "missing", "as_of": None}
+    rows = con.execute(
+        """
+        SELECT expression, liquidity_gate, COUNT(*), AVG(directional_edge), AVG(vol_edge)
+        FROM options_alpha
+        WHERE as_of = CAST(? AS DATE)
+        GROUP BY expression, liquidity_gate
+        ORDER BY COUNT(*) DESC
+        """,
+        [as_of],
+    ).fetchall()
+    return {
+        "status": "ok",
+        "as_of": as_of,
+        "buckets": [
+            {
+                "expression": row[0],
+                "liquidity_gate": row[1],
+                "count": row[2],
+                "avg_directional_edge": row[3],
+                "avg_vol_edge": row[4],
+            }
+            for row in rows
+        ],
+    }
+
+
+def build_cn_artifact(db_path: Path) -> dict[str, Any]:
     con = duckdb.connect(str(db_path), read_only=True)
     try:
         runtime_params = calibrate_paper_trade_params(con)
         return {
             "schema_version": 1,
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "market": market,
+            "market": "cn",
             "source_db": str(db_path),
             "principles": [
                 "Report ranking should use realized strategy EV, not opaque setup score.",
@@ -444,10 +639,43 @@ def build_artifact(market: str, db_path: Path) -> dict[str, Any]:
                 "latest": fetch_strategy_ev(con),
             },
             "limit_up_model": fetch_limit_up_model(con),
-            "parameter_registry": parameter_registry(),
+            "parameter_registry": cn_parameter_registry(),
         }
     finally:
         con.close()
+
+
+def build_us_artifact(db_path: Path) -> dict[str, Any]:
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        return {
+            "schema_version": 1,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "market": "us",
+            "source_db": str(db_path),
+            "principles": [
+                "US execution/risk constants must be runtime parameters with provenance.",
+                "Options alpha is an expression layer; it needs its own outcome calibration.",
+                "Legacy heuristics remain defaults until OOS postmortem LCB improves.",
+                "Headline/news context can explain a setup but cannot prove alpha.",
+            ],
+            "us_runtime_params": DEFAULT_US_RUNTIME_PARAMS,
+            "latest": {
+                "postmortem": fetch_us_postmortem(con),
+                "options_alpha": fetch_us_options_alpha(con),
+            },
+            "parameter_registry": us_parameter_registry(),
+        }
+    finally:
+        con.close()
+
+
+def build_artifact(market: str, db_path: Path) -> dict[str, Any]:
+    if market == "cn":
+        return build_cn_artifact(db_path)
+    if market == "us":
+        return build_us_artifact(db_path)
+    raise ValueError(f"unsupported market: {market}")
 
 
 def output_paths(market: str) -> list[Path]:
@@ -460,17 +688,19 @@ def output_paths(market: str) -> list[Path]:
     ]
     if market == "cn":
         paths.append(QUANT_CN_ROOT / "config" / "strategy_params.generated.yaml")
+    if market == "us":
+        paths.append(QUANT_US_ROOT / "config" / "strategy_params.generated.yaml")
     return paths
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Generate strategy parameter calibration artifact.")
-    parser.add_argument("--market", choices=["cn"], default="cn")
+    parser.add_argument("--market", choices=["cn", "us"], default="cn")
     parser.add_argument("--dry-run", action="store_true", help="Print artifact without writing files.")
     parser.add_argument("--output", type=Path, help="Optional single output path.")
     args = parser.parse_args()
 
-    db_path = QUANT_CN_REPORT_DB if args.market == "cn" else None
+    db_path = QUANT_CN_REPORT_DB if args.market == "cn" else QUANT_US_REPORT_DB
     if db_path is None or not db_path.exists():
         print(f"ERROR: report database not found: {db_path}", file=sys.stderr)
         return 1

@@ -127,6 +127,28 @@ Options alpha emits:
 - `liquidity_gate`
 - expression: `stock_long`, `call_spread`, `put_spread`, `wait`, or `blocked`
 
+## Strategy Parameters
+
+US execution/risk thresholds now follow the same provenance pattern as CN. The
+runtime loads, in order:
+
+- `QUANT_US_STRATEGY_PARAMS`
+- `config/strategy_params.generated.yaml`
+- `config/strategy_params.yaml`
+- `../factor-lab/runtime/strategy_calibration/us/strategy_params.generated.yaml`
+
+The first wired runtime sections are `risk_params`, `options_alpha`, and
+`overnight_continuation_alpha`. Defaults remain conservative legacy heuristics,
+but every value is now in one artifact and can be replaced by weekend
+walk-forward calibration once OOS lower-confidence EV improves.
+
+Generate the US artifact:
+
+```bash
+cd ..
+python factor-lab/scripts/calibrate_strategy_params.py --market us
+```
+
 ## Shared Alpha Gate
 
 The shared gate lives in the root repo:
