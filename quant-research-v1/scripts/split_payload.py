@@ -21,6 +21,14 @@ from datetime import date
 from pathlib import Path
 
 
+def _section_slice(lines: list[str], start: int | None, boundaries: list[int | None]) -> list[str]:
+    if start is None:
+        return []
+    end_candidates = [idx for idx in boundaries if idx is not None and idx > start]
+    end = min(end_candidates) if end_candidates else len(lines)
+    return lines[start:end]
+
+
 def split_payload(payload_path: Path, output_dir: Path, as_of: str, session: str) -> dict[str, Path]:
     """Split a payload file into macro, structural, and news components."""
     text = payload_path.read_text(encoding="utf-8")
@@ -44,9 +52,13 @@ def split_payload(payload_path: Path, output_dir: Path, as_of: str, session: str
     # --- Detect additional section boundaries for routing ---
     report_postmortem_start = None
     scorecard_start = None
+    stable_alpha_start = None
+    strategy_ev_start = None
     portfolio_risk_start = None
     shared_catalysts_start = None
     options_extremes_start = None
+    action_plan_start = None
+    setup_alpha_start = None
     dividend_start = None
     coverage_start = None
     charts_start = None
@@ -56,6 +68,10 @@ def split_payload(payload_path: Path, output_dir: Path, as_of: str, session: str
             report_postmortem_start = i
         elif line.startswith("## Algorithm Scorecard"):
             scorecard_start = i
+        elif line.startswith("## US Stable Alpha Bulletin") or line.startswith("## CN Stable Alpha Bulletin"):
+            stable_alpha_start = i
+        elif line.startswith("## Strategy EV Guidance"):
+            strategy_ev_start = i
         elif line.startswith("## Portfolio Risk Summary"):
             portfolio_risk_start = i
         elif line.startswith("## Shared Catalysts"):
@@ -63,6 +79,10 @@ def split_payload(payload_path: Path, output_dir: Path, as_of: str, session: str
         elif line.startswith("## Options Extremes") or line.startswith("## Top Bullish") or line.startswith("## Top Bearish"):
             if options_extremes_start is None:
                 options_extremes_start = i
+        elif line.startswith("## Action Plan Ledger"):
+            action_plan_start = i
+        elif line.startswith("## Setup Alpha / Anti-Chase"):
+            setup_alpha_start = i
         elif line.startswith("## Dividend"):
             dividend_start = i
         elif line.startswith("## Data Coverage") or line.startswith("## Coverage"):
@@ -95,6 +115,7 @@ def split_payload(payload_path: Path, output_dir: Path, as_of: str, session: str
             for idx in [
                 scorecard_start,
                 portfolio_risk_start,
+                strategy_ev_start,
                 shared_catalysts_start,
                 options_extremes_start,
                 notable_start,
@@ -104,18 +125,41 @@ def split_payload(payload_path: Path, output_dir: Path, as_of: str, session: str
         review_end = min(review_end_candidates) if review_end_candidates else notable_start
         structural_lines.extend(lines[report_postmortem_start:review_end])
         structural_lines.append("\n---\n")
+    structural_section_boundaries = [
+        scorecard_start,
+        stable_alpha_start,
+        strategy_ev_start,
+        portfolio_risk_start,
+        shared_catalysts_start,
+        options_extremes_start,
+        action_plan_start,
+        setup_alpha_start,
+        notable_start,
+        universe_start,
+        dividend_start,
+        coverage_start,
+        charts_start,
+    ]
+    for section_start in [stable_alpha_start, strategy_ev_start, action_plan_start, setup_alpha_start]:
+        section = _section_slice(lines, section_start, structural_section_boundaries)
+        if section:
+            structural_lines.extend(section)
+            structural_lines.append("\n---\n")
     news_lines = [
         f"# News & Events Data — {stem}\n",
         "Per-item news headlines, SEC filings, earnings events.\n",
     ]
 
-    # Find each item block by ### N. SYMBOL pattern
-    item_pattern = re.compile(r"^### \d+\. (\S+) \[")
+    # Find each item block by header. The renderer may include a company name
+    # between the ticker and the signal bracket:
+    #   ### 1. QCOM [..]
+    #   ### 1. QCOM — Qualcomm Inc [..]
+    item_pattern = re.compile(r"^### \d+\. (\S+)(?:\s+.+)? \[")
     item_starts = [
         (i, lines[i]) for i in range(len(lines)) if item_pattern.match(lines[i])
     ]
     if not item_starts:
-        raise ValueError(f"No notable items found (expected '### N. SYMBOL [' pattern) in {payload_path}")
+        raise ValueError(f"No notable items found (expected '### N. SYMBOL [...]' item headers) in {payload_path}")
 
     for idx, (start, header) in enumerate(item_starts):
         end = item_starts[idx + 1][0] if idx + 1 < len(item_starts) else len(lines)

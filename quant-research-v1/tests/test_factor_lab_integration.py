@@ -315,6 +315,7 @@ class RenderPayloadTests(unittest.TestCase):
                 {
                     "symbol": "AAA",
                     "report_bucket": "core",
+                    "momentum": {"regime": "trending"},
                     "execution_gate": {"action": "executable_now"},
                     "risk_params": {"rr_ratio": 2.1},
                     "signal": {
@@ -340,6 +341,40 @@ class RenderPayloadTests(unittest.TestCase):
         self.assertEqual(gate["status"], "pass")
         self.assertEqual(gate["role"], "main_signal")
         self.assertEqual(gate["action_intent"], "TRADE")
+
+    def test_main_signal_gate_requires_profitable_trending_slice(self) -> None:
+        from quant_bot.signals.classify import apply_main_signal_gate
+
+        bundle = {
+            "headline_gate": {"mode": "trend"},
+            "notable_items": [
+                {
+                    "symbol": "LOWTREND",
+                    "report_bucket": "core",
+                    "momentum": {"regime": "trending"},
+                    "execution_gate": {"action": "executable_now"},
+                    "risk_params": {"rr_ratio": 2.0},
+                    "signal": {"confidence": "LOW", "direction": "long", "direction_score": 0.22},
+                },
+                {
+                    "symbol": "NOISY",
+                    "report_bucket": "core",
+                    "momentum": {"regime": "noisy"},
+                    "execution_gate": {"action": "executable_now"},
+                    "risk_params": {"rr_ratio": 2.0},
+                    "signal": {"confidence": "HIGH", "direction": "long", "direction_score": 0.34},
+                },
+            ],
+        }
+
+        apply_main_signal_gate(bundle)
+
+        low_gate = bundle["notable_items"][0]["main_signal_gate"]
+        noisy_gate = bundle["notable_items"][1]["main_signal_gate"]
+        self.assertEqual(low_gate["status"], "pass")
+        self.assertEqual(low_gate["role"], "main_signal")
+        self.assertEqual(noisy_gate["status"], "blocked")
+        self.assertIn("trend_regime_noisy", noisy_gate["blockers"])
 
     def test_render_notable_items_includes_tactical_continuation_bucket(self) -> None:
         from quant_bot.reporting.render import _render_notable_items

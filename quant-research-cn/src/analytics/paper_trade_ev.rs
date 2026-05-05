@@ -12,6 +12,7 @@ const SESSION: &str = "daily";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SelectionStatus {
     Selected,
+    Exploration,
     Ignored,
 }
 
@@ -19,6 +20,7 @@ impl SelectionStatus {
     fn parse(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             "selected" => Self::Selected,
+            "exploration" => Self::Exploration,
             _ => Self::Ignored,
         }
     }
@@ -30,6 +32,7 @@ enum ReportLane {
     ThemeRotation,
     TacticalContinuation,
     RangeCore,
+    Exploration,
     Radar,
     Other,
 }
@@ -41,6 +44,7 @@ impl ReportLane {
             "THEME ROTATION" => Self::ThemeRotation,
             "TACTICAL CONTINUATION" => Self::TacticalContinuation,
             "RANGE CORE" => Self::RangeCore,
+            "EXPLORATION" => Self::Exploration,
             "RADAR" => Self::Radar,
             _ => Self::Other,
         }
@@ -52,6 +56,7 @@ impl ReportLane {
             Self::ThemeRotation => "THEME ROTATION",
             Self::TacticalContinuation => "TACTICAL CONTINUATION",
             Self::RangeCore => "RANGE CORE",
+            Self::Exploration => "EXPLORATION",
             Self::Radar => "RADAR",
             Self::Other => "OTHER",
         }
@@ -63,6 +68,7 @@ impl ReportLane {
             Self::ThemeRotation => "theme_rotation",
             Self::TacticalContinuation => "tactical_continuation",
             Self::RangeCore => "range_core",
+            Self::Exploration => "exploration",
             Self::Radar => "radar",
             Self::Other => "other",
         }
@@ -116,6 +122,7 @@ impl ExecutionMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StrategyFamily {
+    OversoldContrarian,
     EarningsSetup,
     EarlyAccumulation,
     ContinuationBreakout,
@@ -126,9 +133,17 @@ enum StrategyFamily {
 
 impl StrategyFamily {
     fn classify(decision: &Decision) -> Self {
+        let exploration_family = decision.detail_str("exploration_strategy_family", "");
+        let rsi_14 = decision.detail_f64("rsi_14", 50.0);
         let p_upside = decision.detail_f64("p_upside", 0.50);
         let shadow_prob = decision.detail_f64("shadow_option_alpha_prob", 0.50);
         let ret_20d = decision.detail_f64("ret_20d", 0.0);
+
+        if decision.selection_status == SelectionStatus::Exploration
+            && (exploration_family == "oversold_contrarian" || rsi_14 < 35.0)
+        {
+            return Self::OversoldContrarian;
+        }
 
         match (
             p_upside >= 0.70,
@@ -148,6 +163,7 @@ impl StrategyFamily {
 
     fn as_str(self) -> &'static str {
         match self {
+            Self::OversoldContrarian => "oversold_contrarian",
             Self::EarningsSetup => "earnings_setup",
             Self::EarlyAccumulation => "early_accumulation",
             Self::ContinuationBreakout => "continuation_breakout",
@@ -174,6 +190,9 @@ impl TradeIntent {
             decision.report_lane,
             decision.execution_mode,
         ) {
+            (SelectionStatus::Exploration, Direction::Bullish, ReportLane::Exploration, _) => {
+                Self::Trade
+            }
             (
                 SelectionStatus::Selected,
                 Direction::Bullish,
@@ -404,6 +423,14 @@ impl Decision {
             .as_ref()
             .and_then(|v| v.get(key))
             .and_then(|v| v.as_f64())
+            .unwrap_or(default)
+    }
+
+    fn detail_str<'a>(&'a self, key: &str, default: &'a str) -> &'a str {
+        self.details
+            .as_ref()
+            .and_then(|v| v.get(key))
+            .and_then(|v| v.as_str())
             .unwrap_or(default)
     }
 
@@ -1373,6 +1400,9 @@ fn strategy_key(
     family: StrategyFamily,
     execution_rule: ExecutionRule,
 ) -> String {
+    if family == StrategyFamily::OversoldContrarian {
+        return oversold_strategy_key(decision, execution_rule);
+    }
     let shadow_bucket = match decision.detail_f64("downside_stress", 0.5) {
         v if v >= 0.60 => "shadow_high",
         v if v >= 0.35 => "shadow_mid",
@@ -1394,6 +1424,52 @@ fn strategy_key(
         setup_bucket,
         rsi_bucket,
         market_vol_bucket
+    )
+}
+
+fn oversold_strategy_key(decision: &Decision, execution_rule: ExecutionRule) -> String {
+    let rsi = decision.detail_f64("rsi_14", 50.0);
+    let ret_5d = decision.detail_f64("ret_5d", 0.0);
+    let ret_20d = decision.detail_f64("ret_20d", 0.0);
+    let rsi_bucket = match rsi {
+        v if v < 20.0 => "rsi_panic",
+        v if v < 28.0 => "rsi_deep",
+        _ => "rsi_oversold",
+    };
+    let drawdown_bucket = if ret_5d <= -12.0 {
+        "fast_crash_5d"
+    } else if ret_20d <= -18.0 {
+        "deep_drawdown_20d"
+    } else if ret_20d <= -8.0 {
+        "pullback_20d"
+    } else {
+        "shallow_pullback"
+    };
+    let fade_bucket = match decision.fade_risk {
+        v if v <= 0.35 => "fade_low",
+        v if v <= 0.70 => "fade_mid",
+        _ => "fade_high",
+    };
+    let setup_bucket = match decision.setup_score {
+        v if v >= 0.65 => "setup_strong",
+        v if v >= 0.50 => "setup_mixed",
+        _ => "setup_weak",
+    };
+    let flow_bucket = if decision.flow_conflict_flag {
+        "flow_conflict"
+    } else {
+        "flow_clean"
+    };
+    format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        StrategyFamily::OversoldContrarian.as_str(),
+        decision.report_lane.key(),
+        execution_rule.as_str(),
+        rsi_bucket,
+        drawdown_bucket,
+        fade_bucket,
+        setup_bucket,
+        flow_bucket,
     )
 }
 
@@ -1619,6 +1695,38 @@ mod tests {
         assert_eq!(
             ExecutionRule::from_intent(intent),
             ExecutionRule::ObserveOnly
+        );
+    }
+
+    #[test]
+    fn exploration_oversold_candidate_enters_paper_trade_not_observe() {
+        let mut d = decision();
+        d.selection_status = SelectionStatus::Exploration;
+        d.selection_status_raw = "exploration".to_string();
+        d.report_lane = ReportLane::Exploration;
+        d.signal_confidence = "EXPLORATION".to_string();
+        d.execution_mode = ExecutionMode::WaitPullback;
+        d.details = Some(json!({
+            "exploration_strategy_family": "oversold_contrarian",
+            "rsi_14": 29.7,
+            "ret_5d": -2.1,
+            "ret_20d": -8.4,
+            "downside_stress": 0.25
+        }));
+
+        let family = StrategyFamily::classify(&d);
+        let intent = TradeIntent::from_decision(&d);
+
+        assert_eq!(family, StrategyFamily::OversoldContrarian);
+        assert_eq!(intent, TradeIntent::Trade);
+        assert_eq!(
+            ExecutionRule::from_intent(intent),
+            ExecutionRule::NextOpenOrPullback
+        );
+        assert!(
+            strategy_key(&d, family, ExecutionRule::NextOpenOrPullback).contains(
+                "oversold_contrarian|exploration|next_open_or_pullback|rsi_oversold|pullback_20d"
+            )
         );
     }
 

@@ -196,6 +196,8 @@ fn render_market_sentiment_dashboard(
     let p_high_vol_tomorrow = query_market_metric(db, date_str, "vol_hmm", "p_high_vol_tomorrow");
     let rv_tobit_20d = query_market_metric(db, date_str, "vol_hmm", "rv_tobit_20d");
     let rv_raw_20d = query_market_metric(db, date_str, "vol_hmm", "rv_raw_20d");
+    let gate_multiplier = query_market_metric(db, date_str, "macro_gate", "gate_multiplier");
+    let execution_stress = market_execution_stress(p_high_vol_tomorrow, gate_multiplier);
     let tobit_ratio = match (rv_tobit_20d, rv_raw_20d) {
         (Some(tobit), Some(raw)) if raw > 0.0 => Some(tobit / raw),
         _ => None,
@@ -217,7 +219,7 @@ fn render_market_sentiment_dashboard(
 
     let components = [
         (
-            "vol_stress",
+            "low_vol_support",
             p_high_vol.map(|v| (1.0 - v).clamp(0.0, 1.0) * 100.0),
             0.25,
         ),
@@ -227,7 +229,7 @@ fn render_market_sentiment_dashboard(
             0.15,
         ),
         (
-            "market_rsi",
+            "rsi_component_score",
             market_rsi.and_then(|v| scale(v, 30.0, 70.0)),
             0.20,
         ),
@@ -279,6 +281,12 @@ fn render_market_sentiment_dashboard(
     )?;
     writeln!(
         md,
+        "- execution risk: gate_multiplier={}，execution_stress={}；该压力已进入个股 open_execution_gate，用来收紧追价空间和可执行最低分。",
+        fmt_opt_f64(gate_multiplier, 2),
+        fmt_opt_f64(execution_stress.map(|v| v * 100.0), 1)
+    )?;
+    writeln!(
+        md,
         "- breadth: 20D上涨占比={}%，当日上涨占比={}%，行业资金净流入占比={}%",
         fmt_opt_f64(breadth_20d.map(|v| v * 100.0), 1),
         fmt_opt_f64(advance_ratio.map(|v| v * 100.0), 1),
@@ -286,10 +294,10 @@ fn render_market_sentiment_dashboard(
     )?;
     writeln!(
         md,
-        "- components: vol_stress={}，tobit_vol={}，market_rsi={}，breadth_20d={}，advance_decline={}，sector_flow={}",
-        fmt_opt_f64(component_value(&components, "vol_stress"), 1),
+        "- components: low_vol_support={}，tobit_vol={}，rsi_component_score={}，breadth_20d={}，advance_decline={}，sector_flow={}",
+        fmt_opt_f64(component_value(&components, "low_vol_support"), 1),
         fmt_opt_f64(component_value(&components, "tobit_vol"), 1),
-        fmt_opt_f64(component_value(&components, "market_rsi"), 1),
+        fmt_opt_f64(component_value(&components, "rsi_component_score"), 1),
         fmt_opt_f64(component_value(&components, "breadth_20d"), 1),
         fmt_opt_f64(component_value(&components, "advance_decline"), 1),
         fmt_opt_f64(component_value(&components, "sector_flow"), 1),
@@ -383,6 +391,22 @@ fn scale(value: f64, low: f64, high: f64) -> Option<f64> {
         return None;
     }
     Some(((value - low) / (high - low) * 100.0).clamp(0.0, 100.0))
+}
+
+fn market_execution_stress(
+    p_high_vol_tomorrow: Option<f64>,
+    gate_multiplier: Option<f64>,
+) -> Option<f64> {
+    match (p_high_vol_tomorrow, gate_multiplier) {
+        (Some(p_high), Some(gate)) => {
+            let vol_stress = ((p_high - 0.65) / 0.30).clamp(0.0, 1.0);
+            let gate_stress = ((0.85 - gate) / 0.25).clamp(0.0, 1.0);
+            Some(vol_stress.max(gate_stress))
+        }
+        (Some(p_high), None) => Some(((p_high - 0.65) / 0.30).clamp(0.0, 1.0)),
+        (None, Some(gate)) => Some(((0.85 - gate) / 0.25).clamp(0.0, 1.0)),
+        (None, None) => None,
+    }
 }
 
 fn component_value(components: &[(&str, Option<f64>, f64)], name: &str) -> Option<f64> {
@@ -1661,7 +1685,7 @@ fn render_strategy_ev_summary(md: &mut String, db: &Connection, date_str: &str) 
     writeln!(md)?;
     writeln!(
         md,
-        "该段是策略管线的回测账本，不是叙事层。所有进入报告的候选都会落到 `paper_trades`，按 `Decision -> StrategyFamily -> TradeIntent -> ExecutionRule -> Fill -> Outcome -> EV` 状态机回放；`eligible=yes` 只代表本地纸面 EV 通过，不等于 stable champion，也不等于 Execution Alpha。"
+        "该段是策略管线的回测账本，不是叙事层。所有进入报告的候选都会落到 `paper_trades`，按 `Decision -> StrategyFamily -> TradeIntent -> ExecutionRule -> Fill -> Outcome -> EV` 状态机回放；`eligible=yes` 只代表本地纸面 EV 通过，不等于 stable champion，也不等于 Execution Alpha。A股主线按短生命周期管理：T+1 首个可卖日复核，T+3 无 +1R/放量跟随则退出复核，最长 T+5 时间止损/止盈复盘。"
     )?;
     writeln!(md)?;
 
@@ -1682,13 +1706,13 @@ fn render_strategy_ev_summary(md: &mut String, db: &Connection, date_str: &str) 
             .count();
         writeln!(
             md,
-            "状态机汇总: Positive EV Setup={}，Research Setup={}，Blocked Negative EV={}。`CORE BOOK` 只代表结构筛选来源；若本地 EV 或置信下界为负，报告必须降级为 Blocked/Research，不能写成执行主书。",
+        "状态机汇总: Positive EV Setup={}，Research Setup={}，Blocked Negative EV={}。`CORE BOOK` 只代表结构筛选来源；`no history` 表示同类已完成样本还不够，不等于看空；若本地 EV 或置信下界为负，报告必须降级为 Blocked/Research，不能写成执行主书。",
             positive_ev, research, blocked_negative
         )?;
         writeln!(md)?;
         writeln!(
             md,
-            "| 状态 | 代码 | 名称 | 策略族 | 意图 | 执行规则 | 入场 | 1R波动 | 处理线 | 复核上沿 | 时间规则 | EV% | EV80 LCB | n | 阻断 |"
+            "| 状态 | 代码 | 名称 | 策略族 | 意图 | 执行规则 | 入场 | 1R波动 | 处理线 | 复核上沿 | 时间规则 | 策略EV% | 策略EV80下界 | n | 状态解释 |"
         )?;
         writeln!(
             md,
@@ -1715,7 +1739,7 @@ fn render_strategy_ev_summary(md: &mut String, db: &Connection, date_str: &str) 
                 row.strategy_samples
                     .map(|v| v.to_string())
                     .unwrap_or_else(|| "-".to_string()),
-                row.fail_reasons.as_deref().unwrap_or("no_history"),
+                display_state_reason(row),
             )?;
         }
         writeln!(md)?;
@@ -1857,7 +1881,7 @@ fn query_current_paper_trades(db: &Connection, date_str: &str) -> Vec<PaperTrade
          AND m.execution_rule = p.execution_rule
         WHERE p.report_date = CAST(? AS DATE)
           AND p.session = 'daily'
-          AND p.selection_status = 'selected'
+          AND p.selection_status IN ('selected', 'exploration')
         ORDER BY
             CASE COALESCE(m.alpha_state, '')
                 WHEN 'positive_ev_setup' THEN 0
@@ -1956,7 +1980,7 @@ fn execution_plan_view(row: &PaperTradeLifecycleView) -> ExecutionPlanView {
             .unwrap_or_else(|| "-".to_string()),
         stop,
         upper,
-        time_rule: "T+2未放量越过+1R则退出复核",
+        time_rule: "T+1复核；T+3无+1R退出；最长T+5",
     }
 }
 
@@ -1979,6 +2003,41 @@ fn display_alpha_state(raw: Option<&str>) -> &'static str {
         "blocked_out_of_scope" => "Blocked / Out-of-scope",
         _ => "Research Setup",
     }
+}
+
+fn display_state_reason(row: &PaperTradeLifecycleView) -> String {
+    let raw = row.fail_reasons.as_deref();
+    let text = raw.unwrap_or("").trim();
+    if text.is_empty() {
+        return match row.alpha_state.as_deref().unwrap_or("") {
+            "positive_ev_setup" => "本地EV通过；仍非Execution".to_string(),
+            "blocked_negative_ev" => "本地EV或置信下界未放行".to_string(),
+            _ => "同类已完成样本不足 / no history".to_string(),
+        };
+    }
+    display_fail_reasons(raw)
+}
+
+fn display_fail_reasons(raw: Option<&str>) -> String {
+    let text = raw.unwrap_or("no_history").trim();
+    if text.is_empty() || text == "no_history" {
+        return "同类已完成样本不足 / no history".to_string();
+    }
+    text.split(',')
+        .map(|part| match part.trim() {
+            "samples_lt_8" => "样本<8",
+            "fills_lt_4" => "成交<4",
+            "fill_rate_lt_35pct" => "成交率<35%",
+            "ev_lte_0_150pct" => "EV未超过成本垫",
+            "ev_not_positive_enough" => "EV不足",
+            "ev_lcb80_lte_0pct" => "EV80下界<=0",
+            "tail_risk_high" => "尾部风险高",
+            "blocked" => "已阻断",
+            "observe_only" => "观察层不回放交易",
+            other => other,
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn render_setup_alpha_summary(
@@ -4074,48 +4133,89 @@ fn render_upcoming_unlocks(md: &mut String, db: &Connection, date_str: &str) -> 
     Ok(())
 }
 
-fn render_disclosure_calendar(md: &mut String, db: &Connection, _date_str: &str) -> Result<()> {
-    writeln!(md, "### 财报披露日历")?;
+fn render_disclosure_calendar(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
+    writeln!(md, "### 财报披露日历（今日/昨夜/未来3日/延期）")?;
     writeln!(md)?;
-    writeln!(md, "| 代码 | 报告期 | 预约日 | 实际日 |")?;
-    writeln!(md, "|------|--------|--------|--------|")?;
+    writeln!(md, "| 关注类型 | 代码 | 报告期 | 预约日 | 实际日 |")?;
+    writeln!(md, "|----------|------|--------|--------|--------|")?;
 
-    // Get the latest quarter end date
-    let sql = "SELECT ts_code, CAST(end_date AS VARCHAR),
+    let sql = "SELECT
+                      CASE
+                        WHEN TRY_CAST(actual_date AS DATE) = CAST(? AS DATE) THEN '今日已披露'
+                        WHEN TRY_CAST(actual_date AS DATE) = CAST(? AS DATE) - INTERVAL '1 day' THEN '昨夜/昨日已披露'
+                        WHEN TRY_CAST(actual_date AS DATE) IS NULL
+                             AND TRY_CAST(pre_date AS DATE) = CAST(? AS DATE) THEN '今日预约'
+                        WHEN TRY_CAST(actual_date AS DATE) IS NULL
+                             AND TRY_CAST(pre_date AS DATE) > CAST(? AS DATE)
+                             AND TRY_CAST(pre_date AS DATE) <= CAST(? AS DATE) + INTERVAL '3 days' THEN '未来3日'
+                        WHEN TRY_CAST(actual_date AS DATE) IS NULL
+                             AND TRY_CAST(pre_date AS DATE) < CAST(? AS DATE) THEN '延期/待披露'
+                        ELSE '关注'
+                      END AS focus_type,
+                      ts_code,
+                      CAST(end_date AS VARCHAR),
                       COALESCE(pre_date, '-'),
                       COALESCE(actual_date, '-')
                FROM disclosure_date
                WHERE end_date = (
                    SELECT MAX(end_date) FROM disclosure_date
                )
-               ORDER BY COALESCE(actual_date, pre_date, '9999')
-               LIMIT 30";
+                 AND (
+                    TRY_CAST(actual_date AS DATE) IN (CAST(? AS DATE), CAST(? AS DATE) - INTERVAL '1 day')
+                    OR (
+                        TRY_CAST(actual_date AS DATE) IS NULL
+                        AND TRY_CAST(pre_date AS DATE) <= CAST(? AS DATE) + INTERVAL '3 days'
+                    )
+                 )
+               ORDER BY
+                 CASE focus_type
+                    WHEN '今日已披露' THEN 0
+                    WHEN '昨夜/昨日已披露' THEN 1
+                    WHEN '今日预约' THEN 2
+                    WHEN '延期/待披露' THEN 3
+                    WHEN '未来3日' THEN 4
+                    ELSE 9
+                 END,
+                 COALESCE(TRY_CAST(actual_date AS DATE), TRY_CAST(pre_date AS DATE), DATE '9999-12-31'),
+                 ts_code
+               LIMIT 40";
 
     match db.prepare(sql) {
         Ok(mut stmt) => {
-            let rows: Vec<(String, String, String, String)> = stmt
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                })?
+            let rows: Vec<(String, String, String, String, String)> = stmt
+                .query_map(
+                    duckdb::params![
+                        date_str, date_str, date_str, date_str, date_str, date_str, date_str,
+                        date_str, date_str,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )?
                 .filter_map(|r| r.ok())
                 .collect();
 
             if rows.is_empty() {
-                writeln!(md, "| (无数据) | - | - | - |")?;
+                writeln!(md, "| (无今日/近期重点披露) | - | - | - | - |")?;
             } else {
-                for (code, end, pre, actual) in &rows {
-                    writeln!(md, "| {} | {} | {} | {} |", code, end, pre, actual)?;
+                for (focus, code, end, pre, actual) in &rows {
+                    writeln!(
+                        md,
+                        "| {} | {} | {} | {} | {} |",
+                        focus, code, end, pre, actual
+                    )?;
                 }
             }
         }
         Err(e) => {
             warn!(err = %e, "disclosure_date query failed");
-            writeln!(md, "| (查询失败) | - | - | - |")?;
+            writeln!(md, "| (查询失败) | - | - | - | - |")?;
         }
     }
     writeln!(md)?;
@@ -4126,12 +4226,14 @@ fn render_enriched_news(md: &mut String, db: &Connection, date_str: &str) -> Res
     writeln!(md, "### 个股新闻 (DeepSeek enriched)")?;
     writeln!(md)?;
 
-    let sql = "SELECT ts_code, published_at, headline, event_type, sentiment,
-                      relevance, summary_one_line
-               FROM news_enriched
-               WHERE TRY_CAST(published_at AS TIMESTAMP) >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS TIMESTAMP)
-                 AND TRY_CAST(published_at AS TIMESTAMP) < CAST(CAST(? AS DATE) + INTERVAL '1 day' AS TIMESTAMP)
-               ORDER BY relevance DESC, published_at DESC
+    let sql = "SELECT e.ts_code, COALESCE(sb.name, '') AS name, e.published_at,
+                      e.headline, e.event_type, e.sentiment, e.relevance,
+                      e.summary_one_line, COALESCE(e.key_entities, '')
+               FROM news_enriched e
+               LEFT JOIN stock_basic sb ON sb.ts_code = e.ts_code
+               WHERE TRY_CAST(e.published_at AS TIMESTAMP) >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS TIMESTAMP)
+                 AND TRY_CAST(e.published_at AS TIMESTAMP) < CAST(CAST(? AS DATE) + INTERVAL '1 day' AS TIMESTAMP)
+               ORDER BY e.relevance DESC, e.published_at DESC
                LIMIT 40";
 
     match db.prepare(sql) {
@@ -4139,21 +4241,25 @@ fn render_enriched_news(md: &mut String, db: &Connection, date_str: &str) -> Res
             let rows: Vec<(
                 String,
                 String,
+                String,
                 Option<String>,
                 Option<String>,
                 Option<String>,
                 Option<f64>,
                 Option<String>,
+                String,
             )> = stmt
                 .query_map(duckdb::params![date_str, date_str], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
-                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, String>(2)?,
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<f64>>(5)?,
-                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<f64>>(6)?,
+                        row.get::<_, Option<String>>(7)?,
+                        row.get::<_, String>(8).unwrap_or_default(),
                     ))
                 })?
                 .filter_map(|r| r.ok())
@@ -4162,7 +4268,31 @@ fn render_enriched_news(md: &mut String, db: &Connection, date_str: &str) -> Res
             if rows.is_empty() {
                 writeln!(md, "- (近3日无enriched新闻)")?;
             } else {
-                for (code, pub_at, headline, event_type, sentiment, relevance, summary) in &rows {
+                let mut invalid = Vec::new();
+                for (
+                    code,
+                    name,
+                    pub_at,
+                    headline,
+                    event_type,
+                    sentiment,
+                    relevance,
+                    summary,
+                    key_entities,
+                ) in &rows
+                {
+                    let display_text = summary
+                        .as_deref()
+                        .unwrap_or(headline.as_deref().unwrap_or("-"));
+                    if !news_entity_supported(
+                        name,
+                        headline.as_deref(),
+                        Some(display_text),
+                        Some(key_entities),
+                    ) {
+                        invalid.push((code, name, pub_at, headline, display_text));
+                        continue;
+                    }
                     writeln!(
                         md,
                         "- **{}** [{}] [{}] rel={:.2}",
@@ -4171,15 +4301,10 @@ fn render_enriched_news(md: &mut String, db: &Connection, date_str: &str) -> Res
                         sentiment.as_deref().unwrap_or("neutral"),
                         relevance.unwrap_or(0.0),
                     )?;
-                    writeln!(
-                        md,
-                        "  {}",
-                        summary
-                            .as_deref()
-                            .unwrap_or(headline.as_deref().unwrap_or("-")),
-                    )?;
+                    writeln!(md, "  {}", display_text)?;
                     writeln!(md, "  时间: {}", pub_at)?;
                 }
+                render_news_entity_audit(md, &invalid)?;
             }
         }
         Err(_) => {
@@ -4200,22 +4325,25 @@ fn render_enriched_news(md: &mut String, db: &Connection, date_str: &str) -> Res
 }
 
 fn render_raw_stock_news(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
-    let sql = "SELECT ts_code, publish_time, title, source
-               FROM stock_news
-               WHERE TRY_CAST(publish_time AS TIMESTAMP) >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS TIMESTAMP)
-                 AND TRY_CAST(publish_time AS TIMESTAMP) < CAST(CAST(? AS DATE) + INTERVAL '1 day' AS TIMESTAMP)
-               ORDER BY publish_time DESC
-               LIMIT 30";
+    let sql = "SELECT n.ts_code, COALESCE(sb.name, '') AS name, n.publish_time,
+                      n.title, n.source
+               FROM stock_news n
+               LEFT JOIN stock_basic sb ON sb.ts_code = n.ts_code
+               WHERE TRY_CAST(n.publish_time AS TIMESTAMP) >= CAST(CAST(? AS DATE) - INTERVAL '3 days' AS TIMESTAMP)
+                 AND TRY_CAST(n.publish_time AS TIMESTAMP) < CAST(CAST(? AS DATE) + INTERVAL '1 day' AS TIMESTAMP)
+               ORDER BY n.publish_time DESC
+               LIMIT 60";
 
     match db.prepare(sql) {
         Ok(mut stmt) => {
-            let rows: Vec<(String, String, String, Option<String>)> = stmt
+            let rows: Vec<(String, String, String, String, Option<String>)> = stmt
                 .query_map(duckdb::params![date_str, date_str], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 })?
                 .filter_map(|r| r.ok())
@@ -4224,7 +4352,13 @@ fn render_raw_stock_news(md: &mut String, db: &Connection, date_str: &str) -> Re
             if rows.is_empty() {
                 writeln!(md, "- (无原始新闻)")?;
             } else {
-                for (code, pub_time, title, source) in &rows {
+                let mut rendered = 0usize;
+                let mut invalid = Vec::new();
+                for (code, name, pub_time, title, source) in &rows {
+                    if !news_entity_supported(name, Some(title), None, None) {
+                        invalid.push((code, name, pub_time, title.as_str()));
+                        continue;
+                    }
                     writeln!(
                         md,
                         "- **{}**: {} — 来源: {}, 时间: {}",
@@ -4233,7 +4367,12 @@ fn render_raw_stock_news(md: &mut String, db: &Connection, date_str: &str) -> Re
                         source.as_deref().unwrap_or("-"),
                         pub_time,
                     )?;
+                    rendered += 1;
+                    if rendered >= 30 {
+                        break;
+                    }
                 }
+                render_raw_news_entity_audit(md, &invalid)?;
             }
         }
         Err(_) => {
@@ -4242,6 +4381,86 @@ fn render_raw_stock_news(md: &mut String, db: &Connection, date_str: &str) -> Re
     }
     writeln!(md)?;
     Ok(())
+}
+
+fn render_news_entity_audit(
+    md: &mut String,
+    invalid: &[(&String, &String, &String, &Option<String>, &str)],
+) -> Result<()> {
+    if invalid.is_empty() {
+        return Ok(());
+    }
+    writeln!(md)?;
+    writeln!(md, "#### 事实待验 / 错配剔除")?;
+    for (code, name, pub_at, headline, summary) in invalid.iter().take(10) {
+        writeln!(
+            md,
+            "- **{} {}**: {} — {}。原因: 标题/摘要未命中股票简称，不能作为个股事件。",
+            code,
+            name,
+            headline.as_deref().unwrap_or(summary),
+            pub_at
+        )?;
+    }
+    Ok(())
+}
+
+fn render_raw_news_entity_audit(
+    md: &mut String,
+    invalid: &[(&String, &String, &String, &str)],
+) -> Result<()> {
+    if invalid.is_empty() {
+        return Ok(());
+    }
+    writeln!(md)?;
+    writeln!(md, "#### 事实待验 / 错配剔除")?;
+    for (code, name, pub_time, title) in invalid.iter().take(10) {
+        writeln!(
+            md,
+            "- **{} {}**: {} — {}。原因: 标题未命中股票简称，降级为行业/待验新闻。",
+            code, name, title, pub_time
+        )?;
+    }
+    Ok(())
+}
+
+fn news_entity_supported(
+    stock_name: &str,
+    headline: Option<&str>,
+    summary: Option<&str>,
+    key_entities: Option<&str>,
+) -> bool {
+    let stock = normalize_entity_text(stock_name);
+    if stock.len() < 2 {
+        return true;
+    }
+    let mut haystack = String::new();
+    if let Some(text) = headline {
+        haystack.push_str(text);
+    }
+    if let Some(text) = summary {
+        haystack.push_str(text);
+    }
+    if let Some(text) = key_entities {
+        haystack.push_str(text);
+    }
+    let hay = normalize_entity_text(&haystack);
+    if hay.contains(&stock) {
+        return true;
+    }
+    let core = stock
+        .trim_start_matches("ST")
+        .trim_start_matches("*ST")
+        .trim_end_matches('A')
+        .to_string();
+    core.len() >= 2 && hay.contains(&core)
+}
+
+fn normalize_entity_text(text: &str) -> String {
+    text.chars()
+        .filter(|ch| ch.is_alphanumeric() || *ch == '*')
+        .collect::<String>()
+        .to_uppercase()
 }
 
 fn render_sentiment_summary(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {

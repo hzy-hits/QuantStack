@@ -131,6 +131,31 @@ CREATE TABLE IF NOT EXISTS options_analysis (
     PRIMARY KEY (symbol, as_of, expiry)
 );
 
+-- Leg-level delayed option quotes for expression shadow PnL marking.
+CREATE TABLE IF NOT EXISTS options_chain_quotes (
+    symbol              VARCHAR NOT NULL,
+    as_of               DATE NOT NULL,
+    expiry              VARCHAR NOT NULL,
+    days_to_exp         INTEGER,
+    current_price       DOUBLE,
+    contract_symbol     VARCHAR NOT NULL,
+    option_type         VARCHAR NOT NULL,
+    strike              DOUBLE,
+    bid                 DOUBLE,
+    ask                 DOUBLE,
+    mid                 DOUBLE,
+    last_price          DOUBLE,
+    volume              BIGINT,
+    open_interest       BIGINT,
+    implied_volatility  DOUBLE,
+    delta               DOUBLE,
+    gamma               DOUBLE,
+    theta               DOUBLE,
+    vega                DOUBLE,
+    source              VARCHAR,
+    PRIMARY KEY (symbol, as_of, expiry, contract_symbol)
+);
+
 -- S&P 500 / Nasdaq 100 constituent add/remove events
 CREATE TABLE IF NOT EXISTS index_changes (
     index_symbol    VARCHAR NOT NULL,

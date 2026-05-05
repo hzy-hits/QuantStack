@@ -71,6 +71,12 @@ enum Command {
         date_from: Option<String>,
         #[arg(long)]
         date_to: Option<String>,
+        /// Skip the expensive limit-up model when rebuilding report decision / paper-EV history.
+        #[arg(long)]
+        skip_limit_up_model: bool,
+        /// Rebuild only the feature chain needed for report decisions and paper-EV alpha families.
+        #[arg(long)]
+        alpha_only: bool,
     },
 }
 
@@ -307,7 +313,12 @@ async fn main() -> Result<()> {
             let path = reporting::render_payload(&report_db, &cfg, as_of, &notable)?;
             info!(%path, "payload ready");
         }
-        Command::ReviewBackfill { date_from, date_to } => {
+        Command::ReviewBackfill {
+            date_from,
+            date_to,
+            skip_limit_up_model,
+            alpha_only,
+        } => {
             let end_date = config::resolve_date(date_to.as_deref())?;
             let start_date = match date_from.as_deref() {
                 Some(raw) => config::resolve_date(Some(raw))?,
@@ -318,7 +329,13 @@ async fn main() -> Result<()> {
             let review_dates = load_review_dates(&report_db, start_date, end_date)?;
             let mut refreshed = 0usize;
             for review_date in review_dates {
-                ensure_review_backfill_analytics(&report_db, &cfg, review_date)?;
+                ensure_review_backfill_analytics(
+                    &report_db,
+                    &cfg,
+                    review_date,
+                    skip_limit_up_model,
+                    alpha_only,
+                )?;
                 let notable = filtering::build_notable_items(&report_db, &cfg, review_date)?;
                 let rows = analytics::report_review::materialize_report_review(
                     &report_db,
@@ -373,26 +390,85 @@ fn ensure_review_backfill_analytics(
     db: &Connection,
     cfg: &config::Settings,
     as_of: NaiveDate,
+    skip_limit_up_model: bool,
+    alpha_only: bool,
 ) -> Result<()> {
-    for module in [
-        "flow_audit",
-        "setup_alpha",
-        "continuation_vs_fade",
-        "limit_move_radar",
-        "limit_up_model",
-        "open_execution_gate",
-    ] {
+    let modules: &[&str] = if alpha_only {
+        &[
+            "momentum",
+            "hmm",
+            "vol_hmm",
+            "mean_reversion",
+            "breakout",
+            "sector_rotation",
+            "price_features",
+            "setup_alpha",
+            "continuation_vs_fade",
+            "limit_move_radar",
+            "flow_audit",
+            "macro_gate",
+            "open_execution_gate",
+        ]
+    } else {
+        &[
+            "momentum",
+            "announcement",
+            "flow",
+            "flow_audit",
+            "unlock",
+            "shadow_option",
+            "hmm",
+            "vol_hmm",
+            "mean_reversion",
+            "breakout",
+            "sector_rotation",
+            "price_features",
+            "setup_alpha",
+            "continuation_vs_fade",
+            "limit_move_radar",
+            "open_execution_gate",
+            "shadow_option_alpha_calibration",
+            "macro_gate",
+        ]
+    };
+    for module in modules {
         if analytics_module_rows(db, as_of, module)? == 0 {
             analytics::run_module(db, cfg, as_of, module)?;
         }
+    }
+    if !skip_limit_up_model && analytics_module_rows(db, as_of, "limit_up_model")? == 0 {
+        analytics::run_module(db, cfg, as_of, "limit_up_model")?;
     }
     Ok(())
 }
 
 fn analytics_module_rows(db: &Connection, as_of: NaiveDate, module: &str) -> Result<i64> {
+    if module == "limit_up_model" {
+        return db
+            .query_row(
+                "SELECT COUNT(*) FROM limit_up_model_predictions WHERE as_of = CAST(? AS DATE)",
+                duckdb::params![as_of.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into);
+    }
+    if module == "price_features" {
+        return db
+            .query_row(
+                "SELECT COUNT(*) FROM price_features WHERE as_of = CAST(? AS DATE)",
+                duckdb::params![as_of.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into);
+    }
+    let stored_module = match module {
+        "shadow_option" => "shadow_fast",
+        "shadow_option_alpha_calibration" => "shadow_option_alpha",
+        other => other,
+    };
     db.query_row(
         "SELECT COUNT(*) FROM analytics WHERE as_of = CAST(? AS DATE) AND module = ?",
-        duckdb::params![as_of.to_string(), module],
+        duckdb::params![as_of.to_string(), stored_module],
         |row| row.get::<_, i64>(0),
     )
     .map_err(Into::into)

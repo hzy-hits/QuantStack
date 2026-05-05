@@ -79,7 +79,10 @@ def _make_history_db(path: Path) -> None:
         """
     )
     gate_json = json.dumps(
-        {"main_signal_gate": {"status": "pass", "role": "main_signal", "action_intent": "TRADE"}}
+        {
+            "main_signal_gate": {"status": "pass", "role": "main_signal", "action_intent": "TRADE"},
+            "execution_gate": {"trend_regime": "trending"},
+        }
     )
     start = date(2026, 3, 23)
     for idx in range(25):
@@ -97,7 +100,7 @@ def _make_history_db(path: Path) -> None:
         con.execute(
             """
             INSERT INTO report_decisions
-            VALUES (?, 'post', ?, 'selected', ?, 'core', 'long', 'HIGH', 'trend',
+            VALUES (?, 'post', ?, 'selected', ?, 'core', 'long', 'LOW', 'trend',
                     0.9, 'executable_now', 2.0, 'main system', ?)
             """,
             [report_date.isoformat(), symbol, idx + 1, gate_json],
@@ -115,9 +118,9 @@ def _make_history_db(path: Path) -> None:
     )
     con.execute(
         """
-        INSERT INTO report_decisions
-        VALUES ('2026-04-23', 'post', 'LEAK', 'selected', 1, 'core', 'long',
-                'HIGH', 'trend', 0.9, 'executable_now', 2.0, 'main system', ?)
+            INSERT INTO report_decisions
+            VALUES ('2026-04-23', 'post', 'LEAK', 'selected', 1, 'core', 'long',
+                'LOW', 'trend', 0.9, 'executable_now', 2.0, 'main system', ?)
         """,
         [gate_json],
     )
@@ -166,7 +169,7 @@ class StrategyBacktestGateTests(unittest.TestCase):
                 """
                 INSERT INTO report_decisions
                 VALUES ('2026-04-21', 'post', 'FUTURE_EVAL', 'selected', 1, 'core',
-                        'long', 'HIGH', 'trend', 0.9, 'executable_now', 2.0,
+                        'long', 'LOW', 'trend', 0.9, 'executable_now', 2.0,
                         'main system', '{}')
                 """
             )
@@ -444,7 +447,7 @@ class StrategyBacktestGateTests(unittest.TestCase):
         for idx in range(20):
             row = {
                 "market": "us",
-                "policy_id": "us:core:long:high_mod:executable_now:h3",
+                "policy_id": "us:core:long:high_mod:executable_now:trending:h3",
                 "policy_label": "test",
                 "report_date": f"2026-03-{idx + 1:02d}",
                 "return_pct": 10.0 if idx == 0 else 0.5,
@@ -470,7 +473,7 @@ class StrategyBacktestGateTests(unittest.TestCase):
             rows.append(
                 {
                     "market": "us",
-                    "policy_id": "us:core:long:high_mod:executable_now:h3",
+                    "policy_id": "us:core:long:high_mod:executable_now:trending:h3",
                     "policy_label": "stable positive edge",
                     "report_date": f"2026-03-{idx + 1:02d}",
                     "return_pct": 0.8,
@@ -491,7 +494,7 @@ class StrategyBacktestGateTests(unittest.TestCase):
         self.assertEqual(candidate["ev_lower_confidence_pct"], 0.8)
         self.assertEqual(candidate["fills_required_for_95_lcb"], 25)
 
-    def test_noisy_positive_policy_needs_more_samples_for_proof(self) -> None:
+    def test_noisy_positive_policy_can_clear_lcb80_but_still_fail_sample_gate(self) -> None:
         rows = []
         returns = [1.2, -0.2, 0.9, -0.1, 1.0, -0.3, 1.1, -0.4]
         for idx, ret in enumerate(returns):
@@ -516,16 +519,17 @@ class StrategyBacktestGateTests(unittest.TestCase):
         )
 
         self.assertGreater(candidate["ev_probability_positive"], 0.5)
-        self.assertLess(candidate["ev_lower_confidence_pct"], 0.0)
-        self.assertGreater(candidate["fills_required_for_95_lcb"], len(returns))
+        self.assertGreater(candidate["ev_lower_confidence_pct"], 0.0)
+        self.assertFalse(candidate["eligible"])
+        self.assertIn("fills<50", candidate["fail_reasons"])
 
-    def test_low_confidence_policy_cannot_be_execution_champion(self) -> None:
+    def test_low_confidence_core_policy_is_v2_execution_scope(self) -> None:
         rows = []
         for idx in range(25):
             rows.append(
                 {
                     "market": "us",
-                    "policy_id": "us:core:long:low:executable_now:h3",
+                    "policy_id": "us:core:long:low:executable_now:trending:h3",
                     "policy_label": "low confidence",
                     "report_date": f"2026-03-{idx + 1:02d}",
                     "return_pct": 1.0,
@@ -542,8 +546,8 @@ class StrategyBacktestGateTests(unittest.TestCase):
             lookback_days=30,
         )
 
-        self.assertFalse(candidate["eligible"])
-        self.assertIn("policy_confidence_not_high_mod", candidate["fail_reasons"])
+        self.assertTrue(candidate["eligible"])
+        self.assertEqual(candidate["fail_reasons"], [])
 
     def test_champion_challenger_requires_15_percent_margin(self) -> None:
         previous = {
@@ -570,14 +574,17 @@ class StrategyBacktestGateTests(unittest.TestCase):
         current = {
             "market": "us",
             "symbol": "ALFA",
-            "policy_id": "us:core:long:high_mod:executable_now:h3",
+            "policy_id": "us:core:long:high_mod:executable_now:trending:h3",
             "policy_label": "US core long high/mod executable now 3D",
             "report_bucket": "core",
             "signal_direction": "long",
             "signal_confidence": "HIGH",
             "execution_mode": "executable_now",
             "details_json": json.dumps(
-                {"main_signal_gate": {"status": "pass", "role": "main_signal", "action_intent": "TRADE"}}
+                {
+                    "main_signal_gate": {"status": "pass", "role": "main_signal", "action_intent": "TRADE"},
+                    "execution_gate": {"trend_regime": "trending"},
+                }
             ),
         }
 
@@ -594,11 +601,11 @@ class StrategyBacktestGateTests(unittest.TestCase):
         self.assertEqual(bulletin["execution_alpha"], [])
         self.assertIn("- ev_status: `failed`", rendered)
         self.assertIn("stable gate evaluated", rendered)
-        self.assertIn("EV unknown", rendered)
+        self.assertIn("stable EV gate not passed", rendered)
         self.assertIn("### Equity Execution Alpha", rendered)
         self.assertIn("### Options / Shadow Options Alpha", rendered)
-        self.assertIn("### Recall Alpha", rendered)
-        self.assertIn("### Blocked / Out-of-scope Alpha", rendered)
+        self.assertIn("### Positive EV Setup", rendered)
+        self.assertIn("### Legacy / Blocked Alpha", rendered)
         self.assertNotIn("buy", rendered.lower())
 
     def test_bulletin_surfaces_stable_theme_rotation_as_tactical_alpha(self) -> None:
@@ -674,7 +681,7 @@ class AlphaBulletinRenderTests(unittest.TestCase):
             )
             bulletin_path.parent.mkdir(parents=True)
             bulletin_path.write_text(
-                "### Equity Execution Alpha\n\n- `ALFA` -- stable candidate.\n\n### Options / Shadow Options Alpha\n\n- None.\n\n### Recall Alpha\n\n- None.\n\n### Blocked / Out-of-scope Alpha\n\n- None.\n",
+                "### Equity Execution Alpha\n\n- `ALFA` -- stable candidate.\n\n### Options / Shadow Options Alpha\n\n- None.\n\n### Positive EV Setup\n\n- None.\n\n### Legacy / Blocked Alpha\n\n- None.\n",
                 encoding="utf-8",
             )
 
@@ -683,8 +690,8 @@ class AlphaBulletinRenderTests(unittest.TestCase):
         rendered = "\n".join(lines)
         self.assertIn("### Equity Execution Alpha", rendered)
         self.assertIn("### Options / Shadow Options Alpha", rendered)
-        self.assertIn("### Recall Alpha", rendered)
-        self.assertIn("### Blocked / Out-of-scope Alpha", rendered)
+        self.assertIn("### Positive EV Setup", rendered)
+        self.assertIn("### Legacy / Blocked Alpha", rendered)
 
 
 class PipelineHookTests(unittest.TestCase):
@@ -692,11 +699,16 @@ class PipelineHookTests(unittest.TestCase):
         run_daily = (REPO_ROOT / "scripts" / "run_daily.py").read_text(encoding="utf-8")
 
         self.assertIn("def emit_stable_alpha_bulletin", run_daily)
-        self.assertIn("QUANT_STACK_BIN", run_daily)
-        self.assertIn('"alpha"', run_daily)
-        self.assertIn('"evaluate"', run_daily)
+        self.assertIn("run_strategy_backtest_report.py", run_daily)
+        self.assertIn('"--lookback-days"', run_daily)
+        self.assertIn('"60"', run_daily)
+        self.assertIn("def emit_my_book_overlay", run_daily)
+        self.assertIn("run_my_book_overlay.py", run_daily)
+        self.assertIn("QUANT_USER_ACTIVITY_CSV", run_daily)
         self.assertIn("step_alpha_bulletin", run_daily)
+        self.assertIn("step_my_book_overlay", run_daily)
         self.assertLess(run_daily.index("step_alpha_bulletin"), run_daily.index("        render_payload_md("))
+        self.assertLess(run_daily.index("step_my_book_overlay"), run_daily.index("        render_payload_md("))
 
     def test_cn_pipeline_emits_bulletin_before_final_structural_render(self) -> None:
         daily_pipeline = (STACK_ROOT / "quant-research-cn" / "scripts" / "daily_pipeline.sh").read_text(

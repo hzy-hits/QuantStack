@@ -51,7 +51,8 @@ from quant_bot.data_ingestion.prices import fetch_and_store_prices
 from quant_bot.data_ingestion.symbols import fetch_us_symbols
 from quant_bot.data_ingestion.fundamentals import fetch_fundamentals
 from quant_bot.data_ingestion.options import (
-    fetch_options_snapshot, upsert_options, upsert_options_analysis,
+    fetch_options_snapshot_with_quotes, upsert_options, upsert_options_analysis,
+    upsert_options_chain_quotes,
     is_options_eligible, OPTIONS_PROXY_MAP,
 )
 from quant_bot.analytics.momentum_risk import run_momentum_risk, store_analysis
@@ -198,55 +199,67 @@ def emit_stable_alpha_bulletin(cfg: Settings, as_of: date) -> tuple[str, str]:
     """Run the cross-market stable-alpha gate before payload rendering."""
     project_root = Path(__file__).resolve().parents[1]
     stack_root = project_root.parent
-    quant_stack_bin = os.environ.get("QUANT_STACK_BIN")
-    if quant_stack_bin:
-        cmd = [quant_stack_bin]
-    elif (stack_root / "target" / "release" / "quant-stack").exists():
-        cmd = [str(stack_root / "target" / "release" / "quant-stack")]
-    elif (stack_root / "target" / "debug" / "quant-stack").exists():
-        cmd = [str(stack_root / "target" / "debug" / "quant-stack")]
-    else:
-        cmd = []
-
-    if cmd:
-        cmd += [
-            "alpha",
-            "evaluate",
-            "--date",
-            as_of.isoformat(),
-            "--lookback-days",
-            "30",
-            "--auto-select",
-            "--emit-bulletin",
-            "--us-db",
-            str(cfg.raw_db_path_abs),
-            "--cn-db",
-            str(stack_root / "quant-research-cn" / "data" / "quant_cn_report.duckdb"),
-        ]
-    else:
-        script = stack_root / "scripts" / "run_strategy_backtest_report.py"
-        if not script.exists():
-            return "skipped", f"missing gate script: {script}"
-        cmd = [
-            sys.executable,
-            str(script),
-            "--date",
-            as_of.isoformat(),
-            "--lookback-days",
-            "30",
-            "--auto-select",
-            "--emit-bulletin",
-            "--us-db",
-            str(cfg.raw_db_path_abs),
-            "--cn-db",
-            str(stack_root / "quant-research-cn" / "data" / "quant_cn_report.duckdb"),
-        ]
+    script = stack_root / "scripts" / "run_strategy_backtest_report.py"
+    if not script.exists():
+        return "skipped", f"missing gate script: {script}"
+    cmd = [
+        sys.executable,
+        str(script),
+        "--date",
+        as_of.isoformat(),
+        "--lookback-days",
+        "60",
+        "--auto-select",
+        "--emit-bulletin",
+        "--us-db",
+        str(cfg.raw_db_path_abs),
+        "--cn-db",
+        str(stack_root / "quant-research-cn" / "data" / "quant_cn_report.duckdb"),
+    ]
     result = subprocess.run(
         cmd,
         cwd=stack_root,
         text=True,
         capture_output=True,
         timeout=300,
+        check=False,
+    )
+    detail = "\n".join(
+        part.strip()
+        for part in [result.stdout, result.stderr]
+        if part and part.strip()
+    )
+    if result.returncode != 0:
+        return "error", detail[-2000:] or f"exit={result.returncode}"
+    return "ok", detail[-2000:]
+
+
+def emit_my_book_overlay(cfg: Settings, as_of: date) -> tuple[str, str]:
+    """Generate the personal portfolio permission overlay when an IBKR CSV is configured."""
+    activity_csv = os.environ.get("QUANT_USER_ACTIVITY_CSV") or os.environ.get("IBKR_ACTIVITY_CSV")
+    if not activity_csv:
+        return "skipped", "missing QUANT_USER_ACTIVITY_CSV / IBKR_ACTIVITY_CSV"
+    project_root = Path(__file__).resolve().parents[1]
+    stack_root = project_root.parent
+    script = stack_root / "scripts" / "run_my_book_overlay.py"
+    if not script.exists():
+        return "skipped", f"missing overlay script: {script}"
+    cmd = [
+        sys.executable,
+        str(script),
+        "--date",
+        as_of.isoformat(),
+        "--activity-csv",
+        activity_csv,
+        "--us-db",
+        str(cfg.raw_db_path_abs),
+    ]
+    result = subprocess.run(
+        cmd,
+        cwd=stack_root,
+        text=True,
+        capture_output=True,
+        timeout=120,
         check=False,
     )
     detail = "\n".join(
@@ -567,10 +580,11 @@ def main() -> None:
         log.info("step_options_targeted", fetch_count=len(fetch_syms),
                  candidates=len(candidate_syms))
 
-        snapshot_df, analysis_df = fetch_options_snapshot(fetch_syms, as_of, max_expiries=2)
+        snapshot_df, analysis_df, chain_quote_df = fetch_options_snapshot_with_quotes(fetch_syms, as_of, max_expiries=2)
         n = upsert_options(research_con, snapshot_df)
         n2 = upsert_options_analysis(research_con, analysis_df)
-        log_run(research_con, run_id, "options", "ok", n, f"snapshot={n} analysis={n2}")
+        n3 = upsert_options_chain_quotes(research_con, chain_quote_df)
+        log_run(research_con, run_id, "options", "ok", n, f"snapshot={n} analysis={n2} chain_quotes={n3}")
 
         # ── 5c. Options sentiment signals (VRP + EWMA) ──────────────
         log.info("step_vrp")
@@ -820,6 +834,25 @@ def main() -> None:
                 raw_log_con = connect_write(cfg.raw_db_path_abs)
             log.warning("alpha_bulletin_failed", error=str(e))
             log_run(raw_log_con, run_id, "alpha_bulletin", "error", 0, str(e))
+
+        # Personal book overlay must run after alpha bulletin so open positions
+        # can inherit Execution Alpha / Positive EV / Blocked state.
+        log.info("step_my_book_overlay")
+        try:
+            overlay_status, overlay_detail = emit_my_book_overlay(cfg, as_of)
+            log_run(
+                raw_log_con,
+                run_id,
+                "my_book_overlay",
+                overlay_status,
+                1 if overlay_status == "ok" else 0,
+                overlay_detail,
+            )
+            if overlay_status not in {"ok", "skipped"}:
+                log.warning("my_book_overlay_nonfatal", status=overlay_status, detail=overlay_detail)
+        except Exception as e:
+            log.warning("my_book_overlay_failed", error=str(e))
+            log_run(raw_log_con, run_id, "my_book_overlay", "error", 0, str(e))
 
         # ── 8. Generate charts ───────────────────────────────────────────────
         chart_output_dir = charts_dir("reports", as_of, session)

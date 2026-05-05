@@ -453,7 +453,8 @@ def main():
     )
     if args.delivery_mode == "test":
         if subject_override:
-            subject_override = f"[TEST] {subject_override}"
+            if "TEST" not in subject_override.upper():
+                subject_override = f"[TEST] {subject_override}"
         else:
             date_str = Path(report_path).stem.split("_")[0]
             subject_override = f"[TEST] A股量化研究日报 — {date_str}"

@@ -1,3 +1,4 @@
+use crate::analytics::rv::{infer_censor_side, CensorSide};
 /// Mean-reversion signal — identifies oversold/overbought positions for regime-adaptive scoring.
 ///
 /// Signals:
@@ -10,6 +11,7 @@
 use anyhow::Result;
 use chrono::NaiveDate;
 use duckdb::Connection;
+use std::collections::HashMap;
 use tracing::info;
 
 /// Compute mean-reversion metrics for all stocks with sufficient price history.
@@ -61,7 +63,8 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
         .filter_map(|r| r.ok())
         .collect();
 
-    // Load RSI data (need close prices for gain/loss calculation)
+    // Load RSI data. For A-shares, use pct_chg + Wilder smoothing as the
+    // report-facing RSI; the legacy raw-close simple RSI is kept for audit.
     let rsi_map = compute_rsi_batch(db, &date_str, 14)?;
 
     db.execute_batch(
@@ -115,7 +118,8 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
             };
 
             // RSI
-            let rsi = rsi_map.get(ts_code.as_str()).copied().unwrap_or(50.0);
+            let rsi_stats = rsi_map.get(ts_code.as_str()).copied().unwrap_or_default();
+            let rsi = rsi_stats.exec;
 
             // Signed reversion score: DIRECTION matters, not just extremeness.
             // Positive = oversold (expect up), Negative = overbought (expect down)
@@ -146,6 +150,12 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
                 "ma60_pct": round3(ma60_pct * 100.0),
                 "ma20_z": round3(ma20_z),
                 "rsi_14": round1(rsi),
+                "rsi_14_wilder": round1(rsi_stats.wilder_pct),
+                "rsi_14_simple_pct": round1(rsi_stats.simple_pct),
+                "rsi_14_raw_simple": round1(rsi_stats.raw_simple),
+                "rsi_limit_censor_count_14": rsi_stats.limit_censor_count as i64,
+                "rsi_latest_pct_chg": round3(rsi_stats.latest_pct_chg),
+                "rsi_method": "wilder_pct_chg_with_limit_censor_audit",
                 "bb_position": round3(bb_position),
                 "bb_width_pct": round3(bb_width / sma20 * 100.0),
                 "direction": reversion_direction,
@@ -156,6 +166,13 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
             for (metric, value) in [
                 ("reversion_score", reversion_score),
                 ("rsi_14", rsi),
+                ("rsi_14_wilder", rsi_stats.wilder_pct),
+                ("rsi_14_simple_pct", rsi_stats.simple_pct),
+                ("rsi_14_raw_simple", rsi_stats.raw_simple),
+                (
+                    "rsi_limit_censor_count_14",
+                    rsi_stats.limit_censor_count as f64,
+                ),
                 ("bb_position", bb_position),
                 ("ma20_z", ma20_z),
                 (
@@ -202,78 +219,202 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     Ok(row_count)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RsiStats {
+    raw_simple: f64,
+    simple_pct: f64,
+    wilder_pct: f64,
+    exec: f64,
+    limit_censor_count: usize,
+    latest_pct_chg: f64,
+}
+
+impl Default for RsiStats {
+    fn default() -> Self {
+        Self {
+            raw_simple: 50.0,
+            simple_pct: 50.0,
+            wilder_pct: 50.0,
+            exec: 50.0,
+            limit_censor_count: 0,
+            latest_pct_chg: 0.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RsiBar {
+    ts_code: String,
+    name: String,
+    close: f64,
+    prev_close: Option<f64>,
+    high: f64,
+    low: f64,
+    pct_chg: Option<f64>,
+}
+
 /// Compute RSI-14 for all stocks as a batch.
+///
+/// A-share daily RSI is intentionally based on exchange pct_chg with Wilder
+/// smoothing. The previous close-difference/simple-average RSI is retained as
+/// `raw_simple` only, because raw price units and one-bar jumps made execution
+/// reports look much hotter than the actual smoothed momentum state.
 fn compute_rsi_batch(
     db: &Connection,
     date_str: &str,
     period: usize,
-) -> Result<std::collections::HashMap<String, f64>> {
-    let lookback = period + 5; // extra margin
+) -> Result<HashMap<String, RsiStats>> {
+    let lookback = period + 65; // enough history for Wilder smoothing
     let sql = format!(
         "WITH bars AS (
-            SELECT ts_code, trade_date, close,
-                   LAG(close) OVER (PARTITION BY ts_code ORDER BY trade_date) AS prev_close,
-                   ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
-            FROM prices
-            WHERE trade_date <= CAST(? AS DATE)
+            SELECT p.ts_code,
+                   p.trade_date,
+                   p.close,
+                   p.high,
+                   p.low,
+                   p.pct_chg,
+                   COALESCE(sb.name, '') AS name,
+                   LAG(p.close) OVER (PARTITION BY p.ts_code ORDER BY p.trade_date) AS prev_close,
+                   ROW_NUMBER() OVER (PARTITION BY p.ts_code ORDER BY p.trade_date DESC) AS rn
+            FROM prices p
+            LEFT JOIN stock_basic sb ON sb.ts_code = p.ts_code
+            WHERE p.trade_date <= CAST(? AS DATE)
         )
-        SELECT ts_code, close, prev_close, rn
+        SELECT ts_code, name, close, prev_close, high, low, pct_chg
         FROM bars
-        WHERE rn <= {lookback} AND prev_close IS NOT NULL
-        ORDER BY ts_code, rn ASC"
+        WHERE rn <= {lookback} AND (pct_chg IS NOT NULL OR prev_close IS NOT NULL)
+        ORDER BY ts_code, trade_date ASC"
     );
 
     let mut stmt = db.prepare(&sql)?;
-    let rows: Vec<(String, f64, f64, i64)> = stmt
+    let rows: Vec<RsiBar> = stmt
         .query_map(duckdb::params![date_str], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, f64>(1)?,
-                row.get::<_, f64>(2)?,
-                row.get::<_, i64>(3)?,
-            ))
+            Ok(RsiBar {
+                ts_code: row.get::<_, String>(0)?,
+                name: row.get::<_, String>(1).unwrap_or_default(),
+                close: row.get::<_, f64>(2).unwrap_or(0.0),
+                prev_close: row.get::<_, Option<f64>>(3).unwrap_or(None),
+                high: row.get::<_, f64>(4).unwrap_or(0.0),
+                low: row.get::<_, f64>(5).unwrap_or(0.0),
+                pct_chg: row.get::<_, Option<f64>>(6).unwrap_or(None),
+            })
         })?
         .filter_map(|r| r.ok())
         .collect();
 
     // Group by ts_code and compute RSI
-    let mut grouped: std::collections::HashMap<String, Vec<(f64, f64)>> =
-        std::collections::HashMap::new();
-    for (ts_code, close, prev_close, _rn) in &rows {
-        grouped
-            .entry(ts_code.clone())
-            .or_default()
-            .push((*close, *prev_close));
+    let mut grouped: HashMap<String, Vec<RsiBar>> = HashMap::new();
+    for row in rows {
+        grouped.entry(row.ts_code.clone()).or_default().push(row);
     }
 
-    let mut result = std::collections::HashMap::new();
-    for (ts_code, changes) in &grouped {
-        if changes.len() < period {
+    let mut result = HashMap::new();
+    for (ts_code, bars) in &grouped {
+        if bars.len() < period {
             continue;
         }
-        // Use last `period` changes (already ordered by rn ASC = most recent first → reversed)
-        // changes are ordered rn ASC (most recent first), take the most recent `period`
-        let recent: Vec<f64> = changes.iter().take(period).map(|(c, p)| c - p).collect();
-
-        let avg_gain = recent.iter().filter(|&&d| d > 0.0).sum::<f64>() / period as f64;
-        let avg_loss = recent
+        let pct_returns: Vec<f64> = bars.iter().filter_map(|bar| return_pct(bar)).collect();
+        let raw_changes: Vec<f64> = bars
             .iter()
-            .filter(|&&d| d < 0.0)
-            .map(|d| d.abs())
-            .sum::<f64>()
-            / period as f64;
+            .filter_map(|bar| bar.prev_close.map(|prev| bar.close - prev))
+            .collect();
+        if pct_returns.len() < period || raw_changes.len() < period {
+            continue;
+        }
 
-        let rsi = if avg_loss < 1e-10 {
-            100.0
-        } else {
-            let rs = avg_gain / avg_loss;
-            100.0 - 100.0 / (1.0 + rs)
-        };
+        let recent_bars = bars.iter().rev().take(period);
+        let limit_censor_count = recent_bars
+            .filter(|bar| {
+                matches!(
+                    infer_censor_side(
+                        &bar.ts_code,
+                        &bar.name,
+                        return_pct(bar).unwrap_or(0.0),
+                        bar.high,
+                        bar.low,
+                        bar.close,
+                    ),
+                    CensorSide::Left | CensorSide::Right
+                )
+            })
+            .count();
 
-        result.insert(ts_code.clone(), rsi);
+        let raw_simple = simple_rsi(&raw_changes[raw_changes.len() - period..]);
+        let simple_pct = simple_rsi(&pct_returns[pct_returns.len() - period..]);
+        let wilder_pct = wilder_rsi(&pct_returns, period);
+        let latest_pct_chg = pct_returns.last().copied().unwrap_or(0.0);
+
+        result.insert(
+            ts_code.clone(),
+            RsiStats {
+                raw_simple,
+                simple_pct,
+                wilder_pct,
+                exec: wilder_pct,
+                limit_censor_count,
+                latest_pct_chg,
+            },
+        );
     }
 
     Ok(result)
+}
+
+fn return_pct(bar: &RsiBar) -> Option<f64> {
+    if let Some(pct) = bar.pct_chg {
+        if pct.is_finite() {
+            return Some(pct);
+        }
+    }
+    let prev = bar.prev_close?;
+    if prev.abs() < 1e-10 || !bar.close.is_finite() {
+        return None;
+    }
+    Some((bar.close / prev - 1.0) * 100.0)
+}
+
+fn simple_rsi(changes: &[f64]) -> f64 {
+    if changes.is_empty() {
+        return 50.0;
+    }
+    let period = changes.len() as f64;
+    let avg_gain = changes.iter().filter(|&&d| d > 0.0).sum::<f64>() / period;
+    let avg_loss = changes
+        .iter()
+        .filter(|&&d| d < 0.0)
+        .map(|d| d.abs())
+        .sum::<f64>()
+        / period;
+    rsi_from_avg(avg_gain, avg_loss)
+}
+
+fn wilder_rsi(changes: &[f64], period: usize) -> f64 {
+    if changes.len() < period || period == 0 {
+        return 50.0;
+    }
+    let mut avg_gain = changes[..period].iter().filter(|&&d| d > 0.0).sum::<f64>() / period as f64;
+    let mut avg_loss = changes[..period]
+        .iter()
+        .filter(|&&d| d < 0.0)
+        .map(|d| d.abs())
+        .sum::<f64>()
+        / period as f64;
+    for change in &changes[period..] {
+        let gain = if *change > 0.0 { *change } else { 0.0 };
+        let loss = if *change < 0.0 { change.abs() } else { 0.0 };
+        avg_gain = (avg_gain * (period as f64 - 1.0) + gain) / period as f64;
+        avg_loss = (avg_loss * (period as f64 - 1.0) + loss) / period as f64;
+    }
+    rsi_from_avg(avg_gain, avg_loss)
+}
+
+fn rsi_from_avg(avg_gain: f64, avg_loss: f64) -> f64 {
+    if avg_loss < 1e-10 {
+        100.0
+    } else {
+        let rs = avg_gain / avg_loss;
+        (100.0 - 100.0 / (1.0 + rs)).clamp(0.0, 100.0)
+    }
 }
 
 fn cross_stats(values: &[f64]) -> (f64, f64) {
@@ -291,4 +432,31 @@ fn round3(v: f64) -> f64 {
 }
 fn round1(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wilder_rsi_dampens_one_day_spike_vs_simple_window() {
+        let mut returns = vec![
+            -1.2, -1.0, -0.8, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.1, -0.2, 0.1, -0.1, 0.2, 4.12,
+            0.56, 0.89, -1.77, 0.9, 0.45, -0.56, -0.56, 1.01, -1.0, 0.23, -0.45, -0.45, 5.22,
+        ];
+        let simple = simple_rsi(&returns[returns.len() - 14..]);
+        let wilder = wilder_rsi(&returns, 14);
+        assert!(simple > 70.0);
+        assert!(wilder < simple - 5.0);
+
+        returns.push(-1.0);
+        let updated = wilder_rsi(&returns, 14);
+        assert!(updated < wilder);
+    }
+
+    #[test]
+    fn simple_rsi_handles_no_losses_as_hot() {
+        let returns = vec![0.1; 14];
+        assert_eq!(simple_rsi(&returns), 100.0);
+    }
 }

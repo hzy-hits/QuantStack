@@ -651,6 +651,15 @@ if [[ -s "$OUT_DIR/outputs/merge-report.md" ]]; then
         --reports-dir "$PROJ_DIR/reports"; then
         echo "  Strategy EV section sync failed (non-fatal)"
     fi
+    echo "  Validating payload consistency..."
+    if ! "$PYTHON_BIN" "$PROJ_DIR/scripts/validate_report_consistency.py" \
+        "$FINAL_REPORT" \
+        --macro-payload "$REPORTS_DIR/${DATE}_payload_macro.md" \
+        --name-payload "$REPORTS_DIR/${DATE}_payload_structural.md" \
+        --name-payload "$REPORTS_DIR/${DATE}_payload_events.md" \
+        --report-db "$PROJ_DIR/data/quant_cn_report.duckdb"; then
+        echo "  Report consistency validation failed (non-fatal)"
+    fi
     if [[ "$SLOT" != "daily" ]]; then
         cp "$FINAL_REPORT" "$REPORTS_DIR/${DATE}_report_zh.md"
     fi

@@ -241,3 +241,51 @@ Legend: . = tested weak, + = decent IC, ++ = strong IC, +++ = promoted, ! = stro
 - OOS pass: 17
 - Rollup: `research_rollups/autoresearch_cn_2026-04.md`
 - Main repeated motif: stability/evenness + anti-autocorrelation on turnover, amount, and float-normalized flow.
+
+## Session 20260430_060001_1eb756 — CN
+- Timestamp: 2026-04-30 06:57
+- Experiments run: 26
+- OOS passed: 3/3
+- Passing factors: amount_stability_pullback_20, anti_autocorr_log_amount_change_20_5, anti_autocorr_openclose_corridor_20
+
+## Session 20260430_140017_d1f7c5 — CN
+- Timestamp: 2026-04-30 14:56
+- Experiments run: 23
+- OOS passed: 3/3
+- Passing factors: autocorr_low_lottery_20, anti_autocorr_relvol_change_smooth_20, anti_autocorr_turnover_corridor_20
+
+## Session 20260501_060002_1da543 — CN
+- Timestamp: 2026-05-01 06:57
+- Experiments run: 22
+- OOS passed: 1/3
+- Passing factors: log_amount_change_stability_20_5
+
+## Session 20260501_140002_c67156 — CN
+- Timestamp: 2026-05-01 14:57
+- Experiments run: 24
+- OOS passed: 3/3
+- Passing factors: quiet_float_openclose_20, stable_amount_flow_absorb_20, anti_autocorr_openclose_stability_20
+
+## Session 20260504_060002_ba5d5e — CN
+- Timestamp: 2026-05-04 06:56
+- Experiments run: 23
+- OOS passed: 3/3
+- Passing factors: autocorr_low_lottery_20, anti_autocorr_mcapflow_change_smooth_20, anti_autocorr_float_flow_smooth_20
+
+## Session 20260504_140002_0c1464 — CN
+- Timestamp: 2026-05-04 14:56
+- Experiments run: 22
+- OOS passed: 3/3
+- Passing factors: low_lottery_amount_change_smooth_20, low_lottery_turnover_change_smooth_20, low_lottery_amount_evenness_20
+
+## Session 20260505_060002_dd6e5d — CN
+- Timestamp: 2026-05-05 06:55
+- Experiments run: 24
+- OOS passed: 1/3
+- Passing factors: low_lottery_weekly_mcap_evenness_20
+
+## Session 20260505_140029_9903b6 — CN
+- Timestamp: 2026-05-05 14:56
+- Experiments run: 21
+- OOS passed: 3/3
+- Passing factors: low_lottery_weekly_turnover_evenness_20, low_lottery_weekly_relvol_stability_20, turnover_stability_20

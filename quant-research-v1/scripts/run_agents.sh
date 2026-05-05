@@ -378,6 +378,13 @@ ${PREV_CONTEXT}
 - Breakout Acceptance 代表“已经涨了但趋势/事件/期权确认仍支持 follow-through”，不得机械打成 stale chase
 - Blocked Chase / Priced-in 必须进入风险回避或不追价，不得升入可直接做
 
+再读 US Stable Alpha Bulletin、Strategy EV Guidance 和 Action Plan Ledger：
+- 如果 ev_status=failed 且 Equity Execution Alpha=None，你的“可直接做”必须为空；只能输出 Setup/Recall/观察计划
+- Strategy EV Guidance 是策略族 EV 裁判：HIGH/MODERATE 只代表召回强度，不代表可赚钱；legacy high/mod core 若历史 EV 弱，必须阻断
+- Positive-EV research policy 只能写成 Positive EV Setup / Recall，不能写成正式 Execution Alpha
+- Action Plan Ledger 的 Blocked / No-Chase 行不能进入“可直接做”
+- Recall Alpha 是正EV研究线索，不是正式执行信号
+
 执行层硬规则：
 - 只有同时满足 Execution read = Still actionable、R:R >= 1.20、且没有重大冲突的名字，才允许归入“可直接做”
 - 如果 Execution read = Prefer pullback entry / Do not chase the gap，一律归入“等回踩/不追价”
@@ -653,6 +660,9 @@ cat > "$OUT_DIR/prompts/merge-report.txt" <<PROMPT
 - 账户约束：**long-only**。全文只能给出做多、空仓、减仓、回避、等待确认这几类动作；不得给出做空、反手空、空头仓位、对冲空单这类执行建议。
 - 如果写下行情景，它的交易含义只能是“不做多/减仓/等更低风险买点”，不能写成可以从下跌中获利的动作。
 - 交易地图要稳定成三层：先写“可执行机会”，再写“条件式延续观察”，最后写“继续跟踪”；不要把大量 veto 全堆进“风险回避”。
+- 交易地图必须优先引用 payload 的 Action Plan Ledger：代码、公司名、入场/复核价、止损/失效线、目标、R:R、时间退出不能写丢。
+- Strategy EV Guidance 必须进入交易地图裁决：不要把 HIGH/MODERATE 当成可执行胜率；如果 legacy high/mod core 历史 EV 为负，只能阻断或观察。
+- Positive-EV research policy 可以写进 Setup Alpha/Recall Alpha，但除非 Stable Alpha Bulletin 的 Equity Execution Alpha 放行，不得写成正式做多。
 - “风险回避”只留最关键的 3-6 个名字，每个一句话；空间优先让给可执行层和继续跟踪层。
 - 盘前、盘后、前后两天如果主判断没有被新证据推翻，就保持同一套 section 顺序、口径和主问题表述；但每份报告必须先写本期 session delta，不能只复述上一份。
 - 如果 prompt 中出现“延续跟踪清单”，清单里的股票必须有去向：继续保留、降级、移除或等待，都要给一句理由，不能让昨天提到的名字静默消失。
@@ -691,6 +701,7 @@ ${PREV_MERGE_CONTEXT}
    - "## 附注"
      一行风险提示。
 2. “做多” 的硬规则：
+   - 如果 US Stable Alpha Bulletin 写明 ev_status=failed 且 Equity Execution Alpha=None，则“做多”必须写“无正式 Execution Alpha”；任何个股只能进入 Setup Alpha、Recall Alpha 或条件式观察，不能写成正式可执行多头。
    - 只有同时满足 execution = Still actionable、R:R >= 1.20、没有重大冲突、并且没有被新闻/风险分析师判定为“已 price in / 不该追”的名字，才允许进入“做多”
    - 如果 Headline Gate != TREND，“做多”仍可保留通过执行硬规则的条件式单名股机会，但必须同时满足 execution = Still actionable、R:R >= 1.35、没有重大冲突，且没有被风险/新闻分析师明确判成“already-done / priced in / 不该追”；它们只能写成条件式个股 alpha，不能上升成市场主方向。如果没有这种机会，直接写：“今天没有可直接做的多头，别追价。”
    - 不允许出现“前文说今天没机会，后文又列出两个买点”的矛盾
@@ -724,7 +735,7 @@ ${PREV_MERGE_CONTEXT}
      - dead-cat bounce → 死猫反弹
      - gap down → 跳空下跌
    - 如果一个句子翻译后读起来别扭，就整句重写成自然中文，不要逐词翻译
-11. 所有股票/ETF代码用粗体标记
+11. 所有股票/ETF代码用粗体标记；美股个股首次出现必须带公司名，格式如 **PWR**（Quanta Services）。ETF 可以只写代码。
 12. 每个写进“做多”的名字必须附失效条件和风险参数；做不到就不要写进“做多”
 13. Tactical Event Tape 如果主要由小盘/高波动标的构成，必须明确写成“战术观察”
 14. 专业直白，有观点。只用分析师提供的数字，不编造。
@@ -761,6 +772,13 @@ ZH_REPORT="reports/${DATE}_report_zh_${SESSION}.md"
 if [ -s "$OUT_DIR/outputs/merge-report.md" ]; then
     cp "$OUT_DIR/outputs/merge-report.md" "$ZH_REPORT"
     echo "  Final report: $ZH_REPORT"
+
+    echo "  Syncing Action Plan Ledger..."
+    if ! "$PYTHON_BIN" "$PROJECT_DIR/scripts/sync_action_plan_report.py" \
+        --report "$ZH_REPORT" \
+        --structural "$PROJECT_DIR/reports/${DATE}_payload_structural_${SESSION}.md"; then
+        echo "  Action Plan Ledger sync failed (non-fatal)"
+    fi
 
     echo "  Syncing Factor Lab stock list..."
     if ! PYTHONPATH="$PROJECT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" \

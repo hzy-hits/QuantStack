@@ -411,6 +411,21 @@ def _execution_action(item: dict[str, Any]) -> str:
     return "unknown"
 
 
+def _is_executable_now(action: str) -> bool:
+    return str(action or "").lower() in {"executable_now", "executable", "still_actionable"}
+
+
+def _trend_regime(item: dict[str, Any]) -> str:
+    gate = item.get("execution_gate") or {}
+    momentum = item.get("momentum") or {}
+    return str(
+        gate.get("trend_regime")
+        or gate.get("regime")
+        or momentum.get("regime")
+        or "unknown"
+    ).lower()
+
+
 def _main_action_intent(action: str, passes: bool) -> str:
     if passes:
         return "TRADE"
@@ -436,18 +451,21 @@ def main_signal_gate(item: dict[str, Any], headline_gate: dict[str, Any] | None)
     confidence = str(signal.get("confidence") or "NO_SIGNAL").upper()
     direction_score = abs(float(signal.get("direction_score") or 0.0))
     rr_ratio = (item.get("risk_params") or {}).get("rr_ratio")
+    trend_regime = _trend_regime(item)
 
     blockers: list[str] = []
     if report_bucket != "core":
         blockers.append(f"report_lane_{report_bucket or 'unknown'}")
-    if confidence not in {"HIGH", "MODERATE"}:
+    if confidence not in {"HIGH", "MODERATE", "LOW"}:
         blockers.append(f"confidence_{confidence.lower()}")
-    if direction not in {"long", "short"}:
+    if direction != "long":
         blockers.append("neutral_direction")
-    if direction_score < 0.20:
+    if direction_score < 0.15:
         blockers.append("thin_direction_score")
-    if action != "executable_now":
+    if not _is_executable_now(action):
         blockers.append(f"execution_{action}")
+    if trend_regime != "trending":
+        blockers.append(f"trend_regime_{trend_regime or 'unknown'}")
     if signal.get("exhaustion_downgrade"):
         blockers.append("exhaustion_downgrade")
     try:
@@ -458,7 +476,7 @@ def main_signal_gate(item: dict[str, Any], headline_gate: dict[str, Any] | None)
 
     passes = not blockers
     role = "main_signal" if passes else "directional_observation"
-    if confidence in {"LOW", "NO_SIGNAL"}:
+    if confidence == "NO_SIGNAL":
         role = "notability_only"
 
     return {
@@ -468,6 +486,9 @@ def main_signal_gate(item: dict[str, Any], headline_gate: dict[str, Any] | None)
         "headline_mode": headline_mode,
         "report_bucket": report_bucket or None,
         "execution_action": action,
+        "trend_regime": trend_regime,
+        "profit_policy": "us_core_long_executable_trending_stock_probe",
+        "max_size": "0.10R/name; 0.50R basket cap; options shadow-only until ledger LCB80>0",
         "blockers": blockers,
     }
 
@@ -484,6 +505,6 @@ def apply_main_signal_gate(bundle: dict[str, Any]) -> dict[str, Any]:
     bundle["main_signal_summary"] = {
         "headline_mode": headline_gate.get("mode"),
         "counts": counts,
-        "rule": "Main signal requires core lane, HIGH/MODERATE directional evidence, executable_now, sufficient RR, and no exhaustion blocker. Headline mode is advisory context only.",
+        "rule": "Profit-first main signal requires core lane, long direction, executable_now/still_actionable, trending regime, positive direction score, sufficient RR, and no exhaustion blocker. Confidence labels alone do not create a trade; options remain shadow-only until ledger evidence is positive.",
     }
     return bundle

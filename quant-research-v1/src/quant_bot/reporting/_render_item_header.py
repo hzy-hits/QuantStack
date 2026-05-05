@@ -9,6 +9,8 @@ from ._render_fmt import _fmt_val
 def render_item_header(i: int, item: dict, compact: bool = False) -> list[str]:
     """Return lines for the header portion of a single notable item."""
     sym = item.get("symbol", "?")
+    company_name = (item.get("fundamentals") or {}).get("company_name")
+    name_part = f" — {company_name}" if company_name else ""
     score = item.get("score", 0)
     reason = item.get("primary_reason", "?")
     sub = item.get("sub_scores", {})
@@ -24,7 +26,7 @@ def render_item_header(i: int, item: dict, compact: bool = False) -> list[str]:
     macro_parts = _macro_parts(sig)
     selection_lines = _selection_lines(item)
 
-    header_line = f"### {i}. {sym} [{badge}]"
+    header_line = f"### {i}. {sym}{name_part} [{badge}]"
     signal_line = f"**Signal:** {sig_type} | **Direction score:** {sig_score:+.3f} | **Macro:** {macro_parts}"
 
     if compact:

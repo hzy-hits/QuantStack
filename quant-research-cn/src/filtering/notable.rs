@@ -28,18 +28,17 @@ use crate::config::Settings;
 
 // ── Fixed weights (regime-independent) ────────────────────────────────────
 const W_MAGNITUDE: f64 = 0.10;
-const W_INFORMATION: f64 = 0.18; // flow
-const W_EVENT: f64 = 0.14; // announcements
-const W_CROSS_ASSET: f64 = 0.10;
+const W_INFORMATION: f64 = 0.12; // flow confirmation, not a standalone reason to buy
+const W_EVENT: f64 = 0.03; // A-share announcements/news are context, not alpha cause
+const W_CROSS_ASSET: f64 = 0.08;
 const W_LAB: f64 = 0.18; // Factor Lab is recall/research input, not a second book
-                         // Remaining 0.20 is split among momentum/reversion/breakout by regime.
-                         // Shadow/setup/execution signals are added separately below.
+                         // Directional price structure is split among momentum/reversion/breakout
+                         // by regime. Shadow/setup/execution signals are added separately below.
 
 // ── Regime-adaptive weights for the 0.20 directional budget ───────────────
-// (momentum, reversion, breakout) — must sum to 0.20
-const REGIME_WEIGHTS_TRENDING: (f64, f64, f64) = (0.13, 0.01, 0.06);
-const REGIME_WEIGHTS_MEAN_REV: (f64, f64, f64) = (0.03, 0.12, 0.05);
-const REGIME_WEIGHTS_NOISY: (f64, f64, f64) = (0.06, 0.06, 0.08);
+const REGIME_WEIGHTS_TRENDING: (f64, f64, f64) = (0.15, 0.02, 0.07);
+const REGIME_WEIGHTS_MEAN_REV: (f64, f64, f64) = (0.04, 0.14, 0.06);
+const REGIME_WEIGHTS_NOISY: (f64, f64, f64) = (0.07, 0.07, 0.10);
 
 const PASS1_CUTOFF_BASE: usize = 120;
 const PASS1_CUTOFF_MAX: usize = 180;
@@ -76,10 +75,12 @@ const RANGE_CORE_COMPOSITE_MIN: f64 = 0.40;
 const RANGE_CORE_SETUP_MIN: f64 = 0.44;
 const RANGE_CORE_CONTINUATION_MIN: f64 = 0.40;
 const RANGE_CORE_INFO_MIN: f64 = 0.70;
-const RANGE_CORE_EVENT_MIN: f64 = 0.20;
 const RANGE_CORE_FADE_MAX: f64 = 0.38;
 const UNCERTAIN_TACTICAL_PRIORITY_REGIME_BONUS: f64 = 0.12;
-const UNCERTAIN_TACTICAL_PRIORITY_EVENT_BONUS: f64 = 0.04;
+const OVERSOLD_EXPLORATION_LIMIT: usize = 80;
+const OVERSOLD_EXPLORATION_RSI_MAX: f64 = 35.0;
+const OVERSOLD_EXPLORATION_FADE_MAX: f64 = 0.95;
+const OVERSOLD_EXPLORATION_EXECUTION_MIN: f64 = 0.15;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct NotableItem {
@@ -190,6 +191,7 @@ struct Candidate {
 
 struct PreparedCandidates {
     candidates: Vec<Candidate>,
+    exploration_candidates: Vec<Candidate>,
     gate_mult: f64,
     fresh_lab: usize,
     stale_lab: usize,
@@ -459,6 +461,10 @@ pub fn build_notable_items(
             execution_mode,
             execution_score,
             fade_risk,
+            item.detail
+                .get("money_policy_pass")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         );
         if let Some(obj) = item.detail.as_object_mut() {
             obj.insert(
@@ -496,7 +502,11 @@ pub fn build_review_decisions(
 ) -> Result<Vec<ReviewDecision>> {
     let shadow_calibration = summarize_shadow_calibration(db, as_of);
     let max_items = effective_report_limit(cfg.output.max_notable_items, &shadow_calibration);
-    let PreparedCandidates { candidates, .. } = prepare_candidates(db, cfg, as_of)?;
+    let PreparedCandidates {
+        candidates,
+        exploration_candidates,
+        ..
+    } = prepare_candidates(db, cfg, as_of)?;
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -541,7 +551,9 @@ pub fn build_review_decisions(
         .unwrap_or(0);
 
     let mut decisions = Vec::with_capacity(candidates.len());
+    let mut decision_symbols: HashSet<String> = HashSet::new();
     for (idx, c) in candidates.into_iter().enumerate() {
+        decision_symbols.insert(c.ts_code.clone());
         let (confidence, direction) = classify_convergence(&c);
         let (mut report_bucket, mut report_reason) =
             classify_report_lane(&c, &confidence, &direction);
@@ -573,6 +585,7 @@ pub fn build_review_decisions(
             &c.execution_mode,
             c.execution_score,
             c.fade_risk,
+            cn_money_policy_proxy(&c),
         );
 
         decisions.push(ReviewDecision {
@@ -603,6 +616,86 @@ pub fn build_review_decisions(
                 "trend_prob_n": c.trend_prob_n,
                 "ret_5d": c.ret_5d,
                 "ret_20d": c.ret_20d,
+                "p_upside": if c.surprise_category >= 0.0 { Some(c.p_upside) } else { None::<f64> },
+                "surprise_category": c.surprise_category,
+                "rsi_14": c.rsi_14,
+                "bb_position": c.bb_position,
+                "reversion_score": c.reversion_score,
+                "reversion_direction": c.reversion_direction,
+                "lab_is_fresh": c.lab_is_fresh,
+                "shadow_alpha_score": c.shadow_alpha_score,
+                "shadow_rank_score": c.shadow_rank_score,
+                "shadow_live_weight": shadow_calibration.recommended_weight,
+                "shadow_live_reserve": shadow_calibration.recommended_reserve,
+                "shadow_recall_gap": shadow_calibration.recall_gap,
+                "shadow_quality_gap": shadow_calibration.quality_gap,
+                "shadow_iv_30d": c.shadow_iv_30d,
+                "shadow_iv_60d": c.shadow_iv_60d,
+                "shadow_iv_90d": c.shadow_iv_90d,
+                "downside_stress": c.downside_stress,
+                "shadow_put_90_3m": c.shadow_put_90_3m,
+                "shadow_touch_90_3m": c.shadow_touch_90_3m,
+                "shadow_floor_1sigma_3m": c.shadow_floor_1sigma_3m,
+                "shadow_floor_2sigma_3m": c.shadow_floor_2sigma_3m,
+                "shadow_skew_90_3m": c.shadow_skew_90_3m,
+                "setup_score": c.setup_score,
+                "continuation_score": c.continuation_score,
+                "execution_score": c.execution_score,
+                "execution_mode": c.execution_mode,
+                "shadow_option_alpha_prob": c.calibrated_shadow_alpha_prob,
+                "stale_chase_risk": c.stale_chase_risk,
+                "entry_quality_score": c.entry_quality_score,
+                "shadow_option_calibration_bucket_id": c.calibration_bucket_id,
+                "shadow_option_alpha": c.shadow_option_alpha_detail,
+                "market_vol": market_vol_context,
+                "money_policy_pass": cn_money_policy_proxy(&c),
+            })
+            .to_string(),
+        });
+    }
+
+    let mut next_rank = decisions.len() as i64 + 1;
+    for c in exploration_candidates.into_iter() {
+        if decision_symbols.contains(&c.ts_code) {
+            continue;
+        }
+        decision_symbols.insert(c.ts_code.clone());
+        let main_signal_gate = serde_json::json!({
+            "status": "blocked",
+            "role": "exploration_only",
+            "action_intent": "WAIT",
+            "headline_mode": headline_gate.mode,
+            "execution_mode": c.execution_mode,
+            "blockers": ["not_in_report_initial_screen", "exploration_only"],
+        });
+        decisions.push(ReviewDecision {
+            symbol: c.ts_code.clone(),
+            selection_status: "exploration".to_string(),
+            rank_order: next_rank,
+            report_bucket: "EXPLORATION".to_string(),
+            signal_direction: "bullish".to_string(),
+            signal_confidence: "EXPLORATION".to_string(),
+            composite_score: c.composite,
+            execution_mode: c.execution_mode.clone(),
+            execution_score: c.execution_score,
+            max_chase_gap_pct: c.max_chase_gap_pct,
+            pullback_trigger_pct: c.pullback_trigger_pct,
+            setup_score: c.setup_score,
+            continuation_score: c.continuation_score,
+            fade_risk: c.fade_risk,
+            reference_close: reference_close.get(&c.ts_code).copied(),
+            details_json: serde_json::json!({
+                "headline_mode": headline_gate.mode,
+                "headline_reason": "exploration-only oversold contrarian sample; not displayed as a report candidate",
+                "main_signal_gate": main_signal_gate,
+                "exploration_strategy_family": "oversold_contrarian",
+                "exploration_reason": "full-universe oversold candidate missed by primary composite screen",
+                "trend_prob": c.trend_prob,
+                "trend_prob_n": c.trend_prob_n,
+                "ret_5d": c.ret_5d,
+                "ret_20d": c.ret_20d,
+                "p_upside": if c.surprise_category >= 0.0 { Some(c.p_upside) } else { None::<f64> },
+                "surprise_category": c.surprise_category,
                 "rsi_14": c.rsi_14,
                 "bb_position": c.bb_position,
                 "reversion_score": c.reversion_score,
@@ -636,6 +729,7 @@ pub fn build_review_decisions(
             })
             .to_string(),
         });
+        next_rank += 1;
     }
 
     Ok(decisions)
@@ -669,6 +763,7 @@ fn prepare_candidates(
     if candidates.is_empty() {
         return Ok(PreparedCandidates {
             candidates,
+            exploration_candidates: Vec::new(),
             gate_mult,
             fresh_lab: 0,
             stale_lab: 0,
@@ -720,8 +815,10 @@ fn prepare_candidates(
         // Information: already [0, 1]
         c.information_s = c.information_score;
 
-        // Event: announcement + unlock
+        // Event: announcement + unlock. Raw value stays in detail/reporting, but
+        // composite scoring only treats it as explanatory context.
         c.event_score = compute_event_score(c);
+        let event_context = event_context_score(c);
 
         // Cross-asset: sector fund flow alignment
         c.cross_asset_score = sector_flow;
@@ -746,7 +843,7 @@ fn prepare_candidates(
             + w_mom * c.momentum_score
             + w_rev * c.reversion_s
             + w_brk * c.breakout_s
-            + W_EVENT * c.event_score
+            + W_EVENT * event_context
             + W_CROSS_ASSET * c.cross_asset_score
             + W_LAB * lab_composite_score(c.lab_factor)
             + shadow_calibration.recommended_weight * c.shadow_rank_score
@@ -759,6 +856,9 @@ fn prepare_candidates(
 
         c.composite = c.composite.clamp(0.0, 1.0);
     }
+
+    let st_symbols = load_st_symbols(db);
+    let exploration_candidates = select_oversold_exploration_candidates(&candidates, &st_symbols);
 
     let full_shadow_event_symbols: Vec<String> = candidates
         .iter()
@@ -837,11 +937,6 @@ fn prepare_candidates(
             confirmation_bonus += 0.05;
         }
 
-        // Bonus: strong announcement
-        if c.surprise_category >= 0.0 && (c.p_upside > 0.7 || c.p_upside < 0.3) {
-            confirmation_bonus += 0.05;
-        }
-
         // Bonus: large unlock imminent
         if c.unlock_days >= 0.0 && c.unlock_days <= 5.0 && c.float_ratio > 5.0 {
             confirmation_bonus += 0.04;
@@ -887,6 +982,7 @@ fn prepare_candidates(
 
     Ok(PreparedCandidates {
         candidates,
+        exploration_candidates,
         gate_mult,
         fresh_lab,
         stale_lab,
@@ -947,6 +1043,71 @@ fn is_chinext_symbol(ts_code: &str) -> bool {
     ts_code.starts_with("300") || ts_code.starts_with("301")
 }
 
+fn is_mainboard_exploration_symbol(ts_code: &str) -> bool {
+    (ts_code.ends_with(".SH") || ts_code.ends_with(".SZ"))
+        && !ts_code.starts_with("300")
+        && !ts_code.starts_with("301")
+        && !ts_code.starts_with("688")
+        && !ts_code.starts_with("920")
+}
+
+fn load_st_symbols(db: &Connection) -> HashSet<String> {
+    let Ok(mut stmt) = db.prepare(
+        "SELECT ts_code
+         FROM stock_basic
+         WHERE name ILIKE '%ST%'",
+    ) else {
+        return HashSet::new();
+    };
+    let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) else {
+        return HashSet::new();
+    };
+    rows.filter_map(|row| row.ok()).collect()
+}
+
+fn oversold_exploration_score(c: &Candidate) -> f64 {
+    let oversold_depth = ((OVERSOLD_EXPLORATION_RSI_MAX - c.rsi_14) / 25.0).clamp(0.0, 1.0);
+    let drawdown = ((-c.ret_20d).max(-c.ret_5d) / 30.0).clamp(0.0, 1.0);
+    let structure = c.setup_score.max(c.continuation_score).clamp(0.0, 1.0);
+    let low_fade = (1.0 - c.fade_risk).clamp(0.0, 1.0);
+    0.40 * oversold_depth + 0.25 * drawdown + 0.20 * structure + 0.15 * low_fade
+}
+
+fn select_oversold_exploration_candidates(
+    candidates: &[Candidate],
+    st_symbols: &HashSet<String>,
+) -> Vec<Candidate> {
+    let mut ranked: Vec<(Candidate, f64)> = candidates
+        .iter()
+        .filter(|c| {
+            is_mainboard_exploration_symbol(&c.ts_code)
+                && !st_symbols.contains(&c.ts_code)
+                && c.rsi_14 <= OVERSOLD_EXPLORATION_RSI_MAX
+                && c.reversion_direction > 0.0
+                && (c.ret_5d <= -0.5 || c.ret_20d <= -3.0)
+                && c.fade_risk <= OVERSOLD_EXPLORATION_FADE_MAX
+                && c.execution_score >= OVERSOLD_EXPLORATION_EXECUTION_MIN
+        })
+        .cloned()
+        .map(|c| {
+            let score = oversold_exploration_score(&c);
+            (c, score)
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap()
+            .then_with(|| a.0.rsi_14.partial_cmp(&b.0.rsi_14).unwrap())
+            .then_with(|| a.0.fade_risk.partial_cmp(&b.0.fade_risk).unwrap())
+            .then_with(|| b.0.setup_score.partial_cmp(&a.0.setup_score).unwrap())
+    });
+    ranked
+        .into_iter()
+        .take(OVERSOLD_EXPLORATION_LIMIT)
+        .map(|(candidate, _)| candidate)
+        .collect()
+}
+
 fn tactical_priority_score(c: &Candidate) -> f64 {
     let regime_bonus = match c.regime {
         1 if c.execution_score >= TACTICAL_CONTINUATION_MEAN_REV_EXECUTION_MIN
@@ -964,19 +1125,12 @@ fn tactical_priority_score(c: &Candidate) -> f64 {
         }
         _ => 0.0,
     };
-    let event_bonus = if c.event_score >= 0.45 || c.p_upside >= 0.80 {
-        UNCERTAIN_TACTICAL_PRIORITY_EVENT_BONUS
-    } else {
-        0.0
-    };
-
     (0.20 * c.composite
         + 0.25 * c.execution_score
         + 0.20 * c.setup_score
         + 0.20 * c.continuation_score
         + 0.10 * c.information_s
         + regime_bonus
-        + event_bonus
         - 0.18 * c.fade_risk)
         .clamp(0.0, 2.0)
 }
@@ -987,7 +1141,6 @@ fn range_core_priority_score(c: &Candidate) -> f64 {
         + 0.16 * c.setup_score
         + 0.14 * c.continuation_score
         + 0.08 * c.information_s
-        + 0.04 * c.event_score
         - 0.16 * c.fade_risk)
         .clamp(0.0, 2.0)
 }
@@ -1080,7 +1233,6 @@ fn final_report_priority_score(item: &NotableItem) -> f64 {
 
     (0.38 * item.composite_score
         + 0.18 * item.flow_score
-        + 0.14 * item.event_score
         + 0.12 * item.magnitude_score
         + 0.12 * execution_score
         + 0.10 * setup_score
@@ -1181,8 +1333,7 @@ fn is_uncertain_range_core_candidate(
     let structural_tailwind = c.setup_direction > 0.0 && c.setup_score >= RANGE_CORE_SETUP_MIN;
     let continuation_tailwind =
         c.continuation_direction > 0.0 && c.continuation_score >= RANGE_CORE_CONTINUATION_MIN;
-    let context_tailwind =
-        c.information_s >= RANGE_CORE_INFO_MIN || c.event_score >= RANGE_CORE_EVENT_MIN;
+    let context_tailwind = c.information_s >= RANGE_CORE_INFO_MIN;
 
     (structural_tailwind && continuation_tailwind)
         || (structural_tailwind && context_tailwind)
@@ -1234,7 +1385,8 @@ fn plan_uncertain_headline_candidates(candidates: &[Candidate]) -> UncertainHead
 }
 
 /// Count independent signal sources and classify by convergence.
-/// Signal sources: momentum, reversion, breakout, flow, event
+/// Signal sources: momentum, reversion, breakout, flow, factor, shadow, setup, continuation.
+/// A-share event/news is not an independent alpha source; it annotates price action.
 /// HIGH = 2+ independent sources aligned in same direction + no conflicts
 fn classify_convergence(c: &Candidate) -> (String, String) {
     // Identify active directional signals and their directions
@@ -1279,12 +1431,6 @@ fn classify_convergence(c: &Candidate) -> (String, String) {
         if dir != 0.0 {
             sources.push(("flow", dir, c.information_s));
         }
-    }
-
-    // 5. Event signal
-    if c.surprise_category >= 0.0 && (c.p_upside - 0.5).abs() > 0.15 {
-        let dir = if c.p_upside > 0.55 { 1.0 } else { -1.0 };
-        sources.push(("event", dir, (c.p_upside - 0.5).abs() * 2.0));
     }
 
     // 6. Unlock (bearish only)
@@ -1503,7 +1649,6 @@ fn classify_report_lane(c: &Candidate, confidence: &str, direction: &str) -> (St
         && (confidence == "MODERATE"
             || confidence == "WATCH"
             || c.information_s >= 0.70
-            || c.event_score >= 0.20
             || c.magnitude_score >= 0.70);
     if theme_like {
         return (
@@ -1526,6 +1671,7 @@ fn main_signal_gate_value(
     execution_mode: &str,
     execution_score: f64,
     fade_risk: f64,
+    money_policy_pass: bool,
 ) -> serde_json::Value {
     let mut blockers: Vec<String> = Vec::new();
     if report_bucket != "CORE BOOK" {
@@ -1545,6 +1691,9 @@ fn main_signal_gate_value(
     }
     if fade_risk > RANGE_CORE_FADE_MAX {
         blockers.push("fade_risk_above_core".to_string());
+    }
+    if !money_policy_pass {
+        blockers.push("profit_policy_requires_oversold_ev_positive".to_string());
     }
 
     let status = if blockers.is_empty() {
@@ -1576,8 +1725,22 @@ fn main_signal_gate_value(
         "headline_mode": headline_mode,
         "report_bucket": report_bucket,
         "execution_mode": execution_mode,
+        "money_policy": "cn_oversold_contrarian_ev_positive_planned_entry",
+        "money_policy_pass": money_policy_pass,
+        "max_size": "0.25R/name; 1R basket cap; planned-entry only",
         "blockers": blockers,
     })
+}
+
+fn cn_money_policy_proxy(c: &Candidate) -> bool {
+    c.rsi_14 <= 35.0
+        && c.reversion_direction > 0.0
+        && c.reversion_score >= 0.30
+        && (c.execution_mode == "executable" || c.execution_mode == "wait_pullback")
+        && c.execution_score >= OVERSOLD_EXPLORATION_EXECUTION_MIN
+        && c.stale_chase_risk < 0.44
+        && c.entry_quality_score >= 0.55
+        && c.downside_stress < 0.70
 }
 
 fn is_tactical_continuation_candidate(c: &Candidate, confidence: &str, direction: &str) -> bool {
@@ -2155,6 +2318,22 @@ fn compute_event_score(c: &Candidate) -> f64 {
     score.min(1.0)
 }
 
+fn price_structure_confirmation(c: &Candidate) -> f64 {
+    c.setup_score
+        .max(c.continuation_score)
+        .max(c.breakout_score)
+        .max(c.momentum_score)
+        .clamp(0.0, 1.0)
+}
+
+fn event_context_score(c: &Candidate) -> f64 {
+    let structure = price_structure_confirmation(c);
+    if structure <= 0.0 {
+        return 0.0;
+    }
+    compute_event_score(c) * structure
+}
+
 fn compute_shadow_alpha_score(c: &Candidate) -> f64 {
     let has_shadow_fast = c.shadow_iv_30d > 0.0 || c.shadow_iv_60d > 0.0 || c.shadow_iv_90d > 0.0;
     let has_shadow_full = c.shadow_put_90_3m > 0.0
@@ -2253,10 +2432,10 @@ fn cross_stats(values: &[f64]) -> (f64, f64) {
 mod tests {
     use super::{
         apply_uncertain_headline_policy, classify_convergence, classify_report_lane,
-        effective_pass1_cutoff, effective_report_limit, expanded_report_pool_limit,
-        is_tactical_continuation_candidate, lab_composite_score, main_signal_gate_value,
-        plan_uncertain_headline_candidates, select_uncertain_tactical_symbols_from_candidates,
-        Candidate, UNCERTAIN_TACTICAL_LIMIT_MAX,
+        effective_pass1_cutoff, effective_report_limit, event_context_score,
+        expanded_report_pool_limit, is_tactical_continuation_candidate, lab_composite_score,
+        main_signal_gate_value, plan_uncertain_headline_candidates,
+        select_uncertain_tactical_symbols_from_candidates, Candidate, UNCERTAIN_TACTICAL_LIMIT_MAX,
     };
     use crate::analytics::shadow_calibration::ShadowCalibrationSummary;
 
@@ -2390,6 +2569,52 @@ mod tests {
     }
 
     #[test]
+    fn event_only_news_cannot_create_directional_alpha() {
+        let mut candidate = sample_candidate();
+        candidate.trend_prob = 0.50;
+        candidate.momentum_score = 0.0;
+        candidate.breakout_score = 0.0;
+        candidate.breakout_direction = 0.0;
+        candidate.reversion_score = 0.0;
+        candidate.reversion_direction = 0.0;
+        candidate.information_s = 0.10;
+        candidate.lab_factor = 0.0;
+        candidate.shadow_rank_score = 0.0;
+        candidate.setup_score = 0.0;
+        candidate.setup_direction = 0.0;
+        candidate.continuation_score = 0.0;
+        candidate.continuation_direction = 0.0;
+        candidate.execution_mode = "executable".to_string();
+        candidate.surprise_category = 1.0;
+        candidate.p_upside = 0.95;
+        candidate.event_score = 0.90;
+
+        let (confidence, direction) = classify_convergence(&candidate);
+        let (bucket, _) = classify_report_lane(&candidate, &confidence, &direction);
+
+        assert_eq!(confidence, "LOW");
+        assert_eq!(direction, "neutral");
+        assert_eq!(bucket, "RADAR");
+    }
+
+    #[test]
+    fn event_context_requires_price_structure() {
+        let mut candidate = sample_candidate();
+        candidate.surprise_category = 1.0;
+        candidate.p_upside = 0.95;
+        candidate.setup_score = 0.0;
+        candidate.continuation_score = 0.0;
+        candidate.breakout_score = 0.0;
+        candidate.momentum_score = 0.0;
+
+        assert_eq!(event_context_score(&candidate), 0.0);
+
+        candidate.setup_score = 0.60;
+        assert!(event_context_score(&candidate) > 0.0);
+        assert!(event_context_score(&candidate) < 0.90);
+    }
+
+    #[test]
     fn tactical_candidate_can_keep_strong_watch_names_alive() {
         let mut candidate = sample_candidate();
         candidate.setup_score = 0.47;
@@ -2516,6 +2741,7 @@ mod tests {
             "executable",
             0.68,
             0.20,
+            true,
         );
         assert_eq!(blocked["status"], "pass");
         assert_eq!(blocked["role"], "main_signal");
@@ -2530,10 +2756,32 @@ mod tests {
             "executable",
             0.68,
             0.20,
+            true,
         );
         assert_eq!(passed["status"], "pass");
         assert_eq!(passed["role"], "main_signal");
         assert_eq!(passed["action_intent"], "TRADE");
+    }
+
+    #[test]
+    fn main_signal_gate_blocks_non_money_policy_core_names() {
+        let blocked = main_signal_gate_value(
+            "CORE BOOK",
+            "HIGH",
+            "bullish",
+            "trend",
+            "executable",
+            0.68,
+            0.20,
+            false,
+        );
+        assert_eq!(blocked["status"], "blocked");
+        assert_eq!(blocked["role"], "directional_observation");
+        assert!(blocked["blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|v| v.as_str() == Some("profit_policy_requires_oversold_ev_positive")));
     }
 
     #[test]

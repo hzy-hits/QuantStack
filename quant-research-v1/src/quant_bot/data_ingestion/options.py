@@ -95,6 +95,29 @@ def _valid_iv(iv) -> Optional[float]:
     return v if v > 0 else None
 
 
+def _safe_float(value) -> Optional[float]:  # noqa: ANN001
+    try:
+        if value is None:
+            return None
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _safe_int(value) -> Optional[int]:  # noqa: ANN001
+    parsed = _safe_float(value)
+    return int(parsed) if parsed is not None else None
+
+
+def _first_float(opt: dict, *keys: str) -> Optional[float]:
+    for key in keys:
+        parsed = _safe_float(opt.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _parse_cboe_option_symbol(opt_sym: str, ticker: str) -> Optional[dict]:
     """Parse CBOE option symbol like AAPL260313C00262500 into components."""
     # Strip the known ticker prefix for reliable parsing
@@ -228,15 +251,23 @@ def _cboe_to_dataframes(
         if not parsed:
             continue
         expiry = parsed["expiry"]
+        bid = _safe_float(opt.get("bid")) or 0.0
+        ask = _safe_float(opt.get("ask")) or 0.0
         by_expiry.setdefault(expiry, []).append({
+            "contractSymbol": opt.get("option", ""),
             "strike": parsed["strike"],
             "opt_type": parsed["type"],
-            "bid": opt.get("bid", 0) or 0,
-            "ask": opt.get("ask", 0) or 0,
-            "volume": opt.get("volume", 0) or 0,
-            "openInterest": opt.get("open_interest", 0) or 0,
-            "impliedVolatility": opt.get("iv", 0) or 0,
-            "delta": opt.get("delta", 0) or 0,
+            "bid": bid,
+            "ask": ask,
+            "mid": (bid + ask) / 2.0 if bid > 0 and ask > 0 else None,
+            "lastPrice": _first_float(opt, "last_trade_price", "last", "last_price", "close"),
+            "volume": _safe_int(opt.get("volume")) or 0,
+            "openInterest": _safe_int(opt.get("open_interest")) or 0,
+            "impliedVolatility": _safe_float(opt.get("iv")) or 0,
+            "delta": _safe_float(opt.get("delta")),
+            "gamma": _safe_float(opt.get("gamma")),
+            "theta": _safe_float(opt.get("theta")),
+            "vega": _safe_float(opt.get("vega")),
         })
 
     result = {}
@@ -444,18 +475,19 @@ def _bias_signal(skew: Optional[float], pc_ratio: Optional[float]) -> str:
 
 def _process_symbol(
     sym: str, as_of: date, max_expiries: int
-) -> tuple[list[dict], list[dict]]:
-    """Fetch and process options for a single symbol. Returns (snapshot_records, analysis_records)."""
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Fetch and process options for a single symbol."""
     snapshot_records = []
     analysis_records = []
+    quote_records = []
 
     raw = _fetch_cboe_single(sym)
     if raw is None:
-        return [], []
+        return [], [], []
 
     expiry_data = _cboe_to_dataframes(raw, sym, as_of)
     if not expiry_data:
-        return [], []
+        return [], [], []
 
     data = raw.get("data", raw)
     current_price = data.get("current_price", 0)
@@ -474,6 +506,33 @@ def _process_symbol(
     for exp_str in valid_expiries:
         calls, puts, price = expiry_data[exp_str]
         dte = _days_to_expiry(exp_str, as_of)
+
+        for opt_type, chain_df in [("call", calls), ("put", puts)]:
+            for _, opt_row in chain_df.iterrows():
+                bid = _safe_float(opt_row.get("bid"))
+                ask = _safe_float(opt_row.get("ask"))
+                quote_records.append({
+                    "symbol": sym,
+                    "as_of": as_of,
+                    "expiry": exp_str,
+                    "days_to_exp": dte,
+                    "current_price": round(price, 4),
+                    "contract_symbol": opt_row.get("contractSymbol") or "",
+                    "option_type": opt_type,
+                    "strike": _safe_float(opt_row.get("strike")),
+                    "bid": bid,
+                    "ask": ask,
+                    "mid": (bid + ask) / 2.0 if bid is not None and ask is not None and bid > 0 and ask > 0 else None,
+                    "last_price": _safe_float(opt_row.get("lastPrice")),
+                    "volume": _safe_int(opt_row.get("volume")) or 0,
+                    "open_interest": _safe_int(opt_row.get("openInterest")) or 0,
+                    "implied_volatility": _safe_float(opt_row.get("impliedVolatility")),
+                    "delta": _safe_float(opt_row.get("delta")),
+                    "gamma": _safe_float(opt_row.get("gamma")),
+                    "theta": _safe_float(opt_row.get("theta")),
+                    "vega": _safe_float(opt_row.get("vega")),
+                    "source": "cboe_delayed",
+                })
 
         # ATM IV from calls (more liquid near ATM), fallback to puts
         atm_iv = _atm_iv(calls, price)
@@ -552,21 +611,22 @@ def _process_symbol(
             "unusual_strikes": json.dumps(unusual) if unusual else None,
         })
 
-    return snapshot_records, analysis_records
+    return snapshot_records, analysis_records, quote_records
 
 
-def fetch_options_snapshot(
+def fetch_options_snapshot_with_quotes(
     symbols: list[str],
     as_of: date,
     max_expiries: int = 2,
-) -> tuple[pl.DataFrame, pl.DataFrame]:
+) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """
     For each symbol, fetch options chain from CBOE and compute:
     1. Snapshot (lightweight): ATM IV, expected move, P/C ratio
     2. Analysis (enhanced): probability cone, skew, liquidity, unusual activity
+    3. Chain quotes: leg-level bid/ask quotes for shadow PnL marking
 
     Uses concurrent requests (5 workers) + 403 blacklist for speed.
-    Returns (snapshot_df, analysis_df).
+    Returns (snapshot_df, analysis_df, quote_df).
     """
     # Filter out blacklisted symbols (403'd within BLACKLIST_DAYS)
     blacklist = _load_blacklist()
@@ -579,6 +639,7 @@ def fetch_options_snapshot(
 
     snapshot_records = []
     analysis_records = []
+    quote_records = []
     fetch_failures = 0
 
     _blacklist_additions.clear()
@@ -591,12 +652,13 @@ def fetch_options_snapshot(
         for future in as_completed(futures):
             sym = futures[future]
             try:
-                snap, anal = future.result()
+                snap, anal, quotes = future.result()
                 snapshot_records.extend(snap)
                 analysis_records.extend(anal)
+                quote_records.extend(quotes)
                 if snap:
                     log.info("options_fetched", symbol=sym, source="cboe",
-                             expiries=len(snap))
+                             expiries=len(snap), quotes=len(quotes))
                 else:
                     fetch_failures += 1
             except Exception as e:
@@ -621,7 +683,23 @@ def fetch_options_snapshot(
             return pl.DataFrame()
         return pl.DataFrame(records, infer_schema_length=None).with_columns([pl.col("as_of").cast(pl.Date)])
 
-    return _to_df(snapshot_records), _to_df(analysis_records)
+    return _to_df(snapshot_records), _to_df(analysis_records), _to_df(quote_records)
+
+
+def fetch_options_snapshot(
+    symbols: list[str],
+    as_of: date,
+    max_expiries: int = 2,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """
+    Backwards-compatible wrapper for callers that only need snapshot/analysis.
+    """
+    snapshot_df, analysis_df, _quote_df = fetch_options_snapshot_with_quotes(
+        symbols,
+        as_of,
+        max_expiries=max_expiries,
+    )
+    return snapshot_df, analysis_df
 
 
 def upsert_options(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> int:
@@ -665,5 +743,48 @@ def upsert_options_analysis(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) ->
         FROM opts_analysis_updates
     """)
     con.unregister("opts_analysis_updates")
+    con.commit()
+    return len(df)
+
+
+def upsert_options_chain_quotes(con: duckdb.DuckDBPyConnection, df: pl.DataFrame) -> int:
+    """Store leg-level delayed option quotes for expression shadow PnL."""
+    if df.is_empty():
+        return 0
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS options_chain_quotes (
+            symbol              VARCHAR NOT NULL,
+            as_of               DATE NOT NULL,
+            expiry              VARCHAR NOT NULL,
+            days_to_exp         INTEGER,
+            current_price       DOUBLE,
+            contract_symbol     VARCHAR NOT NULL,
+            option_type         VARCHAR NOT NULL,
+            strike              DOUBLE,
+            bid                 DOUBLE,
+            ask                 DOUBLE,
+            mid                 DOUBLE,
+            last_price          DOUBLE,
+            volume              BIGINT,
+            open_interest       BIGINT,
+            implied_volatility  DOUBLE,
+            delta               DOUBLE,
+            gamma               DOUBLE,
+            theta               DOUBLE,
+            vega                DOUBLE,
+            source              VARCHAR,
+            PRIMARY KEY (symbol, as_of, expiry, contract_symbol)
+        )
+    """)
+    con.register("opts_chain_quote_updates", df.to_arrow())
+    con.execute("""
+        INSERT OR REPLACE INTO options_chain_quotes
+        SELECT symbol, as_of, expiry, days_to_exp, current_price,
+               contract_symbol, option_type, strike, bid, ask, mid, last_price,
+               volume, open_interest, implied_volatility, delta, gamma, theta,
+               vega, source
+        FROM opts_chain_quote_updates
+    """)
+    con.unregister("opts_chain_quote_updates")
     con.commit()
     return len(df)

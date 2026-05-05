@@ -23,7 +23,7 @@ import duckdb
 STACK_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "strategy_backtest"
 HISTORY_DB = STACK_ROOT / "data" / "strategy_backtest_history.duckdb"
-ONE_SIDED_95_Z = 1.64
+ONE_SIDED_80_Z = 1.2816
 
 
 STABILITY_THRESHOLDS = {
@@ -58,7 +58,7 @@ class MarketConfig:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run stable playbook gate and emit alpha bulletin.")
     parser.add_argument("--date", required=True, help="Report date, YYYY-MM-DD.")
-    parser.add_argument("--lookback-days", type=int, default=30)
+    parser.add_argument("--lookback-days", type=int, default=60)
     parser.add_argument("--auto-select", action="store_true", help="Select daily champion policy.")
     parser.add_argument("--emit-bulletin", action="store_true", help="Write JSON and Markdown bulletin files.")
     parser.add_argument("--history-db", type=Path, default=HISTORY_DB)
@@ -205,7 +205,64 @@ def main_signal_gate(details: dict[str, Any]) -> dict[str, Any]:
     return gate if isinstance(gate, dict) else {}
 
 
+def trend_regime_from_details(details: dict[str, Any]) -> str:
+    gate = details.get("execution_gate") or {}
+    if isinstance(gate, dict):
+        regime = gate.get("trend_regime") or gate.get("regime")
+        if regime:
+            return str(regime).strip().lower()
+    momentum = details.get("momentum") or {}
+    if isinstance(momentum, dict) and momentum.get("regime"):
+        return str(momentum.get("regime")).strip().lower()
+    return "unknown"
+
+
+def is_cn_oversold_ev_positive_row(row: dict[str, Any]) -> bool:
+    family = str(row.get("strategy_family") or "").strip().lower()
+    action = str(row.get("action_intent") or "").strip().upper()
+    alpha_state = str(row.get("alpha_state") or "").strip().lower()
+    ev_lcb80 = round_or_none(row.get("ev_lcb_80_pct"))
+    return (
+        family == "oversold_contrarian"
+        and action == "TRADE"
+        and (alpha_state == "positive_ev_setup" or (ev_lcb80 is not None and ev_lcb80 > 0.0))
+    )
+
+
+def cn_strategy_execution_mode(row: dict[str, Any]) -> str:
+    features = safe_json_loads(row.get("features_json"))
+    return str(features.get("execution_mode") or row.get("execution_mode") or row.get("execution_rule") or "").strip().lower()
+
+
+def cn_strategy_hard_blocked(row: dict[str, Any]) -> bool:
+    return cn_strategy_execution_mode(row) in {"blocked", "no_trade", "skip", "avoid"}
+
+
 def row_policy(row: dict[str, Any], market: str, horizon_days: int) -> dict[str, str]:
+    if market == "cn" and row.get("strategy_family"):
+        family = str(row.get("strategy_family") or "unknown").strip().lower() or "unknown"
+        action = str(row.get("action_intent") or "").strip().upper()
+        direction = "long"
+        if family == "oversold_contrarian":
+            confidence = "ev_positive" if is_cn_oversold_ev_positive_row(row) else "ev_unproven"
+        elif family == "structural_core":
+            confidence = "legacy"
+        else:
+            confidence = "research"
+        execution = "planned_entry" if action == "TRADE" else normalize_execution(row.get("execution_mode") or row.get("execution_rule"))
+        regime = "na"
+        policy_id = f"{market}:{family}:{direction}:{confidence}:{execution}:{regime}:h{horizon_days}"
+        label = f"CN {family.replace('_', ' ')} {confidence.replace('_', ' ')} {execution.replace('_', ' ')} {horizon_days}D"
+        return {
+            "policy_id": policy_id,
+            "policy_label": label,
+            "bucket": family,
+            "direction": direction,
+            "confidence": confidence,
+            "execution": execution,
+            "trend_regime": regime,
+        }
+
     details = safe_json_loads(row.get("details_json"))
     gate = main_signal_gate(details)
     bucket = normalize_bucket(row.get("report_bucket") or gate.get("report_bucket"))
@@ -218,10 +275,12 @@ def row_policy(row: dict[str, Any], market: str, horizon_days: int) -> dict[str,
         or gate.get("execution_mode")
         or gate.get("action_intent")
     )
-    policy_id = f"{market}:{bucket}:{direction}:{confidence}:{execution}:h{horizon_days}"
+    regime = trend_regime_from_details(details) if market == "us" else "na"
+    policy_id = f"{market}:{bucket}:{direction}:{confidence}:{execution}:{regime}:h{horizon_days}"
     label = (
         f"{market.upper()} {bucket.replace('_', ' ')} {direction} "
-        f"{confidence.replace('_', '/')} {execution.replace('_', ' ')} {horizon_days}D"
+        f"{confidence.replace('_', '/')} {execution.replace('_', ' ')} "
+        f"{regime.replace('_', ' ')} {horizon_days}D"
     )
     return {
         "policy_id": policy_id,
@@ -230,6 +289,7 @@ def row_policy(row: dict[str, Any], market: str, horizon_days: int) -> dict[str,
         "direction": direction,
         "confidence": confidence,
         "execution": execution,
+        "trend_regime": regime,
     }
 
 
@@ -254,7 +314,18 @@ def load_evaluated_trades(
     con = duckdb.connect(str(db_path), read_only=True)
     try:
         rows: list[dict[str, Any]] = []
-        if table_exists(con, "paper_trades"):
+        if (
+            market == "cn"
+            and table_exists(con, "strategy_model_dataset")
+        ):
+            rows = load_cn_strategy_model_rows(con, start, cutoff, as_of)
+        if (
+            market == "us"
+            and table_exists(con, "report_decisions")
+            and table_exists(con, "report_outcomes")
+        ):
+            rows = load_report_outcome_rows(con, start, cutoff, as_of)
+        if not rows and table_exists(con, "paper_trades"):
             rows = load_paper_trade_rows(con, start, cutoff, as_of)
         if (not rows or not any(is_fill(row) for row in rows)) and table_exists(con, "algorithm_postmortem"):
             rows = load_algorithm_postmortem_rows(con, start, cutoff, as_of)
@@ -343,6 +414,52 @@ def load_paper_trade_rows(
             and fill_status in {"filled_open", "filled_pullback"}
             and str(row.get("action_intent") or "").upper() == "TRADE"
         )
+    return rows
+
+
+def load_cn_strategy_model_rows(
+    con: duckdb.DuckDBPyConnection,
+    start: date,
+    cutoff: date,
+    as_of: date,
+) -> list[dict[str, Any]]:
+    cols = table_columns(con, "strategy_model_dataset")
+    if "realized_ret_pct" not in cols or "strategy_family" not in cols:
+        return []
+    rows = rows_as_dicts(
+        con,
+        """
+        SELECT
+            m.report_date,
+            m.evaluation_date,
+            m.symbol,
+            m.selection_status,
+            m.strategy_family,
+            m.strategy_key,
+            m.execution_rule,
+            m.action_intent,
+            m.alpha_state,
+            m.realized_ret_pct AS return_pct,
+            m.ev_pct,
+            m.ev_lcb_80_pct,
+            m.ev_lcb_95_pct,
+            m.risk_unit_pct,
+            m.ev_norm_score,
+            m.ev_norm_lcb_80,
+            m.detail_json AS details_json,
+            m.features_json
+        FROM strategy_model_dataset m
+        WHERE m.report_date >= CAST(? AS DATE)
+          AND m.report_date <= CAST(? AS DATE)
+          AND (m.evaluation_date IS NULL OR m.evaluation_date <= CAST(? AS DATE))
+          AND m.action_intent = 'TRADE'
+          AND m.realized_ret_pct IS NOT NULL
+        ORDER BY m.report_date, m.symbol
+        """,
+        [start.isoformat(), cutoff.isoformat(), as_of.isoformat()],
+    )
+    for row in rows:
+        row["executable"] = True
     return rows
 
 
@@ -536,8 +653,8 @@ def ev_evidence_metrics(returns: list[float]) -> dict[str, Any]:
     else:
         se = std / math.sqrt(n)
         prob = normal_cdf(mean / se) if se > 0 else (1.0 if mean > 0 else 0.0)
-        lower = mean - ONE_SIDED_95_Z * se
-        required = math.ceil((ONE_SIDED_95_Z * std / mean) ** 2) if mean > 0 else None
+        lower = mean - ONE_SIDED_80_Z * se
+        required = math.ceil((ONE_SIDED_80_Z * std / mean) ** 2) if mean > 0 else None
     return {
         "return_std_pct": round_or_none(std, 6),
         "ev_probability_positive": round_or_none(prob, 6),
@@ -581,7 +698,7 @@ def evaluate_policy(
         top1_contribution=top1,
         thresholds=thresholds,
     )
-    fail_reasons.extend(policy_scope_fail_reasons(policy_id))
+    fail_reasons.extend(policy_scope_fail_reasons(policy_id, market))
     eligible = not fail_reasons
     score = stability_score(
         fills=len(returns),
@@ -646,12 +763,35 @@ def stability_fail_reasons(
     return reasons
 
 
-def policy_scope_fail_reasons(policy_id: str) -> list[str]:
+def policy_scope_fail_reasons(policy_id: str, market: str) -> list[str]:
     parts = policy_id.split(":")
     if len(parts) < 6:
         return ["policy_scope_unparseable"]
-    _, bucket, direction, confidence, execution, *_ = parts
+    _, bucket, direction, confidence, execution, *rest = parts
+    regime = rest[0] if len(rest) >= 2 else "unknown"
     reasons: list[str] = []
+    if market == "us":
+        if bucket != "core":
+            reasons.append("policy_bucket_not_core")
+        if direction != "long":
+            reasons.append("policy_direction_not_profit_long")
+        if confidence not in {"low", "high_mod"}:
+            reasons.append("policy_confidence_not_profit_scope")
+        if execution != "executable_now":
+            reasons.append("policy_execution_not_now")
+        if regime != "trending":
+            reasons.append("policy_regime_not_trending")
+        return reasons
+    if market == "cn":
+        if bucket != "oversold_contrarian":
+            reasons.append("policy_family_not_oversold_contrarian")
+        if direction != "long":
+            reasons.append("policy_direction_not_profit_long")
+        if confidence != "ev_positive":
+            reasons.append("policy_ev_lcb80_not_positive")
+        if execution != "planned_entry":
+            reasons.append("policy_execution_not_planned_entry")
+        return reasons
     if bucket != "core":
         reasons.append("policy_bucket_not_core")
     if direction not in {"long", "short"}:
@@ -760,6 +900,13 @@ def load_current_candidates(db_path: Path, market: str, as_of: date, horizon_day
         return []
     con = duckdb.connect(str(db_path), read_only=True)
     try:
+        if market == "cn" and table_exists(con, "strategy_model_dataset"):
+            rows = load_cn_current_strategy_candidates(con, as_of)
+            for row in rows:
+                row["market"] = market
+                row["return_pct"] = None
+                row.update(row_policy(row, market, horizon_days))
+            return rows
         if not table_exists(con, "report_decisions"):
             return []
         d_cols = table_columns(con, "report_decisions")
@@ -779,15 +926,26 @@ def load_current_candidates(db_path: Path, market: str, as_of: date, horizon_day
             sql_col("d", "details_json", d_cols),
         ]
         order_expr = "COALESCE(d.rank_order, 999999)" if "rank_order" in d_cols else "999999"
+        latest_row = con.execute(
+            """
+            SELECT MAX(report_date)
+            FROM report_decisions
+            WHERE report_date <= CAST(? AS DATE)
+            """,
+            [as_of.isoformat()],
+        ).fetchone()
+        latest = latest_row[0] if latest_row else None
+        if latest is None:
+            return []
         rows = rows_as_dicts(
             con,
             f"""
             SELECT {", ".join(select_parts)}
             FROM report_decisions d
-            WHERE d.report_date = ?
+            WHERE d.report_date = CAST(? AS DATE)
             ORDER BY {order_expr}, d.symbol
             """,
-            [as_of.isoformat()],
+            [to_iso_date(latest)],
         )
     finally:
         con.close()
@@ -795,6 +953,75 @@ def load_current_candidates(db_path: Path, market: str, as_of: date, horizon_day
         row["market"] = market
         row["return_pct"] = None
         row.update(row_policy(row, market, horizon_days))
+    return rows
+
+
+def load_cn_current_strategy_candidates(con: duckdb.DuckDBPyConnection, as_of: date) -> list[dict[str, Any]]:
+    latest_row = con.execute(
+        "SELECT MAX(report_date) FROM strategy_model_dataset WHERE report_date <= CAST(? AS DATE)",
+        [as_of.isoformat()],
+    ).fetchone()
+    latest = latest_row[0] if latest_row else None
+    if latest is None:
+        return []
+    latest_iso = to_iso_date(latest)
+    rows = rows_as_dicts(
+        con,
+        """
+        SELECT
+            m.report_date,
+            m.evaluation_date,
+            m.symbol,
+            COALESCE(sb.name, '') AS name,
+            m.selection_status,
+            m.strategy_family,
+            m.strategy_key,
+            m.execution_rule,
+            m.action_intent,
+            m.alpha_state,
+            m.ev_pct,
+            m.ev_lcb_80_pct,
+            m.ev_lcb_95_pct,
+            m.risk_unit_pct,
+            m.ev_norm_score,
+            m.ev_norm_lcb_80,
+            m.detail_json AS details_json,
+            m.features_json
+        FROM strategy_model_dataset m
+        LEFT JOIN stock_basic sb ON sb.ts_code = m.symbol
+        WHERE m.report_date = CAST(? AS DATE)
+          AND m.evaluation_date = (
+              SELECT MAX(evaluation_date)
+              FROM strategy_model_dataset
+              WHERE report_date = CAST(? AS DATE)
+          )
+          AND m.selection_status IN ('selected', 'exploration')
+        ORDER BY
+          CASE m.alpha_state
+            WHEN 'positive_ev_setup' THEN 0
+            WHEN 'blocked_negative_ev' THEN 2
+            WHEN 'blocked_tail_risk' THEN 3
+            ELSE 1
+          END,
+          CASE m.action_intent WHEN 'TRADE' THEN 0 WHEN 'SETUP' THEN 1 WHEN 'OBSERVE' THEN 2 ELSE 3 END,
+          COALESCE(m.ev_norm_lcb_80, m.ev_norm_score, -999) DESC,
+          m.symbol
+        """,
+        [latest_iso, latest_iso],
+    )
+    for row in rows:
+        confidence = "EV_POSITIVE" if is_cn_oversold_ev_positive_row(row) else "EV_UNPROVEN"
+        if str(row.get("strategy_family") or "").lower() == "structural_core":
+            confidence = "LEGACY"
+        row["report_bucket"] = row.get("strategy_family")
+        row["signal_direction"] = "long"
+        row["signal_confidence"] = confidence
+        row["execution_mode"] = cn_strategy_execution_mode(row) or row.get("execution_rule")
+        row["primary_reason"] = (
+            "CN oversold_contrarian EV-positive planned-entry policy"
+            if confidence == "EV_POSITIVE"
+            else "CN strategy candidate outside EV-positive money policy"
+        )
     return rows
 
 
@@ -960,6 +1187,22 @@ def load_cn_shadow_options_alpha_candidates(db_path: Path, as_of: date) -> list[
     return out
 
 
+def long_options_expression_pass(item: dict[str, Any] | None) -> tuple[bool, str]:
+    if not item:
+        return False, "options expression missing or blocked"
+    expression = str(item.get("expression") or "").lower()
+    details = item.get("details") or {}
+    directional = round_or_none(details.get("directional_edge"))
+    vol_edge = round_or_none(details.get("vol_edge"))
+    if expression == "call_spread" and (directional or 0.0) > 0.0 and (vol_edge or 0.0) > 0.0:
+        return True, "call_spread direction+vol edge passed"
+    if expression == "stock_long" and (directional or 0.0) > 0.0:
+        return True, "stock_long direction edge passed; options not cheap enough"
+    if expression in {"wait", "blocked", "put_spread"}:
+        return False, f"expression {expression} is not a long-expression pass"
+    return False, "options direction/vol edge did not pass"
+
+
 def has_factor_lab_prior(row: dict[str, Any]) -> bool:
     details = safe_json_loads(row.get("details_json"))
     haystack = " ".join(
@@ -980,6 +1223,24 @@ def has_factor_lab_prior(row: dict[str, Any]) -> bool:
 def gate_passes(row: dict[str, Any]) -> bool:
     details = safe_json_loads(row.get("details_json"))
     gate = main_signal_gate(details)
+    market = str(row.get("market") or "").lower()
+    if market == "cn" and row.get("strategy_family"):
+        return is_cn_oversold_ev_positive_row(row) and not cn_strategy_hard_blocked(row)
+    if market == "us":
+        trend_regime = trend_regime_from_details(details)
+        return (
+            normalize_bucket(row.get("report_bucket") or gate.get("report_bucket")) == "core"
+            and normalize_confidence(row.get("signal_confidence")) in {"low", "high_mod"}
+            and normalize_direction(row.get("signal_direction") or gate.get("direction")) == "long"
+            and normalize_execution(
+                row.get("execution_mode")
+                or gate.get("execution_action")
+                or gate.get("execution_mode")
+                or gate.get("action_intent")
+            )
+            == "executable_now"
+            and trend_regime == "trending"
+        )
     row_passes = (
         normalize_bucket(row.get("report_bucket") or gate.get("report_bucket")) == "core"
         and normalize_confidence(row.get("signal_confidence")) == "high_mod"
@@ -1030,19 +1291,57 @@ def select_tactical_policy(candidates: list[dict[str, Any]]) -> str | None:
     return str(max(tactical, key=lambda c: float(c.get("stability_score") or 0.0))["policy_id"])
 
 
+def select_positive_ev_research_policy(candidates: list[dict[str, Any]]) -> str | None:
+    """Surface policies that pass EV evidence but miss only report-scope labels.
+
+    These are not Execution Alpha champions. They are statistically interesting
+    recall/setup policies that would otherwise disappear behind legacy scope
+    labels such as LOW confidence.
+    """
+    scope_only = {
+        "policy_bucket_not_core",
+        "policy_confidence_not_high_mod",
+        "policy_not_v2_low_confidence",
+        "policy_confidence_not_profit_scope",
+        "policy_execution_not_now",
+    }
+    research: list[dict[str, Any]] = []
+    for c in candidates:
+        reasons = set(c.get("fail_reasons") or [])
+        if not reasons or not reasons.issubset(scope_only):
+            continue
+        if "policy_direction_not_tradeable" in reasons:
+            continue
+        if c.get("ev_lower_confidence_pct") is None or float(c.get("ev_lower_confidence_pct") or 0.0) <= 0.0:
+            continue
+        if c.get("fills", 0) <= 0:
+            continue
+        research.append(c)
+    if not research:
+        return None
+    return str(max(research, key=lambda c: (float(c.get("ev_lower_confidence_pct") or 0.0), float(c.get("stability_score") or 0.0)))["policy_id"])
+
+
 def candidate_blockers(row: dict[str, Any], selected_policy_id: str | None) -> list[str]:
     details = safe_json_loads(row.get("details_json"))
     gate = main_signal_gate(details)
+    market = str(row.get("market") or "").lower()
     blockers = [
         str(x)
         for x in gate.get("blockers", [])
         if not str(x).lower().startswith("headline_gate_")
         and "headline gate" not in str(x).lower()
     ] if gate else []
+    if market == "us" and row.get("policy_id") == selected_policy_id:
+        blockers = [
+            blocker
+            for blocker in blockers
+            if str(blocker).lower() not in {"confidence_low", "signal_confidence_low"}
+        ]
     if not selected_policy_id:
-        blockers.append("EV unknown: no stable champion policy")
+        blockers.append("stable EV gate not passed")
     elif row.get("policy_id") != selected_policy_id:
-        blockers.append("EV unknown: outside selected champion policy")
+        blockers.append("outside selected stable EV policy")
     if normalize_bucket(row.get("report_bucket")) in {"radar", "appendix", "theme_rotation"}:
         blockers.append("strategy/out-of-scope")
     if normalize_execution(row.get("execution_mode") or gate.get("execution_mode")) == "wait_pullback":
@@ -1100,6 +1399,7 @@ def build_bulletin(
     candidates_by_market: dict[str, list[dict[str, Any]]],
     current_by_market: dict[str, list[dict[str, Any]]],
     options_by_market: dict[str, list[dict[str, Any]]] | None = None,
+    ev_status_override: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     execution: list[dict[str, Any]] = []
     tactical: list[dict[str, Any]] = []
@@ -1111,7 +1411,11 @@ def build_bulletin(
         market: select_tactical_policy(candidates)
         for market, candidates in candidates_by_market.items()
     }
-    ev_status = {
+    research_policies = {
+        market: select_positive_ev_research_policy(candidates)
+        for market, candidates in candidates_by_market.items()
+    }
+    ev_status = ev_status_override or {
         market: "passed" if selected_policies.get(market) else "failed"
         for market in candidates_by_market
     }
@@ -1119,16 +1423,43 @@ def build_bulletin(
     for market, current_rows in current_by_market.items():
         selected_policy_id = selected_policies.get(market)
         tactical_policy_id = tactical_policies.get(market)
+        research_policy_id = research_policies.get(market)
+        option_lookup = {
+            str(item.get("symbol") or "").upper(): item
+            for item in options_by_market.get(market, [])
+            if item.get("source") == "real_options"
+        }
         for row in current_rows:
             blockers = candidate_blockers(row, selected_policy_id)
             if selected_policy_id and row.get("policy_id") == selected_policy_id and gate_passes(row):
-                execution.append(
-                    bulletin_item(
-                        row,
-                        "execution_alpha",
-                        "selected champion policy with passing execution gate; headline context is advisory",
+                options_ok = True
+                options_reason = ""
+                if market == "us":
+                    options_ok, options_reason = long_options_expression_pass(
+                        option_lookup.get(str(row.get("symbol") or "").upper())
                     )
-                )
+                if options_ok:
+                    reason = (
+                        "Execution Alpha: CN oversold_contrarian has EV LCB80>0 and planned-entry constraints passed"
+                        if market == "cn"
+                        else "Execution Alpha: V2 main strategy with EV LCB80>0, execution constraints passed, and options expression passed"
+                    )
+                    execution.append(
+                        bulletin_item(
+                            row,
+                            "execution_alpha",
+                            reason,
+                        )
+                    )
+                else:
+                    recall.append(
+                        bulletin_item(
+                            row,
+                            "recall_alpha",
+                            "Positive EV Setup: V2 main strategy has positive EV evidence, but expression/stable execution is not fully passed",
+                            dedupe([*blockers, options_reason]),
+                        )
+                    )
             elif tactical_policy_id and row.get("policy_id") == tactical_policy_id and tactical_gate_passes(row):
                 tactical.append(
                     bulletin_item(
@@ -1136,6 +1467,15 @@ def build_bulletin(
                         "tactical_alpha",
                         "stable theme-rotation policy; tactical follow-through only, not CORE BOOK execution alpha",
                         ["strategy/out-of-scope for core execution", "use pullback/liquidity confirmation"],
+                    )
+                )
+            elif research_policy_id and row.get("policy_id") == research_policy_id:
+                recall.append(
+                    bulletin_item(
+                        row,
+                        "recall_alpha",
+                        "positive-EV research policy; not Execution Alpha because report-scope/confidence gate is not promoted",
+                        blockers,
                     )
                 )
             elif has_factor_lab_prior(row) or (
@@ -1191,6 +1531,7 @@ def build_bulletin(
         "ev_status": ev_status,
         "selected_policies": selected_policies,
         "tactical_policies": tactical_policies,
+        "research_policies": research_policies,
         "stability": stability,
         "execution_alpha": execution,
         "tactical_alpha": tactical,
@@ -1204,13 +1545,14 @@ def render_market_bulletin_md(bulletin: dict[str, Any], market: str) -> str:
     market_upper = market.upper()
     selected = bulletin["selected_policies"].get(market)
     tactical = bulletin.get("tactical_policies", {}).get(market)
+    research = bulletin.get("research_policies", {}).get(market)
     evaluated = bulletin["evaluated_through"].get(market, "unknown")
     ev_status = bulletin.get("ev_status", {}).get(
         market, "passed" if selected else "failed"
     )
     ev_note = {
-        "passed": "stable champion selected; Execution Alpha may be emitted only for matching current candidates",
-        "failed": "stable gate evaluated; no champion policy passed, so Setup/Recall names remain review-only",
+        "passed": "stable profit policy selected; Execution Alpha still needs a matching current candidate and expression pass",
+        "failed": "stable gate evaluated; no profit policy passed, so Positive EV Setup / Legacy names remain review-only",
         "pending": "stable gate not evaluated yet; do not treat pending as no champion or EV failure",
     }.get(ev_status, "stable gate status unknown; do not promote candidates without explicit pass")
     lines = [
@@ -1221,6 +1563,7 @@ def render_market_bulletin_md(bulletin: dict[str, Any], market: str) -> str:
         f"- ev_status: `{ev_status}`",
         f"- selected_policy: `{selected or 'none'}`",
         f"- tactical_policy: `{tactical or 'none'}`",
+        f"- positive_ev_research_policy: `{research or 'none'}`",
         f"- ev_note: {ev_note}",
         "- headline: advisory context only, not an execution blocker",
         "",
@@ -1242,12 +1585,12 @@ def render_market_bulletin_md(bulletin: dict[str, Any], market: str) -> str:
             "None. No real-options or shadow-options candidate passed the daily options-alpha screen.",
         ),
         (
-            "Recall Alpha",
+            "Positive EV Setup",
             "recall_alpha",
-            "None. No Factor Lab research prior / recall lead requires follow-up.",
+            "None. No positive-EV setup / Factor Lab recall lead requires follow-up.",
         ),
         (
-            "Blocked / Out-of-scope Alpha",
+            "Legacy / Blocked Alpha",
             "blocked_alpha",
             "None. No blocked current candidates were found.",
         ),
@@ -1669,17 +2012,39 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     current_by_market: dict[str, list[dict[str, Any]]] = {}
     options_by_market: dict[str, list[dict[str, Any]]] = {}
     selected_policies: dict[str, str | None] = {}
+    ev_status: dict[str, str] = {}
     selection_rows: list[dict[str, Any]] = []
     selected_trade_rows: list[dict[str, Any]] = []
 
     for cfg in configs:
-        rows, eval_through = load_evaluated_trades(
-            cfg.db_path,
-            cfg.market,
-            as_of,
-            args.lookback_days,
-            cfg.horizon_days,
-        )
+        try:
+            rows, eval_through = load_evaluated_trades(
+                cfg.db_path,
+                cfg.market,
+                as_of,
+                args.lookback_days,
+                cfg.horizon_days,
+            )
+        except duckdb.Error as exc:
+            eval_through = completed_cutoff(as_of, cfg.horizon_days).isoformat()
+            candidates_by_market[cfg.market] = []
+            current_by_market[cfg.market] = []
+            options_by_market[cfg.market] = []
+            selected_policies[cfg.market] = None
+            ev_status[cfg.market] = "pending"
+            selection_rows.append(
+                {
+                    "market": cfg.market,
+                    "selected_policy_id": None,
+                    "previous_policy_id": load_previous_champion(args.history_db, cfg.market, as_of),
+                    "stability_score": None,
+                    "challenger_policy_id": None,
+                    "challenger_score": None,
+                    "selection_reason": f"market data unavailable; stable gate pending: {type(exc).__name__}: {str(exc).splitlines()[0][:180]}",
+                }
+            )
+            evaluated_through[cfg.market] = eval_through
+            continue
         evaluated_through[cfg.market] = eval_through
         candidates = build_policy_candidates(rows, cfg.market, cfg.horizon_days, args.lookback_days)
         previous = load_previous_champion(args.history_db, cfg.market, as_of)
@@ -1689,18 +2054,25 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             selected, reason = select_champion(candidates, previous)
         mark_selected(candidates, selected)
         selected_policies[cfg.market] = selected
+        ev_status[cfg.market] = "passed" if selected else "failed"
         candidates_by_market[cfg.market] = candidates
-        current_by_market[cfg.market] = load_current_candidates(
-            cfg.db_path,
-            cfg.market,
-            as_of,
-            cfg.horizon_days,
-        )
-        options_by_market[cfg.market] = load_options_alpha_candidates(
-            cfg.db_path,
-            cfg.market,
-            as_of,
-        )
+        try:
+            current_by_market[cfg.market] = load_current_candidates(
+                cfg.db_path,
+                cfg.market,
+                as_of,
+                cfg.horizon_days,
+            )
+        except duckdb.Error:
+            current_by_market[cfg.market] = []
+        try:
+            options_by_market[cfg.market] = load_options_alpha_candidates(
+                cfg.db_path,
+                cfg.market,
+                as_of,
+            )
+        except duckdb.Error:
+            options_by_market[cfg.market] = []
 
         selected_candidate = next((c for c in candidates if c.get("selected")), None)
         challenger = max(
@@ -1729,6 +2101,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         candidates_by_market,
         current_by_market,
         options_by_market,
+        ev_status,
     )
 
     output_dir = args.output_root / as_of.isoformat()

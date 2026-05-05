@@ -48,7 +48,8 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
                 MAX(CASE WHEN module = 'continuation_vs_fade' AND metric = 'fade_risk' THEN value END) AS fade_risk,
                 MAX(CASE WHEN module = 'shadow_fast' AND metric = 'shadow_iv_30d' THEN value END) AS shadow_iv_30d,
                 MAX(CASE WHEN module = 'shadow_fast' AND metric = 'downside_stress' THEN value END) AS downside_stress,
-                MAX(CASE WHEN module = 'momentum' AND metric = 'regime' THEN value END) AS regime
+                MAX(CASE WHEN module = 'momentum' AND metric = 'regime' THEN value END) AS regime,
+                MAX(CASE WHEN module = 'mean_reversion' AND metric = 'rsi_14' THEN value END) AS rsi_14
             FROM analytics
             WHERE as_of = CAST(? AS DATE)
               AND (
@@ -56,6 +57,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
                 OR (module = 'continuation_vs_fade' AND metric IN ('continuation_score', 'fade_risk'))
                 OR (module = 'shadow_fast' AND metric IN ('shadow_iv_30d', 'downside_stress'))
                 OR (module = 'momentum' AND metric = 'regime')
+                OR (module = 'mean_reversion' AND metric = 'rsi_14')
               )
             GROUP BY ts_code
         )
@@ -70,7 +72,8 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
             COALESCE(aux.fade_risk, 0) AS fade_risk,
             COALESCE(aux.shadow_iv_30d, 0) AS shadow_iv_30d,
             COALESCE(aux.downside_stress, 0) AS downside_stress,
-            CAST(COALESCE(aux.regime, 2) AS INTEGER) AS regime
+            CAST(COALESCE(aux.regime, 2) AS INTEGER) AS regime,
+            COALESCE(aux.rsi_14, 50) AS rsi_14
         FROM price_features p
         LEFT JOIN aux ON p.ts_code = aux.ts_code
         WHERE p.as_of = CAST(? AS DATE)
@@ -92,6 +95,7 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
                 row.get::<_, f64>(8).unwrap_or(0.0),
                 row.get::<_, f64>(9).unwrap_or(0.0),
                 row.get::<_, i32>(10).unwrap_or(2),
+                row.get::<_, f64>(11).unwrap_or(50.0),
             ))
         })?
         .filter_map(|r| r.ok())
@@ -109,6 +113,11 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
         DELETE FROM open_execution_gate_stage;",
     )?;
     let mut count = 0usize;
+    let p_high_vol_tomorrow =
+        market_metric(db, &date_str, "vol_hmm", "p_high_vol_tomorrow").unwrap_or(0.50);
+    let macro_gate_multiplier =
+        market_metric(db, &date_str, "macro_gate", "gate_multiplier").unwrap_or(1.0);
+    let market_stress = market_stress_score(p_high_vol_tomorrow, macro_gate_multiplier);
 
     {
         let mut appender = db.appender("open_execution_gate_stage")?;
@@ -124,27 +133,38 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
             shadow_iv_30d,
             downside_stress,
             regime,
+            rsi_14,
         ) in rows
         {
             let (ret_penalty_denom, wait_pullback_threshold, do_not_chase_threshold) =
                 regime_sensitive_thresholds(regime, setup_score, continuation_score);
-            let max_chase_gap_pct = (0.45 * atr_pct_14
+            let rsi_heat = rsi_heat_score(rsi_14, ret_5d, ret_20d);
+            let base_max_chase_gap_pct = (0.45 * atr_pct_14
                 + 1.10 * continuation_score
                 + 0.70 * (1.0 - downside_stress.clamp(0.0, 1.0)))
             .clamp(0.8, 4.5);
+            let max_chase_gap_pct =
+                tighten_chase_gap(base_max_chase_gap_pct, market_stress, rsi_heat);
             let pullback_trigger_pct = (0.45 * max_chase_gap_pct).clamp(0.4, 2.5);
-            let execution_score = (0.45 * continuation_score
+            let base_execution_score = (0.45 * continuation_score
                 + 0.25 * setup_score
                 + 0.15 * (1.0 - downside_stress.clamp(0.0, 1.0))
                 + 0.15 * (1.0 - (ret_5d.abs() / ret_penalty_denom).clamp(0.0, 1.0)))
             .clamp(0.0, 1.0);
+            let execution_score =
+                adjust_execution_score(base_execution_score, market_stress, rsi_heat);
+            let required_score = required_execution_score(market_stress, rsi_heat, fade_risk);
 
             let execution_mode = if fade_risk > 0.65
                 || ret_5d.abs() > do_not_chase_threshold
                 || (shadow_iv_30d > 28.0 && downside_stress > 0.60)
+                || (rsi_heat >= 0.85 && ret_5d > 3.0)
             {
                 "do_not_chase"
-            } else if execution_score < 0.48 || ret_5d.abs() > wait_pullback_threshold {
+            } else if execution_score < required_score
+                || ret_5d.abs() > wait_pullback_threshold
+                || (market_stress >= 0.75 && rsi_heat >= 0.40)
+            {
                 "wait_pullback"
             } else {
                 "executable"
@@ -164,6 +184,12 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
                 "setup_score": round3(setup_score),
                 "continuation_score": round3(continuation_score),
                 "fade_risk": round3(fade_risk),
+                "rsi_14": round2(rsi_14),
+                "rsi_heat": round3(rsi_heat),
+                "p_high_vol_tomorrow": round3(p_high_vol_tomorrow),
+                "macro_gate_multiplier": round3(macro_gate_multiplier),
+                "market_stress": round3(market_stress),
+                "required_execution_score": round3(required_score),
                 "shadow_iv_30d": round2(shadow_iv_30d),
                 "downside_stress": round3(downside_stress),
                 "pullback_price": round2(pullback_price),
@@ -201,6 +227,46 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
     Ok(count)
 }
 
+fn market_metric(db: &Connection, date_str: &str, module: &str, metric: &str) -> Option<f64> {
+    db.query_row(
+        "SELECT value FROM analytics
+         WHERE ts_code = '_MARKET'
+           AND as_of = CAST(? AS DATE)
+           AND module = ?
+           AND metric = ?",
+        duckdb::params![date_str, module, metric],
+        |row| row.get::<_, f64>(0),
+    )
+    .ok()
+}
+
+fn rsi_heat_score(rsi_14: f64, ret_5d: f64, ret_20d: f64) -> f64 {
+    if ret_5d <= 0.0 && ret_20d <= 0.0 {
+        return 0.0;
+    }
+    ((rsi_14 - 68.0) / 12.0).clamp(0.0, 1.0)
+}
+
+fn market_stress_score(p_high_vol_tomorrow: f64, macro_gate_multiplier: f64) -> f64 {
+    let vol_stress = ((p_high_vol_tomorrow - 0.65) / 0.30).clamp(0.0, 1.0);
+    let gate_stress = ((0.85 - macro_gate_multiplier) / 0.25).clamp(0.0, 1.0);
+    vol_stress.max(gate_stress)
+}
+
+fn tighten_chase_gap(base_gap_pct: f64, market_stress: f64, rsi_heat: f64) -> f64 {
+    let multiplier = (1.0 - 0.25 * market_stress - 0.20 * rsi_heat).clamp(0.55, 1.0);
+    (base_gap_pct * multiplier).clamp(0.4, base_gap_pct.max(0.4))
+}
+
+fn adjust_execution_score(base_score: f64, market_stress: f64, rsi_heat: f64) -> f64 {
+    (base_score - 0.16 * market_stress - 0.18 * rsi_heat).clamp(0.0, 1.0)
+}
+
+fn required_execution_score(market_stress: f64, rsi_heat: f64, fade_risk: f64) -> f64 {
+    (0.48 + 0.06 * market_stress + 0.04 * rsi_heat + 0.03 * fade_risk.clamp(0.0, 1.0))
+        .clamp(0.48, 0.62)
+}
+
 fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
@@ -211,7 +277,10 @@ fn round3(v: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::regime_sensitive_thresholds;
+    use super::{
+        adjust_execution_score, market_stress_score, regime_sensitive_thresholds,
+        required_execution_score, rsi_heat_score, tighten_chase_gap,
+    };
 
     #[test]
     fn trending_regime_allows_more_extension_than_mean_reversion() {
@@ -230,5 +299,23 @@ mod tests {
         assert!(ret_denom_high > ret_denom_low);
         assert!(wait_high > wait_low);
         assert!(stop_high > stop_low);
+    }
+
+    #[test]
+    fn hot_rsi_only_penalizes_extended_longs() {
+        assert_eq!(rsi_heat_score(75.0, -1.0, -3.0), 0.0);
+        assert!(rsi_heat_score(75.0, 2.0, 5.0) > 0.5);
+        assert_eq!(rsi_heat_score(60.0, 2.0, 5.0), 0.0);
+    }
+
+    #[test]
+    fn high_market_stress_and_hot_rsi_tighten_execution() {
+        let stress = market_stress_score(0.94, 0.70);
+        let heat = rsi_heat_score(78.0, 6.0, 18.0);
+
+        assert!(stress > 0.8);
+        assert!(tighten_chase_gap(3.0, stress, heat) < 2.0);
+        assert!(adjust_execution_score(0.70, stress, heat) < 0.45);
+        assert!(required_execution_score(stress, heat, 0.40) > 0.55);
     }
 }

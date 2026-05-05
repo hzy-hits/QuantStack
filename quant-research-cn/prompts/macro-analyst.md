@@ -45,7 +45,7 @@
 ## Regime
 - state: [trend|range|uncertain]
 - fear_greed: [score/100 + label + 口径]
-- market_rsi: [沪深300/上证50/创业板 RSI14]
+- market_rsi: [必须原样使用 payload `inputs` 行里的沪深300/上证50/创业板 RSI14；不得把 `components` 里的 `rsi_component_score` 当成 RSI]
 - breadth: [20D上涨占比/当日上涨占比/行业资金净流入占比]
 - hmm_evidence: [model_state_label + model_label_p_bull；明确写“非牛熊裁判”]
 - Brier: [值], hit_rate: [百分比], n=[观测数]
