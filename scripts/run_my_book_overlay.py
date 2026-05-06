@@ -26,6 +26,7 @@ STACK_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "my_book_overlay"
 DEFAULT_US_DB = STACK_ROOT / "quant-research-v1" / "data" / "quant.duckdb"
 DEFAULT_ALPHA_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "strategy_backtest"
+DEFAULT_US_R_UNIT_PCT = 8.0
 
 
 @dataclass
@@ -54,7 +55,9 @@ class SymbolPosition:
     last_buy: str | None
     last_trade: str | None
     net_qty: float
+    buy_qty: float
     gross_buy: float
+    avg_buy_price: float | None
     realized_pnl: float
     unrealized_pnl: float
     total_pnl: float
@@ -182,6 +185,7 @@ def summarize_positions(orders: list[Order], performance: dict[str, dict[str, fl
         rows = sorted(rows, key=lambda row: row.trade_dt)
         buys = [row for row in rows if row.qty > 0]
         sells = [row for row in rows if row.qty < 0]
+        buy_qty = sum(row.qty for row in buys)
         gross_buy = sum(-row.proceeds for row in buys)
         net_qty = sum(row.qty for row in rows)
         perf = performance.get(
@@ -209,7 +213,9 @@ def summarize_positions(orders: list[Order], performance: dict[str, dict[str, fl
                 last_buy=last_buy.isoformat() if last_buy else None,
                 last_trade=last_trade.isoformat() if last_trade else None,
                 net_qty=round(net_qty, 6),
+                buy_qty=round(buy_qty, 6),
                 gross_buy=round(gross_buy, 6),
+                avg_buy_price=round(gross_buy / buy_qty, 6) if buy_qty > 0 else None,
                 realized_pnl=round(float(perf.get("realized_pnl") or 0.0), 6),
                 unrealized_pnl=round(float(perf.get("unrealized_pnl") or 0.0), 6),
                 total_pnl=round(total_pnl, 6),
@@ -231,6 +237,18 @@ def table_exists(con: duckdb.DuckDBPyConnection, table_name: str) -> bool:
         [table_name],
     ).fetchone()
     return bool(row and row[0])
+
+
+def table_columns(con: duckdb.DuckDBPyConnection, table_name: str) -> set[str]:
+    rows = con.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = ?
+        """,
+        [table_name],
+    ).fetchall()
+    return {str(row[0]) for row in rows}
 
 
 def rows_as_dicts(con: duckdb.DuckDBPyConnection, sql: str, params: list[Any]) -> list[dict[str, Any]]:
@@ -296,6 +314,47 @@ def report_v2_pass(row: dict[str, Any]) -> bool:
     )
 
 
+def report_blockers(row: dict[str, Any] | None) -> list[str]:
+    if not row:
+        return []
+    details = safe_json_loads(row.get("details_json"))
+    out: list[str] = []
+    main_gate = details.get("main_signal_gate")
+    if isinstance(main_gate, dict):
+        blockers = main_gate.get("blockers") or []
+        if isinstance(blockers, list):
+            out.extend(str(item) for item in blockers if item)
+    overnight = details.get("overnight_alpha")
+    if isinstance(overnight, dict):
+        reasons = overnight.get("reason_codes") or []
+        if isinstance(reasons, list):
+            out.extend(str(item) for item in reasons if item)
+        if overnight.get("alpha_already_paid_risk"):
+            out.append("alpha_already_paid_risk")
+    primary = str(row.get("primary_reason") or "")
+    for marker in ["rr_below_1_5", "stale_chase", "exhaustion_downgrade", "move already paid"]:
+        if marker in primary and marker not in out:
+            out.append(marker)
+    return list(dict.fromkeys(out))
+
+
+def ticket_price_context(ticket: dict[str, Any] | None) -> dict[str, Any]:
+    if not ticket:
+        return {}
+    details = safe_json_loads(ticket.get("details_json"))
+    gate = details.get("execution_gate") if isinstance(details.get("execution_gate"), dict) else {}
+    return {
+        "entry_price": round_or_none(ticket.get("entry_price") or ticket.get("reference_price") or gate.get("ref_price")),
+        "stop_price": round_or_none(ticket.get("stop_price")),
+        "target_price": round_or_none(ticket.get("target_price")),
+        "pullback_price": round_or_none(gate.get("pullback_price")),
+        "last_close": round_or_none(gate.get("last_close")),
+        "support_score": round_or_none(gate.get("support_score")),
+        "trend_regime": trend_regime(details),
+        "blockers": report_blockers(ticket),
+    }
+
+
 def load_recent_report_tickets(
     db_path: Path,
     symbols: list[str],
@@ -308,6 +367,14 @@ def load_recent_report_tickets(
     try:
         if not table_exists(con, "report_decisions"):
             return {}
+        columns = table_columns(con, "report_decisions")
+        optional_selects = {
+            "entry_price": "d.entry_price" if "entry_price" in columns else "NULL::DOUBLE",
+            "reference_price": "d.reference_price" if "reference_price" in columns else "NULL::DOUBLE",
+            "stop_price": "d.stop_price" if "stop_price" in columns else "NULL::DOUBLE",
+            "target_price": "d.target_price" if "target_price" in columns else "NULL::DOUBLE",
+            "expected_move_pct": "d.expected_move_pct" if "expected_move_pct" in columns else "NULL::DOUBLE",
+        }
         placeholders = ",".join("?" for _ in symbols)
         rows = rows_as_dicts(
             con,
@@ -320,7 +387,12 @@ def load_recent_report_tickets(
                 d.signal_direction,
                 d.signal_confidence,
                 d.execution_mode,
+                {optional_selects["entry_price"]} AS entry_price,
+                {optional_selects["reference_price"]} AS reference_price,
+                {optional_selects["stop_price"]} AS stop_price,
+                {optional_selects["target_price"]} AS target_price,
                 d.rr_ratio,
+                {optional_selects["expected_move_pct"]} AS expected_move_pct,
                 d.primary_reason,
                 d.details_json
             FROM report_decisions d
@@ -341,6 +413,7 @@ def load_recent_report_tickets(
             continue
         row["trend_regime"] = trend_regime(safe_json_loads(row.get("details_json")))
         row["v2_pass"] = report_v2_pass(row)
+        row["blockers"] = report_blockers(row)
         latest[symbol] = row
     return latest
 
@@ -389,6 +462,18 @@ def ticket_decision(
     first_buy = datetime.fromisoformat(position.first_buy).date() if position.first_buy else None
     is_open = abs(position.net_qty) > 1e-9
     is_new_this_week = bool(first_buy and first_buy >= week_start)
+    price_context = ticket_price_context(ticket)
+    common = {
+        "fresh_entry_gate": "blocked",
+        "fresh_entry_action": "no_new_buy",
+        "add_permission": "add_only_with_fresh_execution_ticket",
+        "entry_price": price_context.get("entry_price"),
+        "stop_price": price_context.get("stop_price"),
+        "target_price": price_context.get("target_price"),
+        "pullback_price": price_context.get("pullback_price"),
+        "ticket_trend_regime": price_context.get("trend_regime"),
+        "ticket_blockers": price_context.get("blockers") or [],
+    }
     if alpha:
         section = str(alpha.get("section") or "")
         if section == "execution_alpha":
@@ -396,11 +481,16 @@ def ticket_decision(
             action = "hold_or_add_ticketed"
             max_size = "Execution Alpha size from daily risk rules"
             violation = None
+            common["fresh_entry_gate"] = "execution_alpha"
+            common["fresh_entry_action"] = "fresh_entry_allowed_by_daily_risk"
+            common["add_permission"] = "add_allowed_only_inside_daily_max_r"
         elif section == "recall_alpha" and "Positive EV Setup" in str(alpha.get("reason") or ""):
             state = "Positive EV Setup"
             action = "hold_probe_only"
             max_size = "0.10R/name stock probe; no options"
             violation = None
+            common["fresh_entry_gate"] = "positive_ev_setup"
+            common["fresh_entry_action"] = "fresh_entry_probe_only_0_10r"
         else:
             state = "Legacy / Blocked"
             action = "freeze_adds_trim_or_exit_review" if is_open else "postmortem_only"
@@ -416,6 +506,7 @@ def ticket_decision(
             "ticket_source": "alpha_bulletin",
             "policy_id": alpha.get("policy_id"),
             "ticket_date": None,
+            **common,
         }
     if ticket:
         if ticket.get("v2_pass"):
@@ -428,6 +519,9 @@ def ticket_decision(
                 "ticket_source": "report_decisions",
                 "policy_id": None,
                 "ticket_date": str(ticket.get("report_date")),
+                "fresh_entry_gate": "positive_ev_setup",
+                "fresh_entry_action": "fresh_entry_probe_only_0_10r",
+                **{k: v for k, v in common.items() if k not in {"fresh_entry_gate", "fresh_entry_action"}},
             }
         return {
             "ticket_state": "Legacy / Blocked",
@@ -438,6 +532,7 @@ def ticket_decision(
             "ticket_source": "report_decisions",
             "policy_id": None,
             "ticket_date": str(ticket.get("report_date")),
+            **common,
         }
     return {
         "ticket_state": "No Report Support",
@@ -448,6 +543,86 @@ def ticket_decision(
         "ticket_source": "none",
         "policy_id": None,
         "ticket_date": None,
+        **common,
+    }
+
+
+def estimate_profit_r(row: dict[str, Any]) -> float | None:
+    pnl_pct = parse_number(row.get("pnl_pct_on_buy"))
+    if pnl_pct is None:
+        return None
+    entry = parse_number(row.get("entry_price")) or parse_number(row.get("avg_buy_price"))
+    stop = parse_number(row.get("stop_price"))
+    risk_pct = None
+    if entry is not None and stop is not None and entry > 0 and entry > stop:
+        risk_pct = (entry - stop) / entry * 100.0
+    if risk_pct is None or risk_pct <= 0:
+        risk_pct = DEFAULT_US_R_UNIT_PCT
+    return round(pnl_pct / risk_pct, 4)
+
+
+def invalidation_broken(row: dict[str, Any]) -> bool:
+    current = parse_number(row.get("current_close"))
+    stop = parse_number(row.get("stop_price"))
+    return bool(current is not None and stop is not None and current <= stop)
+
+
+def winner_hold_rule(row: dict[str, Any], holding_days: int | None, max_hold_days: int) -> dict[str, Any]:
+    profit_r = estimate_profit_r(row)
+    past_time_window = holding_days is not None and holding_days > max_hold_days
+    if invalidation_broken(row):
+        return {
+            "management_state": "winner_invalidation_broken",
+            "management_action": "trim_or_exit_broken_runner",
+            "management_violation": "winner_below_invalidation_line",
+            "management_reason": "profitable position broke the daily invalidation line; runner protection no longer applies",
+            "profit_r": profit_r,
+            "max_exit_fraction_now": "full_exit_allowed_after_invalidation",
+            "runner_rule": "runner invalidated",
+            "trailing_stop_rule": "exit/trim because invalidation line broke",
+        }
+    if profit_r is not None and profit_r >= 2.0:
+        return {
+            "management_state": "runner_2r",
+            "management_action": "hold_runner_trim_to_half_max",
+            "management_violation": None,
+            "management_reason": "+2R winner: do not full-exit; keep at least half unless trailing stop or invalidation breaks",
+            "profit_r": profit_r,
+            "max_exit_fraction_now": "50%",
+            "runner_rule": "+2R: may trim down to half, keep remaining runner",
+            "trailing_stop_rule": "10D/20D trailing stop or prior swing low",
+        }
+    if profit_r is not None and profit_r >= 1.0:
+        return {
+            "management_state": "runner_1r",
+            "management_action": "hold_runner_trim_one_third_max",
+            "management_violation": None,
+            "management_reason": "+1R winner: do not full-exit; max trim is one third without a broken trailing stop",
+            "profit_r": profit_r,
+            "max_exit_fraction_now": "33%",
+            "runner_rule": "+1R: max trim one third, keep runner",
+            "trailing_stop_rule": "10D/20D trailing stop or prior swing low",
+        }
+    if past_time_window:
+        return {
+            "management_state": "winner_time_review",
+            "management_action": "hold_runner_review_trailing_stop",
+            "management_violation": None,
+            "management_reason": f"winner is past {max_hold_days}D; review, but no full exit while trailing stop/invalidation remains intact",
+            "profit_r": profit_r,
+            "max_exit_fraction_now": "review_trim_only",
+            "runner_rule": "past time window: review/trim, no forced full exit while trend is intact",
+            "trailing_stop_rule": "10D/20D trailing stop or prior swing low",
+        }
+    return {
+        "management_state": "hold_winner",
+        "management_action": "hold_runner_no_add_without_fresh_ticket",
+        "management_violation": None,
+        "management_reason": f"profitable position inside {max_hold_days}D management window; entry gate blocks new buys, not the existing runner",
+        "profit_r": profit_r,
+        "max_exit_fraction_now": "0% unless risk rule triggers",
+        "runner_rule": "hold winner; no add without fresh daily ticket",
+        "trailing_stop_rule": "10D/20D trailing stop or prior swing low",
     }
 
 
@@ -466,20 +641,23 @@ def management_decision(row: dict[str, Any], max_hold_days: int) -> dict[str, An
             "management_action": "review_closed_trade",
             "management_violation": None,
             "management_reason": "closed position; use it as behavior evidence, not a live action",
+            "profit_r": estimate_profit_r(row),
+            "max_exit_fraction_now": "-",
+            "runner_rule": "closed trade",
+            "trailing_stop_rule": "-",
         }
+    if total_pnl > 0:
+        return winner_hold_rule(row, holding_days, max_hold_days)
     if holding_days is not None and holding_days > max_hold_days:
         return {
             "management_state": "time_stop_review",
             "management_action": "trim_or_exit_time_stop",
             "management_violation": "holding_days_above_max_hold",
             "management_reason": f"holding_days {holding_days} > {max_hold_days}D max hold window",
-        }
-    if total_pnl > 0:
-        return {
-            "management_state": "hold_winner",
-            "management_action": "hold_no_add_without_fresh_ticket",
-            "management_violation": None,
-            "management_reason": f"profitable position inside {max_hold_days}D management window",
+            "profit_r": estimate_profit_r(row),
+            "max_exit_fraction_now": "review",
+            "runner_rule": "loser/flat past time window",
+            "trailing_stop_rule": "time stop",
         }
     if total_pnl < 0 and actionable_ticket:
         return {
@@ -487,6 +665,10 @@ def management_decision(row: dict[str, Any], max_hold_days: int) -> dict[str, An
             "management_action": "hold_only_if_risk_line_intact",
             "management_violation": None,
             "management_reason": "losing ticketed position; keep only if daily invalidation price is intact",
+            "profit_r": estimate_profit_r(row),
+            "max_exit_fraction_now": "risk_line_dependent",
+            "runner_rule": "not a winner",
+            "trailing_stop_rule": "daily invalidation line",
         }
     if total_pnl < 0:
         return {
@@ -494,12 +676,20 @@ def management_decision(row: dict[str, Any], max_hold_days: int) -> dict[str, An
             "management_action": "trim_or_exit_review",
             "management_violation": "losing_position_without_actionable_ticket",
             "management_reason": "losing position without actionable daily-report support",
+            "profit_r": estimate_profit_r(row),
+            "max_exit_fraction_now": "exit_or_reduce",
+            "runner_rule": "not a winner",
+            "trailing_stop_rule": "none",
         }
     return {
         "management_state": "neutral_review",
         "management_action": "hold_or_exit_by_ticket",
         "management_violation": None,
         "management_reason": "flat PnL; ticket state decides whether capital stays active",
+        "profit_r": estimate_profit_r(row),
+        "max_exit_fraction_now": "ticket_dependent",
+        "runner_rule": "not a winner yet",
+        "trailing_stop_rule": "daily invalidation line if ticketed",
     }
 
 
@@ -547,10 +737,14 @@ def build_overlay(
 
     by_state = Counter(str(row["ticket_state"]) for row in rows)
     by_management = Counter(str(row["management_state"]) for row in open_rows)
+    runner_states = {"hold_winner", "runner_1r", "runner_2r", "winner_time_review"}
     return {
         "as_of": as_of.isoformat(),
         "policy": {
             "no_ticket_no_trade": True,
+            "fresh_entry_gate": "strict: no ticket, no discretionary buy; stale/high-RSI/low-RR rows remain blocked for new capital",
+            "winner_hold_overlay": "entry gate does not force selling existing profitable runners",
+            "no_full_exit_rule": "+1R max trim one third; +2R may trim down to half; remaining runner exits only on trailing stop/invalidation",
             "ticket_lookback_days": ticket_lookback_days,
             "positive_ev_setup_max_size": "0.10R/name stock probe; no options",
             "legacy_blocked_max_size": "0R new capital",
@@ -571,6 +765,10 @@ def build_overlay(
             "management_state_counts": dict(sorted(by_management.items())),
             "time_stop_positions": sum(1 for row in open_rows if row.get("management_state") == "time_stop_review"),
             "hold_winner_positions": sum(1 for row in open_rows if row.get("management_state") == "hold_winner"),
+            "runner_positions": sum(1 for row in open_rows if row.get("management_state") in runner_states),
+            "runner_1r_positions": sum(1 for row in open_rows if row.get("management_state") == "runner_1r"),
+            "runner_2r_positions": sum(1 for row in open_rows if row.get("management_state") == "runner_2r"),
+            "winner_time_review_positions": sum(1 for row in open_rows if row.get("management_state") == "winner_time_review"),
             "exit_or_reduce_loser_positions": sum(
                 1 for row in open_rows if row.get("management_state") == "exit_or_reduce_loser"
             ),
@@ -665,7 +863,8 @@ def build_personal_alpha_research(
             "entry": "no ticket, no discretionary trade",
             "target_hold_window": f"11-{max_hold_days}D",
             "time_stop_days": max_hold_days,
-            "winner_management": "hold winners inside the window; add only with a fresh daily-report ticket",
+            "winner_management": "hold winners; entry gate blocks new buys, not existing profitable runners",
+            "no_full_exit": "+1R max trim one third; +2R may trim down to half; keep the rest until 10D/20D trailing stop, prior low, or invalidation breaks",
             "loser_management": "reduce or exit no-ticket losers; ticketed losers need an intact invalidation line",
             "options": "US options remain shadow PnL until post-cost ledger evidence is positive",
         },
@@ -725,18 +924,19 @@ def render_overlay(payload: dict[str, Any]) -> str:
     lines = [
         "## My Book Overlay",
         "",
-        "Personal trading permission layer computed from the IBKR activity CSV and the daily report gate. No ticket means no new discretionary buy.",
+        "Personal trading permission layer computed from the IBKR activity CSV and the daily report gate. Fresh entries and existing winners are managed separately: no ticket means no new discretionary buy, but a profitable runner is not sold just because the fresh-entry gate is blocked.",
         "",
         f"- Open positions: `{summary.get('open_positions', 0)}`; cap `{(payload.get('policy') or {}).get('single_name_position_cap')}`",
         f"- New names this week: `{summary.get('new_names_this_week', 0)}`; cap `{(payload.get('policy') or {}).get('weekly_new_name_cap')}`",
         f"- New buys without valid trade ticket: `{summary.get('new_buy_without_ticket', 0)}`",
         f"- Time-stop reviews: `{summary.get('time_stop_positions', 0)}`; max hold `{(payload.get('policy') or {}).get('max_hold_days')}D`",
-        f"- Hold winners inside window: `{summary.get('hold_winner_positions', 0)}`",
+        f"- Winner runners protected: `{summary.get('runner_positions', 0)}`; +1R `{summary.get('runner_1r_positions', 0)}`, +2R `{summary.get('runner_2r_positions', 0)}`, time-review winners `{summary.get('winner_time_review_positions', 0)}`",
+        f"- No-full-exit rule: {(payload.get('policy') or {}).get('no_full_exit_rule')}",
         f"- Exit/reduce no-ticket losers: `{summary.get('exit_or_reduce_loser_positions', 0)}`",
         f"- Total PnL in statement USD equities: `{fmt_money(summary.get('total_pnl'))}`",
         "",
-        "| Symbol | Qty | Hold | PnL | PnL % | Ticket | Ticket action | Mgmt | Max size | Reason |",
-        "|---|---:|---:|---:|---:|---|---|---|---|---|",
+        "| Symbol | Qty | Hold | PnL | PnL % | R | Fresh entry | Hold action | Max exit now | Add | Reason |",
+        "|---|---:|---:|---:|---:|---:|---|---|---|---|---|",
     ]
     for row in [r for r in rows if r.get("is_open")][:30]:
         reason_parts = [
@@ -748,16 +948,17 @@ def render_overlay(payload: dict[str, Any]) -> str:
         ]
         reason = "; ".join(part for part in reason_parts if part)
         lines.append(
-            "| {symbol} | {qty:g} | {hold} | {pnl} | {pnl_pct} | {ticket} | {action} | {mgmt} | {max_size} | {reason} |".format(
+            "| {symbol} | {qty:g} | {hold} | {pnl} | {pnl_pct} | {profit_r} | {fresh} | {mgmt} | {max_exit} | {add} | {reason} |".format(
                 symbol=row.get("symbol"),
                 qty=float(row.get("net_qty") or 0.0),
                 hold=fmt_days(row.get("holding_days")),
                 pnl=fmt_money(row.get("total_pnl")),
                 pnl_pct=fmt_pct(row.get("pnl_pct_on_buy")),
-                ticket=row.get("ticket_state"),
-                action=row.get("action"),
+                profit_r="-" if parse_number(row.get("profit_r")) is None else f"{float(row.get('profit_r')):.2f}R",
+                fresh=row.get("fresh_entry_action") or row.get("action"),
                 mgmt=row.get("management_action"),
-                max_size=row.get("max_size"),
+                max_exit=row.get("max_exit_fraction_now") or "-",
+                add=row.get("add_permission") or "-",
                 reason=reason.replace("|", "/")[:220],
             )
         )
@@ -813,6 +1014,7 @@ def render_personal_alpha_research(payload: dict[str, Any]) -> str:
         f"- Learned hold window: `{policy.get('target_hold_window')}`; time stop `{policy.get('time_stop_days')}D`",
         f"- Entry rule: `{policy.get('entry')}`",
         f"- Add rule: `{policy.get('winner_management')}`",
+        f"- No-full-exit rule: `{policy.get('no_full_exit')}`",
         "",
     ]
     lines += render_group_table(

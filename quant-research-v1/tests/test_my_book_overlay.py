@@ -33,10 +33,12 @@ def _write_activity_csv(path: Path) -> None:
             [
                 "交易,Header,DataDiscriminator,资产分类,货币,代码,日期/时间,数量,交易价格,收盘价格,收益,佣金/税,基础,已实现的损益,按市值计算的损益,代码",
                 "交易,Data,Order,股票,USD,OLD,\"2026-03-15, 09:30:00\",2,100,130,-200,-1,201,0,60,O",
+                "交易,Data,Order,股票,USD,RUN,\"2026-04-20, 09:30:00\",10,100,112,-1000,-1,1001,0,120,O",
                 "交易,Data,Order,股票,USD,MSFT,\"2026-04-29, 09:30:00\",10,100,101,-1000,-1,1001,0,10,O",
                 "交易,Data,Order,股票,USD,NOPE,\"2026-04-30, 09:30:00\",5,20,19,-100,-1,101,0,-5,O",
                 "已实现和未实现的表现总结,Header,资产分类,代码,费用调整,已实现的 短期利润,已实现的 短期损失,已实现的 长期利润,已实现的 长期损失,已实现的 总数,未实现的 短期利润,未实现的 短期损失,未实现的 长期利润,未实现的 长期损失,未实现的 总数,总数,代码",
                 "已实现和未实现的表现总结,Data,股票,OLD,0,0,0,0,0,0,60,0,0,0,60,60,",
+                "已实现和未实现的表现总结,Data,股票,RUN,0,0,0,0,0,0,120,0,0,0,120,120,",
                 "已实现和未实现的表现总结,Data,股票,MSFT,0,0,0,0,0,0,10,0,0,0,10,10,",
                 "已实现和未实现的表现总结,Data,股票,NOPE,0,0,0,0,0,0,0,-5,0,0,-5,-5,",
             ]
@@ -128,11 +130,17 @@ class MyBookOverlayTests(unittest.TestCase):
             self.assertEqual(rows["MSFT"]["ticket_state"], "Positive EV Setup")
             self.assertEqual(rows["MSFT"]["action"], "hold_probe_only")
             self.assertEqual(rows["MSFT"]["management_state"], "hold_winner")
-            self.assertEqual(rows["OLD"]["management_state"], "time_stop_review")
-            self.assertEqual(rows["OLD"]["management_violation"], "holding_days_above_max_hold")
+            self.assertEqual(rows["OLD"]["management_state"], "runner_2r")
+            self.assertEqual(rows["OLD"]["management_action"], "hold_runner_trim_to_half_max")
+            self.assertEqual(rows["OLD"]["max_exit_fraction_now"], "50%")
+            self.assertEqual(rows["RUN"]["management_state"], "runner_1r")
+            self.assertEqual(rows["RUN"]["management_action"], "hold_runner_trim_one_third_max")
+            self.assertEqual(rows["RUN"]["fresh_entry_action"], "no_new_buy")
             self.assertEqual(rows["NOPE"]["ticket_state"], "No Report Support")
             self.assertEqual(rows["NOPE"]["violation"], "new_buy_without_trade_ticket")
             self.assertEqual(rows["NOPE"]["management_state"], "exit_or_reduce_loser")
+            self.assertEqual(payload["summary"]["runner_1r_positions"], 1)
+            self.assertEqual(payload["summary"]["runner_2r_positions"], 1)
             self.assertTrue((output_root / "2026-05-01" / "my_book_overlay_us.md").exists())
             self.assertTrue((output_root / "2026-05-01" / "personal_alpha_research.md").exists())
             self.assertTrue((output_root / "2026-05-01" / "personal_alpha_research.json").exists())

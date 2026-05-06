@@ -347,6 +347,52 @@ def us_trend_regime(row: dict[str, Any]) -> str:
     ).lower()
 
 
+def us_signal_blockers(row: dict[str, Any]) -> list[str]:
+    details = safe_json_loads(row.get("details_json"))
+    out: list[str] = []
+    main_gate = details.get("main_signal_gate")
+    if isinstance(main_gate, dict):
+        blockers = main_gate.get("blockers") or []
+        if isinstance(blockers, list):
+            out.extend(str(item) for item in blockers if item)
+    overnight = details.get("overnight_alpha")
+    if isinstance(overnight, dict):
+        reasons = overnight.get("reason_codes") or []
+        if isinstance(reasons, list):
+            out.extend(str(item) for item in reasons if item)
+        if overnight.get("alpha_already_paid_risk"):
+            out.append("alpha_already_paid_risk")
+    primary = str(row.get("primary_reason") or "")
+    for marker in ["rr_below_1_5", "stale_chase", "exhaustion_downgrade", "move already paid"]:
+        if marker in primary:
+            out.append(marker)
+    return list(dict.fromkeys(out))
+
+
+def us_pullback_price(row: dict[str, Any]) -> float | None:
+    details = safe_json_loads(row.get("details_json"))
+    return round_or_none(nested_get(details, "execution_gate", "pullback_price"), 4)
+
+
+def us_missed_alpha_candidate(row: dict[str, Any]) -> bool:
+    if str(row.get("state") or "") == "Execution Alpha":
+        return False
+    if str(row.get("policy") or "") not in {"legacy HIGH/MOD core", "LOW core executable trending"}:
+        return False
+    blockers = {str(item) for item in (row.get("blockers") or [])}
+    blocker_text = " ".join(blockers).lower()
+    rr = round_or_none(row.get("rr_ratio"))
+    trend = str(row.get("trend_regime") or "")
+    return bool(
+        "stale" in blocker_text
+        or "already_paid" in blocker_text
+        or "paid" in blocker_text
+        or "exhaustion" in blocker_text
+        or (rr is not None and rr < 1.5)
+        or trend in {"noisy", "mean_reverting"}
+    )
+
+
 def is_us_v2_policy(row: dict[str, Any]) -> bool:
     return (
         str(row.get("report_bucket") or "").lower() == "core"
@@ -490,6 +536,56 @@ def load_us_options_range(db_path: Path, start: date, as_of: date) -> dict[tuple
         con.close()
 
 
+def build_us_missed_alpha_radar(current: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Rows too extended for fresh entry, but useful as hold/retest radar."""
+    confidence_rank = {"HIGH": 3, "MODERATE": 2, "LOW": 1}
+    def radar_priority(row: dict[str, Any]) -> tuple[int, int, int, float, str]:
+        blockers = " ".join(str(item) for item in (row.get("blockers") or [])).lower()
+        rr = round_or_none(row.get("rr_ratio"))
+        low_rr = int("rr_below" in blockers or (rr is not None and rr < 1.5))
+        has_stop = int(row.get("stop") is not None)
+        confidence = confidence_rank.get(str(row.get("signal_confidence") or "").upper(), 0)
+        rr_sort = float(rr if rr is not None else 99.0)
+        return (-low_rr, -has_stop, -confidence, rr_sort, str(row.get("symbol") or ""))
+
+    by_symbol: dict[str, dict[str, Any]] = {}
+    for row in current:
+        if not us_missed_alpha_candidate(row):
+            continue
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        blockers = row.get("blockers") or []
+        radar_row = {
+            "state": "Missed Alpha Radar",
+            "symbol": symbol,
+            "signal_confidence": row.get("signal_confidence"),
+            "fresh_entry_action": "no_fresh_buy_chase_blocked",
+            "hold_action": "valid_to_hold_if_already_owned_and_trailing_stop_intact",
+            "retest_plan": "wait pullback/retest; add only if a fresh V2 ticket appears",
+            "entry": row.get("entry"),
+            "pullback_price": row.get("pullback_price"),
+            "stop": row.get("stop"),
+            "target": row.get("target"),
+            "rr_ratio": row.get("rr_ratio"),
+            "trend_regime": row.get("trend_regime"),
+            "blockers": blockers,
+            "reason": row.get("primary_reason") or row.get("reason"),
+        }
+        existing = by_symbol.get(symbol)
+        if not existing:
+            by_symbol[symbol] = radar_row
+            continue
+        old_rank = confidence_rank.get(str(existing.get("signal_confidence") or "").upper(), 0)
+        new_rank = confidence_rank.get(str(radar_row.get("signal_confidence") or "").upper(), 0)
+        if (new_rank, float(radar_row.get("rr_ratio") or 0.0)) > (old_rank, float(existing.get("rr_ratio") or 0.0)):
+            by_symbol[symbol] = radar_row
+    return sorted(
+        by_symbol.values(),
+        key=radar_priority,
+    )[:50]
+
+
 def summarize_us(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
     rows, status = load_us_rows(db_path, start, as_of)
     options = load_us_options(db_path, as_of)
@@ -559,10 +655,16 @@ def summarize_us(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
                 "option_expression": (opt_row or {}).get("expression"),
                 "option_reason": opt_reason,
                 "trend_regime": us_trend_regime(row),
+                "signal_confidence": row.get("signal_confidence"),
+                "execution_mode": row.get("execution_mode"),
+                "primary_reason": row.get("primary_reason"),
+                "blockers": us_signal_blockers(row),
+                "pullback_price": us_pullback_price(row),
                 "reason": reason,
             }
         )
 
+    missed_alpha = build_us_missed_alpha_radar(current)
     return {
         "status": status,
         "current_status": current_status,
@@ -577,6 +679,7 @@ def summarize_us(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
         "v2_stable": v2_stable,
         "options_coverage_rows": len(options),
         "current": current,
+        "missed_alpha_radar": missed_alpha,
     }
 
 
@@ -1149,6 +1252,32 @@ def render_current_table(rows: list[dict[str, Any]], market: str) -> list[str]:
     return lines
 
 
+def render_missed_alpha_radar(rows: list[dict[str, Any]]) -> list[str]:
+    lines = [
+        "## US Missed Alpha / Winner Hold Radar",
+        "",
+        "这些不是新买入清单。它们是被 fresh-entry gate 以追高、低 R:R、noisy/mean-reverting 等理由拦住，但如果已经持有则不该被机械清掉的延续票。动作是 hold runner / wait pullback-retest；加仓仍必须等新的 V2 ticket。",
+        "",
+    ]
+    if not rows:
+        lines += ["- No missed-alpha radar rows today.", ""]
+        return lines
+    lines += [
+        "| State | Symbol | Confidence | Fresh entry | Hold overlay | Pullback/retest | Stop | R:R | Trend | Blockers |",
+        "|---|---|---|---|---|---:|---:|---:|---|---|",
+    ]
+    for row in rows[:30]:
+        blockers = ", ".join(str(item) for item in (row.get("blockers") or []) if item)
+        lines.append(
+            f"| {row.get('state')} | {row.get('symbol')} | {row.get('signal_confidence') or '-'} | "
+            f"{row.get('fresh_entry_action')} | {row.get('hold_action')} | "
+            f"{fmt_num(row.get('pullback_price') or row.get('entry'))} | {fmt_num(row.get('stop'))} | "
+            f"{fmt_num(row.get('rr_ratio'))} | {row.get('trend_regime') or '-'} | {blockers or row.get('reason') or '-'} |"
+        )
+    lines.append("")
+    return lines
+
+
 def render_limit_table(rows: list[dict[str, Any]]) -> list[str]:
     if not rows:
         return ["- No limit-up radar rows.", ""]
@@ -1482,9 +1611,10 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
                 f"My Book open={my_summary.get('open_positions', '-')}, cap="
                 f"{(my_book.get('policy') or {}).get('single_name_position_cap', '-')}; "
                 f"time_stop={my_summary.get('time_stop_positions', '-')}; "
+                f"runners={my_summary.get('runner_positions', '-')}; "
                 f"exit_reduce_losers={my_summary.get('exit_or_reduce_loser_positions', '-')}"
             ),
-            "next_step": "Trim book back to cap before adding. New US buys require a fresh V2 ticket; size stays 0.10R/name stock-only.",
+            "next_step": "Fresh buys still require a V2 ticket. Existing profitable names use Winner Hold Overlay: no full exit at +1R/+2R unless trailing stop or invalidation breaks.",
             "priority": 2,
         },
         {
@@ -2674,6 +2804,9 @@ def render_report(payload: dict[str, Any]) -> str:
         f"- Stock-only bridge: subtracts {US_STOCK_ROUNDTRIP_COST_PCT:.2f}% roundtrip cost from the underlying 3-session result; this can only support a tiny probe until options expression PnL has enough history.",
         "- Why not HIGH/MOD: legacy HIGH/MOD is no longer the main policy and must be blocked when EV LCB80 is not positive.",
         "",
+    ]
+    lines += render_missed_alpha_radar(us.get("missed_alpha_radar") or [])
+    lines += [
         "## 策略新鲜期 / Freshness",
         "",
         "主策略不是永久身份。这里用滚动 7/14/30/45/60 日窗口重新计算 EV LCB80；短窗口通过才叫 fresh，只有长窗口通过则按衰减处理。",
