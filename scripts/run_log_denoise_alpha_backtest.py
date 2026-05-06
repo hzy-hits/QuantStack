@@ -517,6 +517,8 @@ def compact_row(row: dict[str, Any]) -> dict[str, Any]:
         "denoised_log_slope_10d_pct",
         "fft_signal_to_noise",
         "haar_noise_energy",
+        "ret_3d_net_pct",
+        "ret_5d_net_pct",
         "ret_10d_net_pct",
         "ret_20d_net_pct",
         "ret_30d_net_pct",
@@ -526,6 +528,50 @@ def compact_row(row: dict[str, Any]) -> dict[str, Any]:
         "blockers",
     ]
     return {key: row.get(key) for key in keep}
+
+
+def compact_horizon_row(row: dict[str, Any], horizon: int) -> dict[str, Any]:
+    return {
+        "report_date": row.get("report_date"),
+        "symbol": row.get("symbol"),
+        "signal_confidence": row.get("signal_confidence"),
+        "primary_reason": row.get("primary_reason"),
+        "rr_ratio": row.get("rr_ratio"),
+        "trend_regime": row.get("trend_regime"),
+        "return_pct": row.get(f"ret_{horizon}d_net_pct"),
+    }
+
+
+def top_bottom(rows: list[dict[str, Any]], horizon: int, n: int = 12) -> dict[str, list[dict[str, Any]]]:
+    key = f"ret_{horizon}d_net_pct"
+    resolved = [row for row in rows if row.get(key) is not None]
+    top = sorted(resolved, key=lambda row: row[key], reverse=True)[:n]
+    bottom = sorted(resolved, key=lambda row: row[key])[:n]
+    return {
+        "top": [compact_horizon_row(row, horizon) for row in top],
+        "bottom": [compact_horizon_row(row, horizon) for row in bottom],
+    }
+
+
+def date_summary(rows: list[dict[str, Any]], horizon: int) -> list[dict[str, Any]]:
+    key = f"ret_{horizon}d_net_pct"
+    grouped: dict[str, list[float]] = {}
+    for row in rows:
+        value = round_or_none(row.get(key))
+        if value is None:
+            continue
+        grouped.setdefault(str(row.get("report_date")), []).append(value)
+    out = []
+    for report_date, values in sorted(grouped.items()):
+        out.append(
+            {
+                "report_date": report_date,
+                "n": len(values),
+                "avg_pct": statistics.fmean(values),
+                "win_rate": sum(value > 0 for value in values) / len(values),
+            }
+        )
+    return out
 
 
 def render_metric_table(metrics: dict[str, dict[str, Any]], label: str) -> list[str]:
@@ -616,21 +662,67 @@ def render_report(payload: dict[str, Any]) -> str:
     lines += render_metric_table(payload["metrics"]["denoise_missed_like"], "Denoise Filter On Missed-Like Rows")
 
     lines += [
+        "## Why Legacy 20D/30D Looks Strong",
+        "",
+        "Legacy HIGH/MOD did not work as a short-term timing model. It worked when the position was held through the March rebound and high-beta continuation. This is why the result argues for a hold overlay, not a looser fresh-entry gate.",
+        "",
+        "### Legacy 20D Top / Bottom",
+        "",
+        "| Side | Date | Symbol | Conf | Reason | RR | 20D net |",
+        "|---|---|---|---|---|---:|---:|",
+    ]
+    for side in ["top", "bottom"]:
+        for row in ((payload.get("legacy_20d_top_bottom") or {}).get(side) or [])[:10]:
+            lines.append(
+                f"| {side} | {row.get('report_date')} | {row.get('symbol')} | "
+                f"{row.get('signal_confidence') or '-'} | {row.get('primary_reason') or '-'} | "
+                f"{fmt_num(row.get('rr_ratio'), 2)} | {fmt_pct(row.get('return_pct'))} |"
+            )
+    lines += [
+        "",
+        "### Legacy 30D Top / Bottom",
+        "",
+        "| Side | Date | Symbol | Conf | Reason | RR | 30D net |",
+        "|---|---|---|---|---|---:|---:|",
+    ]
+    for side in ["top", "bottom"]:
+        for row in ((payload.get("legacy_30d_top_bottom") or {}).get(side) or [])[:10]:
+            lines.append(
+                f"| {side} | {row.get('report_date')} | {row.get('symbol')} | "
+                f"{row.get('signal_confidence') or '-'} | {row.get('primary_reason') or '-'} | "
+                f"{fmt_num(row.get('rr_ratio'), 2)} | {fmt_pct(row.get('return_pct'))} |"
+            )
+    lines += [
+        "",
+        "### Legacy 20D By Date",
+        "",
+        "| Date | n | avg 20D | win |",
+        "|---|---:|---:|---:|",
+    ]
+    for row in (payload.get("legacy_20d_by_date") or [])[:40]:
+        lines.append(
+            f"| {row.get('report_date')} | {row.get('n', 0)} | "
+            f"{fmt_pct(row.get('avg_pct'))} | {fmt_num((row.get('win_rate') or 0) * 100, 1)}% |"
+        )
+
+    lines += [
+        "",
         "## MU / INTC Case Study",
         "",
-        "| Date | Symbol | Conf | RR | Regime | slope10 | FFT S/N | Haar noise | 10D | 20D | 30D | Blocked? |",
-        "|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|",
+        "| Date | Symbol | Status | Conf | RR | Regime | slope10 | FFT S/N | Haar noise | 3D | 5D | 10D | Blocked? |",
+        "|---|---|---|---|---:|---|---:|---:|---:|---:|---:|---:|---|",
     ]
-    for row in payload.get("mu_intc_rows", [])[:30]:
+    for row in payload.get("mu_intc_rows", [])[:40]:
         blocked = "yes" if row.get("is_missed_like") and not row.get("is_v2_strict") else "no"
         lines.append(
-            f"| {row.get('report_date')} | {row.get('symbol')} | {row.get('signal_confidence') or '-'} | "
+            f"| {row.get('report_date')} | {row.get('symbol')} | {row.get('selection_status') or '-'} | "
+            f"{row.get('signal_confidence') or '-'} | "
             f"{fmt_num(row.get('rr_ratio'), 2)} | {row.get('trend_regime') or '-'} | "
             f"{fmt_num(row.get('denoised_log_slope_10d_pct'), 3)} | "
             f"{fmt_num(row.get('fft_signal_to_noise'), 2)} | "
             f"{fmt_num(row.get('haar_noise_energy'), 2)} | "
-            f"{fmt_pct(row.get('ret_10d_net_pct'))} | {fmt_pct(row.get('ret_20d_net_pct'))} | "
-            f"{fmt_pct(row.get('ret_30d_net_pct'))} | {blocked} |"
+            f"{fmt_pct(row.get('ret_3d_net_pct'))} | {fmt_pct(row.get('ret_5d_net_pct'))} | "
+            f"{fmt_pct(row.get('ret_10d_net_pct'))} | {blocked} |"
         )
     lines += ["", "## Current Denoise Radar", ""]
     if current:
@@ -791,8 +883,9 @@ def main() -> int:
     current = select_current(rows, slope, snr, noise, as_of)
     mu_intc = [
         row
-        for row in denoise_missed
+        for row in rows
         if row.get("symbol") in {"MU", "INTC"}
+        and parse_date(str(row.get("report_date"))) >= as_of - timedelta(days=18)
     ]
     mu_intc = sorted(mu_intc, key=lambda row: (str(row.get("report_date")), str(row.get("symbol"))), reverse=True)
 
@@ -838,6 +931,10 @@ def main() -> int:
             "denoise_core_long": metric_pack("denoise_core_long", denoise_core),
             "denoise_missed_like": metric_pack("denoise_missed_like", denoise_missed),
         },
+        "legacy_20d_top_bottom": top_bottom(legacy, 20),
+        "legacy_30d_top_bottom": top_bottom(legacy, 30),
+        "legacy_20d_by_date": date_summary(legacy, 20),
+        "legacy_30d_by_date": date_summary(legacy, 30),
         "current_candidates": [compact_row(row) for row in current],
         "mu_intc_rows": [compact_row(row) for row in mu_intc],
         "rows": [compact_row(row) for row in denoise_missed],
