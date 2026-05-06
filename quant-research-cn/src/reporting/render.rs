@@ -3021,17 +3021,26 @@ fn render_notable_item(
     let trend_prob_n = detail.get("trend_prob_n").and_then(|v| v.as_f64());
 
     // Query regime and vol_bucket from analytics
-    let (regime, vol_bucket, ci_low, ci_high) = query_momentum_detail(db, &item.ts_code, date_str);
+    let momentum_detail = query_momentum_detail(db, &item.ts_code, date_str);
 
     writeln!(
         md,
         "- **动量**: trend_prob={} [{}, {}] (n={}, regime={}, vol_bucket={})",
         fmt_opt_f64(trend_prob, 3),
-        fmt_opt_f64(ci_low, 3),
-        fmt_opt_f64(ci_high, 3),
+        fmt_opt_f64(momentum_detail.ci_low, 3),
+        fmt_opt_f64(momentum_detail.ci_high, 3),
         fmt_opt_f64(trend_prob_n, 0),
-        regime.as_deref().unwrap_or("-"),
-        vol_bucket.as_deref().unwrap_or("-"),
+        momentum_detail.regime.as_deref().unwrap_or("-"),
+        momentum_detail.vol_bucket.as_deref().unwrap_or("-"),
+    )?;
+    writeln!(
+        md,
+        "- **Log/K线去噪**: log20={}%, denoised_slope10={}%/day, vol_norm={}σ, FFT trend/noise={}, Haar noise={}%",
+        fmt_opt_f64(momentum_detail.log_return_20d_pct, 2),
+        fmt_opt_f64(momentum_detail.denoised_log_slope_10d_pct, 3),
+        fmt_opt_f64(momentum_detail.log_return_vol_norm_20d, 2),
+        fmt_opt_f64(momentum_detail.fft_signal_to_noise, 2),
+        fmt_opt_f64(momentum_detail.haar_noise_energy.map(|v| v * 100.0), 1),
     )?;
 
     // ── 信息分 (flow components) ──────────────────────────────────────────
@@ -4690,21 +4699,27 @@ fn query_stock_valuation(
         .unwrap_or((None, None, None, None))
 }
 
-/// Fetch momentum detail: regime, vol_bucket, CI from analytics.
-fn query_momentum_detail(
-    db: &Connection,
-    ts_code: &str,
-    date_str: &str,
-) -> (Option<String>, Option<String>, Option<f64>, Option<f64>) {
+#[derive(Default)]
+struct MomentumDetail {
+    regime: Option<String>,
+    vol_bucket: Option<String>,
+    ci_low: Option<f64>,
+    ci_high: Option<f64>,
+    log_return_20d_pct: Option<f64>,
+    denoised_log_slope_10d_pct: Option<f64>,
+    log_return_vol_norm_20d: Option<f64>,
+    fft_signal_to_noise: Option<f64>,
+    haar_noise_energy: Option<f64>,
+}
+
+/// Fetch momentum detail: regime, vol_bucket, CI, and log/denoise diagnostics.
+fn query_momentum_detail(db: &Connection, ts_code: &str, date_str: &str) -> MomentumDetail {
     let sql = "SELECT metric, value, detail
                FROM analytics
                WHERE ts_code = ? AND as_of = ? AND module = 'momentum'
                ORDER BY metric";
 
-    let mut regime = None;
-    let mut vol_bucket = None;
-    let mut ci_low = None;
-    let mut ci_high = None;
+    let mut detail_out = MomentumDetail::default();
 
     if let Ok(mut stmt) = db.prepare(sql) {
         let rows: Vec<(String, f64, Option<String>)> = stmt
@@ -4721,7 +4736,7 @@ fn query_momentum_detail(
         for (metric, value, detail) in &rows {
             match metric.as_str() {
                 "regime" => {
-                    regime = Some(
+                    detail_out.regime = Some(
                         match *value as i32 {
                             0 => "trending",
                             1 => "mean_reverting",
@@ -4731,7 +4746,7 @@ fn query_momentum_detail(
                     );
                 }
                 "vol_bucket" => {
-                    vol_bucket = Some(
+                    detail_out.vol_bucket = Some(
                         match *value as i32 {
                             0 => "low",
                             1 => "mid",
@@ -4744,17 +4759,32 @@ fn query_momentum_detail(
                     // Parse CI from detail JSON if available
                     if let Some(d) = detail {
                         if let Ok(obj) = serde_json::from_str::<serde_json::Value>(d) {
-                            ci_low = obj.get("ci_low").and_then(|v| v.as_f64());
-                            ci_high = obj.get("ci_high").and_then(|v| v.as_f64());
+                            detail_out.ci_low = obj.get("ci_low").and_then(|v| v.as_f64());
+                            detail_out.ci_high = obj.get("ci_high").and_then(|v| v.as_f64());
                         }
                     }
                 }
+                "trend_prob_ci_low" => {
+                    detail_out.ci_low = Some(*value);
+                }
+                "trend_prob_ci_high" => {
+                    detail_out.ci_high = Some(*value);
+                }
+                "log_return_20d_pct" => detail_out.log_return_20d_pct = Some(*value),
+                "denoised_log_slope_10d_pct" => {
+                    detail_out.denoised_log_slope_10d_pct = Some(*value);
+                }
+                "log_return_vol_norm_20d" => {
+                    detail_out.log_return_vol_norm_20d = Some(*value);
+                }
+                "fft_signal_to_noise" => detail_out.fft_signal_to_noise = Some(*value),
+                "haar_noise_energy" => detail_out.haar_noise_energy = Some(*value),
                 _ => {}
             }
         }
     }
 
-    (regime, vol_bucket, ci_low, ci_high)
+    detail_out
 }
 
 /// Fetch flow component z-scores from analytics.

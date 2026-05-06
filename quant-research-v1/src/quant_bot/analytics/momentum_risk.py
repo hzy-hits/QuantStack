@@ -69,6 +69,167 @@ def _classify_regime(returns: np.ndarray, window: int = 20) -> str:
     return "noisy"
 
 
+def _ema(values: np.ndarray, span: int) -> np.ndarray:
+    """Causal EMA over a 1D series."""
+    if len(values) == 0:
+        return values
+    alpha = 2.0 / (span + 1.0)
+    out = np.empty_like(values, dtype=float)
+    out[0] = float(values[0])
+    for i in range(1, len(values)):
+        out[i] = alpha * float(values[i]) + (1.0 - alpha) * out[i - 1]
+    return out
+
+
+def _tail_slope(values: np.ndarray, window: int) -> float | None:
+    """Linear slope over the latest causal window."""
+    if len(values) < window:
+        return None
+    y = values[-window:].astype(float)
+    if not np.all(np.isfinite(y)):
+        return None
+    x = np.arange(window, dtype=float)
+    x = x - float(np.mean(x))
+    denom = float(np.dot(x, x))
+    if denom <= 0:
+        return None
+    return float(np.dot(x, y - float(np.mean(y))) / denom)
+
+
+def _std_tail(values: np.ndarray, window: int) -> float | None:
+    if len(values) < window:
+        return None
+    sigma = float(np.std(values[-window:]))
+    return sigma if np.isfinite(sigma) and sigma > 1e-12 else None
+
+
+def _spectral_energy(returns: np.ndarray, window: int = 32) -> dict[str, float | None]:
+    """
+    Causal FFT energy split on the latest return window.
+
+    The zero-frequency component is removed. Low-frequency energy is treated as
+    smoother trend content; high-frequency energy is treated as noise/chop.
+    """
+    if len(returns) < 8:
+        return {
+            "fft_low_freq_power": None,
+            "fft_high_freq_power": None,
+            "fft_signal_to_noise": None,
+        }
+    tail = returns[-min(window, len(returns)):].astype(float)
+    tail = tail[np.isfinite(tail)]
+    if len(tail) < 8:
+        return {
+            "fft_low_freq_power": None,
+            "fft_high_freq_power": None,
+            "fft_signal_to_noise": None,
+        }
+    tail = tail - float(np.mean(tail))
+    coeff = np.fft.rfft(tail)
+    if len(coeff) <= 2:
+        return {
+            "fft_low_freq_power": None,
+            "fft_high_freq_power": None,
+            "fft_signal_to_noise": None,
+        }
+    power = np.abs(coeff[1:]) ** 2
+    total = float(np.sum(power))
+    if total <= 1e-18:
+        return {
+            "fft_low_freq_power": 0.0,
+            "fft_high_freq_power": 0.0,
+            "fft_signal_to_noise": None,
+        }
+    split = max(1, len(power) // 3)
+    low = float(np.sum(power[:split]))
+    high = float(np.sum(power[split:]))
+    return {
+        "fft_low_freq_power": low / total,
+        "fft_high_freq_power": high / total,
+        "fft_signal_to_noise": low / (high + 1e-12),
+    }
+
+
+def _haar_energy(returns: np.ndarray, window: int = 32) -> dict[str, float | None]:
+    """Dependency-free causal Haar detail energy on the latest return window."""
+    if len(returns) < 8:
+        return {"haar_trend_energy": None, "haar_noise_energy": None}
+    n = 2 ** int(np.floor(np.log2(min(window, len(returns)))))
+    if n < 8:
+        return {"haar_trend_energy": None, "haar_noise_energy": None}
+    arr = returns[-n:].astype(float)
+    arr = arr[np.isfinite(arr)]
+    if len(arr) != n:
+        return {"haar_trend_energy": None, "haar_noise_energy": None}
+    arr = arr - float(np.mean(arr))
+    total = float(np.dot(arr, arr))
+    if total <= 1e-18:
+        return {"haar_trend_energy": 0.0, "haar_noise_energy": 0.0}
+
+    detail_energies: list[float] = []
+    cur = arr.copy()
+    inv_sqrt2 = 1.0 / np.sqrt(2.0)
+    while len(cur) >= 2:
+        avg = (cur[0::2] + cur[1::2]) * inv_sqrt2
+        detail = (cur[0::2] - cur[1::2]) * inv_sqrt2
+        detail_energies.append(float(np.dot(detail, detail)))
+        cur = avg
+
+    noise = float(sum(detail_energies[:2]))
+    trend = float(sum(detail_energies[2:]))
+    return {
+        "haar_trend_energy": trend / total,
+        "haar_noise_energy": noise / total,
+    }
+
+
+def _log_price_features(close: np.ndarray) -> dict[str, float | None]:
+    """Percent-scale log features from only current and prior bars."""
+    prices = np.maximum(close.astype(float), 1e-9)
+    log_px = np.log(prices)
+    log_rets = np.diff(log_px)
+
+    def log_ret_pct(days: int) -> float | None:
+        if len(log_px) <= days:
+            return None
+        return float((log_px[-1] - log_px[-days - 1]) * 100.0)
+
+    ema_log = _ema(log_px, span=5)
+    residual = log_px - ema_log
+    residual_sigma = _std_tail(residual, 20)
+    residual_z = (
+        float(residual[-1] / residual_sigma)
+        if residual_sigma is not None and np.isfinite(residual[-1])
+        else None
+    )
+    sigma20 = _std_tail(log_rets, 20)
+    vol_norm = (
+        float(log_rets[-1] / sigma20)
+        if sigma20 is not None and len(log_rets) > 0 and np.isfinite(log_rets[-1])
+        else None
+    )
+    log_trend_slope_20d = _tail_slope(log_px, 20)
+    denoised_log_slope_10d = _tail_slope(ema_log, 10)
+
+    features: dict[str, float | None] = {
+        "log_return_1d_pct": log_ret_pct(1),
+        "log_return_5d_pct": log_ret_pct(5),
+        "log_return_20d_pct": log_ret_pct(20),
+        "log_trend_slope_20d_pct": (
+            log_trend_slope_20d * 100.0 if log_trend_slope_20d is not None else None
+        ),
+        "denoised_log_slope_10d_pct": (
+            denoised_log_slope_10d * 100.0 if denoised_log_slope_10d is not None else None
+        ),
+        "log_return_vol_norm_20d": vol_norm,
+        "denoise_residual_zscore": residual_z,
+        "log_feature_window": float(min(32, len(log_rets))),
+    }
+    features.update(_spectral_energy(log_rets, window=32))
+    features.update(_haar_energy(log_rets, window=32))
+    return features
+
+
 def _build_cpt(df: pl.DataFrame) -> MomentumCPT:
     """
     Build 9-cell CPT from all historical price + volume data.
@@ -250,6 +411,7 @@ def run_momentum_risk(
         # Regime from recent returns
         returns = np.diff(np.log(np.maximum(ac, 1e-9)))
         regime = _classify_regime(returns)
+        log_features = _log_price_features(ac)
 
         # Current vol bucket using universe-wide thresholds from CPT
         avg_vol_20 = float(np.mean(vol[-21:-1])) if len(vol) >= 21 else float(np.mean(vol[:-1]) + 1e-9)
@@ -287,6 +449,7 @@ def run_momentum_risk(
             "direction": direction,
             "mom": mom,
             "momentum_accel": momentum_accel,
+            "log_features": log_features,
             "posterior": posterior,
         })
 
@@ -318,6 +481,11 @@ def run_momentum_risk(
             "z_descriptive": round(z_descriptive, 4),
             "z_note": "cross-sectional rank only, not a p-value",
             "momentum_accel": round(p["momentum_accel"], 3) if p["momentum_accel"] is not None else None,
+            **{
+                key: round(float(value), 4)
+                for key, value in (p.get("log_features") or {}).items()
+                if value is not None
+            },
         }
 
         results.append({

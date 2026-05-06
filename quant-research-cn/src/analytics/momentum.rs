@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use chrono::NaiveDate;
 use duckdb::Connection;
+use serde_json::json;
 use tracing::{info, warn};
 
 use super::bayes::BetaBinomial;
@@ -45,8 +46,26 @@ struct StockFeatures {
     ts_code: String,
     regime: Regime,
     vol_ratio: f64,
+    log_features: LogFeatures,
     // These are set after cross-sectional tercile assignment:
     vol_bucket: Option<VolBucket>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct LogFeatures {
+    log_return_1d_pct: Option<f64>,
+    log_return_5d_pct: Option<f64>,
+    log_return_20d_pct: Option<f64>,
+    log_trend_slope_20d_pct: Option<f64>,
+    denoised_log_slope_10d_pct: Option<f64>,
+    log_return_vol_norm_20d: Option<f64>,
+    denoise_residual_zscore: Option<f64>,
+    fft_low_freq_power: Option<f64>,
+    fft_high_freq_power: Option<f64>,
+    fft_signal_to_noise: Option<f64>,
+    haar_trend_energy: Option<f64>,
+    haar_noise_energy: Option<f64>,
+    log_feature_window: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +124,206 @@ fn lag1_autocorrelation(series: &[f64]) -> f64 {
 /// Compute daily log-returns from a close-price series.
 fn log_returns(closes: &[f64]) -> Vec<f64> {
     closes.windows(2).map(|w| (w[1] / w[0]).ln()).collect()
+}
+
+fn mean(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn stddev(values: &[f64]) -> Option<f64> {
+    let mu = mean(values)?;
+    let var = values
+        .iter()
+        .map(|v| {
+            let d = *v - mu;
+            d * d
+        })
+        .sum::<f64>()
+        / values.len() as f64;
+    let sigma = var.sqrt();
+    if sigma.is_finite() && sigma > 1e-12 {
+        Some(sigma)
+    } else {
+        None
+    }
+}
+
+fn tail_slope(values: &[f64], window: usize) -> Option<f64> {
+    if values.len() < window || window < 2 {
+        return None;
+    }
+    let y = &values[values.len() - window..];
+    if y.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let x_mean = (window as f64 - 1.0) / 2.0;
+    let y_mean = mean(y)?;
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for (i, value) in y.iter().enumerate() {
+        let dx = i as f64 - x_mean;
+        num += dx * (*value - y_mean);
+        den += dx * dx;
+    }
+    if den <= 0.0 {
+        None
+    } else {
+        Some(num / den)
+    }
+}
+
+fn ema(values: &[f64], span: usize) -> Vec<f64> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let alpha = 2.0 / (span as f64 + 1.0);
+    let mut out = Vec::with_capacity(values.len());
+    let mut prev = values[0];
+    out.push(prev);
+    for value in values.iter().skip(1) {
+        prev = alpha * *value + (1.0 - alpha) * prev;
+        out.push(prev);
+    }
+    out
+}
+
+fn log_return_pct(log_prices: &[f64], days: usize) -> Option<f64> {
+    if log_prices.len() <= days {
+        return None;
+    }
+    Some((log_prices[log_prices.len() - 1] - log_prices[log_prices.len() - 1 - days]) * 100.0)
+}
+
+fn spectral_energy(log_rets: &[f64], window: usize) -> (Option<f64>, Option<f64>, Option<f64>) {
+    if log_rets.len() < 8 {
+        return (None, None, None);
+    }
+    let n = window.min(log_rets.len());
+    if n < 8 {
+        return (None, None, None);
+    }
+    let mut tail = log_rets[log_rets.len() - n..].to_vec();
+    if tail.iter().any(|v| !v.is_finite()) {
+        return (None, None, None);
+    }
+    let mu = mean(&tail).unwrap_or(0.0);
+    for value in &mut tail {
+        *value -= mu;
+    }
+
+    let mut powers: Vec<f64> = Vec::new();
+    for k in 1..=(n / 2) {
+        let mut re = 0.0;
+        let mut im = 0.0;
+        for (t, value) in tail.iter().enumerate() {
+            let angle = -2.0 * std::f64::consts::PI * k as f64 * t as f64 / n as f64;
+            re += *value * angle.cos();
+            im += *value * angle.sin();
+        }
+        powers.push(re * re + im * im);
+    }
+    if powers.is_empty() {
+        return (None, None, None);
+    }
+    let total = powers.iter().sum::<f64>();
+    if total <= 1e-18 {
+        return (Some(0.0), Some(0.0), None);
+    }
+    let split = (powers.len() / 3).max(1);
+    let low = powers[..split].iter().sum::<f64>();
+    let high = powers[split..].iter().sum::<f64>();
+    (
+        Some(low / total),
+        Some(high / total),
+        Some(low / (high + 1e-12)),
+    )
+}
+
+fn haar_energy(log_rets: &[f64], window: usize) -> (Option<f64>, Option<f64>) {
+    if log_rets.len() < 8 {
+        return (None, None);
+    }
+    let mut n = window.min(log_rets.len());
+    n = 1usize << ((usize::BITS - 1 - n.leading_zeros()) as usize);
+    if n < 8 {
+        return (None, None);
+    }
+    let mut cur = log_rets[log_rets.len() - n..].to_vec();
+    if cur.iter().any(|v| !v.is_finite()) {
+        return (None, None);
+    }
+    let mu = mean(&cur).unwrap_or(0.0);
+    for value in &mut cur {
+        *value -= mu;
+    }
+    let total = cur.iter().map(|v| v * v).sum::<f64>();
+    if total <= 1e-18 {
+        return (Some(0.0), Some(0.0));
+    }
+
+    let inv_sqrt2 = 1.0 / 2.0_f64.sqrt();
+    let mut detail_energies: Vec<f64> = Vec::new();
+    while cur.len() >= 2 {
+        let mut next = Vec::with_capacity(cur.len() / 2);
+        let mut detail_energy = 0.0;
+        for pair in cur.chunks_exact(2) {
+            let avg = (pair[0] + pair[1]) * inv_sqrt2;
+            let detail = (pair[0] - pair[1]) * inv_sqrt2;
+            next.push(avg);
+            detail_energy += detail * detail;
+        }
+        detail_energies.push(detail_energy);
+        cur = next;
+    }
+    let noise = detail_energies.iter().take(2).sum::<f64>();
+    let trend = detail_energies.iter().skip(2).sum::<f64>();
+    (Some(trend / total), Some(noise / total))
+}
+
+fn compute_log_features(closes: &[f64]) -> LogFeatures {
+    if closes.len() < 2 {
+        return LogFeatures::default();
+    }
+    let log_prices: Vec<f64> = closes.iter().map(|close| (*close).max(1e-9).ln()).collect();
+    let log_rets = log_returns(closes);
+    let ema_log = ema(&log_prices, 5);
+    let residuals: Vec<f64> = log_prices
+        .iter()
+        .zip(ema_log.iter())
+        .map(|(price, smooth)| price - smooth)
+        .collect();
+    let residual_z = if residuals.len() >= 20 {
+        stddev(&residuals[residuals.len() - 20..])
+            .map(|sigma| residuals[residuals.len() - 1] / sigma)
+    } else {
+        None
+    };
+    let vol_norm = if log_rets.len() >= 20 {
+        stddev(&log_rets[log_rets.len() - 20..]).map(|sigma| log_rets[log_rets.len() - 1] / sigma)
+    } else {
+        None
+    };
+    let (fft_low, fft_high, fft_snr) = spectral_energy(&log_rets, 32);
+    let (haar_trend, haar_noise) = haar_energy(&log_rets, 32);
+
+    LogFeatures {
+        log_return_1d_pct: log_return_pct(&log_prices, 1),
+        log_return_5d_pct: log_return_pct(&log_prices, 5),
+        log_return_20d_pct: log_return_pct(&log_prices, 20),
+        log_trend_slope_20d_pct: tail_slope(&log_prices, 20).map(|v| v * 100.0),
+        denoised_log_slope_10d_pct: tail_slope(&ema_log, 10).map(|v| v * 100.0),
+        log_return_vol_norm_20d: vol_norm,
+        denoise_residual_zscore: residual_z,
+        fft_low_freq_power: fft_low,
+        fft_high_freq_power: fft_high,
+        fft_signal_to_noise: fft_snr,
+        haar_trend_energy: haar_trend,
+        haar_noise_energy: haar_noise,
+        log_feature_window: 32usize.min(log_rets.len()) as f64,
+    }
 }
 
 /// Compute 5-day forward log-return starting at index `i`.
@@ -244,6 +463,7 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
             ts_code: ts_code.clone(),
             regime,
             vol_ratio,
+            log_features: compute_log_features(&closes),
             vol_bucket: None, // filled in after tercile computation
         });
 
@@ -365,11 +585,6 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
             VolBucket::Mid => "mid",
             VolBucket::High => "high",
         };
-        let detail = format!(
-            "regime={},vol_bucket={},ewma_wins={:.1},ewma_losses={:.1},half_life={}",
-            regime_label, vol_label, wins, losses, EWMA_HALF_LIFE as u32
-        );
-
         let regime_f64 = match feat.regime {
             Regime::Trending => 0.0,
             Regime::MeanReverting => 1.0,
@@ -381,8 +596,31 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
             VolBucket::High => 2.0,
         };
 
-        // Write 6 metrics per stock
-        let metrics: [(&str, f64, &str); 6] = [
+        let detail = json!({
+            "regime": regime_label,
+            "vol_bucket": vol_label,
+            "ewma_wins": wins,
+            "ewma_losses": losses,
+            "half_life": EWMA_HALF_LIFE as u32,
+            "ci_low": posterior.ci_low,
+            "ci_high": posterior.ci_high,
+            "log_return_1d_pct": feat.log_features.log_return_1d_pct,
+            "log_return_5d_pct": feat.log_features.log_return_5d_pct,
+            "log_return_20d_pct": feat.log_features.log_return_20d_pct,
+            "log_trend_slope_20d_pct": feat.log_features.log_trend_slope_20d_pct,
+            "denoised_log_slope_10d_pct": feat.log_features.denoised_log_slope_10d_pct,
+            "log_return_vol_norm_20d": feat.log_features.log_return_vol_norm_20d,
+            "denoise_residual_zscore": feat.log_features.denoise_residual_zscore,
+            "fft_low_freq_power": feat.log_features.fft_low_freq_power,
+            "fft_high_freq_power": feat.log_features.fft_high_freq_power,
+            "fft_signal_to_noise": feat.log_features.fft_signal_to_noise,
+            "haar_trend_energy": feat.log_features.haar_trend_energy,
+            "haar_noise_energy": feat.log_features.haar_noise_energy,
+            "log_feature_window": feat.log_features.log_feature_window,
+        })
+        .to_string();
+
+        let mut metrics: Vec<(&str, f64, &str)> = vec![
             ("trend_prob", posterior.mean, &detail),
             ("trend_prob_ci_low", posterior.ci_low, &detail),
             ("trend_prob_ci_high", posterior.ci_high, &detail),
@@ -390,6 +628,47 @@ pub fn compute(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Result<usiz
             ("regime", regime_f64, regime_label),
             ("vol_bucket", vol_bucket_f64, vol_label),
         ];
+        if let Some(v) = feat.log_features.log_return_1d_pct {
+            metrics.push(("log_return_1d_pct", v, &detail));
+        }
+        if let Some(v) = feat.log_features.log_return_5d_pct {
+            metrics.push(("log_return_5d_pct", v, &detail));
+        }
+        if let Some(v) = feat.log_features.log_return_20d_pct {
+            metrics.push(("log_return_20d_pct", v, &detail));
+        }
+        if let Some(v) = feat.log_features.log_trend_slope_20d_pct {
+            metrics.push(("log_trend_slope_20d_pct", v, &detail));
+        }
+        if let Some(v) = feat.log_features.denoised_log_slope_10d_pct {
+            metrics.push(("denoised_log_slope_10d_pct", v, &detail));
+        }
+        if let Some(v) = feat.log_features.log_return_vol_norm_20d {
+            metrics.push(("log_return_vol_norm_20d", v, &detail));
+        }
+        if let Some(v) = feat.log_features.denoise_residual_zscore {
+            metrics.push(("denoise_residual_zscore", v, &detail));
+        }
+        if let Some(v) = feat.log_features.fft_low_freq_power {
+            metrics.push(("fft_low_freq_power", v, &detail));
+        }
+        if let Some(v) = feat.log_features.fft_high_freq_power {
+            metrics.push(("fft_high_freq_power", v, &detail));
+        }
+        if let Some(v) = feat.log_features.fft_signal_to_noise {
+            metrics.push(("fft_signal_to_noise", v, &detail));
+        }
+        if let Some(v) = feat.log_features.haar_trend_energy {
+            metrics.push(("haar_trend_energy", v, &detail));
+        }
+        if let Some(v) = feat.log_features.haar_noise_energy {
+            metrics.push(("haar_noise_energy", v, &detail));
+        }
+        metrics.push((
+            "log_feature_window",
+            feat.log_features.log_feature_window,
+            &detail,
+        ));
 
         for (metric, value, det) in &metrics {
             insert_stmt.execute(duckdb::params![feat.ts_code, as_of_str, metric, value, det,])?;
@@ -466,6 +745,26 @@ mod tests {
         let rets = log_returns(&closes);
         assert_eq!(rets.len(), 2);
         assert!((rets[0] - (1.05f64).ln()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_compute_log_features_percentage_scale() {
+        let closes: Vec<f64> = (0..40).map(|i| 100.0 * 1.01f64.powi(i)).collect();
+        let features = compute_log_features(&closes);
+        assert!((features.log_return_1d_pct.unwrap() - 1.01f64.ln() * 100.0).abs() < 1e-10);
+        assert!((features.log_return_20d_pct.unwrap() - 1.01f64.ln() * 20.0 * 100.0).abs() < 1e-10);
+        assert!(features.denoised_log_slope_10d_pct.unwrap() > 0.0);
+        assert!(features.fft_low_freq_power.is_some());
+        assert_eq!(features.log_feature_window, 32.0);
+    }
+
+    #[test]
+    fn test_compute_log_features_chop_noise() {
+        let closes: Vec<f64> = (0..40)
+            .map(|i| if i % 2 == 0 { 102.0 } else { 98.0 })
+            .collect();
+        let features = compute_log_features(&closes);
+        assert!(features.haar_noise_energy.unwrap() > 0.5);
     }
 
     #[test]
