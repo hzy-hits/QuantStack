@@ -23,6 +23,7 @@ DEFAULT_V2_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "cn_opportunity_ranker"
 DEFAULT_CN_DB = STACK_ROOT / "quant-research-cn" / "data" / "quant_cn_report.duckdb"
 CN_ALPHA_FACTORY_EXECUTION_SLEEVE = "cn_oversold_ev_positive"
+CN_OBSERVED_LIFECYCLE_SLEEVE = "cn_observed_lifecycle_prob"
 CN_EXECUTION_ALPHA_STATE = "positive_ev_setup"
 
 
@@ -83,6 +84,7 @@ class RankerConfig:
     score_weights: dict[str, float] = field(
         default_factory=lambda: {
             "strategy_ev": 0.20,
+            "observed_lifecycle": 0.22,
             "tushare_flow": 0.22,
             "oversold_reversion": 0.10,
             "execution_quality": 0.16,
@@ -897,6 +899,12 @@ def add_percentiles(rows: list[dict[str, Any]]) -> None:
     specs = {
         "ev_pct": True,
         "ev_lcb80_pct": True,
+        "expected_r_t3": True,
+        "lcb80_r_t3": True,
+        "p_win_t1": True,
+        "p_hit_1r_t3": True,
+        "p_stop_t3": False,
+        "observed_lifecycle_score": True,
         "strategy_samples": True,
         "negative_residual": True,
         "negative_log20": True,
@@ -988,6 +996,20 @@ def enrich_base_rows(
             "reason": candidate.get("reason") or "",
             "ev_pct": first_number(candidate.get("ev_pct"), model.get("ev_pct")),
             "ev_lcb80_pct": first_number(candidate.get("ev_lcb80_pct"), candidate.get("ev_lcb_80_pct"), model.get("ev_lcb_80_pct")),
+            "p_win_t1": first_number(candidate.get("p_win_t1")),
+            "p_hit_1r_t3": first_number(candidate.get("p_hit_1r_t3")),
+            "p_stop_t3": first_number(candidate.get("p_stop_t3")),
+            "expected_r_t3": first_number(candidate.get("expected_r_t3")),
+            "lcb80_r_t3": first_number(candidate.get("lcb80_r_t3")),
+            "observed_probability_n": first_number(candidate.get("observed_probability_n")),
+            "observed_probability_t3_n": first_number(candidate.get("observed_probability_t3_n")),
+            "observed_probability_bucket": candidate.get("observed_probability_bucket"),
+            "observed_probability_source": candidate.get("observed_probability_source"),
+            "observed_lifecycle_tier": candidate.get("observed_lifecycle_tier"),
+            "observed_lifecycle_qualified": bool(candidate.get("observed_lifecycle_qualified")),
+            "observed_lifecycle_sleeve_id": candidate.get("observed_lifecycle_sleeve_id"),
+            "observed_lifecycle_reason": candidate.get("observed_lifecycle_reason"),
+            "suggested_hold_days": first_number(candidate.get("suggested_hold_days")),
             "risk_unit_pct": first_number(candidate.get("risk_unit_pct"), model.get("risk_unit_pct")),
             "strategy_samples": first_number(candidate.get("strategy_samples")),
             "strategy_fills": first_number(candidate.get("strategy_fills")),
@@ -1016,7 +1038,15 @@ def enrich_base_rows(
             combined["negative_log20"] = -float(combined["log_return_20d_pct"])
         alpha_sleeve = candidate.get("alpha_sleeve_id") or alpha_factory_sleeve_id(combined)
         combined["alpha_sleeve_id"] = alpha_sleeve
-        combined["alpha_factory_role"] = "execution_sleeve" if alpha_sleeve else "rank_only"
+        if alpha_sleeve:
+            combined["execution_source"] = "alpha_factory_sleeve"
+            combined["alpha_factory_role"] = "execution_sleeve"
+        elif combined.get("observed_lifecycle_qualified"):
+            combined["execution_source"] = "observed_lifecycle_prob"
+            combined["alpha_factory_role"] = "observed_lifecycle_execution"
+        else:
+            combined["execution_source"] = "rank_only"
+            combined["alpha_factory_role"] = "rank_only"
         rows.append(combined)
     return rows
 
@@ -1025,6 +1055,7 @@ def production_tier(rank: int, row: dict[str, Any], config: RankerConfig = DEFAU
     headline_risk = round_or_none(row.get("headline_risk")) or 0.0
     falling_knife = round_or_none(row.get("falling_knife_score")) or 0.0
     alpha_sleeve = str(row.get("alpha_sleeve_id") or "")
+    observed_qualified = bool(row.get("observed_lifecycle_qualified"))
     if headline_risk >= config.event_risk_zero_r:
         return (
             "event_risk_watch",
@@ -1037,11 +1068,42 @@ def production_tier(rank: int, row: dict[str, Any], config: RankerConfig = DEFAU
             "wait_for_flow_reversal",
             "0R default; only manual tiny after positive flow reversal",
         )
-    if alpha_sleeve != CN_ALPHA_FACTORY_EXECUTION_SLEEVE:
+    if alpha_sleeve != CN_ALPHA_FACTORY_EXECUTION_SLEEVE and not observed_qualified:
         return (
             "ranked_watch",
             "rank_only_no_new_trade",
-            "0R until Alpha Factory sleeve membership is present",
+            "0R until Alpha Factory sleeve membership or observed lifecycle probability is present",
+        )
+    if alpha_sleeve != CN_ALPHA_FACTORY_EXECUTION_SLEEVE and observed_qualified:
+        observed_tier = str(row.get("observed_lifecycle_tier") or "")
+        if observed_tier == "observed_micro_probe" and rank <= config.secondary_probe_count:
+            return (
+                "observed_lifecycle_micro_probe",
+                "pullback_observed_micro_probe",
+                "0.02R/name after pullback/flow confirmation; observed mean positive but LCB weak",
+            )
+        if observed_tier == "observed_micro_probe":
+            return (
+                "observed_lifecycle_watch",
+                "wait_for_rank_or_price_confirmation",
+                "0R default; micro-probe evidence is not top-ranked",
+            )
+        if rank <= config.top_probe_count:
+            return (
+                "observed_lifecycle_probe",
+                "planned_entry_observed_probe",
+                "0.05R/name; observed historical analogs are positive; no chase above entry zone",
+            )
+        if rank <= config.secondary_probe_count:
+            return (
+                "observed_lifecycle_secondary",
+                "pullback_observed_micro_probe",
+                "0.03R/name after pullback/flow confirmation",
+            )
+        return (
+            "observed_lifecycle_watch",
+            "wait_for_rank_or_price_confirmation",
+            "0R default; probability is positive but rank is not high enough",
         )
     if rank <= config.top_probe_count:
         return (
@@ -1080,6 +1142,16 @@ def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG
                 (row.get("ev_pct_rank"), 0.70),
                 (row.get("ev_lcb80_pct_rank"), 0.20),
                 (row.get("strategy_samples_rank"), 0.10),
+            ]
+        )
+        observed_lifecycle = weighted(
+            [
+                (row.get("observed_lifecycle_score_rank"), 0.25),
+                (row.get("expected_r_t3_rank"), 0.25),
+                (row.get("lcb80_r_t3_rank"), 0.25),
+                (row.get("p_hit_1r_t3_rank"), 0.12),
+                (row.get("p_stop_t3_rank"), 0.08),
+                (row.get("p_win_t1_rank"), 0.05),
             ]
         )
         oversold_reversion = weighted(
@@ -1159,6 +1231,7 @@ def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG
         row["falling_knife_score"] = round(falling_knife * 100.0, 2)
         raw = (
             config.score_weights["strategy_ev"] * strategy_ev
+            + config.score_weights["observed_lifecycle"] * observed_lifecycle
             + config.score_weights["tushare_flow"] * tushare_flow
             + config.score_weights["oversold_reversion"] * oversold_reversion
             + config.score_weights["execution_quality"] * execution_quality
@@ -1172,6 +1245,7 @@ def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG
         )
         row["score_components"] = {
             "strategy_ev": round(strategy_ev * 100.0, 2),
+            "observed_lifecycle": round(observed_lifecycle * 100.0, 2),
             "tushare_flow": round(tushare_flow * 100.0, 2),
             "oversold_reversion": round(oversold_reversion * 100.0, 2),
             "execution_quality": round(execution_quality * 100.0, 2),
@@ -1214,12 +1288,27 @@ def public_row(row: dict[str, Any]) -> dict[str, Any]:
         "policy",
         "alpha_sleeve_id",
         "alpha_factory_role",
+        "execution_source",
         "alpha_state",
         "action_intent",
         "execution_mode",
         "lifecycle_action",
         "ev_pct",
         "ev_lcb80_pct",
+        "p_win_t1",
+        "p_hit_1r_t3",
+        "p_stop_t3",
+        "expected_r_t3",
+        "lcb80_r_t3",
+        "observed_probability_n",
+        "observed_probability_t3_n",
+        "observed_probability_source",
+        "observed_probability_bucket",
+        "observed_lifecycle_tier",
+        "observed_lifecycle_qualified",
+        "observed_lifecycle_sleeve_id",
+        "observed_lifecycle_reason",
+        "suggested_hold_days",
         "risk_unit_pct",
         "strategy_samples",
         "strategy_fills",
@@ -1283,22 +1372,23 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Production Basket",
         "",
-        "| Rank | Symbol | Name | Sleeve | Tier | Action | Size | Entry | Stop/Line | Target | Score |",
-        "|---:|---|---|---|---|---|---|---|---|---|---:|",
+        "| Rank | Symbol | Name | Source | Tier | Action | Size | Entry | ExpR | LCBR | n | Score |",
+        "|---:|---|---|---|---|---|---|---|---:|---:|---:|---:|",
     ]
     for row in rows[:10]:
         lines.append(
-            "| {rank} | {symbol} | {name} | {sleeve} | {tier} | {action} | {size} | {entry} | {line} | {target} | {score:.2f} |".format(
+            "| {rank} | {symbol} | {name} | {source} | {tier} | {action} | {size} | {entry} | {expr} | {lcbr} | {n} | {score:.2f} |".format(
                 rank=row.get("rank"),
                 symbol=row.get("symbol") or "",
                 name=row.get("name") or "",
-                sleeve=row.get("alpha_sleeve_id") or "rank_only",
+                source=row.get("alpha_sleeve_id") or row.get("observed_lifecycle_sleeve_id") or "rank_only",
                 tier=row.get("production_tier") or "",
                 action=row.get("production_action") or "",
                 size=row.get("size_hint") or "",
                 entry=row.get("observation_entry_zone") or "-",
-                line=row.get("handling_line") or "-",
-                target=row.get("first_target") or "-",
+                expr=fmt_num(row.get("expected_r_t3"), 2),
+                lcbr=fmt_num(row.get("lcb80_r_t3"), 2),
+                n=row.get("observed_probability_n") or "-",
                 score=round_or_none(row.get("rank_score")) or 0.0,
             )
         )
@@ -1306,7 +1396,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Top Ranked",
         "",
-        "| Rank | Symbol | Name | Industry | Score | Sleeve | Tier | Headline | Knife | EV | LCB80 | ResidualZ | 20D | Flow | NetMF/Circ | LimitTouch | Turnover | Reason |",
+        "| Rank | Symbol | Name | Industry | Score | Source | Tier | ExpR | LCBR | Hit | Stop | n | Headline | Knife | EV | LCB80 | Flow | Reason |",
         "|---:|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:
@@ -1314,24 +1404,24 @@ def render_markdown(payload: dict[str, Any]) -> str:
         if len(reason) > 70:
             reason = reason[:67] + "..."
         lines.append(
-            "| {rank} | {symbol} | {name} | {industry} | {score:.2f} | {sleeve} | {tier} | {headline} | {knife} | {ev} | {lcb} | {resid} | {ret20} | {flow} | {netmf} | {touch} | {turnover} | {reason} |".format(
+            "| {rank} | {symbol} | {name} | {industry} | {score:.2f} | {source} | {tier} | {expr} | {lcbr} | {hit} | {stop} | {n} | {headline} | {knife} | {ev} | {lcb} | {flow} | {reason} |".format(
                 rank=row.get("rank"),
                 symbol=row.get("symbol") or "",
                 name=row.get("name") or "",
                 industry=row.get("industry") or "",
                 score=round_or_none(row.get("rank_score")) or 0.0,
-                sleeve=row.get("alpha_sleeve_id") or "rank_only",
+                source=row.get("alpha_sleeve_id") or row.get("observed_lifecycle_sleeve_id") or "rank_only",
                 tier=row.get("production_tier") or "",
+                expr=fmt_num(row.get("expected_r_t3"), 2),
+                lcbr=fmt_num(row.get("lcb80_r_t3"), 2),
+                hit=fmt_num(None if row.get("p_hit_1r_t3") is None else float(row.get("p_hit_1r_t3")) * 100.0, 0),
+                stop=fmt_num(None if row.get("p_stop_t3") is None else float(row.get("p_stop_t3")) * 100.0, 0),
+                n=row.get("observed_probability_n") or "-",
                 headline=fmt_num((round_or_none(row.get("headline_risk")) or 0.0) * 100.0, 0),
                 knife=fmt_num(row.get("falling_knife_score"), 0),
                 ev=fmt_pct(row.get("ev_pct")),
                 lcb=fmt_pct(row.get("ev_lcb80_pct")),
-                resid=fmt_num(row.get("denoise_residual_zscore"), 2),
-                ret20=fmt_pct(row.get("log_return_20d_pct")),
                 flow=fmt_num(row.get("flow_information_score"), 2),
-                netmf=fmt_pct(row.get("net_mf_pct_circ_mv"), 3),
-                touch=fmt_pct(None if row.get("p_touch_limit") is None else float(row.get("p_touch_limit")) * 100.0),
-                turnover=fmt_num(row.get("turnover_rate"), 2),
                 reason=reason,
             )
         )
@@ -1348,7 +1438,8 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Operating Rule",
         "",
-        "- Only `cn_oversold_ev_positive` rows can become probe candidates.",
+        "- `cn_oversold_ev_positive` remains the proven Alpha Factory sleeve.",
+        "- `cn_observed_lifecycle_prob` rows can become tiny observed probes when historical analog probability is positive.",
         "- Top 5 sleeve rows: planned-entry probe; top-5 basket default <= 1R.",
         "- Rank 6-10 sleeve rows: only after pullback or intraday confirmation.",
         "- Non-sleeve oversold rows remain ranked watch with 0R default size.",
@@ -1371,10 +1462,18 @@ def write_duckdb(path: Path, rows: list[dict[str, Any]], as_of: date) -> None:
                 industry VARCHAR,
                 rank_score DOUBLE,
                 alpha_sleeve_id VARCHAR,
+                observed_lifecycle_sleeve_id VARCHAR,
+                execution_source VARCHAR,
                 alpha_factory_role VARCHAR,
                 production_tier VARCHAR,
                 production_action VARCHAR,
                 size_hint VARCHAR,
+                expected_r_t3 DOUBLE,
+                lcb80_r_t3 DOUBLE,
+                p_win_t1 DOUBLE,
+                p_hit_1r_t3 DOUBLE,
+                p_stop_t3 DOUBLE,
+                observed_probability_n INTEGER,
                 ev_pct DOUBLE,
                 ev_lcb80_pct DOUBLE,
                 denoise_residual_zscore DOUBLE,
@@ -1391,7 +1490,7 @@ def write_duckdb(path: Path, rows: list[dict[str, Any]], as_of: date) -> None:
         con.executemany(
             """
             INSERT INTO cn_opportunity_ranker VALUES (
-                CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             [
@@ -1403,10 +1502,18 @@ def write_duckdb(path: Path, rows: list[dict[str, Any]], as_of: date) -> None:
                     row.get("industry"),
                     row.get("rank_score"),
                     row.get("alpha_sleeve_id"),
+                    row.get("observed_lifecycle_sleeve_id"),
+                    row.get("execution_source"),
                     row.get("alpha_factory_role"),
                     row.get("production_tier"),
                     row.get("production_action"),
                     row.get("size_hint"),
+                    row.get("expected_r_t3"),
+                    row.get("lcb80_r_t3"),
+                    row.get("p_win_t1"),
+                    row.get("p_hit_1r_t3"),
+                    row.get("p_stop_t3"),
+                    row.get("observed_probability_n"),
                     row.get("ev_pct"),
                     row.get("ev_lcb80_pct"),
                     row.get("denoise_residual_zscore"),

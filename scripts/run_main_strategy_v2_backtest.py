@@ -31,7 +31,7 @@ QUANT_V1_SRC = STACK_ROOT / "quant-research-v1" / "src"
 if str(QUANT_V1_SRC) not in sys.path:
     sys.path.insert(0, str(QUANT_V1_SRC))
 
-from quant_bot.analytics import cn_opportunity_ranker, us_opportunity_ranker  # noqa: E402
+from quant_bot.analytics import cn_observed_lifecycle_prob, cn_opportunity_ranker, us_opportunity_ranker  # noqa: E402
 
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2"
 DEFAULT_START = "2026-03-01"
@@ -51,6 +51,7 @@ CN_LIFECYCLE_BUCKET_ORDER = ["T+1", "T+2", "T+3", "T+4-T+5", "T+6-T+10", ">T+10"
 CN_MANUAL_MICRO_PROBE_R = 0.05
 CN_EXECUTION_ALPHA_STATE = "positive_ev_setup"
 CN_ALPHA_FACTORY_EXECUTION_SLEEVE = "cn_oversold_ev_positive"
+CN_OBSERVED_LIFECYCLE_SLEEVE = cn_observed_lifecycle_prob.OBSERVED_LIFECYCLE_SLEEVE
 US_ALPHA_FACTORY_EXECUTION_SLEEVE = "us_v2_stock_probe"
 CN_LOG_DENOISE_METRICS = [
     "log_return_20d_pct",
@@ -1229,8 +1230,19 @@ def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
     current_rows, current_date, current_status = load_cn_current_rows(db_path, as_of)
     current_symbols = sorted({str(row.get("symbol") or "") for row in current_rows if row.get("symbol")})
     current_log_features = load_cn_log_denoise_features(db_path, current_date or as_of, current_symbols)
+    observed_lifecycle = cn_observed_lifecycle_prob.build_probability_payload(
+        db_path=db_path,
+        start=start,
+        as_of=current_date or as_of,
+        current_rows=current_rows,
+    )
+    observed_by_symbol = {
+        str(symbol or "").upper(): values
+        for symbol, values in (observed_lifecycle.get("by_symbol") or {}).items()
+    }
     current: list[dict[str, Any]] = []
     for row in current_rows:
+        symbol = str(row.get("symbol") or "").upper()
         family = str(row.get("strategy_family") or "")
         action = str(row.get("action_intent") or "")
         lcb80 = round_or_none(row.get("ev_lcb_80_pct"))
@@ -1256,6 +1268,7 @@ def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
             continue
         gate_summary = cn_current_gate_summary(row)
         log_features = current_log_features.get(str(row.get("symbol") or ""), {})
+        observed_features = observed_by_symbol.get(symbol, {})
         log_overlay = cn_log_denoise_report_action(log_features, state=state, gate_summary=gate_summary)
         plan = cn_price_plan(row)
         current.append(
@@ -1294,6 +1307,20 @@ def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
                 "fft_signal_to_noise": log_features.get("fft_signal_to_noise"),
                 "haar_noise_energy": log_features.get("haar_noise_energy"),
                 "log_denoise_overlay": log_overlay,
+                "p_win_t1": observed_features.get("p_win_t1"),
+                "p_hit_1r_t3": observed_features.get("p_hit_1r_t3"),
+                "p_stop_t3": observed_features.get("p_stop_t3"),
+                "expected_r_t3": observed_features.get("expected_r_t3"),
+                "lcb80_r_t3": observed_features.get("lcb80_r_t3"),
+                "observed_probability_n": observed_features.get("observed_probability_n"),
+                "observed_probability_t3_n": observed_features.get("observed_probability_t3_n"),
+                "observed_probability_bucket": observed_features.get("observed_probability_bucket"),
+                "observed_probability_source": observed_features.get("observed_probability_source"),
+                "observed_lifecycle_tier": observed_features.get("observed_lifecycle_tier"),
+                "observed_lifecycle_qualified": observed_features.get("observed_lifecycle_qualified"),
+                "observed_lifecycle_sleeve_id": observed_features.get("observed_lifecycle_sleeve_id"),
+                "observed_lifecycle_reason": observed_features.get("observed_lifecycle_reason"),
+                "suggested_hold_days": observed_features.get("suggested_hold_days"),
                 "reason": reason,
             }
         )
@@ -1309,6 +1336,7 @@ def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
         },
         "freshness": freshness,
         "lifecycle": lifecycle,
+        "observed_lifecycle_prob": observed_lifecycle,
         "current": current,
     }
 
@@ -1432,14 +1460,16 @@ def render_current_table(rows: list[dict[str, Any]], market: str) -> list[str]:
         return lines
 
     lines = [
-        "| State | Code | Name | Rank | Tier | Action | Observation entry | Handling line | First target | EV | EV80 | Evidence context | Log overlay | Lifecycle action | Time exit | T+1 risk |",
-        "|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---|---|---|",
+        "| State | Code | Name | Rank | Tier | Action | ExpR | LCBR | Obs n | Observation entry | Handling line | First target | EV | EV80 | Evidence context | Log overlay | Lifecycle action | Time exit | T+1 risk |",
+        "|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|---|",
     ]
     for row in rows[:16]:
         lines.append(
             f"| {row['state']} | {row['symbol']} | {row.get('name') or '-'} | "
             f"{row.get('production_rank') or '-'} | {row.get('production_tier') or '-'} | "
             f"{row.get('production_action') or '-'} | "
+            f"{fmt_num(row.get('expected_r_t3'))} | {fmt_num(row.get('lcb80_r_t3'))} | "
+            f"{row.get('observed_probability_n') or '-'} | "
             f"{row.get('observation_entry_zone') or '-'} | {fmt_num(row.get('handling_line'))} | "
             f"{fmt_num(row.get('first_target'))} | {fmt_pct(row.get('ev_pct'))} | "
             f"{fmt_pct(row.get('ev_lcb80_pct'))} | {row.get('gate_summary') or '-'} | "
@@ -1609,6 +1639,17 @@ def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: di
     us_metric_ok = metrics_gate_passes(us_v2, min_n=20, min_dates=10, max_drawdown_floor_pct=-8.0)
     us_stock_ok = metrics_gate_passes(us_stock, min_n=20, min_dates=8, max_drawdown_floor_pct=-8.0)
     cn_metric_ok = metrics_gate_passes(cn_v2, min_n=200, min_dates=10, max_drawdown_floor_pct=-8.0)
+    cn_current_rows = cn.get("current") or []
+    cn_alpha_factory_ea = sum(
+        1
+        for row in cn_current_rows
+        if row.get("state") == "Execution Alpha" and row.get("alpha_sleeve_id") == CN_ALPHA_FACTORY_EXECUTION_SLEEVE
+    )
+    cn_observed_ea = sum(
+        1
+        for row in cn_current_rows
+        if row.get("state") == "Execution Alpha" and row.get("observed_lifecycle_sleeve_id") == CN_OBSERVED_LIFECYCLE_SLEEVE
+    )
 
     if us_counts.get("Execution Alpha", 0) > 0 and us_metric_ok:
         us_state = "tradeable_small"
@@ -1627,9 +1668,12 @@ def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: di
         us_state = "no_current_setup"
         us_size = "0R"
 
-    if cn_counts.get("Execution Alpha", 0) > 0 and cn_metric_ok and cn_lifecycle_ok:
+    if cn_alpha_factory_ea > 0 and cn_metric_ok and cn_lifecycle_ok:
         cn_state = "conditional_small"
         cn_size = "0.25R/name; 1R basket cap; planned-entry only"
+    elif cn_observed_ea > 0 and cn_lifecycle_ok:
+        cn_state = "observed_lifecycle_probe"
+        cn_size = "0.05R/name max; 0.40R observed basket cap; planned-entry only"
     elif cn_counts.get("Positive EV Setup", 0) > 0 and cn_lifecycle_ok:
         cn_state = "opportunity_probe"
         cn_size = "0.05R/name; 0.25R basket cap; planned-entry only"
@@ -1658,10 +1702,11 @@ def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: di
             "why": (
                 f"V2 LCB80 {fmt_pct(cn_v2.get('lcb80_pct'))}, freshness={cn_fresh.get('state') or '-'}, "
                 f"lifecycle={cn_lifecycle_policy.get('best_bucket') or '-'} / T+{cn_lifecycle_policy.get('max_hold_days') or '-'}, "
-                f"current Execution Alpha={cn_counts.get('Execution Alpha', 0)}, "
+                f"current Execution Alpha={cn_counts.get('Execution Alpha', 0)}, alpha_factory_EA={cn_alpha_factory_ea}, "
+                f"observed_EA={cn_observed_ea}, "
                 f"Positive EV Setup={cn_counts.get('Positive EV Setup', 0)}"
             ),
-            "kill_switch": f"Only `{CN_ALPHA_FACTORY_EXECUTION_SLEEVE}` plus production probe tier can receive new money.",
+            "kill_switch": f"Only `{CN_ALPHA_FACTORY_EXECUTION_SLEEVE}` or `{CN_OBSERVED_LIFECYCLE_SLEEVE}` plus production probe tier can receive new money.",
         },
         {
             "market": "Limit-Up",
@@ -1898,6 +1943,7 @@ def build_pipeline_requirements_audit(payload: dict[str, Any]) -> dict[str, Any]
     cn_ea = _current_state_count(cn_current, "Execution Alpha")
     us_ea = _current_state_count(us_current, "Execution Alpha")
     cn_sleeve_rows = [row for row in cn_ranker_rows if row.get("alpha_sleeve_id") == CN_ALPHA_FACTORY_EXECUTION_SLEEVE]
+    cn_observed_rows = [row for row in cn_ranker_rows if row.get("observed_lifecycle_qualified")]
     cn_event_rows = [row for row in cn_ranker_rows if row.get("production_tier") == "event_risk_watch"]
     us_event_rows = [row for row in us_ranker_rows if row.get("production_tier") == "event_risk_watch"]
     cn_probability_keys = {
@@ -1917,10 +1963,11 @@ def build_pipeline_requirements_audit(payload: dict[str, Any]) -> dict[str, Any]
             "evidence": (
                 f"current_total={len(cn_current)}, current_EA={cn_ea}, "
                 f"ranker_sleeve_rows={len(cn_sleeve_rows)}, "
+                f"observed_qualified={len(cn_observed_rows)}, "
                 f"historical_lcb80={fmt_pct((cn.get('metrics') or {}).get('v2', {}).get('lcb80_pct'))}"
             ),
-            "requirement": "Current producer must either emit `cn_oversold_ev_positive` members or explicitly declare no-trade.",
-            "next_change": "Add daily reconciliation: current candidates vs Alpha Factory sleeve membership, with top missing reasons.",
+            "requirement": "Current producer must either emit `cn_oversold_ev_positive`, qualify via observed lifecycle probability, or explicitly declare no-trade.",
+            "next_change": "Keep daily reconciliation: current candidates vs Alpha Factory sleeve and observed probability sleeve, with top missing reasons.",
         },
         {
             "priority": 2,
@@ -1928,7 +1975,7 @@ def build_pipeline_requirements_audit(payload: dict[str, Any]) -> dict[str, Any]
             "state": "pass_observed_probability" if has_cn_observed_probability else "fail_missing_observed_probability",
             "evidence": "current/ranker rows do not expose p_win_t1, p_hit_1r_t3, p_stop_t3, expected_r_t3, lcb80_r_t3"
             if not has_cn_observed_probability
-            else "observed probability fields present on CN current/ranker rows",
+            else f"observed probability fields present; qualified={len(cn_observed_rows)}",
             "requirement": "Ranker action must be driven by observed historical analog probabilities, not only strategy labels.",
             "next_change": "Build `cn_observed_lifecycle_prob`: state vector -> nearest historical buckets -> expected R / LCB / hold-days.",
         },
@@ -2528,10 +2575,20 @@ def build_portfolio_risk_overlay(
     for row in cn.get("current") or []:
         if row.get("state") not in {"Execution Alpha", "Positive EV Setup"}:
             continue
-        base_r = 0.25 if row.get("state") == "Execution Alpha" else 0.10
-        risk_reasons: list[str] = []
-        if not cn_allows_auto:
+        production_tier = str(row.get("production_tier") or "")
+        if production_tier == "observed_lifecycle_probe":
             base_r = 0.05
+        elif production_tier == "observed_lifecycle_secondary":
+            base_r = 0.03
+        elif production_tier == "observed_lifecycle_micro_probe":
+            base_r = 0.02
+        else:
+            base_r = 0.25 if row.get("state") == "Execution Alpha" else 0.10
+        risk_reasons: list[str] = []
+        if production_tier.startswith("observed_lifecycle"):
+            risk_reasons.append("observed_lifecycle_tiny_size")
+        if not cn_allows_auto:
+            base_r = min(base_r, 0.05)
             risk_reasons.append(f"profit_guardrail_{cn_profit_state or 'missing'}")
         rows.append(
             {
@@ -2547,6 +2604,11 @@ def build_portfolio_risk_overlay(
                 "handling_line": row.get("handling_line"),
                 "first_target": row.get("first_target"),
                 "lifecycle_action": row.get("lifecycle_action"),
+                "production_tier": row.get("production_tier"),
+                "execution_source": row.get("execution_source"),
+                "expected_r_t3": row.get("expected_r_t3"),
+                "lcb80_r_t3": row.get("lcb80_r_t3"),
+                "observed_probability_n": row.get("observed_probability_n"),
                 "time_exit": row.get("time_exit"),
                 "max_hold_days": row.get("max_hold_days"),
                 "base_r": base_r,
@@ -3127,18 +3189,21 @@ def render_cn_opportunity_ranker_section(payload: dict[str, Any]) -> list[str]:
     lines = [
         "## A 股生产排序 / CN Production Ranker",
         "",
-        "`cn_oversold_ev_positive` 是当前唯一可执行 Alpha Factory sleeve；其他 oversold 默认 ranked watch。新闻事件风险、falling-knife、资金流、执行质量共同决定排序和 0R/可 probe 动作。",
+        "`cn_oversold_ev_positive` 是 Alpha Factory 已证明 sleeve；`cn_observed_lifecycle_prob` 是当前新增的历史相似观测概率 sleeve。新闻事件风险、falling-knife、资金流、执行质量共同决定排序和 0R/可 probe 动作。",
         "",
-        "| Rank | Symbol | Name | Sleeve | Tier | Action | Score | Headline | Knife | Flow | Entry |",
-        "|---:|---|---|---|---|---|---:|---:|---:|---:|---|",
+        "| Rank | Symbol | Name | Source | Tier | Action | Score | ExpR | LCBR | Obs n | Headline | Knife | Flow | Entry |",
+        "|---:|---|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows[:12]:
         headline = round_or_none(row.get("headline_risk"))
         lines.append(
             f"| {row.get('rank')} | {row.get('symbol')} | {row.get('name') or '-'} | "
-            f"{row.get('alpha_sleeve_id') or 'rank_only'} | "
+            f"{row.get('alpha_sleeve_id') or row.get('observed_lifecycle_sleeve_id') or 'rank_only'} | "
             f"{row.get('production_tier')} | {row.get('production_action')} | "
             f"{fmt_num(row.get('rank_score'))} | "
+            f"{fmt_num(row.get('expected_r_t3'))} | "
+            f"{fmt_num(row.get('lcb80_r_t3'))} | "
+            f"{row.get('observed_probability_n') or '-'} | "
             f"{fmt_num(None if headline is None else headline * 100.0, 0)} | "
             f"{fmt_num(row.get('falling_knife_score'), 0)} | "
             f"{fmt_num(row.get('flow_information_score'))} | "
@@ -3446,8 +3511,12 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
             CREATE TABLE IF NOT EXISTS cn_opportunity_ranker (
                 as_of DATE, rank INTEGER, symbol VARCHAR, name VARCHAR,
                 industry VARCHAR, rank_score DOUBLE, alpha_sleeve_id VARCHAR,
+                observed_lifecycle_sleeve_id VARCHAR, execution_source VARCHAR,
                 alpha_factory_role VARCHAR, production_tier VARCHAR,
-                production_action VARCHAR, headline_risk DOUBLE,
+                production_action VARCHAR, expected_r_t3 DOUBLE,
+                lcb80_r_t3 DOUBLE, p_win_t1 DOUBLE, p_hit_1r_t3 DOUBLE,
+                p_stop_t3 DOUBLE, observed_probability_n INTEGER,
+                headline_risk DOUBLE,
                 falling_knife_score DOUBLE, payload_json VARCHAR
             )
             """
@@ -3618,7 +3687,7 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
             )
         for row in (payload.get("cn_opportunity_ranker") or {}).get("all_rows") or []:
             con.execute(
-                "INSERT INTO cn_opportunity_ranker VALUES (CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO cn_opportunity_ranker VALUES (CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 [
                     payload["as_of"],
                     row.get("rank"),
@@ -3627,9 +3696,17 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
                     row.get("industry") or "",
                     row.get("rank_score"),
                     row.get("alpha_sleeve_id"),
+                    row.get("observed_lifecycle_sleeve_id"),
+                    row.get("execution_source"),
                     row.get("alpha_factory_role"),
                     row.get("production_tier"),
                     row.get("production_action"),
+                    row.get("expected_r_t3"),
+                    row.get("lcb80_r_t3"),
+                    row.get("p_win_t1"),
+                    row.get("p_hit_1r_t3"),
+                    row.get("p_stop_t3"),
+                    row.get("observed_probability_n"),
                     row.get("headline_risk"),
                     row.get("falling_knife_score"),
                     json.dumps(row, ensure_ascii=False, default=str),
@@ -3680,6 +3757,18 @@ def apply_us_ranker_to_current(us: dict[str, Any], ranker: dict[str, Any]) -> No
         row["latest_headline"] = ranked.get("latest_headline")
         row["alpha_sleeve_id"] = ranked.get("alpha_sleeve_id")
         row["alpha_factory_role"] = ranked.get("alpha_factory_role")
+        row["execution_source"] = ranked.get("execution_source")
+        row["observed_lifecycle_sleeve_id"] = ranked.get("observed_lifecycle_sleeve_id")
+        row["observed_lifecycle_qualified"] = ranked.get("observed_lifecycle_qualified")
+        row["observed_lifecycle_tier"] = ranked.get("observed_lifecycle_tier")
+        row["observed_lifecycle_reason"] = ranked.get("observed_lifecycle_reason")
+        row["expected_r_t3"] = ranked.get("expected_r_t3")
+        row["lcb80_r_t3"] = ranked.get("lcb80_r_t3")
+        row["p_win_t1"] = ranked.get("p_win_t1")
+        row["p_hit_1r_t3"] = ranked.get("p_hit_1r_t3")
+        row["p_stop_t3"] = ranked.get("p_stop_t3")
+        row["observed_probability_n"] = ranked.get("observed_probability_n")
+        row["suggested_hold_days"] = ranked.get("suggested_hold_days")
         tier = str(ranked.get("production_tier") or "")
         if tier == "event_risk_watch":
             row["state"] = "Event Risk Watch"
@@ -3732,11 +3821,20 @@ def apply_cn_ranker_to_current(cn: dict[str, Any], ranker: dict[str, Any]) -> No
             row["execution_mode"] = "wait_for_flow_reversal"
             row["lifecycle_action"] = "rank_only_no_new_trade"
             row["reason"] = "production ranker demoted to 0R: falling-knife risk without enough confirmation"
+        elif tier in {"observed_lifecycle_probe", "observed_lifecycle_secondary", "observed_lifecycle_micro_probe"}:
+            row["state"] = "Execution Alpha"
+            row["execution_mode"] = ranked.get("production_action") or "planned_entry_observed_probe"
+            row["lifecycle_action"] = ranked.get("production_action") or row.get("lifecycle_action")
+            row["reason"] = (
+                f"Observed lifecycle probability sleeve {CN_OBSERVED_LIFECYCLE_SLEEVE}; "
+                f"ExpR={fmt_num(ranked.get('expected_r_t3'))}, LCBR={fmt_num(ranked.get('lcb80_r_t3'))}, "
+                f"n={ranked.get('observed_probability_n')}"
+            )
         elif ranked.get("alpha_sleeve_id") != CN_ALPHA_FACTORY_EXECUTION_SLEEVE:
             row["state"] = "Ranked Watch"
             row["execution_mode"] = "rank_only_no_new_trade"
             row["lifecycle_action"] = "rank_only_no_new_trade"
-            row["reason"] = "production ranker kept at 0R: not a current Alpha Factory execution sleeve member"
+            row["reason"] = "production ranker kept at 0R: no Alpha Factory sleeve and no qualified observed lifecycle probability"
         elif tier in {"top_probe", "secondary_probe"}:
             row["state"] = "Execution Alpha"
             row["lifecycle_action"] = ranked.get("production_action") or row.get("lifecycle_action")
