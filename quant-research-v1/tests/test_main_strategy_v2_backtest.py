@@ -227,6 +227,8 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
             self.assertTrue((output_dir / "cn_lifecycle_research.json").exists())
             self.assertTrue((output_dir / "profit_readiness.md").exists())
             self.assertTrue((output_dir / "profit_readiness.json").exists())
+            self.assertTrue((output_dir / "pipeline_requirements_audit.md").exists())
+            self.assertTrue((output_dir / "pipeline_requirements_audit.json").exists())
             self.assertTrue((output_dir / "us_opportunity_ranker.md").exists())
             self.assertTrue((output_dir / "us_opportunity_ranker.json").exists())
             self.assertTrue((output_dir / "us_opportunity_ranker.duckdb").exists())
@@ -235,6 +237,7 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
             self.assertTrue((output_dir / "cn_opportunity_ranker.duckdb").exists())
             self.assertIn("## 赚钱优先裁决 / Profit Guardrails", text)
             self.assertIn("## 赚钱落地缺口 / Profit Readiness", text)
+            self.assertIn("## 管线需求审计 / Pipeline Requirements Audit", text)
             self.assertIn("## 策略方向裁决 / Strategy Direction", text)
             self.assertIn("## 组合风险覆盖 / Portfolio Risk Overlay", text)
             self.assertIn("## US Option Shadow PnL Ledger", text)
@@ -254,6 +257,7 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
             self.assertIn("option_shadow_ledger", payload)
             self.assertIn("lifecycle", payload["cn"])
             self.assertIn("profit_readiness", payload)
+            self.assertIn("pipeline_requirements_audit", payload)
             self.assertIn("missed_alpha_radar", payload["us"])
             self.assertIn("us_opportunity_ranker", payload)
             self.assertIn("cn_opportunity_ranker", payload)
@@ -275,6 +279,7 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
                 ledger_count = con.execute("SELECT COUNT(*) FROM option_shadow_ledger").fetchone()[0]
                 lifecycle_count = con.execute("SELECT COUNT(*) FROM cn_lifecycle_research").fetchone()[0]
                 readiness_count = con.execute("SELECT COUNT(*) FROM profit_readiness").fetchone()[0]
+                audit_count = con.execute("SELECT COUNT(*) FROM pipeline_requirements_audit").fetchone()[0]
                 us_ranker_count = con.execute("SELECT COUNT(*) FROM us_opportunity_ranker").fetchone()[0]
                 cn_ranker_count = con.execute("SELECT COUNT(*) FROM cn_opportunity_ranker").fetchone()[0]
             finally:
@@ -284,6 +289,7 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
             self.assertGreaterEqual(ledger_count, 1)
             self.assertGreaterEqual(lifecycle_count, 1)
             self.assertGreaterEqual(readiness_count, 1)
+            self.assertGreaterEqual(audit_count, 1)
             self.assertGreaterEqual(us_ranker_count, 1)
             self.assertGreaterEqual(cn_ranker_count, 1)
 

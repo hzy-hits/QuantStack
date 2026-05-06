@@ -1774,23 +1774,28 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
     )
     cn_final_r = _overlay_final_r(overlay, "CN")
     cn_manual_r = _overlay_manual_probe_r(overlay, "CN")
-    cn_next_step = (
-        "Opportunity mode: use planned-entry/pullback when available; if the setup is live, it can receive probe size without waiting for a separate audit upgrade."
-        if cn_manual_r <= 0
-        else "Do not chase open. If using micro-probe, cap at 0.05R, require planned-entry/pullback fill, and record fill/exit in CN live ledger."
-    )
+    cn_ea_count = count_current_states(cn_current).get("Execution Alpha", 0)
+    if cn_ea_count <= 0:
+        cn_state = "no_current_execution_sleeve"
+        cn_next_step = "Fix current-pool generation/probability layer: today's CN rows do not map to `cn_oversold_ev_positive`, so production size is correctly 0R."
+    elif cn_manual_r > 0:
+        cn_state = "manual_micro_probe_ready"
+        cn_next_step = "Do not chase open. If using micro-probe, cap at 0.05R, require planned-entry/pullback fill, and record fill/exit in CN live ledger."
+    else:
+        cn_state = "probe_ready"
+        cn_next_step = "Use planned-entry/pullback for current execution-sleeve names; record fills/exits in CN live ledger."
     option_summary = (option_ledger.get("summary") or {}).get("overall_long") or {}
     limit_perf = limit_up.get("performance") or {}
 
     rows = [
         {
             "area": "CN main alpha",
-            "state": "manual_micro_probe_ready" if cn_manual_r > 0 else "probe_ready",
+            "state": cn_state,
             "allowed_now": cn_guard.get("max_auto_size") or "0R",
             "evidence": (
                 f"LCB80 {fmt_pct((cn.get('metrics') or {}).get('v2', {}).get('lcb80_pct'))}; "
                 f"lifecycle {((cn.get('lifecycle') or {}).get('policy') or {}).get('best_bucket') or '-'}; "
-                f"current EA={count_current_states(cn_current).get('Execution Alpha', 0)}"
+                f"current EA={cn_ea_count}"
             ),
             "blocker": (
                 f"portfolio final CN R={fmt_num(cn_final_r, 4)}; manual probe R={fmt_num(cn_manual_r, 4)}; "
@@ -1865,9 +1870,112 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
         "summary": {
             "money_ready_lines": len(money_ready),
             "highest_priority_blocker": rows[0]["blocker"],
-            "today_bias": "CN research edge first, US stock probe only after book cleanup; options and limit-up stay shadow/radar",
+            "today_bias": (
+                "US stock probe only; CN has no current execution-sleeve member; options and limit-up stay shadow/radar"
+                if cn_ea_count <= 0
+                else "CN execution sleeve plus US stock probe; options and limit-up stay shadow/radar"
+            ),
         },
         "rows": sorted(rows, key=lambda row: int(row.get("priority") or 99)),
+    }
+
+
+def _current_state_count(rows: list[dict[str, Any]], state: str) -> int:
+    return sum(1 for row in rows if row.get("state") == state)
+
+
+def build_pipeline_requirements_audit(payload: dict[str, Any]) -> dict[str, Any]:
+    cn = payload.get("cn") or {}
+    us = payload.get("us") or {}
+    cn_current = cn.get("current") or []
+    us_current = us.get("current") or []
+    cn_ranker_rows = (payload.get("cn_opportunity_ranker") or {}).get("all_rows") or []
+    us_ranker_rows = (payload.get("us_opportunity_ranker") or {}).get("all_rows") or []
+    option_ledger = payload.get("option_shadow_ledger") or {}
+    readiness_rows = (payload.get("profit_readiness") or {}).get("rows") or []
+    live_row = next((row for row in readiness_rows if row.get("area") == "Live execution ledger"), {})
+
+    cn_ea = _current_state_count(cn_current, "Execution Alpha")
+    us_ea = _current_state_count(us_current, "Execution Alpha")
+    cn_sleeve_rows = [row for row in cn_ranker_rows if row.get("alpha_sleeve_id") == CN_ALPHA_FACTORY_EXECUTION_SLEEVE]
+    cn_event_rows = [row for row in cn_ranker_rows if row.get("production_tier") == "event_risk_watch"]
+    us_event_rows = [row for row in us_ranker_rows if row.get("production_tier") == "event_risk_watch"]
+    cn_probability_keys = {
+        "p_win_t1",
+        "p_hit_1r_t3",
+        "p_stop_t3",
+        "expected_r_t3",
+        "lcb80_r_t3",
+        "observed_probability_bucket",
+    }
+    has_cn_observed_probability = any(cn_probability_keys & set(row) for row in [*cn_current, *cn_ranker_rows])
+    rows = [
+        {
+            "priority": 1,
+            "area": "CN current-pool to sleeve bridge",
+            "state": "fail_no_current_execution_sleeve" if cn_ea <= 0 else "pass_current_execution_sleeve",
+            "evidence": (
+                f"current_total={len(cn_current)}, current_EA={cn_ea}, "
+                f"ranker_sleeve_rows={len(cn_sleeve_rows)}, "
+                f"historical_lcb80={fmt_pct((cn.get('metrics') or {}).get('v2', {}).get('lcb80_pct'))}"
+            ),
+            "requirement": "Current producer must either emit `cn_oversold_ev_positive` members or explicitly declare no-trade.",
+            "next_change": "Add daily reconciliation: current candidates vs Alpha Factory sleeve membership, with top missing reasons.",
+        },
+        {
+            "priority": 2,
+            "area": "CN observed probability layer",
+            "state": "pass_observed_probability" if has_cn_observed_probability else "fail_missing_observed_probability",
+            "evidence": "current/ranker rows do not expose p_win_t1, p_hit_1r_t3, p_stop_t3, expected_r_t3, lcb80_r_t3"
+            if not has_cn_observed_probability
+            else "observed probability fields present on CN current/ranker rows",
+            "requirement": "Ranker action must be driven by observed historical analog probabilities, not only strategy labels.",
+            "next_change": "Build `cn_observed_lifecycle_prob`: state vector -> nearest historical buckets -> expected R / LCB / hold-days.",
+        },
+        {
+            "priority": 3,
+            "area": "CN news/event binding",
+            "state": "partial_event_watch_active" if cn_event_rows else "partial_no_event_flags_today",
+            "evidence": f"event_risk_watch={len(cn_event_rows)}; top_event={((cn_event_rows[0] if cn_event_rows else {}) or {}).get('symbol') or '-'}",
+            "requirement": "Every current symbol needs structured headline risk attached before any production action.",
+            "next_change": "Keep `news_enriched` primary; fail visible if a ranked current row has stale/missing news coverage.",
+        },
+        {
+            "priority": 4,
+            "area": "US production ranker",
+            "state": "pass_stock_probe_ready" if us_ea > 0 else "fail_no_us_execution_rows",
+            "evidence": f"current_total={len(us_current)}, current_EA={us_ea}, event_risk_watch={len(us_event_rows)}",
+            "requirement": "`rank_score/headline_risk/options_quality/production_action` must exist for US current rows.",
+            "next_change": "Keep legacy HIGH/MOD rank-only unless Alpha Factory promotes it; improve missing R:R/options quality coverage.",
+        },
+        {
+            "priority": 5,
+            "area": "Options execution ledger",
+            "state": "fail_no_resolved_option_pnl" if int(option_ledger.get("resolved_count") or 0) <= 0 else "pass_option_pnl_present",
+            "evidence": f"resolved={option_ledger.get('resolved_count', 0)}, unresolved={option_ledger.get('unresolved_count', 0)}",
+            "requirement": "Option recommendations need bid/ask leg PnL before options become production alpha.",
+            "next_change": "Persist options_chain_quotes and option leg selections daily; keep stock probe separate until then.",
+        },
+        {
+            "priority": 6,
+            "area": "Live execution ledger",
+            "state": "fail_missing_cn_live_fills" if "missing" in str(live_row.get("blocker") or "").lower() else "partial_live_ledger",
+            "evidence": live_row.get("blocker") or "-",
+            "requirement": "Every production action must be reconciled to fill/slippage/exit, especially CN T+1.",
+            "next_change": "Set QUANT_CN_ACTIVITY_CSV and store realized fill/exit into the daily review DB.",
+        },
+    ]
+    failing = [row for row in rows if str(row.get("state") or "").startswith("fail")]
+    return {
+        "as_of": payload["as_of"],
+        "summary": {
+            "fail_count": len(failing),
+            "top_blocker": (failing[0] if failing else rows[0]).get("area"),
+            "production_bias": "US only today; CN is research/ranked-watch until current-pool bridge and observed probability layer are fixed"
+            if cn_ea <= 0
+            else "CN and US both have execution rows; size still controlled by ranker and live ledger",
+        },
+        "rows": rows,
     }
 
 
@@ -1908,6 +2016,53 @@ def render_profit_readiness_section(payload: dict[str, Any]) -> list[str]:
         lines.append(
             f"| {row.get('priority')} | {row.get('area')} | {row.get('state')} | "
             f"{row.get('allowed_now')} | {row.get('blocker')} | {row.get('next_step')} |"
+        )
+    lines.append("")
+    return lines
+
+
+def render_pipeline_requirements_audit(payload: dict[str, Any]) -> str:
+    audit = payload.get("pipeline_requirements_audit") or {}
+    summary = audit.get("summary") or {}
+    lines = [
+        f"# Pipeline Requirements Audit - {payload['as_of']}",
+        "",
+        "This is the production-contract audit for the current pipeline. A fail here means the report may rank names, but should not pretend the row is executable.",
+        "",
+        f"- Fail count: `{summary.get('fail_count', 0)}`",
+        f"- Top blocker: {summary.get('top_blocker') or '-'}",
+        f"- Production bias: {summary.get('production_bias') or '-'}",
+        "",
+        "| Priority | Area | State | Evidence | Requirement | Next change |",
+        "|---:|---|---|---|---|---|",
+    ]
+    for row in audit.get("rows") or []:
+        lines.append(
+            f"| {row.get('priority')} | {row.get('area')} | {row.get('state')} | "
+            f"{row.get('evidence')} | {row.get('requirement')} | {row.get('next_change')} |"
+        )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_pipeline_requirements_audit_section(payload: dict[str, Any]) -> list[str]:
+    audit = payload.get("pipeline_requirements_audit") or {}
+    summary = audit.get("summary") or {}
+    lines = [
+        "## 管线需求审计 / Pipeline Requirements Audit",
+        "",
+        "这里专门回答“这套管线有没有实际用”：fail 表示可以观察/排序，但不能把它写成可执行 alpha。",
+        "",
+        f"- Fail count: `{summary.get('fail_count', 0)}`",
+        f"- Top blocker: {summary.get('top_blocker') or '-'}",
+        f"- Production bias: {summary.get('production_bias') or '-'}",
+        "",
+        "| Priority | Area | State | Evidence | Next change |",
+        "|---:|---|---|---|---|",
+    ]
+    for row in audit.get("rows") or []:
+        lines.append(
+            f"| {row.get('priority')} | {row.get('area')} | {row.get('state')} | "
+            f"{row.get('evidence')} | {row.get('next_change')} |"
         )
     lines.append("")
     return lines
@@ -3037,6 +3192,7 @@ def render_report(payload: dict[str, Any]) -> str:
     ]
     lines += render_profit_guardrails(payload.get("profit_guardrails") or [])
     lines += render_profit_readiness_section(payload)
+    lines += render_pipeline_requirements_audit_section(payload)
     lines += [
         "## 策略方向裁决 / Strategy Direction",
         "",
@@ -3204,6 +3360,7 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
     try:
         con.execute("DROP TABLE IF EXISTS cn_opportunity_ranker")
         con.execute("DROP TABLE IF EXISTS us_opportunity_ranker")
+        con.execute("DROP TABLE IF EXISTS pipeline_requirements_audit")
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS strategy_summary (
@@ -3277,6 +3434,15 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
         )
         con.execute(
             """
+            CREATE TABLE IF NOT EXISTS pipeline_requirements_audit (
+                as_of DATE, priority INTEGER, area VARCHAR, state VARCHAR,
+                evidence VARCHAR, requirement VARCHAR, next_change VARCHAR,
+                payload_json VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS cn_opportunity_ranker (
                 as_of DATE, rank INTEGER, symbol VARCHAR, name VARCHAR,
                 industry VARCHAR, rank_score DOUBLE, alpha_sleeve_id VARCHAR,
@@ -3305,6 +3471,7 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
         con.execute("DELETE FROM option_shadow_ledger WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM cn_lifecycle_research WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM profit_readiness WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
+        con.execute("DELETE FROM pipeline_requirements_audit WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM cn_opportunity_ranker WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM us_opportunity_ranker WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         for market in ["us", "cn"]:
@@ -3432,6 +3599,20 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
                     row.get("evidence"),
                     row.get("blocker"),
                     row.get("next_step"),
+                    json.dumps(row, ensure_ascii=False, default=str),
+                ],
+            )
+        for row in (payload.get("pipeline_requirements_audit") or {}).get("rows") or []:
+            con.execute(
+                "INSERT INTO pipeline_requirements_audit VALUES (CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    payload["as_of"],
+                    row.get("priority"),
+                    row.get("area"),
+                    row.get("state"),
+                    row.get("evidence"),
+                    row.get("requirement"),
+                    row.get("next_change"),
                     json.dumps(row, ensure_ascii=False, default=str),
                 ],
             )
@@ -3621,6 +3802,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "option_shadow_ledger": option_shadow_ledger,
     }
     payload["profit_readiness"] = build_profit_readiness(payload)
+    payload["pipeline_requirements_audit"] = build_pipeline_requirements_audit(payload)
     return payload
 
 
@@ -3657,6 +3839,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     (output_dir / "profit_readiness.md").write_text(render_profit_readiness(payload), encoding="utf-8")
     (output_dir / "profit_readiness.json").write_text(
         json.dumps(payload.get("profit_readiness") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    (output_dir / "pipeline_requirements_audit.md").write_text(
+        render_pipeline_requirements_audit(payload),
+        encoding="utf-8",
+    )
+    (output_dir / "pipeline_requirements_audit.json").write_text(
+        json.dumps(payload.get("pipeline_requirements_audit") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
         encoding="utf-8",
     )
     (output_dir / "us_opportunity_ranker.md").write_text(
