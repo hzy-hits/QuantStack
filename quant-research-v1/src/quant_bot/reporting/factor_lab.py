@@ -37,6 +37,9 @@ def _parse_factor_lab_signal(signal_block: str) -> dict[str, Any] | None:
         "status_line": "",
         "trade_date_line": "",
         "factor_name": "",
+        "contract": "research_only",
+        "sleeve": "daily_price_overlay",
+        "money_status": "research_only",
         "hold_days_line": "",
         "cleaning_line": "",
         "rows": [],
@@ -50,6 +53,16 @@ def _parse_factor_lab_signal(signal_block: str) -> dict[str, Any] | None:
             parsed["trade_date_line"] = stripped
         elif (stripped.startswith("依据:") or stripped.startswith("因子:")) and not parsed["factor_name"]:
             parsed["factor_name"] = re.sub(r"^(依据|因子):", "", stripped, count=1).strip()
+        elif ("Contract:" in stripped or "合约:" in stripped) and parsed["contract"] == "research_only":
+            contract_match = re.search(r"(?:Contract|合约):\s*([^|]+)", stripped, re.IGNORECASE)
+            sleeve_match = re.search(r"Sleeve:\s*([^|]+)", stripped, re.IGNORECASE)
+            money_match = re.search(r"money_status:\s*([^|]+)", stripped, re.IGNORECASE)
+            if contract_match:
+                parsed["contract"] = contract_match.group(1).strip()
+            if sleeve_match:
+                parsed["sleeve"] = sleeve_match.group(1).strip()
+            if money_match:
+                parsed["money_status"] = money_match.group(1).strip()
         elif (
             stripped.startswith("2. 持有")
             or stripped.startswith("4. 参考持有窗口")
@@ -90,7 +103,7 @@ def render_factor_lab_report_section(signal_block: str) -> str:
     parsed = _parse_factor_lab_signal(signal_block)
     if parsed:
         summary_bits = [
-            "research prior / recall lead，不是交易指令；不改变主系统结论；未通过主系统 gate 的票只能观察。"
+            "research prior / recall lead，不是交易指令；不改变主系统结论；未通过主系统 V2/EV gate 的票只能观察。"
         ]
         if parsed["status_line"]:
             summary_bits.append(parsed["status_line"])
@@ -98,6 +111,9 @@ def render_factor_lab_report_section(signal_block: str) -> str:
             summary_bits.append(parsed["trade_date_line"])
         if parsed["factor_name"]:
             summary_bits.append(f"当前因子：`{parsed['factor_name']}`。")
+        summary_bits.append(
+            f"contract=`{parsed['contract']}`；sleeve=`{parsed['sleeve']}`；money_status=`{parsed['money_status']}`。"
+        )
         if parsed["hold_days_line"]:
             summary_bits.append(parsed["hold_days_line"])
         if parsed["cleaning_line"]:
@@ -108,12 +124,13 @@ def render_factor_lab_report_section(signal_block: str) -> str:
             "",
             " ".join(summary_bits),
             "",
-            "| 代码 | 名称 | 研究参考价 | 失效观察线 | 复核上沿 | 排序权重 | 备注 |",
-            "|---|---|---:|---:|---:|---:|---|",
+            "| 代码 | 名称 | 研究参考价 | 失效观察线 | 复核上沿 | 排序权重 | contract | sleeve | money_status | 备注 |",
+            "|---|---|---:|---:|---:|---:|---|---|---|---|",
         ]
         for row in parsed["rows"]:
             lines.append(
-                f"| `{row['symbol']}` | {row['name']} | {row['entry']} | {row['stop']} | {row['target']} | {row['weight']} | 强度#{row['rank']} |"
+                f"| `{row['symbol']}` | {row['name']} | {row['entry']} | {row['stop']} | {row['target']} | {row['weight']} | "
+                f"{parsed['contract']} | {parsed['sleeve']} | {parsed['money_status']} | 强度#{row['rank']} |"
             )
         return "\n".join(lines).strip()
 

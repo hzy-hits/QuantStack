@@ -6,7 +6,7 @@ from pathlib import Path
 
 from src.autoresearch.session_state import ensure_session_files
 from src.agent.loop import FactorSession
-from src.agent.prompts import build_system_prompt
+from src.agent.prompts import build_system_prompt, parse_agent_response
 
 
 class AutoresearchSessionTests(unittest.TestCase):
@@ -35,6 +35,43 @@ class AutoresearchSessionTests(unittest.TestCase):
         )
         self.assertIn("Resumable Session Context", prompt)
         self.assertIn("Try volume-stability families first.", prompt)
+
+    def test_agent_response_parser_accepts_new_contract_fields(self) -> None:
+        parsed = parse_agent_response(
+            """
+            HYPOTHESIS: Forced unwind after crowded volume spikes.
+            FORMULA: rank(-ret_5d)
+            DIRECTION: long
+            NAME: reversal_overlay
+            SLEEVE: Daily Price Overlay
+            MISPRICING_SOURCE: stale forced sellers
+            FORCED_COUNTERPARTY: liquidation flow
+            DATA_REQUIREMENTS: ["prices"]
+            FAILURE_MODE: crowded
+            REPORT_CONTRACT: action_overlay
+            """
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.sleeve_id, "daily_price_overlay")
+        self.assertEqual(parsed.report_contract, "action_overlay")
+        self.assertEqual(parsed.mispricing_source, "stale forced sellers")
+
+    def test_agent_response_parser_keeps_old_format_research_only(self) -> None:
+        parsed = parse_agent_response(
+            """
+            HYPOTHESIS: Old format.
+            FORMULA: rank(close)
+            DIRECTION: long
+            NAME: old_format
+            """
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.sleeve_id, "daily_price_overlay")
+        self.assertEqual(parsed.report_contract, "research_only")
 
     def test_summary_does_not_promote_oos_pass_that_checks_reverted(self) -> None:
         session = FactorSession.__new__(FactorSession)

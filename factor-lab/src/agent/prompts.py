@@ -180,6 +180,8 @@ and iterate based on IS backtest feedback. You have a limited experiment budget 
 6. Think about turnover: noisy daily signals cost more in transaction costs.
 7. Combine operators creatively. rank(x) * rank(y) is a useful interaction pattern.
 8. Consider regime context: momentum works in trending markets, reversal in mean-reverting.
+9. Treat every new factor as a potential alpha sleeve: state who is the forced/uneconomic counterparty or structural constraint, and why this return stream is not just a high-correlation variant of an existing price factor.
+10. If the idea is mainly event/VRP/microstructure, do not fake it with daily prices; say what non-daily data or payoff ledger is required before it can be money-ready.
 
 {DSL_REFERENCE}
 
@@ -194,6 +196,12 @@ HYPOTHESIS: <1-2 sentences explaining the economic logic>
 FORMULA: <DSL expression>
 DIRECTION: <long or short>
 NAME: <snake_case short name>
+SLEEVE: <stable alpha sleeve id, e.g. daily_price_overlay>
+MISPRICING_SOURCE: <why the payoff exists>
+FORCED_COUNTERPARTY: <who is structurally forced/uneconomic, or none>
+DATA_REQUIREMENTS: <json-ish list or sentence of required data>
+FAILURE_MODE: <how this factor stops working>
+REPORT_CONTRACT: <fresh_buy_gate|action_overlay|setup_overlay|risk_warning|hold_overlay|research_only>
 """
 
 
@@ -257,6 +265,12 @@ class ParsedResponse:
     formula: str
     direction: str  # "long" or "short"
     name: str
+    sleeve_id: str
+    mispricing_source: str
+    forced_counterparty: str
+    data_requirements: str
+    failure_mode: str
+    report_contract: str
     raw: str  # original response text
 
 
@@ -281,6 +295,12 @@ def parse_agent_response(response_text: str) -> ParsedResponse | None:
     formula = _extract_field(text, "FORMULA")
     direction = _extract_field(text, "DIRECTION")
     name = _extract_field(text, "NAME")
+    sleeve_id = _extract_field(text, "SLEEVE")
+    mispricing_source = _extract_field(text, "MISPRICING_SOURCE")
+    forced_counterparty = _extract_field(text, "FORCED_COUNTERPARTY")
+    data_requirements = _extract_field(text, "DATA_REQUIREMENTS")
+    failure_mode = _extract_field(text, "FAILURE_MODE")
+    report_contract = _extract_field(text, "REPORT_CONTRACT")
 
     if not formula:
         return None
@@ -298,18 +318,40 @@ def parse_agent_response(response_text: str) -> ParsedResponse | None:
         name = "unnamed_factor"
     name = re.sub(r"[^a-z0-9_]", "_", name.strip().lower())
 
+    if not sleeve_id:
+        sleeve_id = "daily_price_overlay"
+    sleeve_id = re.sub(r"[^a-z0-9_]", "_", sleeve_id.strip().lower()) or "daily_price_overlay"
+
+    report_contract = (report_contract or "research_only").strip().lower()
+    valid_contracts = {
+        "fresh_buy_gate",
+        "action_overlay",
+        "setup_overlay",
+        "risk_warning",
+        "hold_overlay",
+        "research_only",
+    }
+    if report_contract not in valid_contracts:
+        report_contract = "research_only"
+
     return ParsedResponse(
         hypothesis=hypothesis or "No hypothesis provided.",
         formula=formula,
         direction=direction,
         name=name,
+        sleeve_id=sleeve_id,
+        mispricing_source=mispricing_source or "",
+        forced_counterparty=forced_counterparty or "",
+        data_requirements=data_requirements or "",
+        failure_mode=failure_mode or "",
+        report_contract=report_contract,
         raw=text,
     )
 
 
 def _extract_field(text: str, field_name: str) -> str | None:
     """Extract a field value from 'FIELD_NAME: value' format."""
-    pattern = rf"(?i){field_name}\s*:\s*(.+?)(?:\n[A-Z_]+\s*:|$)"
+    pattern = rf"(?i){field_name}\s*:\s*(.+?)(?:\n\s*[A-Z_]+\s*:|$)"
     match = re.search(pattern, text, re.DOTALL)
     if match:
         return match.group(1).strip()

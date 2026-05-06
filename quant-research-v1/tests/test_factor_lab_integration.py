@@ -610,9 +610,16 @@ class FactorLabReportSyncTests(unittest.TestCase):
         synced = sync_factor_lab_signal_section(report_text, structural_text)
 
         self.assertIn("**Factor Lab research prior / recall lead**", synced)
-        self.assertIn("| `AAA` | ALPHA | 10.00 | 9.00 | 12.00 | 18.2% | 强度#1 |", synced)
-        self.assertIn("| `BBB` | BETA | 20.00 | 18.00 | 24.00 | 16.4% | 强度#2 |", synced)
+        self.assertIn(
+            "| `AAA` | ALPHA | 10.00 | 9.00 | 12.00 | 18.2% | research_only | daily_price_overlay | research_only | 强度#1 |",
+            synced,
+        )
+        self.assertIn(
+            "| `BBB` | BETA | 20.00 | 18.00 | 24.00 | 16.4% | research_only | daily_price_overlay | research_only | 强度#2 |",
+            synced,
+        )
         self.assertIn("当前因子：`d2_3_516`。", synced)
+        self.assertIn("未通过主系统 V2/EV gate 的票只能观察", synced)
         self.assertIn("数据清洗: 已剔除 3 个异常候选", synced)
         self.assertNotIn("怎么操作:", synced)
         self.assertNotIn("本期为因子研究实验报告，非个股选股清单。", synced)

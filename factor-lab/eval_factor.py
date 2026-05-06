@@ -11,7 +11,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sys
@@ -29,6 +28,11 @@ from src.dsl.compute import compute_factor
 from src.backtest.walk_forward import walk_forward_backtest, run_oos_check
 from src.backtest.gates import check_gates, GateResult
 from src.paths import FACTOR_LAB_DB, FACTOR_LAB_ROOT, QUANT_CN_DB, QUANT_US_DB
+from src.mining.contracts import (
+    apply_factor_metadata_defaults,
+    factor_id_for,
+    record_experiment_ledger,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -287,10 +291,12 @@ def promote_factor(
     hypothesis: str,
     direction: str,
     bt,
+    metadata: dict | None = None,
 ) -> str:
     """Write factor to DuckDB registry as promoted. Populates IS metrics. Returns factor_id."""
     ensure_tables()
-    factor_id = hashlib.sha256(f"{market}:{formula}".encode()).hexdigest()[:16]
+    factor_id = factor_id_for(market, formula)
+    meta = apply_factor_metadata_defaults(dict(metadata or {}))
     con = duckdb.connect(FACTOR_LAB_DB)
     try:
         existing = con.execute(
@@ -309,17 +315,35 @@ def promote_factor(
                     status='promoted', promoted_at=CURRENT_TIMESTAMP,
                     watchlist_at=NULL, retired_at=NULL, retire_reason=NULL,
                     health_watch_count=0,
+                    sleeve_id=?, mispricing_source=?, forced_counterparty=?,
+                    data_requirements_json=?, failure_mode=?, report_contract=?,
+                    money_readiness=?, metadata_json=?,
                     ic_7d=?, ic_ir_7d=?, mono_7d=?
                 WHERE factor_id=?
-            """, [name, hypothesis, direction, ic_val, icir_val, mono_val, factor_id])
+            """, [
+                name, hypothesis, direction,
+                meta["sleeve_id"], meta["mispricing_source"], meta["forced_counterparty"],
+                meta["data_requirements_json"], meta["failure_mode"], meta["report_contract"],
+                meta["money_readiness"], meta["metadata_json"],
+                ic_val, icir_val, mono_val, factor_id,
+            ])
         else:
             con.execute("""
                 INSERT INTO factor_registry
                     (factor_id, market, name, hypothesis, formula, direction,
+                     sleeve_id, mispricing_source, forced_counterparty,
+                     data_requirements_json, failure_mode, report_contract,
+                     money_readiness, metadata_json,
                      status, promoted_at, ic_7d, ic_ir_7d, mono_7d)
-                VALUES (?, ?, ?, ?, ?, ?, 'promoted', CURRENT_TIMESTAMP, ?, ?, ?)
-            """, [factor_id, market, name, hypothesis, formula, direction,
-                  ic_val, icir_val, mono_val])
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                        'promoted', CURRENT_TIMESTAMP, ?, ?, ?)
+            """, [
+                factor_id, market, name, hypothesis, formula, direction,
+                meta["sleeve_id"], meta["mispricing_source"], meta["forced_counterparty"],
+                meta["data_requirements_json"], meta["failure_mode"], meta["report_contract"],
+                meta["money_readiness"], meta["metadata_json"],
+                ic_val, icir_val, mono_val,
+            ])
     finally:
         con.close()
 
@@ -331,10 +355,12 @@ def promote_factor(
 # ---------------------------------------------------------------------------
 def show_registry(market: str) -> None:
     """Print promoted factors for a market."""
+    ensure_tables()
     con = duckdb.connect(FACTOR_LAB_DB, read_only=True)
     try:
         df = con.execute("""
             SELECT name, formula, status, composite_score,
+                   sleeve_id, report_contract, money_readiness,
                    ic_7d, ic_ir_7d, promoted_at
             FROM factor_registry
             WHERE market=?
@@ -356,7 +382,10 @@ def show_registry(market: str) -> None:
         status = row["status"]
         name = row["name"] or "unnamed"
         formula = row["formula"]
-        print(f"  [{status:>10s}] {name}: {formula}")
+        sleeve = row.get("sleeve_id") or "daily_price_overlay"
+        contract = row.get("report_contract") or "research_only"
+        readiness = row.get("money_readiness") or "research_only"
+        print(f"  [{status:>10s}] {name}: {formula} [{sleeve}/{contract}/{readiness}]")
 
 
 # ---------------------------------------------------------------------------
@@ -460,12 +489,39 @@ def main() -> int:
     parser.add_argument("--name", type=str, default="", help="Factor name")
     parser.add_argument("--hypothesis", type=str, default="", help="Economic hypothesis")
     parser.add_argument("--direction", choices=["long", "short"], default="long")
+    parser.add_argument("--sleeve-id", default="daily_price_overlay", help="Alpha sleeve id for promoted/exported factors")
+    parser.add_argument("--mispricing-source", default="", help="Structured payoff/mispricing source")
+    parser.add_argument("--forced-counterparty", default="", help="Forced or uneconomic counterparty/constraint")
+    parser.add_argument("--data-requirements", default="", help="JSON or text describing required data")
+    parser.add_argument("--failure-mode", default="", help="Known way the factor can decay/fail")
+    parser.add_argument(
+        "--report-contract",
+        default="research_only",
+        choices=["fresh_buy_gate", "action_overlay", "setup_overlay", "risk_warning", "hold_overlay", "research_only"],
+        help="Daily report contract; defaults to research_only for backward compatibility",
+    )
+    parser.add_argument(
+        "--money-readiness",
+        default="",
+        choices=["", "money_ready", "money_candidate", "research_only", "payoff_ledger_required", "blocked"],
+        help="Money-readiness state; omitted values default from report contract",
+    )
     parser.add_argument("--oos-check", action="store_true", help="Run OOS validation (PASS/FAIL)")
     parser.add_argument("--promote", action="store_true", help="Promote factor to registry")
     parser.add_argument("--show-registry", action="store_true", help="Show promoted factors")
     parser.add_argument("--eval-composite", action="store_true", help="Evaluate promoted factor composite")
 
     args = parser.parse_args()
+
+    metadata = {
+        "sleeve_id": args.sleeve_id,
+        "mispricing_source": args.mispricing_source,
+        "forced_counterparty": args.forced_counterparty,
+        "data_requirements": args.data_requirements,
+        "failure_mode": args.failure_mode,
+        "report_contract": args.report_contract,
+        "money_readiness": args.money_readiness,
+    }
 
     # Dispatch modes
     if args.show_registry:
@@ -498,6 +554,17 @@ def main() -> int:
         ast = parse(args.formula)
     except DSLParseError as e:
         print(f"PARSE_ERROR: {e}", file=sys.stderr)
+        record_experiment_ledger(
+            market=args.market,
+            stage="parse",
+            status="failed",
+            formula=args.formula,
+            name=args.name,
+            error=str(e),
+            metadata=metadata,
+            source="eval_factor",
+            eval_seconds=time.time() - t0,
+        )
         return 1
 
     # 2. Load data (cached — first call ~10s, subsequent <0.5s)
@@ -506,6 +573,17 @@ def main() -> int:
         fwd = compute_forward_returns(args.market)
     except Exception as e:
         print(f"DATA_ERROR: {e}", file=sys.stderr)
+        record_experiment_ledger(
+            market=args.market,
+            stage="data",
+            status="failed",
+            formula=args.formula,
+            name=args.name,
+            error=str(e),
+            metadata=metadata,
+            source="eval_factor",
+            eval_seconds=time.time() - t0,
+        )
         return 2
 
     # 3. Compute factor values
@@ -513,10 +591,32 @@ def main() -> int:
         factor_values = compute_factor(ast, prices, sym_col=sym_col, date_col=date_col)
     except Exception as e:
         print(f"COMPUTE_ERROR: {e}", file=sys.stderr)
+        record_experiment_ledger(
+            market=args.market,
+            stage="compute",
+            status="failed",
+            formula=args.formula,
+            name=args.name,
+            error=str(e),
+            metadata=metadata,
+            source="eval_factor",
+            eval_seconds=time.time() - t0,
+        )
         return 2
 
     if factor_values.empty or factor_values["factor_value"].isna().all():
         print("COMPUTE_ERROR: factor produced all NaN values", file=sys.stderr)
+        record_experiment_ledger(
+            market=args.market,
+            stage="compute",
+            status="failed",
+            formula=args.formula,
+            name=args.name,
+            error="factor produced all NaN values",
+            metadata=metadata,
+            source="eval_factor",
+            eval_seconds=time.time() - t0,
+        )
         return 2
 
     # Apply direction: flip factor values for short factors
@@ -533,6 +633,17 @@ def main() -> int:
         )
     except Exception as e:
         print(f"BACKTEST_ERROR: {e}", file=sys.stderr)
+        record_experiment_ledger(
+            market=args.market,
+            stage="backtest",
+            status="failed",
+            formula=args.formula,
+            name=args.name,
+            error=str(e),
+            metadata=metadata,
+            source="eval_factor",
+            eval_seconds=time.time() - t0,
+        )
         return 3
 
     # 5. Check gates (with correlation against promoted factors)
@@ -568,6 +679,25 @@ def main() -> int:
 
     # 6. Print IS results
     print_results(args.market, args.formula, bt, gate_result, elapsed)
+    record_experiment_ledger(
+        market=args.market,
+        stage="gate",
+        status="passed" if gate_result.passed else "failed",
+        formula=args.formula,
+        name=args.name,
+        gates_passed=gate_result.passed,
+        gate_detail=gate_result.details,
+        metrics={
+            "is_ic": bt.avg_ic,
+            "is_ic_ir": bt.avg_ic_ir,
+            "is_sharpe": bt.avg_sharpe,
+            "is_turnover": bt.avg_turnover,
+            "is_monotonicity": bt.avg_monotonicity,
+        },
+        metadata=metadata,
+        source="eval_factor",
+        eval_seconds=elapsed,
+    )
 
     # 7. OOS check
     if args.oos_check:
@@ -582,6 +712,24 @@ def main() -> int:
                 cost_per_trade=cfg["cost_per_trade"],
             )
             print(f"oos_result:       {'PASS' if oos_pass else 'FAIL'}")
+            record_experiment_ledger(
+                market=args.market,
+                stage="oos",
+                status="passed" if oos_pass else "failed",
+                formula=args.formula,
+                name=args.name,
+                gates_passed=gate_result.passed,
+                gate_detail=gate_result.details,
+                oos_result="PASS" if oos_pass else "FAIL",
+                metrics={
+                    "is_ic": bt.avg_ic,
+                    "is_ic_ir": bt.avg_ic_ir,
+                    "is_sharpe": bt.avg_sharpe,
+                },
+                metadata=metadata,
+                source="eval_factor",
+                eval_seconds=elapsed,
+            )
 
     # 8. Promote (only if gates passed — defense in depth)
     if args.promote:
@@ -590,12 +738,39 @@ def main() -> int:
             return 1
         if not gate_result.passed:
             print("PROMOTE_SKIP:     gates did not pass", file=sys.stderr)
+            record_experiment_ledger(
+                market=args.market,
+                stage="promote",
+                status="failed",
+                formula=args.formula,
+                name=args.name,
+                gates_passed=False,
+                gate_detail=gate_result.details,
+                decision="promote_skip_gates_failed",
+                metadata=metadata,
+                source="eval_factor",
+                eval_seconds=elapsed,
+            )
             return 1
         factor_id = promote_factor(
             args.market, args.formula, args.name,
-            args.hypothesis, args.direction, bt,
+            args.hypothesis, args.direction, bt, metadata=metadata,
         )
         print(f"promoted_id:      {factor_id}")
+        record_experiment_ledger(
+            market=args.market,
+            stage="promote",
+            status="passed",
+            formula=args.formula,
+            name=args.name,
+            factor_id=factor_id,
+            gates_passed=gate_result.passed,
+            gate_detail=gate_result.details,
+            decision="promoted",
+            metadata=metadata,
+            source="eval_factor",
+            eval_seconds=elapsed,
+        )
 
     # 9. Append to experiments.jsonl (auto-log after every evaluation)
     log_entry = {
@@ -608,6 +783,13 @@ def main() -> int:
         "gates": "PASS" if gate_result.passed else "FAIL",
         "status": "promoted" if args.promote and gate_result.passed else "evaluated",
         "eval_seconds": round(elapsed, 1),
+        "sleeve_id": args.sleeve_id,
+        "mispricing_source": args.mispricing_source,
+        "forced_counterparty": args.forced_counterparty,
+        "data_requirements": args.data_requirements,
+        "failure_mode": args.failure_mode,
+        "report_contract": args.report_contract,
+        "money_readiness": args.money_readiness or ("money_candidate" if args.report_contract == "fresh_buy_gate" else "research_only"),
     }
     log_path = Path(__file__).parent / "experiments.jsonl"
     with open(log_path, "a") as f:

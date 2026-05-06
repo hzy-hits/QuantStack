@@ -36,6 +36,11 @@ from src.evaluate.forward_returns import compute_forward_returns
 from src.evaluate.ic import compute_ic_series, ic_summary
 from src.evaluate.quintile import compute_quintile_returns
 from src.mining.batch_mine import generate_factor_formulas, CONFIGS
+from src.mining.contracts import (
+    apply_factor_metadata_defaults,
+    ensure_contract_tables,
+    record_experiment_ledger,
+)
 from src.paths import (
     FACTOR_LAB_DB,
     QUANT_CN_DB,
@@ -68,6 +73,7 @@ HEALTH_WATCH_IC = 0.005    # IC below this → watchlist
 HEALTH_WATCH_DAYS = 5      # consecutive days
 HEALTH_RETIRE_DAYS = 5     # days on watchlist before retire
 HEALTH_RECOVER_IC = 0.01   # IC above this → recover from watchlist
+LCB80_Z = 1.2816
 
 HORIZON_WEIGHTS = {7: 0.5, 14: 0.3, 30: 0.2}
 SIGREG_REDUNDANCY_SOFT = 0.55
@@ -115,9 +121,19 @@ def init_db():
 
             last_health_check TIMESTAMP,
             rolling_ic_20d DOUBLE,
-            health_watch_count INTEGER DEFAULT 0
+            health_watch_count INTEGER DEFAULT 0,
+
+            sleeve_id VARCHAR DEFAULT 'daily_price_overlay',
+            mispricing_source VARCHAR,
+            forced_counterparty VARCHAR,
+            data_requirements_json VARCHAR,
+            failure_mode VARCHAR,
+            report_contract VARCHAR DEFAULT 'research_only',
+            money_readiness VARCHAR DEFAULT 'research_only',
+            metadata_json VARCHAR
         )
     """)
+    ensure_contract_tables(con)
     con.execute("""
         CREATE TABLE IF NOT EXISTS daily_candidates (
             date DATE NOT NULL,
@@ -294,6 +310,20 @@ def _candidate_metric_values(candidate: dict) -> list[float]:
     ]
 
 
+def _candidate_metadata_values(candidate: dict) -> list[str]:
+    apply_factor_metadata_defaults(candidate)
+    return [
+        candidate.get("sleeve_id", "daily_price_overlay"),
+        candidate.get("mispricing_source", ""),
+        candidate.get("forced_counterparty", ""),
+        candidate.get("data_requirements_json", "{}"),
+        candidate.get("failure_mode", ""),
+        candidate.get("report_contract", "research_only"),
+        candidate.get("money_readiness", "research_only"),
+        candidate.get("metadata_json", "{}"),
+    ]
+
+
 def _latest_factor_snapshot(factor_df: pd.DataFrame) -> pd.Series | None:
     if factor_df.empty:
         return None
@@ -352,6 +382,17 @@ def _effective_count_shrinkage(
 
     shrink = float(np.sqrt(effective / total))
     return round(float(np.clip(shrink, floor, 1.0)), 4)
+
+
+def _lcb80(values: pd.Series | np.ndarray | list[float]) -> float:
+    clean = pd.Series(values, dtype="float64").dropna()
+    if clean.empty:
+        return 0.0
+    if len(clean) == 1:
+        return float(clean.iloc[0])
+    std = float(clean.std(ddof=1))
+    se = std / float(np.sqrt(len(clean))) if std > 1e-12 else 0.0
+    return float(clean.mean() - LCB80_Z * se)
 
 
 def _apply_sigreg_penalties(candidates: list[dict], market: str, prices: pd.DataFrame) -> list[dict]:
@@ -660,9 +701,13 @@ def _apply_report_feedback(candidates: list[dict], market: str) -> list[dict]:
 
 
 def _refresh_promoted_factor(con: duckdb.DuckDBPyConnection, factor_id: str, candidate: dict) -> None:
+    apply_factor_metadata_defaults(candidate)
     con.execute("""
         UPDATE factor_registry SET
             name=?, hypothesis=?, composite_score=?, direction=?,
+            sleeve_id=?, mispricing_source=?, forced_counterparty=?,
+            data_requirements_json=?, failure_mode=?, report_contract=?,
+            money_readiness=?, metadata_json=?,
             ic_7d=?, ic_14d=?, ic_30d=?,
             ic_ir_7d=?, ic_ir_14d=?, ic_ir_30d=?,
             mono_7d=?, mono_14d=?, mono_30d=?,
@@ -670,6 +715,7 @@ def _refresh_promoted_factor(con: duckdb.DuckDBPyConnection, factor_id: str, can
         WHERE factor_id=?
     """, [
         candidate["name"], candidate["hypothesis"], candidate["composite_score"], candidate["direction"],
+        *_candidate_metadata_values(candidate),
         *_candidate_metric_values(candidate),
         factor_id,
     ])
@@ -681,6 +727,7 @@ def _promote_factor(
     candidate: dict,
     existing_factor_id: str | None = None,
 ) -> None:
+    apply_factor_metadata_defaults(candidate)
     if existing_factor_id:
         con.execute("""
             UPDATE factor_registry SET
@@ -688,6 +735,9 @@ def _promote_factor(
                 status='promoted', promoted_at=CURRENT_TIMESTAMP,
                 watchlist_at=NULL, retired_at=NULL, retire_reason=NULL,
                 health_watch_count=0,
+                sleeve_id=?, mispricing_source=?, forced_counterparty=?,
+                data_requirements_json=?, failure_mode=?, report_contract=?,
+                money_readiness=?, metadata_json=?,
                 ic_7d=?, ic_14d=?, ic_30d=?,
                 ic_ir_7d=?, ic_ir_14d=?, ic_ir_30d=?,
                 mono_7d=?, mono_14d=?, mono_30d=?,
@@ -696,6 +746,7 @@ def _promote_factor(
         """, [
             candidate["name"], candidate["hypothesis"], candidate["formula"],
             candidate["direction"], candidate["composite_score"],
+            *_candidate_metadata_values(candidate),
             *_candidate_metric_values(candidate),
             existing_factor_id,
         ])
@@ -704,14 +755,17 @@ def _promote_factor(
     con.execute("""
         INSERT INTO factor_registry
             (factor_id, market, name, hypothesis, formula, direction, composite_score,
+             sleeve_id, mispricing_source, forced_counterparty, data_requirements_json,
+             failure_mode, report_contract, money_readiness, metadata_json,
              status, promoted_at,
              ic_7d, ic_14d, ic_30d, ic_ir_7d, ic_ir_14d, ic_ir_30d,
              mono_7d, mono_14d, mono_30d, q5_q1_7d, q5_q1_14d, q5_q1_30d)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 'promoted', CURRENT_TIMESTAMP,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'promoted', CURRENT_TIMESTAMP,
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, [
         candidate["factor_id"], market, candidate["name"], candidate["hypothesis"],
         candidate["formula"], candidate["direction"], candidate["composite_score"],
+        *_candidate_metadata_values(candidate),
         *_candidate_metric_values(candidate),
     ])
 
@@ -804,8 +858,18 @@ def step1_mine(market: str, max_factors: int = 500) -> list[dict]:
                 "factor_id": _stable_factor_id(market, formula),
                 "_values": merged.set_index(["ts_code", "trade_date"])["factor_value"],  # for correlation
             })
-        except Exception:
+        except Exception as exc:
             errors += 1
+            record_experiment_ledger(
+                market=market,
+                stage="compute",
+                status="failed",
+                formula=formula,
+                name=name,
+                error=str(exc),
+                metadata={"report_contract": "research_only", "sleeve_id": "daily_price_overlay"},
+                source="daily_pipeline",
+            )
 
     results = [r for r in results if not _is_blacklisted_formula(r["formula"])]
 
@@ -818,6 +882,25 @@ def step1_mine(market: str, max_factors: int = 500) -> list[dict]:
         "  Gate attrition: "
         f"valid={len(results)} -> ic={len(ic_pass)} -> ic+ir={len(ir_pass)} -> ic+ir+mono={len(passed)}"
     )
+    passed_ids = {r["factor_id"] for r in passed}
+    for r in results:
+        record_experiment_ledger(
+            market=market,
+            stage="gate",
+            status="passed" if r["factor_id"] in passed_ids else "failed",
+            formula=r["formula"],
+            name=r["name"],
+            factor_id=r["factor_id"],
+            gates_passed=r["factor_id"] in passed_ids,
+            metrics={
+                "is_ic": r.get("ic"),
+                "is_ic_ir": r.get("ic_ir"),
+                "is_monotonicity": r.get("mono"),
+                "q5_q1": r.get("q5_q1"),
+            },
+            metadata={"report_contract": "research_only", "sleeve_id": "daily_price_overlay"},
+            source="daily_pipeline",
+        )
 
     # Sort by score
     passed.sort(key=lambda r: r["score"], reverse=True)
@@ -1027,6 +1110,7 @@ def step3_select_and_promote(candidates: list[dict], market: str):
     promote_slots = max(0, MAX_PROMOTED - existing_promoted)
     promotions_allowed = min(PROMOTE_COUNT, promote_slots)
     promoted = 0
+    promotion_ledger_entries: list[dict] = []
     for c in candidates:
         if promoted >= promotions_allowed:
             break
@@ -1040,6 +1124,34 @@ def step3_select_and_promote(candidates: list[dict], market: str):
             market,
             c,
             existing_factor_id=existing["factor_id"] if existing else None,
+        )
+        promotion_ledger_entries.append(
+            {
+                "market": market,
+                "stage": "promote",
+                "status": "passed",
+                "formula": c["formula"],
+                "name": c["name"],
+                "factor_id": existing["factor_id"] if existing else c["factor_id"],
+                "gates_passed": True,
+                "decision": "promoted",
+                "metrics": {
+                    "composite_score": c.get("composite_score"),
+                    "rank_score": c.get("rank_score"),
+                    "ic_7d": c.get("ic_7d"),
+                    "ic_ir_7d": c.get("ic_ir_7d"),
+                },
+                "metadata": {
+                    "sleeve_id": c.get("sleeve_id"),
+                    "mispricing_source": c.get("mispricing_source"),
+                    "forced_counterparty": c.get("forced_counterparty"),
+                    "data_requirements": c.get("data_requirements_json"),
+                    "failure_mode": c.get("failure_mode"),
+                    "report_contract": c.get("report_contract"),
+                    "money_readiness": c.get("money_readiness"),
+                },
+                "source": "daily_pipeline",
+            }
         )
         promoted += 1
 
@@ -1063,6 +1175,8 @@ def step3_select_and_promote(candidates: list[dict], market: str):
             )
 
     con.close()
+    for entry in promotion_ledger_entries:
+        record_experiment_ledger(**entry)
     print(f"  Refreshed {refreshed} active factors")
     print(f"  Promoted {promoted} new factors ({existing_promoted} active before fill, {promote_slots} slots available)")
 
@@ -1122,17 +1236,31 @@ def step4_health_check(market: str):
                 on=["ts_code", "trade_date"], how="inner"
             ).dropna(subset=["fwd_5d", "factor_value"])
 
-            # Get last 20 days
-            recent_dates = sorted(merged["trade_date"].unique())[-20:]
-            recent = merged[merged["trade_date"].isin(recent_dates)]
+            # Get last 14/20 trading-day IC windows. LCB80 is stored so the
+            # lifecycle state is auditable instead of only logged to stdout.
+            recent_dates_20 = sorted(merged["trade_date"].unique())[-20:]
+            recent_dates_14 = sorted(merged["trade_date"].unique())[-14:]
+            recent_20 = merged[merged["trade_date"].isin(recent_dates_20)]
+            recent_14 = merged[merged["trade_date"].isin(recent_dates_14)]
 
-            if len(recent) < 100:
+            if len(recent_20) < 100:
                 rolling_ic = 0.0
+                recent_ic_series_20 = pd.DataFrame({"ic": []})
             else:
-                ic_series = compute_ic_series(
-                    recent["factor_value"], recent["fwd_5d"], recent["trade_date"]
+                recent_ic_series_20 = compute_ic_series(
+                    recent_20["factor_value"], recent_20["fwd_5d"], recent_20["trade_date"]
                 )
-                rolling_ic = float(ic_series["ic"].mean()) if len(ic_series) > 0 else 0.0
+                rolling_ic = float(recent_ic_series_20["ic"].mean()) if len(recent_ic_series_20) > 0 else 0.0
+
+            if len(recent_14) < 100:
+                rolling_ic_14d = 0.0
+                rolling_lcb80_14d = 0.0
+            else:
+                recent_ic_series_14 = compute_ic_series(
+                    recent_14["factor_value"], recent_14["fwd_5d"], recent_14["trade_date"]
+                )
+                rolling_ic_14d = float(recent_ic_series_14["ic"].mean()) if len(recent_ic_series_14) > 0 else 0.0
+                rolling_lcb80_14d = _lcb80(recent_ic_series_14["ic"]) if len(recent_ic_series_14) > 0 else 0.0
 
             full_ic_series = compute_ic_series(
                 merged["factor_value"], merged["fwd_5d"], merged["trade_date"]
@@ -1153,8 +1281,10 @@ def step4_health_check(market: str):
                 # IC is computed after applying stored direction, so negative IC
                 # means the promoted factor has flipped against us.
                 reasons = []
-                if rolling_ic < HEALTH_WATCH_IC:
-                    reasons.append("IC too low")
+                if rolling_ic_14d < HEALTH_WATCH_IC:
+                    reasons.append("14D IC too low")
+                if rolling_lcb80_14d <= 0:
+                    reasons.append("14D LCB80 non-positive")
                 if health_score < SIGREG_HEALTH_WATCH_SCORE:
                     reasons.append(f"SigReg health={health_score:.2f}")
                 if regime_change:
@@ -1166,30 +1296,36 @@ def step4_health_check(market: str):
                         new_status = "watchlist"
                         print(
                             f"  ⚠️ {factor_id}: promoted → watchlist "
-                            f"(IC={rolling_ic:.4f}, health={health_score:.2f}, "
+                            f"(IC14={rolling_ic_14d:.4f}, LCB80={rolling_lcb80_14d:.4f}, "
+                            f"health={health_score:.2f}, "
                             f"{', '.join(reasons)}, {new_watch}d)"
                         )
                     else:
                         print(
-                            f"  📉 {factor_id}: IC={rolling_ic:.4f}, health={health_score:.2f} "
+                            f"  📉 {factor_id}: IC14={rolling_ic_14d:.4f}, "
+                            f"LCB80={rolling_lcb80_14d:.4f}, health={health_score:.2f} "
                             f"({' ; '.join(reasons)}) "
                             f"({new_watch}/{HEALTH_WATCH_DAYS} watch days)"
                         )
                 else:
                     new_watch = 0  # reset counter
-                    print(f"  ✅ {factor_id}: IC={rolling_ic:.4f}, health={health_score:.2f} healthy")
+                    print(
+                        f"  ✅ {factor_id}: IC14={rolling_ic_14d:.4f}, "
+                        f"LCB80={rolling_lcb80_14d:.4f}, health={health_score:.2f} healthy"
+                    )
 
             elif status == "watchlist":
                 if (
-                    rolling_ic >= HEALTH_RECOVER_IC
-                    and health_score >= SIGREG_HEALTH_RECOVER_SCORE
+                    rolling_ic_14d >= HEALTH_RECOVER_IC
+                    and rolling_lcb80_14d > 0
                     and not regime_change
                 ):
                     new_status = "promoted"
                     new_watch = 0
                     print(
                         f"  🔄 {factor_id}: watchlist → promoted "
-                        f"(IC recovered to {rolling_ic:.4f}, health={health_score:.2f})"
+                        f"(IC14 recovered to {rolling_ic_14d:.4f}, "
+                        f"LCB80={rolling_lcb80_14d:.4f}, health={health_score:.2f})"
                     )
                 else:
                     new_watch = watch_count + 1
@@ -1197,12 +1333,14 @@ def step4_health_check(market: str):
                         new_status = "retired"
                         print(
                             f"  ❌ {factor_id}: watchlist → retired "
-                            f"(IC={rolling_ic:.4f}, health={health_score:.2f}, no recovery)"
+                            f"(IC14={rolling_ic_14d:.4f}, "
+                            f"LCB80={rolling_lcb80_14d:.4f}, health={health_score:.2f}, no recovery)"
                         )
                     else:
                         remaining = HEALTH_WATCH_DAYS + HEALTH_RETIRE_DAYS - new_watch
                         print(
-                            f"  ⏳ {factor_id}: watchlist IC={rolling_ic:.4f}, health={health_score:.2f} "
+                            f"  ⏳ {factor_id}: watchlist IC14={rolling_ic_14d:.4f}, "
+                            f"LCB80={rolling_lcb80_14d:.4f}, health={health_score:.2f} "
                             f"({remaining}d to retire)"
                         )
 
@@ -1229,6 +1367,47 @@ def step4_health_check(market: str):
                 INSERT OR REPLACE INTO health_log (date, factor_id, rolling_ic_20d, status_before, status_after)
                 VALUES (?, ?, ?, ?, ?)
             """, [today, factor_id, rolling_ic, status, new_status])
+            health_state = (
+                "healthy"
+                if new_status == "promoted" and rolling_ic_14d >= HEALTH_RECOVER_IC and rolling_lcb80_14d > 0
+                else "watchlist"
+                if new_status == "watchlist"
+                else "retired"
+                if new_status == "retired"
+                else "degrading"
+            )
+            con.execute("""
+                INSERT OR REPLACE INTO factor_health_daily (
+                    as_of, market, factor_id, rolling_ic_14d, rolling_ic_20d,
+                    rolling_lcb80_14d, health_score, health_state,
+                    status_before, status_after, watch_count, retire_reason, detail_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                today,
+                market,
+                factor_id,
+                rolling_ic_14d,
+                rolling_ic,
+                rolling_lcb80_14d,
+                health_score,
+                health_state,
+                status,
+                new_status,
+                new_watch,
+                "IC/LCB decay" if new_status == "retired" else None,
+                json.dumps(
+                    {
+                        "regime_change": regime_change,
+                        "sigreg_health_score": health_score,
+                        "recent_ic_20d_lcb80": _lcb80(recent_ic_series_20["ic"])
+                        if len(recent_ic_series_20) > 0
+                        else 0.0,
+                    },
+                    ensure_ascii=True,
+                    sort_keys=True,
+                ),
+            ])
 
         except Exception as e:
             print(f"  ❗ {factor_id}: health check error - {e}")

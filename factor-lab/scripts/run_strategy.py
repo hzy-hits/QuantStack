@@ -256,6 +256,37 @@ def _us_rejection_reason(
     return None
 
 
+def _load_factor_report_contract(market: str, factor_name: str) -> dict[str, str]:
+    try:
+        con = duckdb.connect(str(FACTOR_LAB_DB), read_only=True)
+        try:
+            row = con.execute(
+                """
+                SELECT sleeve_id, report_contract, money_readiness
+                FROM factor_registry
+                WHERE market=? AND status='promoted' AND name=?
+                ORDER BY promoted_at DESC NULLS LAST
+                LIMIT 1
+                """,
+                [market, factor_name],
+            ).fetchone()
+        finally:
+            con.close()
+    except Exception:
+        row = None
+    if not row:
+        return {
+            "sleeve_id": "daily_price_overlay",
+            "report_contract": "research_only",
+            "money_status": "research_only",
+        }
+    return {
+        "sleeve_id": str(row[0] or "daily_price_overlay"),
+        "report_contract": str(row[1] or "research_only"),
+        "money_status": str(row[2] or "research_only"),
+    }
+
+
 def run_backtest(market: str, cfg: StrategyConfig):
     t0 = time.time()
     prices, all_factors, sym_col, date_col = load_data(market)
@@ -356,6 +387,7 @@ def show_today(market: str, cfg: StrategyConfig, as_of: str | None = None):
     if factor_name is None:
         print("No factor selected — stay cash")
         return
+    factor_contract = _load_factor_report_contract(market, factor_name)
 
     fdata = all_factors[factor_name]
     today = fdata[fdata[date_col] == latest].dropna(subset=["factor_value"])
@@ -469,6 +501,11 @@ def show_today(market: str, cfg: StrategyConfig, as_of: str | None = None):
     # Keep Factor Lab subordinate to the main report/execution gate.
     side_note = "因子值最高" if side == "top" else "因子值最低"
     print(f"  类型: Factor Lab 研究候选，不是独立交易指令")
+    print(
+        f"  Contract: {factor_contract['report_contract']} | "
+        f"Sleeve: {factor_contract['sleeve_id']} | "
+        f"money_status: {factor_contract['money_status']}"
+    )
     print(f"  筛选: {side_note} 的 {cfg.n_picks} 只股票")
     print(f"  因子: {factor_name}")
     print(f"  健康: {w_icon} {'正常' if w_action == 'HOLD' else '注意衰减信号'}")
@@ -476,7 +513,7 @@ def show_today(market: str, cfg: StrategyConfig, as_of: str | None = None):
     print(f"  使用方式:")
     print(f"    1. 只作为主系统的召回/对照候选")
     print(f"    2. 必须再通过主报告方向、执行 gate、流动性和追价过滤")
-    print(f"    3. 未通过主系统时，最多进入观察/轮动池")
+    print(f"    3. 未通过主系统 V2/EV gate 时，最多进入观察/轮动池")
     print(f"    4. 参考持有窗口 {actual_hold} 个交易日，到 ~{exit_date} 复核")
     if market == "cn":
         print(f"    5. 已剔除科创板和北交所等当前不可交易板块")

@@ -128,7 +128,8 @@ def load_promoted(target_date: str) -> list[dict]:
     try:
         df = con.execute("""
             SELECT name, formula, market, direction,
-                   ic_7d, ic_ir_7d, hypothesis, promoted_at
+                   ic_7d, ic_ir_7d, hypothesis, promoted_at,
+                   sleeve_id, report_contract, money_readiness
             FROM factor_registry
             WHERE status = 'promoted'
               AND CAST(promoted_at AS DATE) = ?
@@ -216,19 +217,25 @@ def generate_report(target_date: str) -> str:
     if promoted:
         lines.append("### 新发现因子")
         lines.append("")
-        lines.append("| 名称 | 公式 | 市场 | IC | IC_IR | 假设 |")
-        lines.append("|------|------|------|-----|-------|------|")
+        lines.append("| 名称 | 公式 | 市场 | sleeve | contract | money_status | IC | IC_IR | 假设 |")
+        lines.append("|------|------|------|--------|----------|--------------|-----|-------|------|")
         for f in promoted:
             ic = f"{ f['ic_7d']:.3f}" if f.get("ic_7d") else "N/A"
             ir = f"{ f['ic_ir_7d']:.2f}" if f.get("ic_ir_7d") else "N/A"
             market = (f.get("market") or "").upper()
             name = f.get("name") or "unnamed"
             formula = f"`{f.get('formula', '')}`"
+            sleeve = f.get("sleeve_id") or "daily_price_overlay"
+            contract = f.get("report_contract") or "research_only"
+            money_status = f.get("money_readiness") or "research_only"
             hyp = f.get("hypothesis") or ""
             # Truncate long hypothesis
             if len(hyp) > 40:
                 hyp = hyp[:37] + "..."
-            lines.append(f"| {name} | {formula} | {market} | {ic} | {ir} | {hyp} |")
+            lines.append(
+                f"| {name} | {formula} | {market} | {sleeve} | {contract} | "
+                f"{money_status} | {ic} | {ir} | {hyp} |"
+            )
         lines.append("")
 
     # Composite stats

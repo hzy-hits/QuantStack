@@ -46,6 +46,7 @@ from src.agent.prompts import (
 from src.autoresearch.session_state import load_session_context
 from src.agent.backends import call_agent
 from src.paths import FACTOR_LAB_DB, QUANT_CN_DB, QUANT_US_DB
+from src.mining.contracts import record_experiment_ledger
 
 logger = logging.getLogger(__name__)
 EXPERIMENTS_FILE = Path(__file__).resolve().parents[2] / "experiments.jsonl"
@@ -270,6 +271,17 @@ def _append_experiment_rows(
             "status": exp.get("status", "evaluated"),
             "eval_seconds": round(float(exp.get("eval_seconds", 0.0)), 1),
         }
+        for field in (
+            "sleeve_id",
+            "mispricing_source",
+            "forced_counterparty",
+            "data_requirements",
+            "failure_mode",
+            "report_contract",
+            "money_readiness",
+        ):
+            if exp.get(field):
+                row[field] = exp[field]
         row["decision"] = exp.get("decision", "revert")
         row["status"] = exp.get("status", row["status"])
         for field in ("session_branch", "base_ref", "merge_base", "head_commit", "session_log"):
@@ -777,6 +789,43 @@ class FactorSession:
         logger.info(f"Loaded {len(factors)} existing factors ({sum(1 for f in factors if f['status']=='promoted')} promoted)")
         return factors
 
+    def _record_ledger(self, exp: dict, *, stage: str, status: str, error: str | None = None) -> None:
+        try:
+            record_experiment_ledger(
+                market=self.market,
+                session_id=self.session_id,
+                stage=stage,
+                status=status,
+                formula=exp.get("formula", ""),
+                name=exp.get("name", ""),
+                error=error or exp.get("error"),
+                gates_passed=exp.get("gates_passed"),
+                gate_detail=exp.get("gate_details"),
+                oos_result=exp.get("oos"),
+                checks_status=exp.get("checks_status"),
+                decision=exp.get("decision"),
+                metrics={
+                    "is_ic": exp.get("is_ic"),
+                    "is_ic_ir": exp.get("is_ic_ir"),
+                    "is_sharpe": exp.get("is_sharpe"),
+                    "is_turnover": exp.get("is_turnover"),
+                    "is_monotonicity": exp.get("is_monotonicity"),
+                },
+                metadata={
+                    "sleeve_id": exp.get("sleeve_id"),
+                    "mispricing_source": exp.get("mispricing_source"),
+                    "forced_counterparty": exp.get("forced_counterparty"),
+                    "data_requirements": exp.get("data_requirements"),
+                    "failure_mode": exp.get("failure_mode"),
+                    "report_contract": exp.get("report_contract"),
+                    "money_readiness": exp.get("money_readiness"),
+                },
+                source="agent_loop",
+                eval_seconds=exp.get("eval_seconds"),
+            )
+        except Exception as exc:
+            logger.warning(f"Could not write factor experiment ledger: {exc}")
+
     def run(self) -> SessionResult:
         """Run full session: budget experiments, then OOS check top 3."""
         print(f"=== Factor Lab Session: {self.market.upper()} ===")
@@ -843,11 +892,18 @@ class FactorSession:
             parsed = parse_agent_response(response_text)
             if parsed is None:
                 print(f"  Could not parse agent response. Skipping.")
-                self.experiments.append({
+                exp_record = {
                     "name": "parse_error",
                     "formula": "",
                     "hypothesis": "Parse error",
                     "direction": "long",
+                    "sleeve_id": "daily_price_overlay",
+                    "mispricing_source": "",
+                    "forced_counterparty": "",
+                    "data_requirements": "",
+                    "failure_mode": "",
+                    "report_contract": "research_only",
+                    "money_readiness": "research_only",
                     "is_ic": 0.0,
                     "is_ic_ir": 0.0,
                     "is_sharpe": 0.0,
@@ -860,12 +916,15 @@ class FactorSession:
                     "eval_seconds": time.time() - exp_started,
                     "error": "parse_error",
                     **self.branch_context,
-                })
+                }
+                self.experiments.append(exp_record)
+                self._record_ledger(exp_record, stage="parse", status="failed", error="parse_error")
                 continue
 
             print(f"  Name: {parsed.name}")
             print(f"  Formula: {parsed.formula}")
             print(f"  Direction: {parsed.direction}")
+            print(f"  Sleeve: {parsed.sleeve_id} ({parsed.report_contract})")
             print(f"  Hypothesis: {parsed.hypothesis[:80]}...")
 
             # Compute factor values using the canonical DSL compute engine
@@ -882,11 +941,18 @@ class FactorSession:
                 factor_df = None
             if factor_df is None or len(factor_df) == 0:
                 print(f"  Factor computation failed.")
-                self.experiments.append({
+                exp_record = {
                     "name": parsed.name,
                     "formula": parsed.formula,
                     "hypothesis": parsed.hypothesis,
                     "direction": parsed.direction,
+                    "sleeve_id": parsed.sleeve_id,
+                    "mispricing_source": parsed.mispricing_source,
+                    "forced_counterparty": parsed.forced_counterparty,
+                    "data_requirements": parsed.data_requirements,
+                    "failure_mode": parsed.failure_mode,
+                    "report_contract": parsed.report_contract,
+                    "money_readiness": "money_candidate" if parsed.report_contract == "fresh_buy_gate" else "research_only",
                     "is_ic": 0.0,
                     "is_ic_ir": 0.0,
                     "is_sharpe": 0.0,
@@ -899,7 +965,9 @@ class FactorSession:
                     "eval_seconds": time.time() - exp_started,
                     "error": "compute_error",
                     **self.branch_context,
-                })
+                }
+                self.experiments.append(exp_record)
+                self._record_ledger(exp_record, stage="compute", status="failed", error="compute_error")
                 continue
 
             # If direction is "short", flip the factor values
@@ -932,6 +1000,13 @@ class FactorSession:
                 "formula": parsed.formula,
                 "hypothesis": parsed.hypothesis,
                 "direction": parsed.direction,
+                "sleeve_id": parsed.sleeve_id,
+                "mispricing_source": parsed.mispricing_source,
+                "forced_counterparty": parsed.forced_counterparty,
+                "data_requirements": parsed.data_requirements,
+                "failure_mode": parsed.failure_mode,
+                "report_contract": parsed.report_contract,
+                "money_readiness": "money_candidate" if parsed.report_contract == "fresh_buy_gate" else "research_only",
                 "is_ic": bt_result.avg_ic,
                 "is_ic_ir": bt_result.avg_ic_ir,
                 "is_sharpe": bt_result.avg_sharpe,
@@ -958,6 +1033,11 @@ class FactorSession:
                 **self.branch_context,
             }
             self.experiments.append(exp_record)
+            self._record_ledger(
+                exp_record,
+                stage="gate",
+                status="passed" if gate_result.passed else "failed",
+            )
             print()
 
         # --- OOS check: top 3 by IS IC ---
@@ -1001,10 +1081,22 @@ class FactorSession:
             exp["checks_status"] = checks_status
             exp["decision"] = decision
             exp["status"] = status
+            self._record_ledger(
+                exp,
+                stage="oos",
+                status="passed" if oos_pass and decision == "keep" else "failed",
+            )
             top3_oos.append({
                 "name": exp["name"],
                 "formula": exp["formula"],
                 "hypothesis": exp["hypothesis"],
+                "sleeve_id": exp.get("sleeve_id", "daily_price_overlay"),
+                "mispricing_source": exp.get("mispricing_source", ""),
+                "forced_counterparty": exp.get("forced_counterparty", ""),
+                "data_requirements": exp.get("data_requirements", ""),
+                "failure_mode": exp.get("failure_mode", ""),
+                "report_contract": exp.get("report_contract", "research_only"),
+                "money_readiness": exp.get("money_readiness", "research_only"),
                 "is_ic": exp["is_ic"],
                 "is_ic_ir": exp["is_ic_ir"],
                 "oos_pass": oos_pass,

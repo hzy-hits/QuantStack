@@ -89,6 +89,18 @@ if [[ "$RUN_US" == true && "$US_READY" == true ]]; then
     $PYTHON -m src.mining.daily_pipeline --market us --max-factors 500 --date "$US_EXPECTED_DATE"
 fi
 
+if [[ "$RUN_CN" == true ]]; then
+    echo ""
+    echo "=== CN Factor Lab Sleeve Returns ==="
+    $PYTHON -m src.mining.export_sleeve_returns --market cn --start 2026-03-01 --date "$CN_EXPECTED_DATE" || echo "CN sleeve export failed (non-fatal)"
+fi
+
+if [[ "$RUN_US" == true && "$US_READY" == true ]]; then
+    echo ""
+    echo "=== US Factor Lab Sleeve Returns ==="
+    $PYTHON -m src.mining.export_sleeve_returns --market us --start 2026-03-01 --date "$US_EXPECTED_DATE" || echo "US sleeve export failed (non-fatal)"
+fi
+
 # SigReg diagnostics
 if [[ "$RUN_CN" == true ]]; then
     echo ""

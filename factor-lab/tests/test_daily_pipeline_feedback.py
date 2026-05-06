@@ -16,9 +16,32 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.mining import daily_pipeline
 from src.mining import export_to_pipeline
+from src.mining import export_sleeve_returns
 
 
 class DailyPipelineFeedbackTests(unittest.TestCase):
+    def test_init_db_adds_contract_ledger_sleeve_and_health_tables_idempotently(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "factor_lab.duckdb"
+            with mock.patch.object(daily_pipeline, "FACTOR_LAB_DB", db_path):
+                daily_pipeline.init_db()
+                daily_pipeline.init_db()
+
+            con = duckdb.connect(str(db_path), read_only=True)
+            try:
+                registry_cols = {row[1] for row in con.execute("PRAGMA table_info('factor_registry')").fetchall()}
+                self.assertIn("sleeve_id", registry_cols)
+                self.assertIn("report_contract", registry_cols)
+                self.assertIn("money_readiness", registry_cols)
+                for table in ("factor_experiment_ledger", "factor_sleeve_returns", "factor_health_daily"):
+                    row = con.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name=?",
+                        [table],
+                    ).fetchone()
+                    self.assertEqual(row[0], 1)
+            finally:
+                con.close()
+
     def test_short_direction_orients_factor_values_before_health_checks(self) -> None:
         raw = pd.DataFrame(
             {
@@ -179,6 +202,43 @@ class DailyPipelineFeedbackTests(unittest.TestCase):
         self.assertIn("captured_overlap", detail)
         self.assertEqual(detail["captured_overlap"], detail["capture_overlap"])
         self.assertLessEqual(adjusted[0]["report_feedback_multiplier"], 1.20)
+
+    def test_compute_factor_sleeve_rows_generates_top_quintile_daily_return(self) -> None:
+        symbols = [f"S{i:02d}" for i in range(30)]
+        factor_df = pd.DataFrame(
+            {
+                "ts_code": symbols,
+                "trade_date": pd.Timestamp("2026-05-01"),
+                "factor_value": list(range(30)),
+            }
+        )
+        fwd_returns = pd.DataFrame(
+            {
+                "ts_code": symbols,
+                "trade_date": pd.Timestamp("2026-05-01"),
+                "fwd_5d": [0.0] * 24 + [0.10] * 6,
+            }
+        )
+
+        rows = export_sleeve_returns._compute_factor_sleeve_rows(
+            market="cn",
+            factor_id="f1",
+            factor_name="demo",
+            sleeve_id="daily_price_overlay",
+            report_contract="research_only",
+            money_readiness="research_only",
+            direction="long",
+            factor_df=factor_df,
+            fwd_returns=fwd_returns,
+            start="2026-05-01",
+            as_of="2026-05-01",
+            cost_per_trade=0.003,
+        )
+
+        top = [row for row in rows if row["bucket"] == "top_quintile_long"][0]
+        self.assertAlmostEqual(top["gross_return_pct"], 2.0)
+        self.assertAlmostEqual(top["cost_adjusted_return_pct"], 1.94)
+        self.assertEqual(top["top_bucket_count"], 6)
 
 
 if __name__ == "__main__":
