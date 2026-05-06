@@ -37,6 +37,12 @@ except ImportError:  # pragma: no cover - the repo already depends on pandas for
 DEFAULT_START = "2026-03-01"
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "alpha_factory"
 DEFAULT_FACTOR_LAB_DB = STACK_ROOT / "factor-lab" / "data" / "factor_lab.duckdb"
+FACTOR_LAB_CORR_BLOCK_THRESHOLD = 0.85
+FACTOR_LAB_MIN_PROB_POSITIVE = 0.80
+FACTOR_LAB_GATE_MODE = "opportunity"
+FACTOR_LAB_AUTO_PROD_CONTRACTS = {
+    "daily_price_overlay": "action_overlay",
+}
 
 
 @dataclass
@@ -50,6 +56,7 @@ class Sleeve:
     money_status: str
     notes: str
     rows: list[dict[str, Any]]
+    source_factor_id: str | None = None
 
     def metrics_dict(self) -> dict[str, Any]:
         metrics = v2.compute_metrics(self.label, self.rows).to_dict()
@@ -66,6 +73,8 @@ class Sleeve:
                 "notes": self.notes,
             }
         )
+        if self.source_factor_id:
+            metrics["factor_id"] = self.source_factor_id
         return metrics
 
 
@@ -138,6 +147,52 @@ def daily_series(rows: list[dict[str, Any]]) -> dict[str, float]:
     return {key: statistics.fmean(values) for key, values in sorted(grouped.items()) if values}
 
 
+def lcb80_pct(values: list[float]) -> float | None:
+    if not values:
+        return None
+    if len(values) == 1:
+        return values[0]
+    std = statistics.stdev(values)
+    return statistics.fmean(values) - v2.LCB80_Z * std / math.sqrt(len(values))
+
+
+def normal_cdf(value: float) -> float:
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
+def probabilistic_positive_mean(metrics: dict[str, Any]) -> float | None:
+    n = int(metrics.get("n") or 0)
+    avg = v2.round_or_none(metrics.get("avg_pct"))
+    std = v2.round_or_none(metrics.get("std_pct"))
+    if n < 2 or avg is None or std is None or std <= 1e-12:
+        return None
+    return normal_cdf(float(avg) / (float(std) / math.sqrt(n)))
+
+
+def deflated_lcb80_pct(metrics: dict[str, Any], n_trials: int) -> float | None:
+    n = int(metrics.get("n") or 0)
+    avg = v2.round_or_none(metrics.get("avg_pct"))
+    std = v2.round_or_none(metrics.get("std_pct"))
+    if n < 2 or avg is None or std is None or std <= 1e-12:
+        return v2.round_or_none(metrics.get("lcb80_pct"))
+    trial_z = math.sqrt(2.0 * math.log(max(int(n_trials or 1), 1)))
+    return float(avg) - (v2.LCB80_Z + trial_z) * float(std) / math.sqrt(n)
+
+
+def rolling_oos_min_lcb80_pct(rows: list[dict[str, Any]], windows: int = 3) -> float | None:
+    series = daily_series(rows)
+    if len(series) < windows * 5:
+        return None
+    ordered = [series[key] for key in sorted(series)]
+    chunk_size = math.ceil(len(ordered) / windows)
+    lcbs = [
+        lcb80_pct(ordered[idx : idx + chunk_size])
+        for idx in range(0, len(ordered), chunk_size)
+    ]
+    clean = [value for value in lcbs if value is not None]
+    return min(clean) if len(clean) == windows else None
+
+
 def pearson_corr(a: dict[str, float], b: dict[str, float]) -> float | None:
     keys = sorted(set(a) & set(b))
     if len(keys) < 3:
@@ -162,7 +217,6 @@ def money_status_for(
     min_n: int,
 ) -> str:
     n = int(metrics.get("n") or 0)
-    lcb80 = metrics.get("lcb80_pct")
     if data_status.startswith("missing") or data_status.startswith("no_"):
         return "no_data"
     if role == "baseline":
@@ -173,14 +227,12 @@ def money_status_for(
         return "radar_only"
     if role == "research":
         return "research_only"
-    if n < min_n:
-        return "research_only_sample_thin"
-    if lcb80 is None or lcb80 <= 0:
-        return "blocked_negative_or_unproven"
     if role == "overlay":
         return "report_overlay"
     if role == "probe":
         return "stock_probe_only"
+    if n <= 0:
+        return "no_data"
     return "money_candidate"
 
 
@@ -221,36 +273,119 @@ def factor_lab_role(report_contract: str, money_readiness: str) -> str:
     return "research"
 
 
+def resolve_factor_lab_production_contract(
+    report_contract: str,
+    money_readiness: str,
+    sleeve_id: str,
+) -> tuple[str, str, str | None]:
+    """Promoted daily-price factors are production overlays unless explicitly downgraded.
+
+    Older Factor Lab rows defaulted to `research_only` for parser compatibility.
+    Once such a factor has promoted sleeve returns, treat the daily-price sleeve
+    as an executable overlay input; Alpha Factory records weak evidence as
+    opportunity flags instead of blocking the sleeve.
+    """
+    contract = str(report_contract or "research_only").strip().lower()
+    readiness = str(money_readiness or "research_only").strip().lower()
+    sleeve = str(sleeve_id or "").strip().lower()
+    if contract == "research_only" and sleeve in FACTOR_LAB_AUTO_PROD_CONTRACTS:
+        promoted_contract = FACTOR_LAB_AUTO_PROD_CONTRACTS[sleeve]
+        return promoted_contract, "money_candidate", f"auto_prod_contract={promoted_contract}"
+    return contract, readiness, None
+
+
 def factor_lab_money_status(
     *,
     label: str,
     rows: list[dict[str, Any]],
     report_contract: str,
     money_readiness: str,
+    n_trials: int,
     min_money_n: int,
 ) -> tuple[str, str]:
     role = factor_lab_role(report_contract, money_readiness)
     metrics = v2.compute_metrics(label, rows).to_dict()
     double_cost = v2.compute_metrics(label + " double-cost", rows, return_key="double_cost_return_pct").to_dict()
     top_share = top5_pnl_share(rows)
+    prob_positive = probabilistic_positive_mean(metrics)
+    deflated_lcb = deflated_lcb80_pct(metrics, n_trials)
+    rolling_lcb = rolling_oos_min_lcb80_pct(rows)
+    opportunity_flags: list[str] = []
+    if int(metrics.get("n") or 0) < min_money_n:
+        opportunity_flags.append("sample_thin")
+    if (metrics.get("lcb80_pct") or 0.0) <= 0.0:
+        opportunity_flags.append("lcb80<=0")
+    if top_share is not None and top_share > 0.30:
+        opportunity_flags.append("top5_pnl_share>30%")
+    if (double_cost.get("lcb80_pct") or 0.0) <= 0.0:
+        opportunity_flags.append("double_cost_lcb80<=0")
+    if prob_positive is not None and prob_positive < FACTOR_LAB_MIN_PROB_POSITIVE:
+        opportunity_flags.append("prob_positive<80%")
+    if deflated_lcb is not None and deflated_lcb <= 0.0:
+        opportunity_flags.append("deflated_lcb80<=0")
+    if rolling_lcb is not None and rolling_lcb <= 0.0:
+        opportunity_flags.append("rolling_oos_min_lcb80<=0")
     note = (
-        f"contract={report_contract}; readiness={money_readiness}; "
+        f"contract={report_contract}; readiness={money_readiness}; mode={FACTOR_LAB_GATE_MODE}; "
         f"double_cost_lcb80={fmt_pct(double_cost.get('lcb80_pct'))}; "
-        f"top5_pnl_share={fmt_pct((top_share or 0.0) * 100.0) if top_share is not None else '-'}"
+        f"top5_pnl_share={fmt_pct((top_share or 0.0) * 100.0) if top_share is not None else '-'}; "
+        f"n_trials={max(int(n_trials or 1), 1)}; "
+        f"prob_positive={fmt_pct(prob_positive * 100.0) if prob_positive is not None else '-'}; "
+        f"deflated_lcb80={fmt_pct(deflated_lcb)}; "
+        f"rolling_oos_min_lcb80={fmt_pct(rolling_lcb)}"
     )
+    if opportunity_flags:
+        note = f"{note}; opportunity_flags={','.join(opportunity_flags)}"
     if role == "research":
         return "research_only", note
     if role == "overlay":
         return "report_overlay", note
-    if int(metrics.get("n") or 0) < min_money_n:
-        return "research_only_sample_thin", note
-    if (metrics.get("lcb80_pct") or 0.0) <= 0.0:
-        return "blocked_negative_or_unproven", note
-    if top_share is not None and top_share > 0.30:
-        return "blocked_concentrated_pnl", note
-    if (double_cost.get("lcb80_pct") or 0.0) <= 0.0:
-        return "blocked_double_cost_lcb80", note
     return "money_candidate", note
+
+
+def factor_lab_trial_counts_by_market(
+    con: duckdb.DuckDBPyConnection,
+    as_of: date,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    if table_exists(con, "factor_experiment_ledger"):
+        rows = rows_as_dicts(
+            con,
+            """
+            SELECT market, COUNT(DISTINCT experiment_id) AS n_trials
+            FROM factor_experiment_ledger
+            WHERE market IS NOT NULL
+              AND CAST(ts AS DATE) <= CAST(? AS DATE)
+            GROUP BY market
+            """,
+            [as_of.isoformat()],
+        )
+        counts.update(
+            {
+                str(row.get("market") or ""): max(int(row.get("n_trials") or 0), 1)
+                for row in rows
+                if row.get("market")
+            }
+        )
+
+    if table_exists(con, "factor_registry"):
+        rows = rows_as_dicts(
+            con,
+            """
+            SELECT market, COUNT(*) AS n_trials
+            FROM factor_registry
+            WHERE market IS NOT NULL
+            GROUP BY market
+            """,
+            [],
+        )
+        for row in rows:
+            market = str(row.get("market") or "")
+            if not market:
+                continue
+            counts[market] = max(counts.get(market, 1), int(row.get("n_trials") or 1))
+
+    return counts
 
 
 def load_factor_lab_sleeves(
@@ -265,6 +400,7 @@ def load_factor_lab_sleeves(
     try:
         if not table_exists(con, "factor_sleeve_returns"):
             return []
+        trial_counts = factor_lab_trial_counts_by_market(con, as_of)
         rows = rows_as_dicts(
             con,
             """
@@ -312,15 +448,25 @@ def load_factor_lab_sleeves(
         info = meta[factor_id]
         name = str(info.get("factor_name") or factor_id)
         market = str(info.get("market") or "")
-        contract = str(info.get("report_contract") or "research_only")
-        readiness = str(info.get("money_readiness") or "research_only")
+        registry_contract = str(info.get("report_contract") or "research_only")
+        registry_readiness = str(info.get("money_readiness") or "research_only")
+        sleeve_contract = str(info.get("sleeve_id") or "")
+        contract, readiness, auto_prod_note = resolve_factor_lab_production_contract(
+            registry_contract,
+            registry_readiness,
+            sleeve_contract,
+        )
+        n_trials = trial_counts.get(market, 1)
         money_status, note = factor_lab_money_status(
             label=f"Factor Lab {name} top-quintile sleeve",
             rows=factor_rows,
             report_contract=contract,
             money_readiness=readiness,
+            n_trials=n_trials,
             min_money_n=min_money_n,
         )
+        if auto_prod_note:
+            note = f"{note}; legacy_contract={registry_contract}; {auto_prod_note}"
         sleeves.append(
             Sleeve(
                 sleeve_id=(
@@ -339,6 +485,7 @@ def load_factor_lab_sleeves(
                 money_status=money_status,
                 notes=note,
                 rows=factor_rows,
+                source_factor_id=factor_id,
             )
         )
     return sleeves
@@ -702,7 +849,7 @@ def build_sleeves(
             horizon="T+1 to T+5 lifecycle",
             data_status=log_status,
             role="overlay",
-            notes="Report action overlay after EV gate; not a standalone buy gate.",
+            notes="Report action overlay in opportunity mode; EV fields are context, not a hard gate.",
             rows=residual_rows,
             min_money_n=min_money_n,
         )
@@ -716,7 +863,7 @@ def build_sleeves(
             horizon="T+1 to T+5 lifecycle",
             data_status=log_status,
             role="overlay",
-            notes="Setup overlay only; cannot bypass EV gate.",
+            notes="Setup overlay in opportunity mode; use for pullback/retest priority.",
             rows=deep_log_rows,
             min_money_n=min_money_n,
         )
@@ -853,7 +1000,6 @@ def enrich_relationship_metrics(metrics: list[dict[str, Any]], sleeves: list[Sle
         row["sleeve_id"]
         for row in metrics
         if row["money_status"] in {"money_candidate", "stock_probe_only"}
-        and (row.get("lcb80_pct") or 0.0) > 0
     ]
 
     for row in metrics:
@@ -873,12 +1019,40 @@ def enrich_relationship_metrics(metrics: list[dict[str, Any]], sleeves: list[Sle
             row["marginal_daily_sharpe_delta"] = v2.round_or_none(float(with_sharpe) - float(base_sharpe))
 
 
+def apply_factor_lab_relationship_gates(metrics: list[dict[str, Any]]) -> None:
+    """Annotate Factor Lab relationship risks without suppressing opportunities."""
+    for row in metrics:
+        sleeve_id = str(row.get("sleeve_id") or "")
+        if not sleeve_id.startswith("factor_lab_") or row.get("money_status") != "money_candidate":
+            continue
+
+        blockers: list[str] = []
+        max_corr = v2.round_or_none(row.get("max_abs_corr"))
+        marginal = v2.round_or_none(row.get("marginal_daily_sharpe_delta"))
+        if max_corr is not None and max_corr >= FACTOR_LAB_CORR_BLOCK_THRESHOLD:
+            blockers.append(f"corr>={FACTOR_LAB_CORR_BLOCK_THRESHOLD:.2f}")
+        if marginal is not None and marginal <= 0:
+            blockers.append("marginal_sharpe<=0")
+
+        if blockers:
+            row["notes"] = f"{row.get('notes') or ''}; portfolio_flags={','.join(blockers)}".strip("; ")
+
+
+def sync_sleeve_statuses_from_metrics(sleeves: list[Sleeve], metrics: list[dict[str, Any]]) -> None:
+    by_id = {row["sleeve_id"]: row for row in metrics}
+    for sleeve in sleeves:
+        row = by_id.get(sleeve.sleeve_id)
+        if not row:
+            continue
+        sleeve.money_status = str(row.get("money_status") or sleeve.money_status)
+        sleeve.notes = str(row.get("notes") or sleeve.notes)
+
+
 def build_combo_payload(sleeves: list[Sleeve]) -> dict[str, Any]:
     eligible = [
         sleeve
         for sleeve in sleeves
         if sleeve.money_status in {"money_candidate", "stock_probe_only"}
-        and (v2.compute_metrics(sleeve.label, sleeve.rows).lcb80_pct or 0.0) > 0
     ]
     per_sleeve = {s.sleeve_id: daily_series(s.rows) for s in eligible}
     all_dates = sorted(set().union(*(set(values) for values in per_sleeve.values()))) if per_sleeve else []
@@ -959,6 +1133,10 @@ def render_report(payload: dict[str, Any]) -> str:
             "blocked_negative_or_unproven",
             "blocked_concentrated_pnl",
             "blocked_double_cost_lcb80",
+            "blocked_prob_sharpe",
+            "blocked_deflated_sharpe",
+            "blocked_rolling_oos",
+            "blocked_factor_lab_portfolio_gate",
             "no_data",
         }
     ]
@@ -969,7 +1147,7 @@ def render_report(payload: dict[str, Any]) -> str:
             f"LCB80 {fmt_pct(combo.get('lcb80_pct'))}, daily Sharpe {fmt_num(combo.get('daily_sharpe'), 2)}."
         )
     else:
-        conclusion = "No sleeve is money-ready after LCB80/sample gates; keep research-only diagnostics out of execution."
+        conclusion = "No current opportunity sleeve has usable rows; research-only diagnostics stay informational."
     lines = [
         f"# Alpha Factory Sleeve Backtest - {payload['as_of']}",
         "",
@@ -1129,6 +1307,158 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
         con.close()
 
 
+def alpha_factory_status_for_factor_lab(row: dict[str, Any]) -> tuple[str, list[str]]:
+    status = str(row.get("money_status") or "research_only")
+    if status == "money_candidate":
+        return "pass", []
+    if status == "report_overlay":
+        return "overlay_allowed", []
+    if status == "research_only":
+        return "research_only", ["report_contract_research_only"]
+    if status == "research_only_sample_thin":
+        return "blocked", ["sample_thin"]
+    if status == "blocked_negative_or_unproven":
+        return "blocked", ["lcb80<=0"]
+    if status == "blocked_concentrated_pnl":
+        return "blocked", ["top5_pnl_share>30%"]
+    if status == "blocked_double_cost_lcb80":
+        return "blocked", ["double_cost_lcb80<=0"]
+    if status == "blocked_prob_sharpe":
+        return "blocked", ["prob_positive<80%"]
+    if status == "blocked_deflated_sharpe":
+        return "blocked", ["deflated_lcb80<=0"]
+    if status == "blocked_rolling_oos":
+        return "blocked", ["rolling_oos_min_lcb80<=0"]
+    if status == "blocked_factor_lab_portfolio_gate":
+        notes = str(row.get("notes") or "")
+        marker = "blockers="
+        if marker in notes:
+            parsed = notes.split(marker, 1)[1].split(";", 1)[0]
+            blockers = [item.strip() for item in parsed.split(",") if item.strip()]
+            return "blocked", blockers or ["portfolio_gate"]
+        return "blocked", ["portfolio_gate"]
+    return status, []
+
+
+def _note_metric(notes: str, name: str) -> float | None:
+    marker = f"{name}="
+    if marker not in notes:
+        return None
+    value = notes.split(marker, 1)[1].split(";", 1)[0].strip()
+    if value in {"-", ""}:
+        return None
+    if value.endswith("%"):
+        value = value[:-1]
+    return v2.round_or_none(value)
+
+
+def write_factor_lab_money_gate_audit(factor_lab_db: Path, payload: dict[str, Any]) -> None:
+    factor_rows = [
+        row
+        for row in payload.get("sleeves", [])
+        if str(row.get("sleeve_id") or "").startswith("factor_lab_")
+        and row.get("factor_id")
+    ]
+    if not factor_rows or not factor_lab_db.exists():
+        return
+
+    con = duckdb.connect(str(factor_lab_db))
+    try:
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS factor_money_gate_daily (
+                as_of DATE NOT NULL,
+                market VARCHAR NOT NULL,
+                factor_id VARCHAR NOT NULL,
+                sleeve_id VARCHAR NOT NULL,
+                report_contract VARCHAR DEFAULT 'research_only',
+                money_readiness VARCHAR DEFAULT 'research_only',
+                alpha_factory_status VARCHAR NOT NULL,
+                money_status VARCHAR NOT NULL,
+                n INTEGER,
+                lcb80_pct DOUBLE,
+                double_cost_lcb80_pct DOUBLE,
+                top5_pnl_share DOUBLE,
+                max_abs_corr DOUBLE,
+                marginal_daily_sharpe_delta DOUBLE,
+                blockers_json VARCHAR,
+                notes VARCHAR,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (as_of, market, factor_id)
+            )
+            """
+        )
+        audit_rows = []
+        registry_updates = []
+        for row in factor_rows:
+            notes = str(row.get("notes") or "")
+            report_contract = "research_only"
+            money_readiness = "research_only"
+            if "contract=" in notes:
+                report_contract = notes.split("contract=", 1)[1].split(";", 1)[0].strip() or report_contract
+            if "readiness=" in notes:
+                money_readiness = notes.split("readiness=", 1)[1].split(";", 1)[0].strip() or money_readiness
+            alpha_status, blockers = alpha_factory_status_for_factor_lab(row)
+            if alpha_status in {"overlay_allowed", "pass"} and report_contract != "research_only":
+                registry_updates.append(
+                    [
+                        report_contract,
+                        money_readiness,
+                        row.get("market"),
+                        row.get("factor_id"),
+                    ]
+                )
+            audit_rows.append(
+                [
+                    payload["as_of"],
+                    row.get("market"),
+                    row.get("factor_id"),
+                    row.get("sleeve_id"),
+                    report_contract,
+                    money_readiness,
+                    alpha_status,
+                    row.get("money_status"),
+                    row.get("n"),
+                    row.get("lcb80_pct"),
+                    _note_metric(notes, "double_cost_lcb80"),
+                    row.get("top5_pnl_share"),
+                    row.get("max_abs_corr"),
+                    row.get("marginal_daily_sharpe_delta"),
+                    json.dumps(blockers, ensure_ascii=True, sort_keys=True),
+                    notes,
+                ]
+            )
+        con.executemany(
+            """
+            INSERT OR REPLACE INTO factor_money_gate_daily (
+                as_of, market, factor_id, sleeve_id, report_contract,
+                money_readiness, alpha_factory_status, money_status, n,
+                lcb80_pct, double_cost_lcb80_pct, top5_pnl_share, max_abs_corr,
+                marginal_daily_sharpe_delta, blockers_json, notes
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            audit_rows,
+        )
+        if registry_updates:
+            try:
+                con.executemany(
+                    """
+                    UPDATE factor_registry
+                    SET report_contract=?,
+                        money_readiness=?
+                    WHERE market=?
+                      AND factor_id=?
+                      AND status='promoted'
+                    """,
+                    registry_updates,
+                )
+            except duckdb.Error:
+                pass
+    finally:
+        con.close()
+
+
 def run(args: argparse.Namespace) -> dict[str, Any]:
     start = parse_date(args.start)
     as_of = parse_date(args.date) if args.date else latest_report_date(args.us_db, args.cn_db)
@@ -1136,6 +1466,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     metrics = [sleeve.metrics_dict() for sleeve in sleeves]
     correlations = build_correlation_payload(sleeves)
     enrich_relationship_metrics(metrics, sleeves, correlations)
+    apply_factor_lab_relationship_gates(metrics)
+    sync_sleeve_statuses_from_metrics(sleeves, metrics)
     combo = build_combo_payload(sleeves)
     payload = {
         "as_of": as_of.isoformat(),
@@ -1154,6 +1486,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         encoding="utf-8",
     )
     write_duckdb(output_dir / "alpha_factory_backtest.duckdb", payload)
+    write_factor_lab_money_gate_audit(args.factor_lab_db, payload)
     return payload
 
 

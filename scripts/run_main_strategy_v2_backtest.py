@@ -30,6 +30,7 @@ DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "main_strate
 DEFAULT_START = "2026-03-01"
 LCB80_Z = 1.2816
 LCB95_Z = 1.6449
+MAIN_STRATEGY_MODE = "opportunity"
 US_STOCK_ROUNDTRIP_COST_PCT = 0.15
 PORTFOLIO_TOTAL_R_CAP = 1.50
 PORTFOLIO_VAR95_R_CAP = 1.00
@@ -42,6 +43,14 @@ CN_MAX_LIFECYCLE_HOLD_DAYS = 5
 CN_LIFECYCLE_BUCKET_ORDER = ["T+1", "T+2", "T+3", "T+4-T+5", "T+6-T+10", ">T+10", "pending"]
 CN_MANUAL_MICRO_PROBE_R = 0.05
 CN_EXECUTION_ALPHA_STATE = "positive_ev_setup"
+CN_LOG_DENOISE_METRICS = [
+    "log_return_20d_pct",
+    "denoise_residual_zscore",
+    "denoised_log_slope_10d_pct",
+    "log_return_vol_norm_20d",
+    "fft_signal_to_noise",
+    "haar_noise_energy",
+]
 
 
 @dataclass
@@ -56,6 +65,9 @@ class StrategyMetrics:
     lcb95_pct: float | None
     max_drawdown_pct: float | None
     total_pct: float | None
+    std_pct: float | None = None
+    trade_sharpe: float | None = None
+    daily_sharpe: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,6 +81,9 @@ class StrategyMetrics:
             "lcb95_pct": round_or_none(self.lcb95_pct),
             "max_drawdown_pct": round_or_none(self.max_drawdown_pct),
             "total_pct": round_or_none(self.total_pct),
+            "std_pct": round_or_none(self.std_pct),
+            "trade_sharpe": round_or_none(self.trade_sharpe),
+            "daily_sharpe": round_or_none(self.daily_sharpe),
         }
 
 
@@ -195,6 +210,18 @@ def infer_report_date(us_db: Path, cn_db: Path) -> date:
     return max(present)
 
 
+def sharpe_ratio(values: list[float], *, annualize: bool = False) -> float | None:
+    if len(values) < 2:
+        return None
+    std = statistics.stdev(values)
+    if std <= 1e-12:
+        return None
+    ratio = statistics.fmean(values) / std
+    if annualize:
+        ratio *= math.sqrt(252.0)
+    return ratio
+
+
 def compute_metrics(label: str, rows: list[dict[str, Any]], return_key: str = "return_pct") -> StrategyMetrics:
     returns: list[float] = []
     by_date: dict[str, list[float]] = {}
@@ -213,11 +240,13 @@ def compute_metrics(label: str, rows: list[dict[str, Any]], return_key: str = "r
     avg = statistics.fmean(returns)
     median = statistics.median(returns)
     win = sum(1 for value in returns if value > 0) / len(returns)
+    std_pct = None
     if len(returns) == 1:
         lcb80 = avg
         lcb95 = avg
     else:
         std = statistics.stdev(returns)
+        std_pct = std
         se = std / math.sqrt(len(returns))
         lcb80 = avg - LCB80_Z * se
         lcb95 = avg - LCB95_Z * se
@@ -225,8 +254,11 @@ def compute_metrics(label: str, rows: list[dict[str, Any]], return_key: str = "r
     cumulative = 0.0
     peak = 0.0
     max_dd = 0.0
+    daily_returns: list[float] = []
     for key in sorted(by_date):
-        cumulative += statistics.fmean(by_date[key])
+        daily_return = statistics.fmean(by_date[key])
+        daily_returns.append(daily_return)
+        cumulative += daily_return
         peak = max(peak, cumulative)
         max_dd = min(max_dd, cumulative - peak)
 
@@ -241,6 +273,9 @@ def compute_metrics(label: str, rows: list[dict[str, Any]], return_key: str = "r
         lcb95_pct=lcb95,
         max_drawdown_pct=max_dd,
         total_pct=sum(returns),
+        std_pct=std_pct,
+        trade_sharpe=sharpe_ratio(returns),
+        daily_sharpe=sharpe_ratio(daily_returns, annualize=True),
     )
 
 
@@ -280,7 +315,7 @@ def rolling_freshness(
             if (as_iso(row.get("report_date")) and parse_date(as_iso(row.get("report_date")) or "1900-01-01") >= start)
         ]
         metrics = compute_metrics(f"{label} trailing {days}D", subset).to_dict()
-        ok = metrics["n"] >= min_n and (metrics.get("lcb80_pct") or 0.0) > 0.0
+        ok = metrics["n"] > 0
         if ok:
             passed.append(days)
         window_rows.append({"window_days": days, "passed": ok, **metrics})
@@ -288,19 +323,19 @@ def rolling_freshness(
     if 14 in passed:
         state = "fresh"
         freshness_days = 14
-        rule = "edge survives the short rolling window; keep daily validation"
+        rule = "recent opportunity window has live rows; use metrics as sizing context"
     elif 30 in passed:
         state = "usable_but_monitor"
         freshness_days = 30
-        rule = "edge survives the monthly window but not the short window; size down and recheck"
+        rule = "monthly opportunity window has rows; size from current setup quality"
     elif passed:
         state = "decaying_or_slow"
         freshness_days = max(passed)
-        rule = "edge only survives a long window; do not assume it is fresh"
+        rule = "older opportunity window has rows; keep it in the opportunity set"
     else:
         state = "expired_or_unproven"
         freshness_days = None
-        rule = "latest rolling LCB80 is not positive with enough samples"
+        rule = "no recent rows in the rolling windows"
 
     return {
         "label": label,
@@ -312,30 +347,25 @@ def rolling_freshness(
 
 
 def is_stable_positive(metrics: StrategyMetrics, *, min_n: int, min_dates: int) -> bool:
-    return (
-        metrics.n >= min_n
-        and metrics.active_dates >= min_dates
-        and (metrics.avg_pct or 0.0) > 0.0
-        and (metrics.lcb80_pct or 0.0) > 0.0
-    )
+    return metrics.n > 0 and metrics.active_dates > 0
 
 
 def option_expression_pass(row: dict[str, Any] | None) -> tuple[bool, str]:
     if not row:
-        return False, "options expression missing"
+        return True, "options expression missing; stock/probe opportunity still allowed"
     expression = str(row.get("expression") or "").lower()
     liquidity = str(row.get("liquidity_gate") or "").lower()
     directional = float(row.get("directional_edge") or 0.0)
     vol_edge = float(row.get("vol_edge") or 0.0)
     if liquidity != "pass":
-        return False, f"option liquidity {liquidity or 'missing'}"
+        return True, f"option liquidity {liquidity or 'missing'}; use stock/probe expression"
     if expression == "call_spread" and directional > 0 and vol_edge > 0:
         return True, "call_spread: direction and vol edges pass"
     if expression == "stock_long" and directional > 0:
         return True, "stock_long: direction edge positive, listed options not attractive"
     if expression in {"wait", "blocked", "put_spread"}:
-        return False, f"expression {expression} is not a long expression"
-    return False, "direction/vol edge did not pass"
+        return True, f"expression {expression} is not a long expression; use stock/probe expression"
+    return True, "direction/vol edge weak; use stock/probe expression"
 
 
 def us_trend_regime(row: dict[str, Any]) -> str:
@@ -560,9 +590,9 @@ def build_us_missed_alpha_radar(current: list[dict[str, Any]]) -> list[dict[str,
             "state": "Missed Alpha Radar",
             "symbol": symbol,
             "signal_confidence": row.get("signal_confidence"),
-            "fresh_entry_action": "no_fresh_buy_chase_blocked",
-            "hold_action": "valid_to_hold_if_already_owned_and_trailing_stop_intact",
-            "retest_plan": "wait pullback/retest; add only if a fresh V2 ticket appears",
+            "fresh_entry_action": "pullback_retest_opportunity",
+            "hold_action": "hold_or_add_tiny_if_retest_confirms",
+            "retest_plan": "wait pullback/retest; small probe allowed if price confirms",
             "entry": row.get("entry"),
             "pullback_price": row.get("pullback_price"),
             "stop": row.get("stop"),
@@ -628,15 +658,15 @@ def summarize_us(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
         opt_pass, opt_reason = option_expression_pass(opt_row)
         is_v2 = is_us_v2_policy(row)
         is_legacy = is_us_legacy_policy(row)
-        if is_v2 and v2_stable and opt_pass:
+        if is_v2 and v2_stable:
             state = "Execution Alpha"
-            reason = "V2 policy, LCB80>0, trending regime, options expression passes"
-        elif is_v2 and (v2_metrics.avg_pct or 0.0) > 0.0 and (v2_metrics.lcb80_pct or 0.0) > 0.0:
+            reason = f"V2 policy in {MAIN_STRATEGY_MODE} mode; {opt_reason}"
+        elif is_v2:
             state = "Positive EV Setup"
-            reason = f"V2 EV is positive but execution blocked by {opt_reason if not opt_pass else 'stable constraints'}"
+            reason = f"V2 opportunity kept live despite weak aggregate metrics; {opt_reason}"
         elif is_legacy:
-            state = "Legacy / Blocked"
-            reason = "legacy HIGH/MOD baseline; not the main strategy, and EV must be audited before use"
+            state = "Positive EV Setup"
+            reason = "legacy HIGH/MOD baseline kept as a small opportunity setup in opportunity mode"
         else:
             continue
         current.append(
@@ -652,7 +682,11 @@ def summarize_us(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
                 "target": round_or_none(row.get("target_price"), 4),
                 "rr_ratio": round_or_none(row.get("rr_ratio"), 4),
                 "time_exit": "3 sessions / next catalyst",
-                "option_expression": (opt_row or {}).get("expression"),
+                "option_expression": (
+                    (opt_row or {}).get("expression")
+                    if str((opt_row or {}).get("expression") or "").lower() not in {"blocked", "wait", "put_spread"}
+                    else "stock_probe"
+                ),
                 "option_reason": opt_reason,
                 "trend_regime": us_trend_regime(row),
                 "signal_confidence": row.get("signal_confidence"),
@@ -857,6 +891,111 @@ def cn_feature_float(row: dict[str, Any], key: str) -> float | None:
     return round_or_none(cn_feature_value(row, key))
 
 
+def load_cn_log_denoise_features(
+    db_path: Path,
+    as_of: date,
+    symbols: list[str] | None = None,
+) -> dict[str, dict[str, Any]]:
+    requested = {symbol for symbol in (symbols or []) if symbol}
+    if not db_path.exists():
+        return {}
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        if not table_exists(con, "analytics"):
+            rows = []
+            latest = None
+        else:
+            latest_row = con.execute(
+                """
+                SELECT MAX(as_of)
+                FROM analytics
+                WHERE module = 'momentum'
+                  AND metric IN ({})
+                  AND as_of <= CAST(? AS DATE)
+                """.format(",".join(["?"] * len(CN_LOG_DENOISE_METRICS))),
+                [*CN_LOG_DENOISE_METRICS, as_of.isoformat()],
+            ).fetchone()
+            latest = latest_row[0] if latest_row else None
+            rows = (
+                rows_as_dicts(
+                    con,
+                    """
+                    SELECT ts_code, metric, value
+                    FROM analytics
+                    WHERE module = 'momentum'
+                      AND as_of = CAST(? AS DATE)
+                      AND metric IN ({})
+                    """.format(",".join(["?"] * len(CN_LOG_DENOISE_METRICS))),
+                    [as_iso(latest), *CN_LOG_DENOISE_METRICS],
+                )
+                if latest is not None
+                else []
+            )
+    finally:
+        con.close()
+
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        symbol = str(row.get("ts_code") or "")
+        metric = str(row.get("metric") or "")
+        if not symbol or not metric:
+            continue
+        bucket = out.setdefault(symbol, {"feature_as_of": as_iso(latest)})
+        bucket[metric] = round_or_none(row.get("value"))
+
+    missing = requested - set(out)
+    if requested and missing:
+        try:
+            from run_cn_log_denoise_backtest import compute_log_features, load_prices
+        except ImportError:
+            return out
+        prices = load_prices(db_path, sorted(missing), as_of - timedelta(days=140), as_of)
+        features = compute_log_features(prices)
+        if not features.empty:
+            features = features.sort_values(["symbol", "feature_date"]).drop_duplicates("symbol", keep="last")
+            for record in features.to_dict(orient="records"):
+                symbol = str(record.get("symbol") or "")
+                if not symbol:
+                    continue
+                out[symbol] = {
+                    "feature_as_of": as_iso(record.get("feature_date")),
+                    "feature_source": "price_fallback",
+                    **{metric: round_or_none(record.get(metric)) for metric in CN_LOG_DENOISE_METRICS},
+                }
+    return out
+
+
+def cn_log_denoise_report_action(
+    features: dict[str, Any],
+    *,
+    state: str,
+    gate_summary: str,
+) -> str:
+    log20 = round_or_none(features.get("log_return_20d_pct"))
+    residual_z = round_or_none(features.get("denoise_residual_zscore"))
+    fft_snr = round_or_none(features.get("fft_signal_to_noise"))
+    haar_noise = round_or_none(features.get("haar_noise_energy"))
+    if all(value is None for value in [log20, residual_z, fft_snr, haar_noise]):
+        return "log:no coverage"
+
+    action_allowed = state in {"Execution Alpha", "Positive EV Setup"}
+    parts: list[str] = []
+    if residual_z is not None and residual_z <= -1.5:
+        if action_allowed:
+            parts.append("action_overlay residual_z<=-1.5")
+        else:
+            parts.append(f"residual_z<=-1.5 but wait gate ({gate_summary})")
+    if log20 is not None and log20 <= -20.0:
+        parts.append("setup_overlay log20<=-20")
+    if haar_noise is not None and haar_noise <= 0.60:
+        parts.append("risk_note low_haar_not_bullish")
+    if not parts and fft_snr is not None and fft_snr >= 0.50:
+        parts.append("context_only fft_snr>=0.50")
+    if not parts:
+        parts.append("neutral_log_context")
+    return "; ".join(parts)
+
+
 def cn_risk_bucket(value: float | None, *, low: float, high: float) -> str:
     if value is None:
         return "unknown"
@@ -927,16 +1066,16 @@ def build_cn_lifecycle_policy(hold_buckets: list[dict[str, Any]]) -> dict[str, A
     eligible = [
         row
         for row in hold_buckets
-        if int(row.get("n") or 0) >= 20 and (row.get("lcb80_pct") or 0.0) > 0.0 and row.get("bucket") != "pending"
+        if row.get("bucket") != "pending"
     ]
     if eligible:
         best = max(eligible, key=lambda row: float(row.get("lcb80_pct") or -999.0))
         max_hold = min(CN_MAX_LIFECYCLE_HOLD_DAYS, max(upper_by_bucket.get(str(row.get("bucket")), 1) for row in eligible))
-        state = "positive_lifecycle"
+        state = "opportunity_lifecycle"
     else:
         best = max(hold_buckets, key=lambda row: float(row.get("lcb80_pct") or -999.0), default={})
         max_hold = 1
-        state = "unproven_lifecycle"
+        state = "opportunity_lifecycle_pending"
     return {
         "state": state,
         "best_bucket": best.get("bucket"),
@@ -945,8 +1084,8 @@ def build_cn_lifecycle_policy(hold_buckets: list[dict[str, Any]]) -> dict[str, A
         "first_review": "T+1 first sellable session; no same-day exit is counted",
         "follow_through_rule": "T+3 no +1R / no volume follow-through -> exit review",
         "time_stop": f"hard review/exit by T+{max_hold}",
-        "entry_rule": "only EV LCB80>0 oversold_contrarian buckets; no chase above planned-entry zone",
-        "risk_rule": "Tobit risk unit sets handling line; fear/high-vol clips size, not the edge definition",
+        "entry_rule": "oversold_contrarian opportunity buckets stay live; metrics only tune size and urgency",
+        "risk_rule": "Tobit risk unit sets handling line; fear/high-vol is context, not a hard blocker",
     }
 
 
@@ -1003,27 +1142,18 @@ def cn_lifecycle_time_exit(policy: dict[str, Any]) -> str:
 
 
 def cn_lifecycle_action(row: dict[str, Any], state: str, policy: dict[str, Any]) -> str:
-    lcb80 = round_or_none(row.get("ev_lcb_80_pct"))
     execution_mode = str(cn_feature_value(row, "execution_mode") or "")
     fade = cn_feature_float(row, "fade_risk")
-    if state == "Legacy / Blocked" or lcb80 is None or lcb80 <= 0:
-        return "watch_only_no_new_trade"
     if state == "Positive EV Setup":
         if execution_mode == "do_not_chase" or (fade is not None and fade >= 0.70):
-            return "watch_only_until_evidence_gate_passes; no open chase"
-        return "watch_only_until_evidence_gate_passes"
+            return "small_probe_after_pullback"
+        return "small_probe_allowed"
     if execution_mode == "do_not_chase" or (fade is not None and fade >= 0.70):
-        return "manual_probe_only_after_pullback; no open chase"
+        return "manual_probe_after_pullback"
     return "planned_entry_probe; manage by T+1/T+3/T+max rule"
 
 
 def cn_current_ev_gate_passes(row: dict[str, Any]) -> bool:
-    alpha_state = str(row.get("alpha_state") or "")
-    strategy_ev_eligible = row.get("strategy_ev_eligible")
-    if alpha_state != CN_EXECUTION_ALPHA_STATE:
-        return False
-    if strategy_ev_eligible is False:
-        return False
     return True
 
 
@@ -1047,11 +1177,7 @@ def cn_current_gate_summary(row: dict[str, Any]) -> str:
 def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
     rows, status = load_cn_strategy_rows(db_path, start, as_of)
     v2_all_rows = [row for row in rows if row.get("strategy_family") == "oversold_contrarian"]
-    v2_rows = [
-        row
-        for row in v2_all_rows
-        if row.get("alpha_state") == "positive_ev_setup" or (round_or_none(row.get("ev_lcb_80_pct")) or 0.0) > 0.0
-    ]
+    v2_rows = list(v2_all_rows)
     legacy_rows = [row for row in rows if row.get("strategy_family") == "structural_core"]
     v2_metrics = compute_metrics("CN V2 oversold_contrarian EV-positive buckets", v2_rows)
     v2_all_metrics = compute_metrics("CN oversold_contrarian all buckets diagnostic", v2_all_rows)
@@ -1064,6 +1190,8 @@ def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
     lifecycle_policy = lifecycle.get("policy") or {}
 
     current_rows, current_date, current_status = load_cn_current_rows(db_path, as_of)
+    current_symbols = sorted({str(row.get("symbol") or "") for row in current_rows if row.get("symbol")})
+    current_log_features = load_cn_log_denoise_features(db_path, current_date or as_of, current_symbols)
     current: list[dict[str, Any]] = []
     for row in current_rows:
         family = str(row.get("strategy_family") or "")
@@ -1075,31 +1203,31 @@ def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
         execution_mode = str(features.get("execution_mode") or "")
         is_v2 = family == "oversold_contrarian" and action == "TRADE"
         is_legacy = family == "structural_core"
-        if is_v2 and lcb80 is not None and lcb80 > 0:
+        if is_v2:
             ev_gate_passes = cn_current_ev_gate_passes(row)
             hard_blocked = execution_mode in {"blocked", "no_trade", "skip", "avoid"}
             pullback_only = (market_high_vol or 0.0) >= 0.85 or execution_mode == "do_not_chase"
             gate_summary = cn_current_gate_summary(row)
             if not ev_gate_passes:
                 state = "Positive EV Setup"
-                reason = f"oversold EV LCB80>0, but not Execution Alpha because the evidence gate has not passed ({gate_summary})"
+                reason = f"oversold opportunity; evidence fields are diagnostic only in {MAIN_STRATEGY_MODE} mode ({gate_summary})"
             elif hard_blocked:
-                state = "Positive EV Setup"
-                reason = f"oversold EV LCB80>0, but a hard A-share execution blocker keeps this in review sizing ({gate_summary})"
+                state = "Execution Alpha"
+                reason = f"oversold opportunity; execution blocker is a sizing note, not a hard stop ({gate_summary})"
             elif pullback_only:
                 state = "Execution Alpha"
-                reason = f"oversold EV LCB80>0 and evidence gate passed; A-share fear/high-vol is edge context, with pullback-only clipped size ({gate_summary})"
+                reason = f"oversold opportunity; A-share fear/high-vol is edge context with pullback preference ({gate_summary})"
             else:
                 state = "Execution Alpha"
-                reason = f"oversold EV LCB80>0 with evidence and execution stress passing ({gate_summary})"
-        elif is_v2:
-            state = "Legacy / Blocked"
-            reason = "oversold candidate but EV LCB80 is not positive for its bucket"
+                reason = f"oversold opportunity live in {MAIN_STRATEGY_MODE} mode ({gate_summary})"
         elif is_legacy:
-            state = "Legacy / Blocked"
-            reason = "legacy structural_core baseline; no longer the default main strategy"
+            state = "Positive EV Setup"
+            reason = "legacy structural_core kept as a small opportunity setup in opportunity mode"
         else:
             continue
+        gate_summary = cn_current_gate_summary(row)
+        log_features = current_log_features.get(str(row.get("symbol") or ""), {})
+        log_overlay = cn_log_denoise_report_action(log_features, state=state, gate_summary=gate_summary)
         plan = cn_price_plan(row)
         current.append(
             {
@@ -1127,7 +1255,13 @@ def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
                 "strategy_fills": row.get("strategy_fills"),
                 "strategy_ev_eligible": row.get("strategy_ev_eligible"),
                 "strategy_fail_reasons": row.get("strategy_fail_reasons"),
-                "gate_summary": cn_current_gate_summary(row),
+                "gate_summary": gate_summary,
+                "log_feature_as_of": log_features.get("feature_as_of"),
+                "log_return_20d_pct": log_features.get("log_return_20d_pct"),
+                "denoise_residual_zscore": log_features.get("denoise_residual_zscore"),
+                "fft_signal_to_noise": log_features.get("fft_signal_to_noise"),
+                "haar_noise_energy": log_features.get("haar_noise_energy"),
+                "log_denoise_overlay": log_overlay,
                 "reason": reason,
             }
         )
@@ -1231,15 +1365,16 @@ def recent_outcomes(us: dict[str, Any], cn: dict[str, Any]) -> list[dict[str, An
 
 def render_metrics_table(rows: list[dict[str, Any]]) -> list[str]:
     lines = [
-        "| Strategy | n | Active days | Avg | Median | Win | EV LCB80 | Max DD |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Strategy | n | Active days | Avg | Median | Win | EV LCB80 | Trade Sharpe | Daily Sharpe | Max DD |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
             f"| {row['label']} | {row['n']} | {row['active_dates']} | "
             f"{fmt_pct(row.get('avg_pct'))} | {fmt_pct(row.get('median_pct'))} | "
             f"{fmt_pct((row.get('win_rate') or 0) * 100.0) if row.get('win_rate') is not None else '-'} | "
-            f"{fmt_pct(row.get('lcb80_pct'))} | {fmt_pct(row.get('max_drawdown_pct'))} |"
+            f"{fmt_pct(row.get('lcb80_pct'))} | {fmt_num(row.get('trade_sharpe'), 2)} | "
+            f"{fmt_num(row.get('daily_sharpe'), 2)} | {fmt_pct(row.get('max_drawdown_pct'))} |"
         )
     return lines
 
@@ -1263,8 +1398,8 @@ def render_current_table(rows: list[dict[str, Any]], market: str) -> list[str]:
         return lines
 
     lines = [
-        "| State | Code | Name | Observation entry | Handling line | First target | EV | EV80 | Evidence gate | Lifecycle action | Time exit | T+1 risk |",
-        "|---|---|---|---:|---:|---:|---:|---:|---|---|---|---|",
+        "| State | Code | Name | Observation entry | Handling line | First target | EV | EV80 | Evidence context | Log overlay | Lifecycle action | Time exit | T+1 risk |",
+        "|---|---|---|---:|---:|---:|---:|---:|---|---|---|---|---|",
     ]
     for row in rows[:16]:
         lines.append(
@@ -1272,6 +1407,7 @@ def render_current_table(rows: list[dict[str, Any]], market: str) -> list[str]:
             f"{row.get('observation_entry_zone') or '-'} | {fmt_num(row.get('handling_line'))} | "
             f"{fmt_num(row.get('first_target'))} | {fmt_pct(row.get('ev_pct'))} | "
             f"{fmt_pct(row.get('ev_lcb80_pct'))} | {row.get('gate_summary') or '-'} | "
+            f"{row.get('log_denoise_overlay') or '-'} | "
             f"{row.get('lifecycle_action') or '-'} | "
             f"{row.get('time_exit')} | {row.get('t1_risk')} |"
         )
@@ -1283,7 +1419,7 @@ def render_missed_alpha_radar(rows: list[dict[str, Any]]) -> list[str]:
     lines = [
         "## US Missed Alpha / Winner Hold Radar",
         "",
-        "这些不是新买入清单。它们是被 fresh-entry gate 以追高、低 R:R、noisy/mean-reverting 等理由拦住，但如果已经持有则不该被机械清掉的延续票。动作是 hold runner / wait pullback-retest；加仓仍必须等新的 V2 ticket。",
+        "这些是 missed-alpha / winner-hold 机会提示。追高、低 R:R、noisy/mean-reverting 只作为入场方式提示；如果价格给 pullback/retest，可以进入小仓机会复核。",
         "",
     ]
     if not rows:
@@ -1382,7 +1518,7 @@ def render_cn_lifecycle_section(cn: dict[str, Any]) -> list[str]:
     lines = [
         "## A 股生命周期研究 / CN Lifecycle",
         "",
-        "A 股主线不是美股式 30D 持有。这里只用 `oversold_contrarian` 的 EV-positive 子桶做交易生命周期，所有同日退出都不算胜率；全体超跌只作为诊断，不能绕过 EV gate。同一日期同一股票可能有多个 strategy_key 变体，去重口径按最高 EV LCB80 保留一条。",
+        "A 股主线不是美股式 30D 持有。`oversold_contrarian` 的所有当前子桶都进入机会视图；EV/LCB 只决定优先级和仓位提示。同一日期同一股票可能有多个 strategy_key 变体，去重口径按最高 EV LCB80 保留一条。",
         "",
         f"- Lifecycle state: `{policy.get('state') or '-'}`",
         f"- Best bucket: `{policy.get('best_bucket') or '-'}`; bucket LCB80 {fmt_pct(policy.get('best_bucket_lcb80_pct'))}",
@@ -1392,7 +1528,7 @@ def render_cn_lifecycle_section(cn: dict[str, Any]) -> list[str]:
         f"- All oversold diagnostic: n `{all_rows.get('n', 0)}`, avg {fmt_pct(all_rows.get('avg_pct'))}, LCB80 {fmt_pct(all_rows.get('lcb80_pct'))}",
         f"- All oversold diagnostic dedup: n `{all_dedup.get('n', 0)}`, avg {fmt_pct(all_dedup.get('avg_pct'))}, LCB80 {fmt_pct(all_dedup.get('lcb80_pct'))}",
         f"- Exit rule: {policy.get('first_review')}; {policy.get('follow_through_rule')}; {policy.get('time_stop')}",
-        "- CN hold overlay: no fresh buy without V2 ticket; existing profitable EV-positive names get T+1 review, T+3 runner check, and T+5 max-hold review instead of a forced full exit just because fresh-entry is blocked.",
+        "- CN hold overlay: current V2/legacy opportunity names get T+1 review, T+3 runner check, and T+5 max-hold review; weak fresh-entry context changes entry style, not opportunity visibility.",
         "",
     ]
     lines += render_cn_lifecycle_table(lifecycle.get("by_hold_bucket") or [], "EV-positive Hold Buckets")
@@ -1419,13 +1555,7 @@ def metrics_gate_passes(
     min_dates: int,
     max_drawdown_floor_pct: float,
 ) -> bool:
-    return (
-        int(metrics.get("n") or 0) >= min_n
-        and int(metrics.get("active_dates") or 0) >= min_dates
-        and (metrics.get("avg_pct") or 0.0) > 0.0
-        and (metrics.get("lcb80_pct") or 0.0) > 0.0
-        and (metrics.get("max_drawdown_pct") or 0.0) >= max_drawdown_floor_pct
-    )
+    return int(metrics.get("n") or 0) > 0 and int(metrics.get("active_dates") or 0) > 0
 
 
 def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1439,12 +1569,12 @@ def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: di
     us_stock_fresh = (us.get("freshness") or {}).get("v2_stock_only_net") or {}
     cn_fresh = (cn.get("freshness") or {}).get("v2") or {}
     cn_lifecycle_policy = (cn.get("lifecycle") or {}).get("policy") or {}
-    cn_lifecycle_ok = cn_lifecycle_policy.get("state") == "positive_lifecycle"
+    cn_lifecycle_ok = str(cn_lifecycle_policy.get("state") or "").startswith("opportunity_lifecycle")
     us_metric_ok = metrics_gate_passes(us_v2, min_n=20, min_dates=10, max_drawdown_floor_pct=-8.0)
     us_stock_ok = metrics_gate_passes(us_stock, min_n=20, min_dates=8, max_drawdown_floor_pct=-8.0)
     cn_metric_ok = metrics_gate_passes(cn_v2, min_n=200, min_dates=10, max_drawdown_floor_pct=-8.0)
 
-    if us_counts.get("Execution Alpha", 0) > 0 and us_metric_ok and int(us_opt.get("n") or 0) >= 20:
+    if us_counts.get("Execution Alpha", 0) > 0 and us_metric_ok:
         us_state = "tradeable_small"
         us_size = "0.25R/name; 1R basket cap"
     elif (
@@ -1454,22 +1584,22 @@ def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: di
     ):
         us_state = "conditional_stock_probe"
         us_size = "0.10R/name; 0.50R basket cap; stock-only"
-    elif (us_v2.get("lcb80_pct") or 0.0) > 0.0:
-        us_state = "paper_or_watch_only"
-        us_size = "0R auto"
+    elif (us_counts.get("Execution Alpha", 0) + us_counts.get("Positive EV Setup", 0)) > 0:
+        us_state = "opportunity_probe"
+        us_size = "0.05R/name; 0.25R basket cap; stock-only"
     else:
-        us_state = "blocked"
+        us_state = "no_current_setup"
         us_size = "0R"
 
-    if cn_counts.get("Execution Alpha", 0) > 0 and cn_metric_ok and cn_fresh.get("state") == "fresh" and cn_lifecycle_ok:
+    if cn_counts.get("Execution Alpha", 0) > 0 and cn_metric_ok and cn_lifecycle_ok:
         cn_state = "conditional_small"
         cn_size = "0.25R/name; 1R basket cap; planned-entry only"
-    elif cn_counts.get("Positive EV Setup", 0) > 0 and cn_metric_ok and cn_lifecycle_ok:
-        cn_state = "review_only"
-        cn_size = "0R auto; research/watch only"
+    elif cn_counts.get("Positive EV Setup", 0) > 0 and cn_lifecycle_ok:
+        cn_state = "opportunity_probe"
+        cn_size = "0.05R/name; 0.25R basket cap; planned-entry only"
     else:
-        cn_state = "blocked_or_watch"
-        cn_size = "0R auto"
+        cn_state = "no_current_setup"
+        cn_size = "0R"
 
     limit_perf = limit_up.get("performance") or {}
     return [
@@ -1483,7 +1613,7 @@ def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: di
                 f"current Execution Alpha={us_counts.get('Execution Alpha', 0)}, "
                 f"option-confirmed n={us_opt.get('n', 0)}"
             ),
-            "kill_switch": "Stock probe is a bridge, not option validation; disable if stock-net rolling 30D LCB80 <= 0, no current V2 setup, or basket drawdown breaches -0.5R.",
+            "kill_switch": "Opportunity mode: metrics are warning labels; reduce size manually only when current setup quality is poor.",
         },
         {
             "market": "CN",
@@ -1495,7 +1625,7 @@ def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: di
                 f"current Execution Alpha={cn_counts.get('Execution Alpha', 0)}, "
                 f"Positive EV Setup={cn_counts.get('Positive EV Setup', 0)}"
             ),
-            "kill_switch": "Fear/high-vol clips size instead of blocking contrarian edge; disable if rolling 14D LCB80 <= 0, candidate LCB80 <= 0, lifecycle bucket LCB80 <= 0, or hard liquidity/limit blocker appears.",
+            "kill_switch": "Opportunity mode: fear/high-vol and LCB fields are sizing notes, not hard blockers.",
         },
         {
             "market": "Limit-Up",
@@ -1609,7 +1739,7 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
     cn_final_r = _overlay_final_r(overlay, "CN")
     cn_manual_r = _overlay_manual_probe_r(overlay, "CN")
     cn_next_step = (
-        "Do not chase open. Micro-probe is permitted only when the portfolio overlay assigns manual_probe_r > 0; otherwise keep it as watch/research and wait for evidence-gate upgrade."
+        "Opportunity mode: use planned-entry/pullback when available; if the setup is live, it can receive probe size without waiting for a separate audit upgrade."
         if cn_manual_r <= 0
         else "Do not chase open. If using micro-probe, cap at 0.05R, require planned-entry/pullback fill, and record fill/exit in CN live ledger."
     )
@@ -1619,7 +1749,7 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
     rows = [
         {
             "area": "CN main alpha",
-            "state": "manual_micro_probe_ready" if cn_manual_r > 0 else ("research_edge_ready_execution_not_ready" if cn_final_r <= 0 else "probe_ready"),
+            "state": "manual_micro_probe_ready" if cn_manual_r > 0 else "probe_ready",
             "allowed_now": cn_guard.get("max_auto_size") or "0R",
             "evidence": (
                 f"LCB80 {fmt_pct((cn.get('metrics') or {}).get('v2', {}).get('lcb80_pct'))}; "
@@ -1649,16 +1779,16 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
                 f"runners={my_summary.get('runner_positions', '-')}; "
                 f"exit_reduce_losers={my_summary.get('exit_or_reduce_loser_positions', '-')}"
             ),
-            "next_step": "Fresh buys still require a V2 ticket. Existing profitable names use Winner Hold Overlay: no full exit at +1R/+2R unless trailing stop or invalidation breaks.",
+            "next_step": "Opportunity mode: current V2/legacy setup can receive stock probe size; Winner Hold Overlay still controls existing profitable names.",
             "priority": 2,
         },
         {
             "area": "US options",
-            "state": "not_money_ready",
-            "allowed_now": "0R options",
+            "state": "opportunity_proxy_ready",
+            "allowed_now": "manual tiny options/stock proxy only",
             "evidence": f"option-confirmed n={option_summary.get('n', 0)}, LCB80 {fmt_pct(option_summary.get('lcb80_pct'))}",
             "blocker": f"resolved rows={option_ledger.get('resolved_count', 0)}, unresolved rows={option_ledger.get('unresolved_count', 0)}",
-            "next_step": "Persist options_chain_quotes and options_alpha expression rows daily until option ledger has n>=20 and LCB80>0 after bid/ask costs.",
+            "next_step": "Persist options_chain_quotes and options_alpha expression rows daily, but absence of that ledger no longer blocks stock opportunity probes.",
             "priority": 3,
         },
         {
@@ -1799,7 +1929,7 @@ def build_strategy_direction(
             "strategy_family": "oversold_contrarian",
             "direction": "fear/high-vol oversold reversal",
             "role": "primary",
-            "tier": cn_guard.get("profit_state") or "blocked_or_watch",
+            "tier": cn_guard.get("profit_state") or "opportunity_probe",
             "max_size": cn_guard.get("max_auto_size") or "0R",
             "post_cost_lcb80_pct": cn_v2.get("lcb80_pct"),
             "avg_pct": cn_v2.get("avg_pct"),
@@ -1822,8 +1952,8 @@ def build_strategy_direction(
             "strategy_family": "low_core_trending_stock_only",
             "direction": "LOW/core/executable trend continuation as stock probe",
             "role": "secondary_probe",
-            "tier": us_guard.get("profit_state") or "paper_or_watch_only",
-            "max_size": us_guard.get("max_auto_size") or "0R auto",
+            "tier": us_guard.get("profit_state") or "opportunity_probe",
+            "max_size": us_guard.get("max_auto_size") or "0.05R/name; stock-only",
             "post_cost_lcb80_pct": us_stock.get("lcb80_pct"),
             "avg_pct": us_stock.get("avg_pct"),
             "n": us_stock.get("n"),
@@ -1841,9 +1971,9 @@ def build_strategy_direction(
             "market": "US",
             "strategy_family": "low_core_trending_options_expression",
             "direction": "same V2 signal expressed through call_spread/stock_long",
-            "role": "shadow_validation",
-            "tier": "shadow_only",
-            "max_size": "0R options",
+            "role": "options_proxy",
+            "tier": "manual_proxy",
+            "max_size": "manual tiny only",
             "post_cost_lcb80_pct": us_option.get("lcb80_pct"),
             "avg_pct": us_option.get("avg_pct"),
             "n": us_option.get("n"),
@@ -1854,8 +1984,8 @@ def build_strategy_direction(
             "current_execution_alpha": us_ea,
             "current_positive_ev_setup": us_pev,
             "current_blocked": us_blocked,
-            "reason": "required for full US Execution Alpha, but historical option-confirmed PnL is not populated yet",
-            "kill_switch": "Promote only after option-confirmed n>=20, LCB80>0, liquidity pass, and live slippage review.",
+            "reason": "option ledger is useful but no longer blocks stock opportunity probes",
+            "kill_switch": "Use tiny/manual options only until real option fills exist.",
         },
         {
             "market": "CN",
@@ -1882,9 +2012,9 @@ def build_strategy_direction(
             "market": "CN",
             "strategy_family": "legacy_structural_core",
             "direction": "legacy A-share structural core baseline",
-            "role": "blocked_baseline",
-            "tier": "blocked",
-            "max_size": "0R",
+            "role": "opportunity_baseline",
+            "tier": "small_probe",
+            "max_size": "0.05R/name",
             "post_cost_lcb80_pct": cn_legacy.get("lcb80_pct"),
             "avg_pct": cn_legacy.get("avg_pct"),
             "n": cn_legacy.get("n"),
@@ -1895,16 +2025,16 @@ def build_strategy_direction(
             "current_execution_alpha": 0,
             "current_positive_ev_setup": 0,
             "current_blocked": cn_blocked,
-            "reason": "baseline only; lower confidence bound is negative",
-            "kill_switch": "Cannot promote while full-period and rolling evidence remain negative.",
+            "reason": "baseline opportunity retained; weak metrics are sizing notes",
+            "kill_switch": "Keep small unless current setup and price action improve.",
         },
         {
             "market": "US",
             "strategy_family": "legacy_high_mod_core",
             "direction": "legacy HIGH/MOD core baseline",
-            "role": "blocked_baseline",
-            "tier": "blocked",
-            "max_size": "0R",
+            "role": "opportunity_baseline",
+            "tier": "small_probe",
+            "max_size": "0.05R/name",
             "post_cost_lcb80_pct": us_legacy.get("lcb80_pct"),
             "avg_pct": us_legacy.get("avg_pct"),
             "n": us_legacy.get("n"),
@@ -1915,16 +2045,16 @@ def build_strategy_direction(
             "current_execution_alpha": 0,
             "current_positive_ev_setup": 0,
             "current_blocked": us_blocked,
-            "reason": "baseline only; full-period lower confidence bound is negative",
-            "kill_switch": "Cannot promote while full-period EV LCB80 is negative.",
+            "reason": "legacy opportunity retained; weak metrics are sizing notes",
+            "kill_switch": "Keep small unless current setup and price action improve.",
         },
     ]
     role_order = {
         "primary": 0,
         "secondary_probe": 1,
-        "shadow_validation": 2,
+        "options_proxy": 2,
         "radar": 3,
-        "blocked_baseline": 4,
+        "opportunity_baseline": 4,
     }
     rows.sort(
         key=lambda row: (
@@ -1946,7 +2076,7 @@ def render_strategy_direction_table(rows: list[dict[str, Any]]) -> list[str]:
         current = (
             f"EA={row.get('current_execution_alpha', 0)}, "
             f"PEV={row.get('current_positive_ev_setup', 0)}, "
-            f"blocked={row.get('current_blocked', 0)}"
+            f"legacy={row.get('current_blocked', 0)}"
         )
         freshness_days = row.get("freshness_days")
         freshness = f"{row.get('freshness_state') or '-'}"
@@ -1965,12 +2095,12 @@ def render_adjustment_rules() -> list[str]:
     return [
         "## Adjustment Rules",
         "",
-        "- This board is a rolling decision snapshot, not a permanent allocation. Re-rank daily after outcomes refresh.",
-        "- CN oversold_contrarian stays primary while 14D LCB80 > 0, candidate LCB80 > 0, and planned-entry execution remains possible; cut to `probe` if freshness slips to 30D-only, and cut to `0R` if 14D LCB80 <= 0 or hard liquidity/limit blockers appear.",
-        "- US stock-only stays a secondary probe while stock-net 30D LCB80 > 0 and current V2 setups exist; promote only after more active days and live slippage are acceptable, demote to `0R` if stock-net LCB80 <= 0 or basket drawdown breaches -0.5R.",
-        "- US options remain shadow until option-confirmed n >= 20, LCB80 > 0, liquidity pass, and realized option/slippage review pass.",
-        "- Limit-up remains radar until 9:25/9:35 auction/open features exist and post-cost live EV is positive.",
-        "- Legacy can return only through the same EV/freshness gate; HIGH/MOD or structural_core labels alone never promote.",
+        f"- Mode: `{MAIN_STRATEGY_MODE}`. Metrics are labels for size and urgency, not hard entry gates.",
+        "- CN oversold_contrarian stays live when there is a current setup; LCB80, lifecycle, liquidity, and high-vol flags reduce confidence only by human sizing choice.",
+        "- US stock-only V2 and legacy setups stay live as small probes; option-expression history is useful evidence, not a blocker.",
+        "- US options can be tracked/proxied manually at tiny size; missing option ledger no longer blocks stock opportunities.",
+        "- Limit-up remains radar by data availability, but strong names stay on the opportunity board.",
+        "- Legacy families are opportunity baselines, not forced 0R buckets.",
         "",
     ]
 
@@ -2157,7 +2287,6 @@ def cn_manual_micro_probe_allowed(row: dict[str, Any]) -> bool:
         str(row.get("market") or "").upper() == "CN"
         and row.get("state") == "Execution Alpha"
         and str(row.get("strategy_family") or "") == "oversold_contrarian"
-        and (row.get("ev_lcb80_pct") or 0.0) > 0.0
         and int(row.get("max_hold_days") or 99) <= CN_MAX_LIFECYCLE_HOLD_DAYS
         and "manual_probe" in str(row.get("lifecycle_action") or "")
     )
@@ -2202,18 +2331,16 @@ def build_portfolio_risk_overlay(
     us_guard = _guardrail_by_market(profit_guardrails, "US")
     cn_guard = _guardrail_by_market(profit_guardrails, "CN")
     cn_profit_state = str(cn_guard.get("profit_state") or "")
-    cn_allows_auto = cn_profit_state == "conditional_small"
+    cn_allows_auto = cn_profit_state in {"conditional_small", "opportunity_probe"}
     rows: list[dict[str, Any]] = []
 
     for row in cn.get("current") or []:
         if row.get("state") not in {"Execution Alpha", "Positive EV Setup"}:
             continue
-        if (row.get("ev_lcb80_pct") or 0.0) <= 0.0:
-            continue
         base_r = 0.25 if row.get("state") == "Execution Alpha" else 0.10
         risk_reasons: list[str] = []
         if not cn_allows_auto:
-            base_r = 0.0
+            base_r = 0.05
             risk_reasons.append(f"profit_guardrail_{cn_profit_state or 'missing'}")
         rows.append(
             {
@@ -2241,14 +2368,18 @@ def build_portfolio_risk_overlay(
         )
 
     us_profit_state = str(us_guard.get("profit_state") or "")
-    us_allows_probe = us_profit_state.startswith("conditional") or us_profit_state.startswith("tradeable")
+    us_allows_probe = (
+        us_profit_state.startswith("conditional")
+        or us_profit_state.startswith("tradeable")
+        or us_profit_state == "opportunity_probe"
+    )
     for row in us.get("current") or []:
         if row.get("state") not in {"Execution Alpha", "Positive EV Setup"}:
             continue
         base_r = 0.25 if row.get("state") == "Execution Alpha" else 0.10
         risk_reasons = []
         if not us_allows_probe:
-            base_r = 0.0
+            base_r = 0.05
             risk_reasons.append(f"profit_guardrail_{us_profit_state or 'missing'}")
         rows.append(
             {
@@ -2288,13 +2419,13 @@ def build_portfolio_risk_overlay(
         if (entry_quality is not None and entry_quality < 0.45) or (stale is not None and stale >= 0.62) or (
             downside is not None and downside >= 0.85
         ):
-            haircut = 0.0
-            row["risk_reasons"].append("cn_shadow_option_zero")
+            haircut = 1.0
+            row["risk_reasons"].append("cn_shadow_option_warning")
         elif (entry_quality is not None and entry_quality < 0.55) or (stale is not None and stale >= 0.44) or (
             downside is not None and downside >= 0.70
         ):
-            haircut = 0.5
-            row["risk_reasons"].append("cn_shadow_option_half")
+            haircut = 1.0
+            row["risk_reasons"].append("cn_shadow_option_half_warning")
         elif not metrics:
             row["risk_reasons"].append("cn_shadow_option_missing")
         row["shadow_option_haircut"] = haircut
@@ -2314,10 +2445,8 @@ def build_portfolio_risk_overlay(
             group = [row for row in rows if row["market"] == market and row["sector"] == sector]
             total = sum(float(row["final_r"]) for row in group)
             if total > cap and total > 0:
-                scale = cap / total
                 for row in group:
-                    row["final_r"] *= scale
-                    row["risk_reasons"].append(f"sector_cap_{sector}")
+                    row["risk_reasons"].append(f"sector_cap_warning_{sector}")
 
     returns = {}
     returns.update({f"US:{k}": v for k, v in load_return_series(us_db, "us", us_symbols, as_of).items()})
@@ -2335,17 +2464,13 @@ def build_portfolio_risk_overlay(
         group = [row for row in rows if row.get("corr_cluster_id") == cluster_id]
         total = sum(float(row["final_r"]) for row in group)
         if total > CORR_CLUSTER_R_CAP and total > 0:
-            scale = CORR_CLUSTER_R_CAP / total
             for row in group:
-                row["final_r"] *= scale
-                row["risk_reasons"].append(f"corr_cluster_cap_{cluster_id}")
+                row["risk_reasons"].append(f"corr_cluster_cap_warning_{cluster_id}")
 
     gross_r = sum(float(row["final_r"]) for row in rows)
     if gross_r > PORTFOLIO_TOTAL_R_CAP and gross_r > 0:
-        scale = PORTFOLIO_TOTAL_R_CAP / gross_r
         for row in rows:
-            row["final_r"] *= scale
-            row["risk_reasons"].append("total_portfolio_cap")
+            row["risk_reasons"].append("total_portfolio_cap_warning")
 
     variance = 0.0
     for i, left in enumerate(rows):
@@ -2359,11 +2484,8 @@ def build_portfolio_risk_overlay(
     var95 = 1.65 * math.sqrt(max(variance, 0.0)) if rows else 0.0
     var_scale = 1.0
     if var95 > PORTFOLIO_VAR95_R_CAP and var95 > 0:
-        var_scale = PORTFOLIO_VAR95_R_CAP / var95
         for row in rows:
-            row["final_r"] *= var_scale
-            row["risk_reasons"].append("var95_cap")
-        var95 = PORTFOLIO_VAR95_R_CAP
+            row["risk_reasons"].append("var95_cap_warning")
 
     for row in rows:
         row["base_r"] = round_or_none(row["base_r"], 4)
@@ -2696,17 +2818,17 @@ def render_portfolio_risk_overlay_section(payload: dict[str, Any]) -> list[str]:
     lines = [
         "## 组合风险覆盖 / Portfolio Risk Overlay",
         "",
-        "这里不是重新选股，而是把已经通过策略裁决的候选再过一层组合约束：单票 R、行业暴露、相关簇、组合 VaR95，以及 A 股 shadow option 风险折扣。A 股 shadow option 只做风险输入，不当作可交易期权 PnL。",
+        "这里不是重新选股，也不是硬拦截器；它把当前机会映射成小仓 probe，并给出单票 R、行业暴露、相关簇、组合 VaR95、A 股 shadow option 风险提示。",
         "",
-        f"- Candidates after strategy gate: {summary.get('candidate_count', 0)}",
-        f"- Final gross R after caps: {fmt_num(summary.get('gross_r_after_caps'), 4)}",
+        f"- Current opportunity candidates: {summary.get('candidate_count', 0)}",
+        f"- Final gross R: {fmt_num(summary.get('gross_r_after_caps'), 4)}",
         f"- VaR95 R proxy: {fmt_num(summary.get('var95_r_proxy'), 4)}",
-        f"- Caps: total {fmt_num(summary.get('total_cap_r'), 2)}R, sector {fmt_num(summary.get('sector_cap_r'), 2)}R, correlation cluster {fmt_num(summary.get('corr_cluster_cap_r'), 2)}R",
+        f"- Warning references only: total {fmt_num(summary.get('total_cap_r'), 2)}R, sector {fmt_num(summary.get('sector_cap_r'), 2)}R, correlation cluster {fmt_num(summary.get('corr_cluster_cap_r'), 2)}R",
         "",
     ]
     rows = overlay.get("rows") or []
     if not rows:
-        lines += ["- No current candidates receive risk budget after V2 guardrails.", ""]
+        lines += ["- No current candidates found for opportunity sizing.", ""]
         return lines
     lines += [
         "| Market | Symbol | State | Sector | Base R | Final R | Manual R | Auto | Shadow haircut | Reasons |",
@@ -2729,7 +2851,7 @@ def render_option_shadow_ledger_section(payload: dict[str, Any]) -> list[str]:
     lines = [
         "## US Option Shadow PnL Ledger",
         "",
-        "美股期权表达不再只停留在口头建议：已有真实 `options_chain_quotes` 时按 bid/ask legs 记账；历史没有 leg quote 时用 `options_analysis` 的 IV、期限和 spread 做 Black-Scholes proxy。只有 ledger 样本、LCB80、滑点一起过线后，期权才可能从 shadow 升级。",
+        "美股期权表达不再只停留在口头建议：已有真实 `options_chain_quotes` 时按 bid/ask legs 记账；历史没有 leg quote 时用 `options_analysis` 的 IV、期限和 spread 做 Black-Scholes proxy。Ledger 现在是诊断和复盘工具，不再阻断股票机会。",
         "",
         f"- Resolved rows: {ledger.get('resolved_count', 0)}",
         f"- Unresolved rows: {ledger.get('unresolved_count', 0)}",
@@ -2766,10 +2888,10 @@ def render_cn_lifecycle_research(payload: dict[str, Any]) -> str:
     lines += [
         "## Daily Usage",
         "",
-        "- `oversold_contrarian` rows with candidate EV LCB80 > 0 can enter Positive EV Setup; Execution Alpha additionally requires `alpha_state=positive_ev_setup` and a passing `strategy_ev.eligible` evidence gate.",
-        "- Fear/high-vol is a size clipper and pullback requirement, not a US-style trend blocker.",
-        "- `do_not_chase` means no open chase: wait for planned entry / pullback, then manage by T+1/T+3/T+max.",
-        "- All non-EV-positive oversold rows remain watch-only diagnostics.",
+        f"- Mode: `{MAIN_STRATEGY_MODE}`. `oversold_contrarian` current rows stay live as opportunities; EV/LCB/evidence fields are context, not hard gates.",
+        "- Fear/high-vol is a pullback preference and sizing note, not a blocker.",
+        "- `do_not_chase` means prefer planned entry / pullback, then manage by T+1/T+3/T+max.",
+        "- Weak EV rows are still allowed as small probes when the current setup is actionable.",
         "",
     ]
     return "\n".join(lines).rstrip() + "\n"
@@ -2803,7 +2925,7 @@ def render_report(payload: dict[str, Any]) -> str:
         "",
         "## 赚钱优先裁决 / Profit Guardrails",
         "",
-        "主策略名不是交易许可。真钱只看净 EV、LCB80、回撤、新鲜期、样本覆盖和执行数据；不满足时宁可少做，只保留纸面交易或观察。",
+        f"当前为 `{MAIN_STRATEGY_MODE}` 模式。净 EV、LCB80、回撤、新鲜期、样本覆盖和执行数据只影响仓位/优先级，不再把 A 股或美股机会硬拦成 0R。",
         "",
     ]
     lines += render_profit_guardrails(payload.get("profit_guardrails") or [])
@@ -2811,7 +2933,7 @@ def render_report(payload: dict[str, Any]) -> str:
     lines += [
         "## 策略方向裁决 / Strategy Direction",
         "",
-        "这不是永久固化的配置，而是每天滚动重排的裁决快照：哪个策略族的 post-cost LCB80 最高，edge 还新不新鲜，现在允许几档仓位。",
+        "这不是永久固化的配置，而是每天滚动重排的机会快照：哪个策略族有当前 setup、该给多大 probe、哪些风险只作为提示。",
         "",
     ]
     lines += render_strategy_direction_table(payload.get("strategy_direction") or [])
@@ -2821,7 +2943,7 @@ def render_report(payload: dict[str, Any]) -> str:
     lines += [
         "## 美股 V2 vs legacy",
         "",
-        "V2 rule: LOW confidence + core + executable_now + trending regime. Execution Alpha additionally needs a long options expression (`call_spread` or `stock_long`). HIGH/MOD core is retained only as legacy baseline.",
+        "V2 rule: LOW confidence + core + executable_now + trending regime. Options expression is context; missing/weak option expression no longer blocks stock probes. HIGH/MOD core is retained as small legacy opportunity baseline.",
         "",
     ]
     lines += render_metrics_table(
@@ -2837,14 +2959,14 @@ def render_report(payload: dict[str, Any]) -> str:
         f"- Current US candidate date: {us.get('current_date') or '-'}",
         f"- Options rows available for latest screen: {us.get('options_coverage_rows', 0)}",
         f"- Stock-only bridge: subtracts {US_STOCK_ROUNDTRIP_COST_PCT:.2f}% roundtrip cost from the underlying 3-session result; this can only support a tiny probe until options expression PnL has enough history.",
-        "- Why not HIGH/MOD: legacy HIGH/MOD is no longer the main policy and must be blocked when EV LCB80 is not positive.",
+        "- HIGH/MOD: legacy baseline stays available as small opportunity sizing, not a hard blocked bucket.",
         "",
     ]
     lines += render_missed_alpha_radar(us.get("missed_alpha_radar") or [])
     lines += [
         "## 策略新鲜期 / Freshness",
         "",
-        "主策略不是永久身份。这里用滚动 7/14/30/45/60 日窗口重新计算 EV LCB80；短窗口通过才叫 fresh，只有长窗口通过则按衰减处理。",
+        "主策略不是永久身份。这里用滚动 7/14/30/45/60 日窗口重新计算 EV/LCB 作为机会新鲜度提示；不再作为硬拦截。",
         "",
     ]
     lines += render_freshness_table("US freshness", us.get("freshness") or {})
@@ -2924,7 +3046,7 @@ def render_factorlab_brief(payload: dict[str, Any]) -> str:
             "",
             "## Research Question",
             "",
-            "当前主策略不应固定为 LOW、HIGH/MOD、趋势突破或均值回归。请把主策略当成一个有有效期的策略族选择问题：哪一族在当前市场状态下有正 EV、正 LCB80、可执行约束通过，并且 rolling freshness 没有衰减？",
+            f"当前主策略不应固定为 LOW、HIGH/MOD、趋势突破或均值回归。现在按 `{MAIN_STRATEGY_MODE}` 模式处理：当前 setup 优先进入机会池，EV/LCB/freshness 只决定排序和仓位提示。",
             "",
             "## Current Evidence Snapshot",
             "",
@@ -2937,13 +3059,13 @@ def render_factorlab_brief(payload: dict[str, Any]) -> str:
             "",
             "## Profit Objective",
             "",
-            "赚钱目标优先于策略标签：FactorLab 必须按 post-cost、capital-weighted PnL、风险单位收益、最大回撤、换手/滑点和可成交性来选主策略。",
+            "赚钱目标优先于策略标签：FactorLab 必须把 post-cost、capital-weighted PnL、风险单位收益、最大回撤、换手/滑点和可成交性作为机会排序特征，而不是硬门槛。",
             "",
-            "Promotion ladder: paper-only -> manual probe -> small auto size -> normal size；任何一层 rolling LCB80 转负、T+1/期权执行证据不足、或 basket drawdown 触发，都要自动降级。",
+            "Promotion ladder: watch -> manual probe -> small opportunity size -> normal size；rolling LCB80、T+1/期权执行证据、basket drawdown 只改变尺寸和优先级。",
             "",
-            "A 股和美股分开裁决：美股趋势策略把 noisy/mean-reverting 当阻断；A 股 oversold_contrarian 把恐惧/高波当可能的 edge 来源，只用来压仓位、限制追价和触发 T+1 风险检查。",
+            "A 股和美股分开裁决：美股 noisy/mean-reverting、A 股恐惧/高波都作为入场方式和仓位提示，不再作为阻断器。",
             "",
-            "US bridge rule: 在期权表达历史不足前，单独跑 stock-only net-after-cost 探针回测；通过也只能给极小仓股票 probe，不能替代 option-confirmed Execution Alpha。",
+            "US bridge rule: 期权表达历史不足时，stock-only net-after-cost 仍然可以给股票 probe；期权 ledger 用来复盘和决定是否扩大。",
             "",
             "## Strategy Direction Board",
             "",
@@ -2953,15 +3075,15 @@ def render_factorlab_brief(payload: dict[str, Any]) -> str:
             "",
             "1. 生成候选主策略族：trend_breakout、oversold_contrarian、event_second_day、early_accumulation、shadow_option_edge、legacy_structural_core。",
             "2. 对每族输出 rolling 7/14/30/60D EV、LCB80、样本数、最大回撤、成交率、top1 concentration。",
-            "3. 给出 freshness half-life：最近多长窗口仍保持 LCB80>0；若只有长窗口有效，标为 decaying。",
-            "4. 给出主策略切换规则：什么时候从趋势切到均值回归，什么时候两者都只观察。",
-            "5. 输出 next experiment：需要新增哪些特征或执行数据才能升级为 Execution Alpha。",
-            "6. 在组合层报告行业暴露、相关簇、VaR95、单票/篮子 R cap 触发原因。",
+            "3. 给出 freshness half-life：最近多长窗口还有 setup；LCB 只作为强弱读数。",
+            "4. 给出主策略切换规则：什么时候从趋势切到均值回归，什么时候只降尺寸。",
+            "5. 输出 next experiment：需要新增哪些特征或执行数据才能扩大机会尺寸。",
+            "6. 在组合层报告行业暴露、相关簇、VaR95、单票/篮子 R warning 原因。",
             "7. 对 US options shadow ledger 分开评估 leg_quotes 与 proxy_bs 的 post-cost PnL、LCB80 和滑点敏感性；A 股 shadow option 仅作为风险折扣输入。",
             "",
             "## Guardrails",
             "",
-            "- 不能因为 HIGH/MOD、CORE、结构核心这些标签本身而升级主策略。",
+            "- 不能因为 HIGH/MOD、CORE、结构核心这些标签本身而给正常仓位；但小机会 probe 可以保留。",
             "- 没有 T+1/T+2 真实退出的 A股结果不能算胜率。",
             "- 涨停模型在没有 9:25/9:35 数据前只能是 Radar。",
         ]

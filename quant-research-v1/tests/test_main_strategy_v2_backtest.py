@@ -250,7 +250,7 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
             self.assertGreaterEqual(len(payload["us"]["missed_alpha_radar"]), 1)
             self.assertGreaterEqual(len(payload["profit_readiness"]["rows"]), 1)
             self.assertEqual(payload["strategy_direction"][0]["strategy_family"], "oversold_contrarian")
-            self.assertEqual(payload["cn"]["lifecycle"]["policy"]["state"], "positive_lifecycle")
+            self.assertEqual(payload["cn"]["lifecycle"]["policy"]["state"], "opportunity_lifecycle")
             self.assertIn("lifecycle_action", payload["cn"]["current"][0])
             self.assertIn("v2_stock_only_net", payload["us"]["metrics"])
             self.assertIn("Stock-only bridge", text)

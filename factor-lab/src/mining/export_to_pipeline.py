@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.dsl.parser import parse
 from src.dsl.compute import compute_factor
+from src.mining.contracts import ensure_contract_tables
 from src.paths import FACTOR_LAB_DB, QUANT_CN_DB, QUANT_US_DB
 
 PIPELINE_CONFIGS = {
@@ -55,6 +56,92 @@ PIPELINE_CONFIGS = {
         "insert_sql": None,  # US uses analysis_daily, handled differently
     },
 }
+
+PIPELINE_POSITIVE_OVERLAY_CONTRACTS = {
+    "action_overlay",
+    "setup_overlay",
+}
+
+
+def _latest_alpha_factory_gate(
+    lab_con: duckdb.DuckDBPyConnection,
+    market: str,
+    factor_id: str,
+    as_of: str,
+) -> dict[str, str] | None:
+    try:
+        row = lab_con.execute(
+            """
+            SELECT alpha_factory_status, money_status, blockers_json,
+                   report_contract, money_readiness
+            FROM factor_money_gate_daily
+            WHERE market=? AND factor_id=? AND as_of <= CAST(? AS DATE)
+            ORDER BY as_of DESC
+            LIMIT 1
+            """,
+            [market, factor_id, as_of],
+        ).fetchone()
+    except duckdb.Error:
+        return None
+    if not row:
+        return None
+    return {
+        "alpha_factory_status": str(row[0] or ""),
+        "money_status": str(row[1] or ""),
+        "blockers_json": str(row[2] or "[]"),
+        "report_contract": str(row[3] or ""),
+        "money_readiness": str(row[4] or ""),
+    }
+
+
+def _is_pipeline_exportable(
+    report_contract: str | None,
+    money_readiness: str | None,
+    alpha_gate: dict[str, str] | None = None,
+) -> bool:
+    """Return whether a promoted factor may enter pipeline scoring inputs.
+
+    `research_only` stays in research appendices. `risk_warning` and
+    `hold_overlay` need dedicated non-entry integration paths, so they are not
+    exported as positive lab_composite scores. `fresh_buy_gate` requires both
+    money readiness and an Alpha Factory pass audit.
+    """
+    contract = str(report_contract or "research_only").strip().lower()
+    readiness = str(money_readiness or "research_only").strip().lower()
+    gate_status = str((alpha_gate or {}).get("alpha_factory_status") or "").strip().lower()
+    gate_contract = str((alpha_gate or {}).get("report_contract") or "").strip().lower()
+    if gate_status == "overlay_allowed" and gate_contract in PIPELINE_POSITIVE_OVERLAY_CONTRACTS:
+        return True
+    if gate_status == "pass":
+        return True
+    if contract in PIPELINE_POSITIVE_OVERLAY_CONTRACTS:
+        return True
+    if contract != "fresh_buy_gate" or readiness != "money_ready":
+        return False
+    return bool(alpha_gate and alpha_gate.get("alpha_factory_status") == "pass")
+
+
+def _clear_pipeline_export(cfg: dict, market: str, as_of: str) -> None:
+    pipeline_con = _connect_for_write(cfg["db_path"])
+    try:
+        if market == "cn":
+            pipeline_con.execute(
+                """
+                DELETE FROM analytics
+                WHERE as_of = ? AND module = 'lab_factor' AND metric = 'lab_composite'
+                """,
+                [as_of],
+            )
+        else:
+            pipeline_con.execute(
+                """
+                DELETE FROM analysis_daily
+                WHERE date = ? AND module_name = 'lab_factor'
+                """,
+                [as_of],
+            )
+    finally:
+        pipeline_con.close()
 
 
 def _load_saved_weights(
@@ -247,21 +334,36 @@ def export(market: str, as_of: str | None = None):
         print(f"  Factor Lab DB not found, skipping")
         return 0
 
-    lab_con = duckdb.connect(str(FACTOR_LAB_DB), read_only=True)
-    promoted = lab_con.execute("""
-        SELECT factor_id, formula, name, composite_score, direction, ic_7d, ic_14d, ic_30d
+    lab_con = duckdb.connect(str(FACTOR_LAB_DB))
+    ensure_contract_tables(lab_con)
+    promoted_raw = lab_con.execute("""
+        SELECT factor_id, formula, name, composite_score, direction,
+               ic_7d, ic_14d, ic_30d, report_contract, money_readiness
         FROM factor_registry
         WHERE market = ? AND status = 'promoted'
         ORDER BY composite_score DESC
     """, [market]).fetchall()
+    gate_by_factor = {
+        row[0]: _latest_alpha_factory_gate(lab_con, market, row[0], as_of)
+        for row in promoted_raw
+    }
+    promoted = []
+    for row in promoted_raw:
+        gate = gate_by_factor.get(row[0])
+        if not _is_pipeline_exportable(row[8], row[9], gate):
+            continue
+        effective_contract = (gate or {}).get("report_contract") or row[8]
+        effective_readiness = (gate or {}).get("money_readiness") or row[9]
+        promoted.append((*row[:8], effective_contract, effective_readiness))
     saved_weights = _load_saved_weights(lab_con, market, [row[0] for row in promoted])
     lab_con.close()
 
     if not promoted:
-        print(f"  No promoted factors for {market}, skipping")
+        print(f"  No pipeline-exportable promoted factors for {market}; clearing lab_factor for {as_of}")
+        _clear_pipeline_export(cfg, market, as_of)
         return 0
 
-    print(f"  {len(promoted)} promoted factors for {market}")
+    print(f"  {len(promoted)} pipeline-exportable promoted factors for {market}")
 
     # 2. Load prices (with lock-safe fallback)
     prices = _load_prices_with_fallback(cfg["db_path"], cfg["price_sql"])
@@ -299,7 +401,7 @@ def export(market: str, as_of: str | None = None):
     factor_values = {}
     factor_best_quintile = {}
 
-    for factor_id, formula, name, score, direction, ic_7d, ic_14d, ic_30d in promoted:
+    for factor_id, formula, name, score, direction, ic_7d, ic_14d, ic_30d, report_contract, money_readiness in promoted:
         try:
             ast = parse(formula)
             fdf = compute_factor(ast, prices, sym_col=sym_col, date_col=date_col)
@@ -354,7 +456,7 @@ def export(market: str, as_of: str | None = None):
         fdf[date_col] = effective_trade_date
         # Merge with historical data for lookback evaluation
         full_fdf = None
-        for factor_id2, formula2, name2, _score2, direction2, ic7_2, ic14_2, ic30_2 in promoted:
+        for factor_id2, formula2, name2, _score2, direction2, ic7_2, ic14_2, ic30_2, _contract2, _readiness2 in promoted:
             if factor_id2 == fid:
                 try:
                     ast2 = parse(formula2)
@@ -387,16 +489,27 @@ def export(market: str, as_of: str | None = None):
     selected_factor_name = None
     selected_side = None
     selected_sharpe = None
+    selected_contract = None
+    selected_money_readiness = None
     if best_factor is None:
         print("  No factor qualified in rolling selection, exporting zeros")
         composite = {sym: 0.0 for fv in factor_values.values() for sym in fv.index}
     else:
         # Get the factor name for logging
         factor_name_map = {fid: name for fid, formula, name, *_ in promoted}
+        factor_contract_map = {
+            fid: {
+                "report_contract": report_contract,
+                "money_readiness": money_readiness,
+            }
+            for fid, _formula, _name, _score, _direction, _ic7, _ic14, _ic30, report_contract, money_readiness in promoted
+        }
         sel_name = factor_name_map.get(best_factor, best_factor)
         selected_factor_name = sel_name
         selected_side = best_side
         selected_sharpe = round(float(best_sharpe), 4)
+        selected_contract = factor_contract_map.get(best_factor, {}).get("report_contract")
+        selected_money_readiness = factor_contract_map.get(best_factor, {}).get("money_readiness")
         print(f"  Selected: {sel_name} ({best_side}), lookback_sharpe={best_sharpe:.2f}")
 
         # Rank all stocks by this factor
@@ -487,6 +600,8 @@ def export(market: str, as_of: str | None = None):
                     "factors": n_factors,
                     "selected_factor": selected_factor_name,
                     "selected_side": selected_side,
+                    "selected_contract": selected_contract,
+                    "selected_money_readiness": selected_money_readiness,
                     "lookback_sharpe": selected_sharpe,
                     "trade_date": effective_trade_date.date().isoformat(),
                     **trade_params.get(sym, {}),
@@ -504,6 +619,8 @@ def export(market: str, as_of: str | None = None):
                     "factors": n_factors,
                     "selected_factor": selected_factor_name,
                     "selected_side": selected_side,
+                    "selected_contract": selected_contract,
+                    "selected_money_readiness": selected_money_readiness,
                     "lookback_sharpe": selected_sharpe,
                     "trade_date": effective_trade_date.date().isoformat(),
                     **trade_params.get(sym, {}),

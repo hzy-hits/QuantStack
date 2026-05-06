@@ -256,6 +256,30 @@ def ensure_contract_tables(con: duckdb.DuckDBPyConnection) -> None:
         )
         """
     )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS factor_money_gate_daily (
+            as_of DATE NOT NULL,
+            market VARCHAR NOT NULL,
+            factor_id VARCHAR NOT NULL,
+            sleeve_id VARCHAR NOT NULL,
+            report_contract VARCHAR DEFAULT 'research_only',
+            money_readiness VARCHAR DEFAULT 'research_only',
+            alpha_factory_status VARCHAR NOT NULL,
+            money_status VARCHAR NOT NULL,
+            n INTEGER,
+            lcb80_pct DOUBLE,
+            double_cost_lcb80_pct DOUBLE,
+            top5_pnl_share DOUBLE,
+            max_abs_corr DOUBLE,
+            marginal_daily_sharpe_delta DOUBLE,
+            blockers_json VARCHAR,
+            notes VARCHAR,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (as_of, market, factor_id)
+        )
+        """
+    )
 
 
 def factor_id_for(market: str, formula: str) -> str:
