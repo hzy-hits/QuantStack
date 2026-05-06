@@ -227,18 +227,26 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
             self.assertTrue((output_dir / "cn_lifecycle_research.json").exists())
             self.assertTrue((output_dir / "profit_readiness.md").exists())
             self.assertTrue((output_dir / "profit_readiness.json").exists())
+            self.assertTrue((output_dir / "us_opportunity_ranker.md").exists())
+            self.assertTrue((output_dir / "us_opportunity_ranker.json").exists())
+            self.assertTrue((output_dir / "us_opportunity_ranker.duckdb").exists())
+            self.assertTrue((output_dir / "cn_opportunity_ranker.md").exists())
+            self.assertTrue((output_dir / "cn_opportunity_ranker.json").exists())
+            self.assertTrue((output_dir / "cn_opportunity_ranker.duckdb").exists())
             self.assertIn("## 赚钱优先裁决 / Profit Guardrails", text)
             self.assertIn("## 赚钱落地缺口 / Profit Readiness", text)
             self.assertIn("## 策略方向裁决 / Strategy Direction", text)
             self.assertIn("## 组合风险覆盖 / Portfolio Risk Overlay", text)
             self.assertIn("## US Option Shadow PnL Ledger", text)
             self.assertIn("## US Missed Alpha / Winner Hold Radar", text)
+            self.assertIn("## 美股生产排序 / US Production Ranker", text)
+            self.assertIn("## A 股生产排序 / CN Production Ranker", text)
             self.assertIn("## A 股生命周期研究 / CN Lifecycle", text)
             self.assertIn("## Adjustment Rules", text)
             self.assertIn("不是永久固化", text)
             self.assertIn("## 策略新鲜期 / Freshness", text)
             self.assertIn("Execution Alpha", text)
-            self.assertIn("Positive EV Setup", text)
+            self.assertIn("Ranked Watch", text)
             self.assertIn("Limit-Up Radar", text)
             self.assertIn("profit_guardrails", payload)
             self.assertIn("strategy_direction", payload)
@@ -247,6 +255,8 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
             self.assertIn("lifecycle", payload["cn"])
             self.assertIn("profit_readiness", payload)
             self.assertIn("missed_alpha_radar", payload["us"])
+            self.assertIn("us_opportunity_ranker", payload)
+            self.assertIn("cn_opportunity_ranker", payload)
             self.assertGreaterEqual(len(payload["us"]["missed_alpha_radar"]), 1)
             self.assertGreaterEqual(len(payload["profit_readiness"]["rows"]), 1)
             self.assertEqual(payload["strategy_direction"][0]["strategy_family"], "oversold_contrarian")
@@ -265,6 +275,8 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
                 ledger_count = con.execute("SELECT COUNT(*) FROM option_shadow_ledger").fetchone()[0]
                 lifecycle_count = con.execute("SELECT COUNT(*) FROM cn_lifecycle_research").fetchone()[0]
                 readiness_count = con.execute("SELECT COUNT(*) FROM profit_readiness").fetchone()[0]
+                us_ranker_count = con.execute("SELECT COUNT(*) FROM us_opportunity_ranker").fetchone()[0]
+                cn_ranker_count = con.execute("SELECT COUNT(*) FROM cn_opportunity_ranker").fetchone()[0]
             finally:
                 con.close()
             self.assertGreaterEqual(count, 4)
@@ -272,6 +284,8 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
             self.assertGreaterEqual(ledger_count, 1)
             self.assertGreaterEqual(lifecycle_count, 1)
             self.assertGreaterEqual(readiness_count, 1)
+            self.assertGreaterEqual(us_ranker_count, 1)
+            self.assertGreaterEqual(cn_ranker_count, 1)
 
 
 if __name__ == "__main__":

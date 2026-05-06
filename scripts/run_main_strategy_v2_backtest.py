@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import statistics
+import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,12 @@ import duckdb
 
 
 STACK_ROOT = Path(__file__).resolve().parents[1]
+QUANT_V1_SRC = STACK_ROOT / "quant-research-v1" / "src"
+if str(QUANT_V1_SRC) not in sys.path:
+    sys.path.insert(0, str(QUANT_V1_SRC))
+
+from quant_bot.analytics import cn_opportunity_ranker, us_opportunity_ranker  # noqa: E402
+
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2"
 DEFAULT_START = "2026-03-01"
 LCB80_Z = 1.2816
@@ -43,6 +50,8 @@ CN_MAX_LIFECYCLE_HOLD_DAYS = 5
 CN_LIFECYCLE_BUCKET_ORDER = ["T+1", "T+2", "T+3", "T+4-T+5", "T+6-T+10", ">T+10", "pending"]
 CN_MANUAL_MICRO_PROBE_R = 0.05
 CN_EXECUTION_ALPHA_STATE = "positive_ev_setup"
+CN_ALPHA_FACTORY_EXECUTION_SLEEVE = "cn_oversold_ev_positive"
+US_ALPHA_FACTORY_EXECUTION_SLEEVE = "us_v2_stock_probe"
 CN_LOG_DENOISE_METRICS = [
     "log_return_20d_pct",
     "denoise_residual_zscore",
@@ -442,6 +451,12 @@ def is_us_legacy_policy(row: dict[str, Any]) -> bool:
     )
 
 
+def us_alpha_factory_sleeve_id(row: dict[str, Any]) -> str | None:
+    if is_us_v2_policy(row) or str(row.get("policy") or "") == "LOW core executable trending":
+        return US_ALPHA_FACTORY_EXECUTION_SLEEVE
+    return None
+
+
 def load_us_rows(db_path: Path, start: date, as_of: date) -> tuple[list[dict[str, Any]], str]:
     if not db_path.exists():
         return [], "missing"
@@ -658,15 +673,13 @@ def summarize_us(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
         opt_pass, opt_reason = option_expression_pass(opt_row)
         is_v2 = is_us_v2_policy(row)
         is_legacy = is_us_legacy_policy(row)
-        if is_v2 and v2_stable:
+        alpha_sleeve_id = us_alpha_factory_sleeve_id(row)
+        if alpha_sleeve_id:
             state = "Execution Alpha"
-            reason = f"V2 policy in {MAIN_STRATEGY_MODE} mode; {opt_reason}"
-        elif is_v2:
-            state = "Positive EV Setup"
-            reason = f"V2 opportunity kept live despite weak aggregate metrics; {opt_reason}"
+            reason = f"Alpha Factory sleeve {alpha_sleeve_id} current member; {opt_reason}"
         elif is_legacy:
-            state = "Positive EV Setup"
-            reason = "legacy HIGH/MOD baseline kept as a small opportunity setup in opportunity mode"
+            state = "Ranked Watch"
+            reason = "legacy HIGH/MOD baseline is rank-only until promoted by Alpha Factory"
         else:
             continue
         current.append(
@@ -677,10 +690,13 @@ def summarize_us(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
                 "name": "",
                 "state": state,
                 "policy": "LOW core executable trending" if is_v2 else "legacy HIGH/MOD core",
+                "alpha_sleeve_id": alpha_sleeve_id,
+                "alpha_factory_role": "execution_sleeve" if alpha_sleeve_id else "rank_only",
                 "entry": round_or_none(row.get("entry_price") or row.get("reference_price"), 4),
                 "stop": round_or_none(row.get("stop_price"), 4),
                 "target": round_or_none(row.get("target_price"), 4),
                 "rr_ratio": round_or_none(row.get("rr_ratio"), 4),
+                "expected_move_pct": round_or_none(row.get("expected_move_pct"), 4),
                 "time_exit": "3 sessions / next catalyst",
                 "option_expression": (
                     (opt_row or {}).get("expression")
@@ -946,10 +962,13 @@ def load_cn_log_denoise_features(
     missing = requested - set(out)
     if requested and missing:
         try:
-            from run_cn_log_denoise_backtest import compute_log_features, load_prices
+            from quant_bot.analytics.cn_log_denoise_backtest import compute_log_features, load_prices
         except ImportError:
             return out
-        prices = load_prices(db_path, sorted(missing), as_of - timedelta(days=140), as_of)
+        try:
+            prices = load_prices(db_path, sorted(missing), as_of - timedelta(days=140), as_of)
+        except duckdb.Error:
+            return out
         features = compute_log_features(prices)
         if not features.empty:
             features = features.sort_values(["symbol", "feature_date"]).drop_duplicates("symbol", keep="last")
@@ -1085,7 +1104,7 @@ def build_cn_lifecycle_policy(hold_buckets: list[dict[str, Any]]) -> dict[str, A
         "follow_through_rule": "T+3 no +1R / no volume follow-through -> exit review",
         "time_stop": f"hard review/exit by T+{max_hold}",
         "entry_rule": "oversold_contrarian opportunity buckets stay live; metrics only tune size and urgency",
-        "risk_rule": "Tobit risk unit sets handling line; fear/high-vol is context, not a hard blocker",
+        "risk_rule": "Tobit risk unit sets handling line; fear/high-vol changes entry style after sleeve membership",
     }
 
 
@@ -1141,9 +1160,27 @@ def cn_lifecycle_time_exit(policy: dict[str, Any]) -> str:
     return f"T+1 review; T+3 no +1R follow-through -> exit; hard max T+{max_hold}"
 
 
+def cn_alpha_factory_sleeve_id(row: dict[str, Any]) -> str | None:
+    family = str(row.get("strategy_family") or row.get("policy") or "")
+    action = str(row.get("action_intent") or "")
+    if not action and str(row.get("state") or "") == "Execution Alpha":
+        action = "TRADE"
+    alpha_state = str(row.get("alpha_state") or "")
+    lcb80 = round_or_none(row.get("ev_lcb_80_pct") if row.get("ev_lcb_80_pct") is not None else row.get("ev_lcb80_pct"))
+    if (
+        family == "oversold_contrarian"
+        and action == "TRADE"
+        and (alpha_state == CN_EXECUTION_ALPHA_STATE or (lcb80 is not None and lcb80 > 0.0))
+    ):
+        return CN_ALPHA_FACTORY_EXECUTION_SLEEVE
+    return None
+
+
 def cn_lifecycle_action(row: dict[str, Any], state: str, policy: dict[str, Any]) -> str:
     execution_mode = str(cn_feature_value(row, "execution_mode") or "")
     fade = cn_feature_float(row, "fade_risk")
+    if state in {"Ranked Watch", "Event Risk Watch", "Falling Knife Watch"}:
+        return "rank_only_no_new_trade"
     if state == "Positive EV Setup":
         if execution_mode == "do_not_chase" or (fade is not None and fade >= 0.70):
             return "small_probe_after_pullback"
@@ -1177,7 +1214,7 @@ def cn_current_gate_summary(row: dict[str, Any]) -> str:
 def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
     rows, status = load_cn_strategy_rows(db_path, start, as_of)
     v2_all_rows = [row for row in rows if row.get("strategy_family") == "oversold_contrarian"]
-    v2_rows = list(v2_all_rows)
+    v2_rows = [row for row in v2_all_rows if cn_alpha_factory_sleeve_id(row) == CN_ALPHA_FACTORY_EXECUTION_SLEEVE]
     legacy_rows = [row for row in rows if row.get("strategy_family") == "structural_core"]
     v2_metrics = compute_metrics("CN V2 oversold_contrarian EV-positive buckets", v2_rows)
     v2_all_metrics = compute_metrics("CN oversold_contrarian all buckets diagnostic", v2_all_rows)
@@ -1203,26 +1240,18 @@ def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
         execution_mode = str(features.get("execution_mode") or "")
         is_v2 = family == "oversold_contrarian" and action == "TRADE"
         is_legacy = family == "structural_core"
-        if is_v2:
-            ev_gate_passes = cn_current_ev_gate_passes(row)
-            hard_blocked = execution_mode in {"blocked", "no_trade", "skip", "avoid"}
-            pullback_only = (market_high_vol or 0.0) >= 0.85 or execution_mode == "do_not_chase"
+        alpha_sleeve_id = cn_alpha_factory_sleeve_id(row)
+        if is_v2 and alpha_sleeve_id:
             gate_summary = cn_current_gate_summary(row)
-            if not ev_gate_passes:
-                state = "Positive EV Setup"
-                reason = f"oversold opportunity; evidence fields are diagnostic only in {MAIN_STRATEGY_MODE} mode ({gate_summary})"
-            elif hard_blocked:
-                state = "Execution Alpha"
-                reason = f"oversold opportunity; execution blocker is a sizing note, not a hard stop ({gate_summary})"
-            elif pullback_only:
-                state = "Execution Alpha"
-                reason = f"oversold opportunity; A-share fear/high-vol is edge context with pullback preference ({gate_summary})"
-            else:
-                state = "Execution Alpha"
-                reason = f"oversold opportunity live in {MAIN_STRATEGY_MODE} mode ({gate_summary})"
+            state = "Execution Alpha"
+            reason = f"Alpha Factory sleeve {alpha_sleeve_id} current member; production ranker sets size/tier ({gate_summary})"
+        elif family == "oversold_contrarian":
+            gate_summary = cn_current_gate_summary(row)
+            state = "Ranked Watch"
+            reason = f"oversold rank candidate only; not in Alpha Factory execution sleeve ({gate_summary})"
         elif is_legacy:
-            state = "Positive EV Setup"
-            reason = "legacy structural_core kept as a small opportunity setup in opportunity mode"
+            state = "Ranked Watch"
+            reason = "legacy structural_core is rank-only until promoted by Alpha Factory"
         else:
             continue
         gate_summary = cn_current_gate_summary(row)
@@ -1238,6 +1267,9 @@ def summarize_cn(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
                 "industry": row.get("industry") or "",
                 "state": state,
                 "policy": family,
+                "action_intent": action,
+                "alpha_sleeve_id": alpha_sleeve_id,
+                "alpha_factory_role": "execution_sleeve" if alpha_sleeve_id else "rank_only",
                 "observation_entry_zone": plan["observation_entry_zone"],
                 "handling_line": plan["handling_line"],
                 "first_target": plan["first_target"],
@@ -1384,12 +1416,14 @@ def render_current_table(rows: list[dict[str, Any]], market: str) -> list[str]:
         return [f"- {market.upper()}: none.", ""]
     if market == "us":
         lines = [
-            "| State | Symbol | Buy/Review | Stop | Target | Option expression | Trend | Time exit | Why |",
-            "|---|---|---:|---:|---:|---|---|---|---|",
+            "| State | Symbol | Rank | Tier | Action | Buy/Review | Stop | Target | Option expression | Trend | Time exit | Why |",
+            "|---|---|---:|---|---|---:|---:|---:|---|---|---|---|",
         ]
         for row in rows[:12]:
             lines.append(
-                f"| {row['state']} | {row['symbol']} | {fmt_num(row.get('entry'))} | "
+                f"| {row['state']} | {row['symbol']} | {row.get('production_rank') or '-'} | "
+                f"{row.get('production_tier') or '-'} | {row.get('production_action') or '-'} | "
+                f"{fmt_num(row.get('entry'))} | "
                 f"{fmt_num(row.get('stop'))} | {fmt_num(row.get('target'))} | "
                 f"{row.get('option_expression') or '-'} | {row.get('trend_regime') or '-'} | "
                 f"{row.get('time_exit')} | {row.get('reason')} |"
@@ -1398,12 +1432,14 @@ def render_current_table(rows: list[dict[str, Any]], market: str) -> list[str]:
         return lines
 
     lines = [
-        "| State | Code | Name | Observation entry | Handling line | First target | EV | EV80 | Evidence context | Log overlay | Lifecycle action | Time exit | T+1 risk |",
-        "|---|---|---|---:|---:|---:|---:|---:|---|---|---|---|---|",
+        "| State | Code | Name | Rank | Tier | Action | Observation entry | Handling line | First target | EV | EV80 | Evidence context | Log overlay | Lifecycle action | Time exit | T+1 risk |",
+        "|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---|---|---|---|---|",
     ]
     for row in rows[:16]:
         lines.append(
             f"| {row['state']} | {row['symbol']} | {row.get('name') or '-'} | "
+            f"{row.get('production_rank') or '-'} | {row.get('production_tier') or '-'} | "
+            f"{row.get('production_action') or '-'} | "
             f"{row.get('observation_entry_zone') or '-'} | {fmt_num(row.get('handling_line'))} | "
             f"{fmt_num(row.get('first_target'))} | {fmt_pct(row.get('ev_pct'))} | "
             f"{fmt_pct(row.get('ev_lcb80_pct'))} | {row.get('gate_summary') or '-'} | "
@@ -1518,7 +1554,7 @@ def render_cn_lifecycle_section(cn: dict[str, Any]) -> list[str]:
     lines = [
         "## A 股生命周期研究 / CN Lifecycle",
         "",
-        "A 股主线不是美股式 30D 持有。`oversold_contrarian` 的所有当前子桶都进入机会视图；EV/LCB 只决定优先级和仓位提示。同一日期同一股票可能有多个 strategy_key 变体，去重口径按最高 EV LCB80 保留一条。",
+        "A 股主线不是美股式 30D 持有。当前执行池只认 Alpha Factory 已证明的 `cn_oversold_ev_positive`；其他 `oversold_contrarian` 子桶保留为 ranked watch。同一日期同一股票可能有多个 strategy_key 变体，去重口径按最高 EV LCB80 保留一条。",
         "",
         f"- Lifecycle state: `{policy.get('state') or '-'}`",
         f"- Best bucket: `{policy.get('best_bucket') or '-'}`; bucket LCB80 {fmt_pct(policy.get('best_bucket_lcb80_pct'))}",
@@ -1528,7 +1564,7 @@ def render_cn_lifecycle_section(cn: dict[str, Any]) -> list[str]:
         f"- All oversold diagnostic: n `{all_rows.get('n', 0)}`, avg {fmt_pct(all_rows.get('avg_pct'))}, LCB80 {fmt_pct(all_rows.get('lcb80_pct'))}",
         f"- All oversold diagnostic dedup: n `{all_dedup.get('n', 0)}`, avg {fmt_pct(all_dedup.get('avg_pct'))}, LCB80 {fmt_pct(all_dedup.get('lcb80_pct'))}",
         f"- Exit rule: {policy.get('first_review')}; {policy.get('follow_through_rule')}; {policy.get('time_stop')}",
-        "- CN hold overlay: current V2/legacy opportunity names get T+1 review, T+3 runner check, and T+5 max-hold review; weak fresh-entry context changes entry style, not opportunity visibility.",
+        "- CN hold overlay: execution sleeve names get T+1 review, T+3 runner check, and T+5 max-hold review; non-sleeve rows stay rank-only.",
         "",
     ]
     lines += render_cn_lifecycle_table(lifecycle.get("by_hold_bucket") or [], "EV-positive Hold Buckets")
@@ -1613,7 +1649,7 @@ def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: di
                 f"current Execution Alpha={us_counts.get('Execution Alpha', 0)}, "
                 f"option-confirmed n={us_opt.get('n', 0)}"
             ),
-            "kill_switch": "Opportunity mode: metrics are warning labels; reduce size manually only when current setup quality is poor.",
+            "kill_switch": "Production ranker controls which V2 sleeve names can receive probe size today.",
         },
         {
             "market": "CN",
@@ -1625,7 +1661,7 @@ def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: di
                 f"current Execution Alpha={cn_counts.get('Execution Alpha', 0)}, "
                 f"Positive EV Setup={cn_counts.get('Positive EV Setup', 0)}"
             ),
-            "kill_switch": "Opportunity mode: fear/high-vol and LCB fields are sizing notes, not hard blockers.",
+            "kill_switch": f"Only `{CN_ALPHA_FACTORY_EXECUTION_SLEEVE}` plus production probe tier can receive new money.",
         },
         {
             "market": "Limit-Up",
@@ -1770,7 +1806,7 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
             "allowed_now": us_guard.get("max_auto_size") or "0R",
             "evidence": (
                 f"stock-net LCB80 {fmt_pct((us.get('metrics') or {}).get('v2_stock_only_net', {}).get('lcb80_pct'))}; "
-                f"current Positive EV={count_current_states(us_current).get('Positive EV Setup', 0)}"
+                f"current EA={count_current_states(us_current).get('Execution Alpha', 0)}"
             ),
             "blocker": (
                 f"My Book open={my_summary.get('open_positions', '-')}, cap="
@@ -1779,7 +1815,7 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
                 f"runners={my_summary.get('runner_positions', '-')}; "
                 f"exit_reduce_losers={my_summary.get('exit_or_reduce_loser_positions', '-')}"
             ),
-            "next_step": "Opportunity mode: current V2/legacy setup can receive stock probe size; Winner Hold Overlay still controls existing profitable names.",
+            "next_step": "Only `us_v2_stock_probe` rows can receive probe size; legacy rows stay ranked watch. Winner Hold Overlay still controls existing profitable names.",
             "priority": 2,
         },
         {
@@ -2012,9 +2048,9 @@ def build_strategy_direction(
             "market": "CN",
             "strategy_family": "legacy_structural_core",
             "direction": "legacy A-share structural core baseline",
-            "role": "opportunity_baseline",
-            "tier": "small_probe",
-            "max_size": "0.05R/name",
+            "role": "rank_only_baseline",
+            "tier": "ranked_watch",
+            "max_size": "0R until Alpha Factory promotes sleeve",
             "post_cost_lcb80_pct": cn_legacy.get("lcb80_pct"),
             "avg_pct": cn_legacy.get("avg_pct"),
             "n": cn_legacy.get("n"),
@@ -2025,16 +2061,16 @@ def build_strategy_direction(
             "current_execution_alpha": 0,
             "current_positive_ev_setup": 0,
             "current_blocked": cn_blocked,
-            "reason": "baseline opportunity retained; weak metrics are sizing notes",
-            "kill_switch": "Keep small unless current setup and price action improve.",
+            "reason": "baseline retained for comparison only; not a production entry sleeve",
+            "kill_switch": "No new money entry from legacy CN baseline without Alpha Factory promotion.",
         },
         {
             "market": "US",
             "strategy_family": "legacy_high_mod_core",
             "direction": "legacy HIGH/MOD core baseline",
-            "role": "opportunity_baseline",
-            "tier": "small_probe",
-            "max_size": "0.05R/name",
+            "role": "rank_only_baseline",
+            "tier": "ranked_watch",
+            "max_size": "0R until Alpha Factory promotes sleeve",
             "post_cost_lcb80_pct": us_legacy.get("lcb80_pct"),
             "avg_pct": us_legacy.get("avg_pct"),
             "n": us_legacy.get("n"),
@@ -2045,8 +2081,8 @@ def build_strategy_direction(
             "current_execution_alpha": 0,
             "current_positive_ev_setup": 0,
             "current_blocked": us_blocked,
-            "reason": "legacy opportunity retained; weak metrics are sizing notes",
-            "kill_switch": "Keep small unless current setup and price action improve.",
+            "reason": "legacy retained for comparison only; not a production entry sleeve",
+            "kill_switch": "No new money entry from legacy US baseline without Alpha Factory promotion.",
         },
     ]
     role_order = {
@@ -2054,7 +2090,7 @@ def build_strategy_direction(
         "secondary_probe": 1,
         "options_proxy": 2,
         "radar": 3,
-        "opportunity_baseline": 4,
+        "rank_only_baseline": 4,
     }
     rows.sort(
         key=lambda row: (
@@ -2095,12 +2131,12 @@ def render_adjustment_rules() -> list[str]:
     return [
         "## Adjustment Rules",
         "",
-        f"- Mode: `{MAIN_STRATEGY_MODE}`. Metrics are labels for size and urgency, not hard entry gates.",
-        "- CN oversold_contrarian stays live when there is a current setup; LCB80, lifecycle, liquidity, and high-vol flags reduce confidence only by human sizing choice.",
-        "- US stock-only V2 and legacy setups stay live as small probes; option-expression history is useful evidence, not a blocker.",
+        f"- Mode: `{MAIN_STRATEGY_MODE}`. Execution rows must come from Alpha Factory-proven sleeves plus the production ranker tier.",
+        "- CN broad oversold stays ranked watch unless it is in `cn_oversold_ev_positive`.",
+        "- US stock-only V2 can probe through `us_v2_stock_probe`; legacy HIGH/MOD is ranked watch only.",
         "- US options can be tracked/proxied manually at tiny size; missing option ledger no longer blocks stock opportunities.",
         "- Limit-up remains radar by data availability, but strong names stay on the opportunity board.",
-        "- Legacy families are opportunity baselines, not forced 0R buckets.",
+        "- Legacy families are comparison baselines, not fresh-entry production sleeves.",
         "",
     ]
 
@@ -2888,13 +2924,84 @@ def render_cn_lifecycle_research(payload: dict[str, Any]) -> str:
     lines += [
         "## Daily Usage",
         "",
-        f"- Mode: `{MAIN_STRATEGY_MODE}`. `oversold_contrarian` current rows stay live as opportunities; EV/LCB/evidence fields are context, not hard gates.",
-        "- Fear/high-vol is a pullback preference and sizing note, not a blocker.",
-        "- `do_not_chase` means prefer planned entry / pullback, then manage by T+1/T+3/T+max.",
-        "- Weak EV rows are still allowed as small probes when the current setup is actionable.",
+        f"- Mode: `{MAIN_STRATEGY_MODE}`. Only Alpha Factory sleeve `{CN_ALPHA_FACTORY_EXECUTION_SLEEVE}` can produce execution rows.",
+        "- Broad oversold rows stay in ranked watch; fear/high-vol and no-chase tune entry style only after sleeve membership exists.",
+        "- Weak/non-sleeve rows cannot bypass the production ranker into new money entries.",
         "",
     ]
     return "\n".join(lines).rstrip() + "\n"
+
+
+def render_us_opportunity_ranker_section(payload: dict[str, Any]) -> list[str]:
+    ranker = payload.get("us_opportunity_ranker") or {}
+    rows = ranker.get("top_rows") or []
+    if not rows:
+        return ["## 美股生产排序 / US Production Ranker", "", "- No US production ranker rows.", ""]
+    lines = [
+        "## 美股生产排序 / US Production Ranker",
+        "",
+        "`us_v2_stock_probe` 是当前唯一可执行 Alpha Factory sleeve；legacy report bucket 只做 ranked watch。排序输出 `rank_score/headline_risk/flow_options_quality/production_action`，不再靠旧 HIGH/MOD 桶直接给动作。",
+        "",
+        "| Rank | Symbol | Sleeve | Tier | Action | Score | Headline | Options/Flow | R:R | Trend |",
+        "|---:|---|---|---|---|---:|---:|---:|---:|---|",
+    ]
+    for row in rows[:12]:
+        headline = round_or_none(row.get("headline_risk"))
+        lines.append(
+            f"| {row.get('rank')} | {row.get('symbol')} | {row.get('alpha_sleeve_id') or 'rank_only'} | "
+            f"{row.get('production_tier')} | {row.get('production_action')} | "
+            f"{fmt_num(row.get('rank_score'))} | "
+            f"{fmt_num(None if headline is None else headline * 100.0, 0)} | "
+            f"{fmt_num(row.get('flow_options_quality'), 0)} | "
+            f"{fmt_num(row.get('rr_ratio'))} | {row.get('trend_regime') or '-'} |"
+        )
+    event_rows = [row for row in ranker.get("all_rows") or [] if row.get("production_tier") == "event_risk_watch"]
+    if event_rows:
+        lines += ["", "Event/news 0R watch:"]
+        for row in event_rows[:6]:
+            lines.append(f"- {row.get('symbol')}: {row.get('latest_headline') or row.get('headline_flags') or 'headline risk'}")
+    lines.append("")
+    return lines
+
+
+def render_cn_opportunity_ranker_section(payload: dict[str, Any]) -> list[str]:
+    ranker = payload.get("cn_opportunity_ranker") or {}
+    rows = ranker.get("top_rows") or []
+    if not rows:
+        return ["## A 股生产排序 / CN Production Ranker", "", "- No CN production ranker rows.", ""]
+    lines = [
+        "## A 股生产排序 / CN Production Ranker",
+        "",
+        "`cn_oversold_ev_positive` 是当前唯一可执行 Alpha Factory sleeve；其他 oversold 默认 ranked watch。新闻事件风险、falling-knife、资金流、执行质量共同决定排序和 0R/可 probe 动作。",
+        "",
+        "| Rank | Symbol | Name | Sleeve | Tier | Action | Score | Headline | Knife | Flow | Entry |",
+        "|---:|---|---|---|---|---|---:|---:|---:|---:|---|",
+    ]
+    for row in rows[:12]:
+        headline = round_or_none(row.get("headline_risk"))
+        lines.append(
+            f"| {row.get('rank')} | {row.get('symbol')} | {row.get('name') or '-'} | "
+            f"{row.get('alpha_sleeve_id') or 'rank_only'} | "
+            f"{row.get('production_tier')} | {row.get('production_action')} | "
+            f"{fmt_num(row.get('rank_score'))} | "
+            f"{fmt_num(None if headline is None else headline * 100.0, 0)} | "
+            f"{fmt_num(row.get('falling_knife_score'), 0)} | "
+            f"{fmt_num(row.get('flow_information_score'))} | "
+            f"{row.get('observation_entry_zone') or '-'} |"
+        )
+    event_rows = [
+        row
+        for row in ranker.get("all_rows") or []
+        if str(row.get("production_tier") or "") == "event_risk_watch"
+    ]
+    if event_rows:
+        lines += ["", "Event-risk demotions:", ""]
+        for row in event_rows[:8]:
+            lines.append(
+                f"- {row.get('symbol')} {row.get('name') or ''}: {row.get('latest_headline') or '-'}"
+            )
+    lines.append("")
+    return lines
 
 
 def render_report(payload: dict[str, Any]) -> str:
@@ -2943,7 +3050,7 @@ def render_report(payload: dict[str, Any]) -> str:
     lines += [
         "## 美股 V2 vs legacy",
         "",
-        "V2 rule: LOW confidence + core + executable_now + trending regime. Options expression is context; missing/weak option expression no longer blocks stock probes. HIGH/MOD core is retained as small legacy opportunity baseline.",
+        "V2 rule: LOW confidence + core + executable_now + trending regime. `us_v2_stock_probe` is the executable sleeve; options expression chooses implementation quality, while HIGH/MOD core remains ranked watch until promoted.",
         "",
     ]
     lines += render_metrics_table(
@@ -2959,9 +3066,10 @@ def render_report(payload: dict[str, Any]) -> str:
         f"- Current US candidate date: {us.get('current_date') or '-'}",
         f"- Options rows available for latest screen: {us.get('options_coverage_rows', 0)}",
         f"- Stock-only bridge: subtracts {US_STOCK_ROUNDTRIP_COST_PCT:.2f}% roundtrip cost from the underlying 3-session result; this can only support a tiny probe until options expression PnL has enough history.",
-        "- HIGH/MOD: legacy baseline stays available as small opportunity sizing, not a hard blocked bucket.",
+        "- HIGH/MOD: legacy baseline is ranked watch only until Alpha Factory promotes a sleeve.",
         "",
     ]
+    lines += render_us_opportunity_ranker_section(payload)
     lines += render_missed_alpha_radar(us.get("missed_alpha_radar") or [])
     lines += [
         "## 策略新鲜期 / Freshness",
@@ -2984,6 +3092,7 @@ def render_report(payload: dict[str, Any]) -> str:
         "- A-share T+1 note: same-day exit is not counted as a valid realized exit; current-day rows can remain pending.",
         "",
     ]
+    lines += render_cn_opportunity_ranker_section(payload)
     lines += render_cn_lifecycle_section(cn)
     lines += [
         "## 涨停模型雷达表现",
@@ -3093,6 +3202,8 @@ def render_factorlab_brief(payload: dict[str, Any]) -> str:
 def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
     con = duckdb.connect(str(path))
     try:
+        con.execute("DROP TABLE IF EXISTS cn_opportunity_ranker")
+        con.execute("DROP TABLE IF EXISTS us_opportunity_ranker")
         con.execute(
             """
             CREATE TABLE IF NOT EXISTS strategy_summary (
@@ -3164,6 +3275,28 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
             )
             """
         )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS cn_opportunity_ranker (
+                as_of DATE, rank INTEGER, symbol VARCHAR, name VARCHAR,
+                industry VARCHAR, rank_score DOUBLE, alpha_sleeve_id VARCHAR,
+                alpha_factory_role VARCHAR, production_tier VARCHAR,
+                production_action VARCHAR, headline_risk DOUBLE,
+                falling_knife_score DOUBLE, payload_json VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
+            CREATE TABLE IF NOT EXISTS us_opportunity_ranker (
+                as_of DATE, rank INTEGER, symbol VARCHAR, rank_score DOUBLE,
+                alpha_sleeve_id VARCHAR, alpha_factory_role VARCHAR,
+                production_tier VARCHAR, production_action VARCHAR,
+                headline_risk DOUBLE, options_quality DOUBLE,
+                flow_options_quality DOUBLE, rr_ratio DOUBLE, payload_json VARCHAR
+            )
+            """
+        )
         con.execute("DELETE FROM strategy_summary WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM current_candidates WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM limit_up_radar WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
@@ -3172,6 +3305,8 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
         con.execute("DELETE FROM option_shadow_ledger WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM cn_lifecycle_research WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM profit_readiness WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
+        con.execute("DELETE FROM cn_opportunity_ranker WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
+        con.execute("DELETE FROM us_opportunity_ranker WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         for market in ["us", "cn"]:
             metrics = payload[market]["metrics"]
             for strategy, data in metrics.items():
@@ -3300,9 +3435,139 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
                     json.dumps(row, ensure_ascii=False, default=str),
                 ],
             )
+        for row in (payload.get("cn_opportunity_ranker") or {}).get("all_rows") or []:
+            con.execute(
+                "INSERT INTO cn_opportunity_ranker VALUES (CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    payload["as_of"],
+                    row.get("rank"),
+                    row.get("symbol"),
+                    row.get("name") or "",
+                    row.get("industry") or "",
+                    row.get("rank_score"),
+                    row.get("alpha_sleeve_id"),
+                    row.get("alpha_factory_role"),
+                    row.get("production_tier"),
+                    row.get("production_action"),
+                    row.get("headline_risk"),
+                    row.get("falling_knife_score"),
+                    json.dumps(row, ensure_ascii=False, default=str),
+                ],
+            )
+        for row in (payload.get("us_opportunity_ranker") or {}).get("all_rows") or []:
+            con.execute(
+                "INSERT INTO us_opportunity_ranker VALUES (CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    payload["as_of"],
+                    row.get("rank"),
+                    row.get("symbol"),
+                    row.get("rank_score"),
+                    row.get("alpha_sleeve_id"),
+                    row.get("alpha_factory_role"),
+                    row.get("production_tier"),
+                    row.get("production_action"),
+                    row.get("headline_risk"),
+                    row.get("options_quality"),
+                    row.get("flow_options_quality"),
+                    row.get("rr_ratio"),
+                    json.dumps(row, ensure_ascii=False, default=str),
+                ],
+            )
         con.execute("CHECKPOINT")
     finally:
         con.close()
+
+
+def apply_us_ranker_to_current(us: dict[str, Any], ranker: dict[str, Any]) -> None:
+    by_symbol = {
+        str(row.get("symbol") or "").upper(): row
+        for row in ranker.get("all_rows") or []
+        if row.get("symbol")
+    }
+    for row in us.get("current") or []:
+        symbol = str(row.get("symbol") or "").upper()
+        ranked = by_symbol.get(symbol)
+        if not ranked:
+            continue
+        row["production_rank"] = ranked.get("rank")
+        row["production_rank_score"] = ranked.get("rank_score")
+        row["production_tier"] = ranked.get("production_tier")
+        row["production_action"] = ranked.get("production_action")
+        row["headline_risk"] = ranked.get("headline_risk")
+        row["options_quality"] = ranked.get("options_quality")
+        row["flow_options_quality"] = ranked.get("flow_options_quality")
+        row["latest_headline"] = ranked.get("latest_headline")
+        row["alpha_sleeve_id"] = ranked.get("alpha_sleeve_id")
+        row["alpha_factory_role"] = ranked.get("alpha_factory_role")
+        tier = str(ranked.get("production_tier") or "")
+        if tier == "event_risk_watch":
+            row["state"] = "Event Risk Watch"
+            row["execution_mode"] = "negative_headline_no_probe"
+            row["reason"] = f"production ranker demoted to 0R: {ranked.get('latest_headline') or 'event/news risk'}"
+        elif ranked.get("alpha_sleeve_id") != US_ALPHA_FACTORY_EXECUTION_SLEEVE:
+            row["state"] = "Ranked Watch"
+            row["execution_mode"] = "rank_only_no_new_trade"
+            row["reason"] = "production ranker kept at 0R: not an Alpha Factory execution sleeve member"
+        elif tier in {"top_probe", "secondary_probe"}:
+            row["state"] = "Execution Alpha"
+            row["reason"] = (
+                f"Alpha Factory sleeve {US_ALPHA_FACTORY_EXECUTION_SLEEVE}; "
+                f"production tier={tier}, action={ranked.get('production_action')}"
+            )
+        elif tier == "active_watch":
+            row["state"] = "Ranked Watch"
+            row["execution_mode"] = ranked.get("production_action") or "prepare_order_but_wait_for_price"
+            row["reason"] = "V2 sleeve member, but production rank is watch-only today"
+
+
+def apply_cn_ranker_to_current(cn: dict[str, Any], ranker: dict[str, Any]) -> None:
+    by_symbol = {
+        str(row.get("symbol") or "").upper(): row
+        for row in ranker.get("all_rows") or []
+        if row.get("symbol")
+    }
+    for row in cn.get("current") or []:
+        symbol = str(row.get("symbol") or "").upper()
+        ranked = by_symbol.get(symbol)
+        if not ranked:
+            continue
+        row["production_rank"] = ranked.get("rank")
+        row["production_rank_score"] = ranked.get("rank_score")
+        row["production_tier"] = ranked.get("production_tier")
+        row["production_action"] = ranked.get("production_action")
+        row["headline_risk"] = ranked.get("headline_risk")
+        row["falling_knife_score"] = ranked.get("falling_knife_score")
+        row["latest_headline"] = ranked.get("latest_headline")
+        row["alpha_sleeve_id"] = ranked.get("alpha_sleeve_id")
+        row["alpha_factory_role"] = ranked.get("alpha_factory_role")
+        tier = str(ranked.get("production_tier") or "")
+        if tier == "event_risk_watch":
+            row["state"] = "Event Risk Watch"
+            row["execution_mode"] = "negative_headline_no_probe"
+            row["lifecycle_action"] = "rank_only_no_new_trade"
+            row["reason"] = f"production ranker demoted to 0R: {ranked.get('latest_headline') or 'negative headline risk'}"
+        elif tier == "falling_knife_watch":
+            row["state"] = "Falling Knife Watch"
+            row["execution_mode"] = "wait_for_flow_reversal"
+            row["lifecycle_action"] = "rank_only_no_new_trade"
+            row["reason"] = "production ranker demoted to 0R: falling-knife risk without enough confirmation"
+        elif ranked.get("alpha_sleeve_id") != CN_ALPHA_FACTORY_EXECUTION_SLEEVE:
+            row["state"] = "Ranked Watch"
+            row["execution_mode"] = "rank_only_no_new_trade"
+            row["lifecycle_action"] = "rank_only_no_new_trade"
+            row["reason"] = "production ranker kept at 0R: not a current Alpha Factory execution sleeve member"
+        elif tier in {"top_probe", "secondary_probe"}:
+            row["state"] = "Execution Alpha"
+            row["lifecycle_action"] = ranked.get("production_action") or row.get("lifecycle_action")
+            row["reason"] = (
+                f"Alpha Factory sleeve {CN_ALPHA_FACTORY_EXECUTION_SLEEVE}; "
+                f"production tier={tier}, action={ranked.get('production_action')}"
+            )
+        elif tier in {"active_watch", "bench_ranked"}:
+            row["state"] = "Ranked Watch"
+            row["execution_mode"] = ranked.get("production_action") or "watch_for_rotation"
+            row["lifecycle_action"] = "rank_only_no_new_trade"
+            row["reason"] = f"Alpha Factory sleeve member, but rank tier {tier} is watch-only today"
 
 
 def build_payload(args: argparse.Namespace) -> dict[str, Any]:
@@ -3311,6 +3576,24 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     us = summarize_us(args.us_db, start, as_of)
     cn = summarize_cn(args.cn_db, start, as_of)
     limit_up = summarize_limit_up(args.cn_db, start, as_of)
+    us_ranker = us_opportunity_ranker.build_ranker_payload(
+        as_of=as_of,
+        candidates=us.get("current") or [],
+        candidate_status="from_main_strategy_v2_current",
+        us_db=args.us_db,
+        source_report="main_strategy_v2_payload",
+        top=30,
+    )
+    apply_us_ranker_to_current(us, us_ranker)
+    cn_ranker = cn_opportunity_ranker.build_ranker_payload(
+        as_of=as_of,
+        candidates=cn.get("current") or [],
+        candidate_status="from_main_strategy_v2_current",
+        cn_db=args.cn_db,
+        source_report="main_strategy_v2_payload",
+        top=30,
+    )
+    apply_cn_ranker_to_current(cn, cn_ranker)
     profit_guardrails = build_profit_guardrails(us, cn, limit_up)
     strategy_direction = build_strategy_direction(us, cn, limit_up, profit_guardrails)
     portfolio_risk_overlay = build_portfolio_risk_overlay(
@@ -3330,6 +3613,8 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "us": us,
         "cn": cn,
         "limit_up": limit_up,
+        "us_opportunity_ranker": us_ranker,
+        "cn_opportunity_ranker": cn_ranker,
         "profit_guardrails": profit_guardrails,
         "strategy_direction": strategy_direction,
         "portfolio_risk_overlay": portfolio_risk_overlay,
@@ -3373,6 +3658,32 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     (output_dir / "profit_readiness.json").write_text(
         json.dumps(payload.get("profit_readiness") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
         encoding="utf-8",
+    )
+    (output_dir / "us_opportunity_ranker.md").write_text(
+        us_opportunity_ranker.render_markdown(payload.get("us_opportunity_ranker") or {}),
+        encoding="utf-8",
+    )
+    (output_dir / "us_opportunity_ranker.json").write_text(
+        json.dumps(payload.get("us_opportunity_ranker") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    us_opportunity_ranker.write_duckdb(
+        output_dir / "us_opportunity_ranker.duckdb",
+        (payload.get("us_opportunity_ranker") or {}).get("all_rows") or [],
+        parse_date(payload["as_of"]),
+    )
+    (output_dir / "cn_opportunity_ranker.md").write_text(
+        cn_opportunity_ranker.render_markdown(payload.get("cn_opportunity_ranker") or {}),
+        encoding="utf-8",
+    )
+    (output_dir / "cn_opportunity_ranker.json").write_text(
+        json.dumps(payload.get("cn_opportunity_ranker") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    cn_opportunity_ranker.write_duckdb(
+        output_dir / "cn_opportunity_ranker.duckdb",
+        (payload.get("cn_opportunity_ranker") or {}).get("all_rows") or [],
+        parse_date(payload["as_of"]),
     )
     write_duckdb(output_dir / "main_strategy_v2_backtest.duckdb", payload)
     factorlab_dir = STACK_ROOT / "factor-lab" / "reports"

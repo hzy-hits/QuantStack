@@ -674,9 +674,9 @@ def load_cn_log_overlay_rows(cn_db: Path, start: date, as_of: date) -> tuple[lis
     if pd is None:
         return [], [], "missing pandas"
     try:
-        import run_cn_log_denoise_backtest as cn_log
+        from quant_bot.analytics import cn_log_denoise_backtest as cn_log
     except ImportError as exc:
-        return [], [], f"missing cn log script: {exc}"
+        return [], [], f"missing cn log module: {exc}"
 
     strategy = cn_log.load_strategy_rows(cn_db, start, as_of)
     if strategy.empty:
