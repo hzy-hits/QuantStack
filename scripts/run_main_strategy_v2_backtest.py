@@ -896,6 +896,25 @@ def cn_lifecycle_group(rows: list[dict[str, Any]], key_name: str) -> list[dict[s
     return out
 
 
+def dedupe_cn_strategy_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One report-date/symbol can have multiple strategy-key variants; keep the best EV row."""
+    best: dict[tuple[str, str], tuple[float, float, dict[str, Any]]] = {}
+    for row in rows:
+        report_date = as_iso(row.get("report_date")) or ""
+        symbol = str(row.get("symbol") or "").upper()
+        if not report_date or not symbol:
+            continue
+        score = (
+            round_or_none(row.get("ev_lcb_80_pct")) if round_or_none(row.get("ev_lcb_80_pct")) is not None else -999.0,
+            round_or_none(row.get("ev_pct")) if round_or_none(row.get("ev_pct")) is not None else -999.0,
+        )
+        key = (report_date, symbol)
+        existing = best.get(key)
+        if existing is None or score > (existing[0], existing[1]):
+            best[key] = (score[0], score[1], row)
+    return [row for _, _, row in best.values()]
+
+
 def build_cn_lifecycle_policy(hold_buckets: list[dict[str, Any]]) -> dict[str, Any]:
     upper_by_bucket = {
         "T+1": 1,
@@ -952,18 +971,26 @@ def build_cn_lifecycle_research(
 
     v2_enriched = enrich(v2_rows)
     all_enriched = enrich(all_oversold_rows)
+    v2_dedup = dedupe_cn_strategy_rows(v2_enriched)
+    all_dedup = dedupe_cn_strategy_rows(all_enriched)
     hold_buckets = cn_lifecycle_group(v2_enriched, "hold_bucket")
+    hold_buckets_dedup = cn_lifecycle_group(v2_dedup, "hold_bucket")
     return {
         "as_of": as_of.isoformat(),
         "scope": "CN oversold_contrarian lifecycle from strategy_model_dataset; same-day exits are not counted",
         "policy": build_cn_lifecycle_policy(hold_buckets),
         "summary": {
             "v2_ev_positive": cn_lifecycle_summary("V2 EV-positive oversold_contrarian", v2_enriched),
+            "v2_ev_positive_dedup": cn_lifecycle_summary("V2 EV-positive oversold_contrarian deduped by date/symbol", v2_dedup),
             "all_oversold_diagnostic": cn_lifecycle_summary("All oversold_contrarian diagnostic", all_enriched),
+            "all_oversold_diagnostic_dedup": cn_lifecycle_summary("All oversold_contrarian diagnostic deduped by date/symbol", all_dedup),
         },
         "by_hold_bucket": hold_buckets,
+        "by_hold_bucket_dedup": hold_buckets_dedup,
         "all_oversold_by_hold_bucket": cn_lifecycle_group(all_enriched, "hold_bucket"),
+        "all_oversold_by_hold_bucket_dedup": cn_lifecycle_group(all_dedup, "hold_bucket"),
         "by_execution_mode": cn_lifecycle_group(v2_enriched, "execution_mode_bucket"),
+        "by_execution_mode_dedup": cn_lifecycle_group(v2_dedup, "execution_mode_bucket"),
         "by_fade_bucket": cn_lifecycle_group(v2_enriched, "fade_bucket"),
         "by_stale_bucket": cn_lifecycle_group(v2_enriched, "stale_bucket"),
         "by_flow_bucket": cn_lifecycle_group(v2_enriched, "flow_bucket"),
@@ -1349,23 +1376,31 @@ def render_cn_lifecycle_section(cn: dict[str, Any]) -> list[str]:
     policy = lifecycle.get("policy") or {}
     summary = lifecycle.get("summary") or {}
     v2 = summary.get("v2_ev_positive") or {}
+    v2_dedup = summary.get("v2_ev_positive_dedup") or {}
     all_rows = summary.get("all_oversold_diagnostic") or {}
+    all_dedup = summary.get("all_oversold_diagnostic_dedup") or {}
     lines = [
         "## A 股生命周期研究 / CN Lifecycle",
         "",
-        "A 股主线不是美股式 30D 持有。这里只用 `oversold_contrarian` 的 EV-positive 子桶做交易生命周期，所有同日退出都不算胜率；全体超跌只作为诊断，不能绕过 EV gate。",
+        "A 股主线不是美股式 30D 持有。这里只用 `oversold_contrarian` 的 EV-positive 子桶做交易生命周期，所有同日退出都不算胜率；全体超跌只作为诊断，不能绕过 EV gate。同一日期同一股票可能有多个 strategy_key 变体，去重口径按最高 EV LCB80 保留一条。",
         "",
         f"- Lifecycle state: `{policy.get('state') or '-'}`",
         f"- Best bucket: `{policy.get('best_bucket') or '-'}`; bucket LCB80 {fmt_pct(policy.get('best_bucket_lcb80_pct'))}",
         f"- Max hold: `T+{policy.get('max_hold_days') or '-'}`",
         f"- V2 EV-positive: n `{v2.get('n', 0)}`, avg {fmt_pct(v2.get('avg_pct'))}, LCB80 {fmt_pct(v2.get('lcb80_pct'))}",
+        f"- V2 EV-positive dedup: n `{v2_dedup.get('n', 0)}`, avg {fmt_pct(v2_dedup.get('avg_pct'))}, LCB80 {fmt_pct(v2_dedup.get('lcb80_pct'))}",
         f"- All oversold diagnostic: n `{all_rows.get('n', 0)}`, avg {fmt_pct(all_rows.get('avg_pct'))}, LCB80 {fmt_pct(all_rows.get('lcb80_pct'))}",
+        f"- All oversold diagnostic dedup: n `{all_dedup.get('n', 0)}`, avg {fmt_pct(all_dedup.get('avg_pct'))}, LCB80 {fmt_pct(all_dedup.get('lcb80_pct'))}",
         f"- Exit rule: {policy.get('first_review')}; {policy.get('follow_through_rule')}; {policy.get('time_stop')}",
+        "- CN hold overlay: no fresh buy without V2 ticket; existing profitable EV-positive names get T+1 review, T+3 runner check, and T+5 max-hold review instead of a forced full exit just because fresh-entry is blocked.",
         "",
     ]
     lines += render_cn_lifecycle_table(lifecycle.get("by_hold_bucket") or [], "EV-positive Hold Buckets")
+    lines += render_cn_lifecycle_table(lifecycle.get("by_hold_bucket_dedup") or [], "EV-positive Hold Buckets Deduped By Date/Symbol")
     lines += render_cn_lifecycle_table(lifecycle.get("all_oversold_by_hold_bucket") or [], "All Oversold Diagnostic Hold Buckets")
+    lines += render_cn_lifecycle_table(lifecycle.get("all_oversold_by_hold_bucket_dedup") or [], "All Oversold Diagnostic Hold Buckets Deduped By Date/Symbol")
     lines += render_cn_lifecycle_table(lifecycle.get("by_execution_mode") or [], "EV-positive By Execution Mode")
+    lines += render_cn_lifecycle_table(lifecycle.get("by_execution_mode_dedup") or [], "EV-positive By Execution Mode Deduped")
     return lines
 
 
@@ -3101,8 +3136,11 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
         lifecycle = (payload.get("cn") or {}).get("lifecycle") or {}
         for bucket_type, rows in [
             ("v2_hold_bucket", lifecycle.get("by_hold_bucket") or []),
+            ("v2_hold_bucket_dedup", lifecycle.get("by_hold_bucket_dedup") or []),
             ("all_hold_bucket", lifecycle.get("all_oversold_by_hold_bucket") or []),
+            ("all_hold_bucket_dedup", lifecycle.get("all_oversold_by_hold_bucket_dedup") or []),
             ("execution_mode", lifecycle.get("by_execution_mode") or []),
+            ("execution_mode_dedup", lifecycle.get("by_execution_mode_dedup") or []),
             ("fade_bucket", lifecycle.get("by_fade_bucket") or []),
             ("stale_bucket", lifecycle.get("by_stale_bucket") or []),
             ("flow_bucket", lifecycle.get("by_flow_bucket") or []),
