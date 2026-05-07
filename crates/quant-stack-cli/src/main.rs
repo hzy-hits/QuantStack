@@ -943,8 +943,50 @@ fn send_reports(
             cmd.arg("--dry-run");
         }
         run_or_print("cn delivery", cmd, false)?;
+
+        if should_send_production_decision(slot) {
+            send_production_decision_report(&stack_root, date, slot, args)?;
+        }
     }
     Ok(())
+}
+
+fn should_send_production_decision(slot: &str) -> bool {
+    match std::env::var("QUANT_SEND_PRODUCTION_DECISION") {
+        Ok(value) => {
+            let normalized = value.trim().to_ascii_lowercase();
+            return matches!(normalized.as_str(), "1" | "true" | "yes" | "on");
+        }
+        Err(_) => {}
+    }
+    matches!(slot, "morning" | "pre")
+}
+
+fn send_production_decision_report(
+    stack_root: &Path,
+    date: &str,
+    slot: &str,
+    args: &DailyArgs,
+) -> Result<()> {
+    let mut cmd = ProcessCommand::new("python3");
+    cmd.arg("scripts/send_production_decision_report.py")
+        .arg("--date")
+        .arg(date)
+        .arg("--session")
+        .arg(slot)
+        .arg("--delivery-mode")
+        .arg(args.delivery_mode.as_str())
+        .current_dir(stack_root);
+    if let Some(recipient) = args.test_recipient.as_deref() {
+        cmd.arg("--test-recipient").arg(recipient);
+    }
+    if args.delivery_dry_run {
+        cmd.arg("--delivery-dry-run");
+    }
+    if args.dry_run {
+        cmd.arg("--dry-run");
+    }
+    run_or_print("production decision delivery", cmd, false)
 }
 
 fn cn_chart_dir(cn_root: &Path, date: &str, slot: &str) -> PathBuf {
