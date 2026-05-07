@@ -2,8 +2,8 @@
 """Rank current A-share opportunities with the data already available locally.
 
 This is the production ranking layer for current A-share rows. It keeps every
-oversold candidate ranked, but only Alpha Factory-proven sleeve members can
-move from watchlist into probe tiers.
+oversold candidate ranked, while Alpha Factory-proven sleeve members and
+qualified observed-lifecycle rows can move from watchlist into probe tiers.
 """
 from __future__ import annotations
 
@@ -209,6 +209,11 @@ def alpha_factory_sleeve_id(row: dict[str, Any]) -> str | None:
     ):
         return CN_ALPHA_FACTORY_EXECUTION_SLEEVE
     return None
+
+
+def is_special_treatment_name(value: Any) -> bool:
+    text = str(value or "").upper().strip()
+    return text.startswith("*ST") or text.startswith("ST") or text.startswith("S*ST") or text.startswith("退市")
 
 
 def fmt_pct(value: Any, digits: int = 2) -> str:
@@ -1056,6 +1061,12 @@ def production_tier(rank: int, row: dict[str, Any], config: RankerConfig = DEFAU
     falling_knife = round_or_none(row.get("falling_knife_score")) or 0.0
     alpha_sleeve = str(row.get("alpha_sleeve_id") or "")
     observed_qualified = bool(row.get("observed_lifecycle_qualified"))
+    if is_special_treatment_name(row.get("name")):
+        return (
+            "special_treatment_watch",
+            "special_treatment_no_probe",
+            "0R until a dedicated ST/restructuring sleeve exists; ordinary oversold lifecycle buckets do not apply",
+        )
     if headline_risk >= config.event_risk_zero_r:
         return (
             "event_risk_watch",
@@ -1360,7 +1371,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
     lines = [
         f"# CN Opportunity Ranker - {payload['as_of']}",
         "",
-        "生产版：只有 Alpha Factory 已证明 sleeve 可以产出 Execution Alpha；其他 oversold 只做 ranked watch。财报造假、虚假陈述、留置调查等事件风险会直接降级为 0R 观察。",
+        "生产版：Alpha Factory sleeve 和 `cn_observed_lifecycle_prob` 都可以产出小仓/微仓 Execution Alpha；其他 oversold 只做 ranked watch。财报造假、虚假陈述、留置调查等事件风险会直接降级为 0R 观察。",
         "",
         "## Data",
         "",
@@ -1375,7 +1386,16 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "| Rank | Symbol | Name | Source | Tier | Action | Size | Entry | ExpR | LCBR | n | Score |",
         "|---:|---|---|---|---|---|---|---|---:|---:|---:|---:|",
     ]
-    for row in rows[:10]:
+    basket_rows = [
+        row
+        for row in rows
+        if (
+            "probe" in str(row.get("production_tier") or "")
+            or "probe" in str(row.get("production_action") or "")
+        )
+        and not str(row.get("size_hint") or "").startswith("0R")
+    ]
+    for row in basket_rows[:10]:
         lines.append(
             "| {rank} | {symbol} | {name} | {source} | {tier} | {action} | {size} | {entry} | {expr} | {lcbr} | {n} | {score:.2f} |".format(
                 rank=row.get("rank"),
@@ -1392,6 +1412,8 @@ def render_markdown(payload: dict[str, Any]) -> str:
                 score=round_or_none(row.get("rank_score")) or 0.0,
             )
         )
+    if not basket_rows:
+        lines.append("| - | - | - | - | no production basket today | - | 0R | - | - | - | - | 0.00 |")
     lines += [
         "",
         "## Top Ranked",
@@ -1400,7 +1422,14 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "|---:|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:
-        reason = str(row.get("reason") or "").replace("|", "/")
+        tier = str(row.get("production_tier") or "")
+        if tier == "special_treatment_watch":
+            reason_value = row.get("size_hint") or row.get("reason")
+        elif tier.startswith("observed_lifecycle"):
+            reason_value = row.get("observed_lifecycle_reason") or row.get("size_hint") or row.get("reason")
+        else:
+            reason_value = row.get("reason") or row.get("size_hint")
+        reason = str(reason_value or "").replace("|", "/")
         if len(reason) > 70:
             reason = reason[:67] + "..."
         lines.append(

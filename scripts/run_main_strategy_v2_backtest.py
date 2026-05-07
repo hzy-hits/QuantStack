@@ -1584,7 +1584,7 @@ def render_cn_lifecycle_section(cn: dict[str, Any]) -> list[str]:
     lines = [
         "## A 股生命周期研究 / CN Lifecycle",
         "",
-        "A 股主线不是美股式 30D 持有。当前执行池只认 Alpha Factory 已证明的 `cn_oversold_ev_positive`；其他 `oversold_contrarian` 子桶保留为 ranked watch。同一日期同一股票可能有多个 strategy_key 变体，去重口径按最高 EV LCB80 保留一条。",
+        "A 股主线不是美股式 30D 持有。当前执行池认 `cn_oversold_ev_positive` 和 `cn_observed_lifecycle_prob` 两类生产来源；其他 `oversold_contrarian` 子桶保留为 ranked watch。同一日期同一股票可能有多个 strategy_key 变体，去重口径按最高 EV LCB80 保留一条。",
         "",
         f"- Lifecycle state: `{policy.get('state') or '-'}`",
         f"- Best bucket: `{policy.get('best_bucket') or '-'}`; bucket LCB80 {fmt_pct(policy.get('best_bucket_lcb80_pct'))}",
@@ -1735,6 +1735,307 @@ def render_profit_guardrails(rows: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def fmt_r(value: Any) -> str:
+    parsed = round_or_none(value, 4)
+    if parsed is None:
+        return "-"
+    text = f"{parsed:.4f}".rstrip("0").rstrip(".")
+    return f"{text}R"
+
+
+def clean_table_text(value: Any, limit: int = 120) -> str:
+    text = str(value or "-").replace("\n", " ").replace("|", "/").strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _symbol_key(value: Any) -> str:
+    return str(value or "").upper().strip()
+
+
+def _ranker_lookup(payload: dict[str, Any], market: str) -> dict[str, dict[str, Any]]:
+    key = "cn_opportunity_ranker" if market.upper() == "CN" else "us_opportunity_ranker"
+    ranker = payload.get(key) or {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in [*(ranker.get("all_rows") or []), *(ranker.get("top_rows") or [])]:
+        symbol = _symbol_key(row.get("symbol"))
+        if symbol and symbol not in out:
+            out[symbol] = row
+    return out
+
+
+def _row_source(row: dict[str, Any], ranked: dict[str, Any]) -> str:
+    return str(
+        ranked.get("alpha_sleeve_id")
+        or ranked.get("observed_lifecycle_sleeve_id")
+        or row.get("execution_source")
+        or row.get("strategy_family")
+        or "rank_only"
+    )
+
+
+def _decision_trigger(market: str, row: dict[str, Any], ranked: dict[str, Any], guard: dict[str, Any]) -> str:
+    source = _row_source(row, ranked)
+    if market.upper() == "CN":
+        exp_r = ranked.get("expected_r_t3", row.get("expected_r_t3"))
+        lcb_r = ranked.get("lcb80_r_t3", row.get("lcb80_r_t3"))
+        obs_n = ranked.get("observed_probability_n", row.get("observed_probability_n"))
+        headline = round_or_none(ranked.get("headline_risk"))
+        knife = ranked.get("falling_knife_score")
+        parts = [source]
+        if exp_r is not None or lcb_r is not None:
+            parts.append(f"ExpR {fmt_num(exp_r)} / LCBR {fmt_num(lcb_r)} / n {fmt_num(obs_n, 0)}")
+        if headline is not None:
+            parts.append(f"headline {fmt_num(headline * 100.0, 0)}")
+        if knife is not None:
+            parts.append(f"knife {fmt_num(knife, 0)}")
+        return "; ".join(parts)
+
+    score = ranked.get("rank_score")
+    headline = round_or_none(ranked.get("headline_risk"))
+    quality = ranked.get("flow_options_quality")
+    latest = ranked.get("latest_headline")
+    parts = [source]
+    if score is not None:
+        parts.append(f"score {fmt_num(score)}")
+    if headline is not None:
+        parts.append(f"headline {fmt_num(headline * 100.0, 0)}")
+    if quality is not None:
+        parts.append(f"flow/options {fmt_num(quality, 0)}")
+    if latest:
+        parts.append(clean_table_text(latest, 70))
+    if len(parts) == 1 and guard.get("why"):
+        parts.append(str(guard.get("why")))
+    return "; ".join(parts)
+
+
+def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]:
+    overlay = payload.get("portfolio_risk_overlay") or {}
+    overlay_rows = overlay.get("rows") or []
+    cn_lookup = _ranker_lookup(payload, "CN")
+    us_lookup = _ranker_lookup(payload, "US")
+    guard_by_market = {
+        str(row.get("market") or "").upper(): row for row in payload.get("profit_guardrails") or []
+    }
+    market_order = {"CN": 0, "US": 1}
+
+    actionable: list[dict[str, Any]] = []
+    for row in overlay_rows:
+        final_r = round_or_none(row.get("final_r"))
+        if final_r is None or final_r <= 0.0:
+            continue
+        market = str(row.get("market") or "").upper()
+        ranked = (cn_lookup if market == "CN" else us_lookup).get(_symbol_key(row.get("symbol")), {})
+        action = ranked.get("production_action") or row.get("lifecycle_action") or row.get("state") or "-"
+        tier = ranked.get("production_tier") or row.get("production_tier") or row.get("state") or "-"
+        entry = (
+            ranked.get("observation_entry_zone")
+            or row.get("observation_entry_zone")
+            or ("planned-entry/pullback" if market == "CN" else "stock probe")
+        )
+        actionable.append(
+            {
+                "market": market,
+                "symbol": row.get("symbol"),
+                "name": row.get("name") or ranked.get("name") or "",
+                "action": action,
+                "size_r": final_r,
+                "tier": tier,
+                "source": _row_source(row, ranked),
+                "entry": entry,
+                "trigger": _decision_trigger(market, row, ranked, guard_by_market.get(market, {})),
+            }
+        )
+    actionable.sort(
+        key=lambda row: (
+            market_order.get(str(row.get("market") or ""), 9),
+            -(round_or_none(row.get("size_r")) or 0.0),
+            str(row.get("symbol") or ""),
+        )
+    )
+
+    watch: list[dict[str, Any]] = []
+    for market, lookup in (("CN", cn_lookup), ("US", us_lookup)):
+        rows = sorted(lookup.values(), key=lambda row: int(row.get("rank") or 9999))
+        event_rows = [
+            row
+            for row in rows
+            if str(row.get("production_tier") or "") in {"event_risk_watch", "falling_knife_watch"}
+        ]
+        ranked_watch = [
+            row
+            for row in rows
+            if str(row.get("production_action") or "").startswith("rank_only")
+            or str(row.get("production_tier") or "").endswith("_watch")
+        ]
+        for row in [*event_rows, *ranked_watch][:6]:
+            reason = (
+                row.get("latest_headline")
+                or row.get("size_hint")
+                or row.get("reason")
+                or row.get("production_action")
+                or "watch only"
+            )
+            watch.append(
+                {
+                    "market": market,
+                    "symbol": row.get("symbol"),
+                    "name": row.get("name") or "",
+                    "state": row.get("production_tier") or row.get("state") or "watch",
+                    "reason": clean_table_text(reason, 120),
+                }
+            )
+    for row in (payload.get("limit_up") or {}).get("current") or []:
+        watch.append(
+            {
+                "market": "CN",
+                "symbol": row.get("symbol"),
+                "name": row.get("name") or "",
+                "state": "limit_up_radar",
+                "reason": "0R until 9:25/9:35 auction/open confirmation exists",
+            }
+        )
+    watch = watch[:12]
+
+    readiness_rows = (payload.get("profit_readiness") or {}).get("rows") or []
+    readiness_by_area = {str(row.get("area") or ""): row for row in readiness_rows}
+    option_ledger = payload.get("option_shadow_ledger") or {}
+    event_symbols = [
+        f"{row.get('symbol')}{(' ' + row.get('name')) if row.get('name') else ''}"
+        for row in watch
+        if row.get("state") == "event_risk_watch"
+    ]
+    special_symbols = [
+        f"{row.get('symbol')}{(' ' + row.get('name')) if row.get('name') else ''}"
+        for row in watch
+        if row.get("state") == "special_treatment_watch"
+    ]
+    no_trade = [
+        {
+            "area": "US options",
+            "status": "manual/tiny only",
+            "reason": (
+                f"resolved option PnL={option_ledger.get('resolved_count', 0)}, "
+                f"unresolved={option_ledger.get('unresolved_count', 0)}; no production option orders yet"
+            ),
+        },
+        {
+            "area": "Limit-up",
+            "status": "0R",
+            "reason": (readiness_by_area.get("Limit-up") or {}).get("blocker")
+            or "missing auction/open confirmation and live post-cost execution ledger",
+        },
+        {
+            "area": "CN/US rank-only rows",
+            "status": "0R",
+            "reason": "ranked watch is observation only; no sleeve/probability tier means no new money",
+        },
+        {
+            "area": "Event-risk names",
+            "status": "0R",
+            "reason": ", ".join(event_symbols[:6]) if event_symbols else "none today",
+        },
+        {
+            "area": "ST/restructuring names",
+            "status": "0R",
+            "reason": ", ".join(special_symbols[:6]) if special_symbols else "none today",
+        },
+        {
+            "area": "Live execution ledger",
+            "status": "not closed",
+            "reason": (readiness_by_area.get("Live execution ledger") or {}).get("blocker") or "live fills ledger incomplete",
+        },
+    ]
+
+    cn_actions = [row for row in actionable if row.get("market") == "CN"]
+    us_actions = [row for row in actionable if row.get("market") == "US"]
+    gross_r = sum(float(row.get("size_r") or 0.0) for row in actionable)
+    cn_r = sum(float(row.get("size_r") or 0.0) for row in cn_actions)
+    us_r = sum(float(row.get("size_r") or 0.0) for row in us_actions)
+    summary = {
+        "headline": (
+            f"CN observed lifecycle tiny basket {len(cn_actions)} names ({fmt_r(cn_r)}), "
+            f"US stock probe {len(us_actions)} names ({fmt_r(us_r)}); "
+            "options/limit-up/live ledger are not production-closed."
+        ),
+        "gross_r": round_or_none(gross_r, 4),
+        "cn_action_count": len(cn_actions),
+        "us_action_count": len(us_actions),
+        "cn_r": round_or_none(cn_r, 4),
+        "us_r": round_or_none(us_r, 4),
+        "watch_count": len(watch),
+        "no_trade_count": len(no_trade),
+        "portfolio_var95_r": (overlay.get("summary") or {}).get("var95_r_proxy"),
+        "top_blocker": ((payload.get("pipeline_requirements_audit") or {}).get("summary") or {}).get("top_blocker"),
+    }
+    return {
+        "as_of": payload.get("as_of"),
+        "summary": summary,
+        "actionable": actionable,
+        "watch": watch,
+        "no_trade": no_trade,
+    }
+
+
+def render_production_decision_summary(payload: dict[str, Any]) -> list[str]:
+    decision = payload.get("production_decision_summary") or build_production_decision_summary(payload)
+    summary = decision.get("summary") or {}
+    lines = [
+        "## 今日交易决策 / Production Decision",
+        "",
+        f"- 今日动作: {summary.get('headline') or '-'}",
+        f"- 组合占用: gross {fmt_r(summary.get('gross_r'))}; CN {fmt_r(summary.get('cn_r'))}; US {fmt_r(summary.get('us_r'))}; VaR95 proxy {fmt_r(summary.get('portfolio_var95_r'))}",
+        f"- 当前缺口: {summary.get('top_blocker') or '-'}",
+        "",
+        "### 可以小仓 / Actionable",
+        "",
+        "| Market | Symbol | Name | Action | Size | Tier | Entry | Trigger |",
+        "|---|---|---|---|---:|---|---|---|",
+    ]
+    actions = decision.get("actionable") or []
+    if actions:
+        for row in actions[:14]:
+            lines.append(
+                f"| {row.get('market')} | {row.get('symbol')} | {row.get('name') or '-'} | "
+                f"{row.get('action')} | {fmt_r(row.get('size_r'))} | {row.get('tier')} | "
+                f"{clean_table_text(row.get('entry'), 70)} | {clean_table_text(row.get('trigger'), 120)} |"
+            )
+    else:
+        lines.append("| - | - | - | no production action today | 0R | - | - | - |")
+
+    lines += [
+        "",
+        "### 只能观察 / Watch",
+        "",
+        "| Market | Symbol | Name | State | Reason |",
+        "|---|---|---|---|---|",
+    ]
+    watch_rows = decision.get("watch") or []
+    if watch_rows:
+        for row in watch_rows[:12]:
+            lines.append(
+                f"| {row.get('market')} | {row.get('symbol')} | {row.get('name') or '-'} | "
+                f"{row.get('state')} | {clean_table_text(row.get('reason'), 120)} |"
+            )
+    else:
+        lines.append("| - | - | - | - | no watch-only rows highlighted |")
+
+    lines += [
+        "",
+        "### 禁止碰 / 0R / 未闭环",
+        "",
+        "| Area | Status | Reason |",
+        "|---|---|---|",
+    ]
+    for row in decision.get("no_trade") or []:
+        lines.append(
+            f"| {row.get('area')} | {row.get('status')} | {clean_table_text(row.get('reason'), 140)} |"
+        )
+    lines.append("")
+    return lines
+
+
 def load_my_book_overlay(as_of: date) -> dict[str, Any]:
     path = STACK_ROOT / "reports" / "review_dashboard" / "my_book_overlay" / as_of.isoformat() / "my_book_overlay.json"
     if not path.exists():
@@ -1788,6 +2089,11 @@ def _row_symbols(rows: list[dict[str, Any]], *, state: str | None = None, market
         if symbol:
             selected.append(symbol)
     return ", ".join(selected[:8]) if selected else "-"
+
+
+def _allowed_now_has_money(value: Any) -> bool:
+    text = str(value or "").strip().lower()
+    return bool(text) and not text.startswith("0r")
 
 
 def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1907,7 +2213,7 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
         row
         for row in rows
         if row["area"] in {"CN main alpha", "US stock probe"}
-        and "0R" not in str(row.get("allowed_now") or "")
+        and _allowed_now_has_money(row.get("allowed_now"))
         and "not_ready" not in str(row.get("state") or "")
     ]
     return {
@@ -2333,8 +2639,8 @@ def render_adjustment_rules() -> list[str]:
     return [
         "## Adjustment Rules",
         "",
-        f"- Mode: `{MAIN_STRATEGY_MODE}`. Execution rows must come from Alpha Factory-proven sleeves plus the production ranker tier.",
-        "- CN broad oversold stays ranked watch unless it is in `cn_oversold_ev_positive`.",
+        f"- Mode: `{MAIN_STRATEGY_MODE}`. Execution rows must come from Alpha Factory-proven sleeves or observed-lifecycle probability, plus the production ranker tier.",
+        "- CN broad oversold stays ranked watch unless it is in `cn_oversold_ev_positive` or qualifies through `cn_observed_lifecycle_prob`.",
         "- US stock-only V2 can probe through `us_v2_stock_probe`; legacy HIGH/MOD is ranked watch only.",
         "- US options can be tracked/proxied manually at tiny size; missing option ledger no longer blocks stock opportunities.",
         "- Limit-up remains radar by data availability, but strong names stay on the opportunity board.",
@@ -3141,8 +3447,8 @@ def render_cn_lifecycle_research(payload: dict[str, Any]) -> str:
     lines += [
         "## Daily Usage",
         "",
-        f"- Mode: `{MAIN_STRATEGY_MODE}`. Only Alpha Factory sleeve `{CN_ALPHA_FACTORY_EXECUTION_SLEEVE}` can produce execution rows.",
-        "- Broad oversold rows stay in ranked watch; fear/high-vol and no-chase tune entry style only after sleeve membership exists.",
+        f"- Mode: `{MAIN_STRATEGY_MODE}`. `{CN_ALPHA_FACTORY_EXECUTION_SLEEVE}` and `{CN_OBSERVED_LIFECYCLE_SLEEVE}` can produce small execution rows.",
+        "- Broad oversold rows stay in ranked watch; fear/high-vol and no-chase tune entry style only after sleeve/probability membership exists.",
         "- Weak/non-sleeve rows cannot bypass the production ranker into new money entries.",
         "",
     ]
@@ -3234,11 +3540,12 @@ def render_report(payload: dict[str, Any]) -> str:
     us_legacy = us["metrics"]["legacy"]
     cn_v2 = cn["metrics"]["v2"]
     cn_legacy = cn["metrics"]["legacy"]
+    decision_summary = (payload.get("production_decision_summary") or {}).get("summary") or {}
     conclusion = (
-        f"V2 replaces legacy as the main strategy: US LOW/core/trending has LCB80 "
-        f"{fmt_pct(us_v2.get('lcb80_pct'))} vs legacy {fmt_pct(us_legacy.get('lcb80_pct'))}; "
-        f"CN oversold_contrarian has LCB80 {fmt_pct(cn_v2.get('lcb80_pct'))} vs structural_core "
-        f"{fmt_pct(cn_legacy.get('lcb80_pct'))}; limit-up stays Radar until auction/open data arrives."
+        f"今日生产动作：{decision_summary.get('headline') or 'no production action today'} "
+        f"证据口径：US stock-net LCB80 {fmt_pct((us.get('metrics') or {}).get('v2_stock_only_net', {}).get('lcb80_pct'))}; "
+        f"CN oversold_contrarian LCB80 {fmt_pct(cn_v2.get('lcb80_pct'))} vs structural_core {fmt_pct(cn_legacy.get('lcb80_pct'))}. "
+        "0R 区：rank-only、事件风险、ST/退市类、涨停无竞价确认、未闭环期权。"
     )
 
     lines: list[str] = [
@@ -3246,6 +3553,9 @@ def render_report(payload: dict[str, Any]) -> str:
         "",
         f"Range: {start} to {as_of}.",
         "",
+    ]
+    lines += render_production_decision_summary(payload)
+    lines += [
         "## 一句话结论",
         "",
         conclusion,
@@ -3821,6 +4131,11 @@ def apply_cn_ranker_to_current(cn: dict[str, Any], ranker: dict[str, Any]) -> No
             row["execution_mode"] = "wait_for_flow_reversal"
             row["lifecycle_action"] = "rank_only_no_new_trade"
             row["reason"] = "production ranker demoted to 0R: falling-knife risk without enough confirmation"
+        elif tier == "special_treatment_watch":
+            row["state"] = "Special Treatment Watch"
+            row["execution_mode"] = "special_treatment_no_probe"
+            row["lifecycle_action"] = "rank_only_no_new_trade"
+            row["reason"] = "production ranker demoted to 0R: ST/restructuring payoff needs a dedicated sleeve"
         elif tier in {"observed_lifecycle_probe", "observed_lifecycle_secondary", "observed_lifecycle_micro_probe"}:
             row["state"] = "Execution Alpha"
             row["execution_mode"] = ranked.get("production_action") or "planned_entry_observed_probe"
@@ -3901,6 +4216,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     }
     payload["profit_readiness"] = build_profit_readiness(payload)
     payload["pipeline_requirements_audit"] = build_pipeline_requirements_audit(payload)
+    payload["production_decision_summary"] = build_production_decision_summary(payload)
     return payload
 
 

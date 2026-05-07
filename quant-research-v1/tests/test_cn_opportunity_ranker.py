@@ -248,6 +248,9 @@ class CnOpportunityRankerTests(unittest.TestCase):
             self.assertTrue((output_root / "2026-05-06" / "cn_opportunity_ranker.json").exists())
             self.assertTrue((output_root / "2026-05-06" / "cn_opportunity_ranker.md").exists())
             self.assertTrue((output_root / "2026-05-06" / "cn_opportunity_ranker.duckdb").exists())
+            text = (output_root / "2026-05-06" / "cn_opportunity_ranker.md").read_text(encoding="utf-8")
+            self.assertIn("cn_observed_lifecycle_prob", text)
+            self.assertNotIn("只有 Alpha Factory 已证明 sleeve 可以产出 Execution Alpha", text)
 
 
 if __name__ == "__main__":
