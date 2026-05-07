@@ -572,15 +572,39 @@ def main() -> None:
             OPTIONS_PROXY_MAP[s] for s in candidate_syms
             if not is_options_eligible(s) and s in OPTIONS_PROXY_MAP
         ]
+        watchlist_option_syms = (
+            [s for s in cfg.universe.watchlist if is_options_eligible(s)]
+            if cfg.data.options_include_watchlist
+            else []
+        )
+        env_extra_options = [
+            s.strip().upper()
+            for s in os.getenv("OPTIONS_EXTRA_SYMBOLS", "").split(",")
+            if s.strip()
+        ]
+        configured_extra_options = [
+            s.strip().upper()
+            for s in cfg.data.options_extra_symbols
+            if str(s).strip()
+        ]
         fetch_syms = sorted(set(
             [s for s in candidate_syms if is_options_eligible(s)]
             + non_equity_optionable
             + proxy_syms
+            + watchlist_option_syms
+            + configured_extra_options
+            + env_extra_options
         ))
+        options_max_expiries = max(1, int(cfg.data.options_max_expiries or 1))
         log.info("step_options_targeted", fetch_count=len(fetch_syms),
-                 candidates=len(candidate_syms))
+                 candidates=len(candidate_syms),
+                 watchlist=len(watchlist_option_syms),
+                 extra=len(configured_extra_options) + len(env_extra_options),
+                 max_expiries=options_max_expiries)
 
-        snapshot_df, analysis_df, chain_quote_df = fetch_options_snapshot_with_quotes(fetch_syms, as_of, max_expiries=2)
+        snapshot_df, analysis_df, chain_quote_df = fetch_options_snapshot_with_quotes(
+            fetch_syms, as_of, max_expiries=options_max_expiries
+        )
         n = upsert_options(research_con, snapshot_df)
         n2 = upsert_options_analysis(research_con, analysis_df)
         n3 = upsert_options_chain_quotes(research_con, chain_quote_df)

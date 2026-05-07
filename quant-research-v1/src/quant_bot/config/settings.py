@@ -75,6 +75,9 @@ class DataConfig(BaseModel):
     dev_db_path: str = ""
     use_dev_for_research: bool = False
     constituent_refresh_days: int = 7
+    options_max_expiries: int = 4
+    options_include_watchlist: bool = True
+    options_extra_symbols: list[str] = Field(default_factory=list)
 
 
 class SignalsConfig(BaseModel):

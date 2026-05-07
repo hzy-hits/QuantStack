@@ -58,6 +58,11 @@ data:
   report_db_path: "data/quant_report.duckdb"
   dev_db_path: "data/quant_dev.duckdb"
   use_dev_for_research: false
+  # Options chain history. Four expiries covers near weekly event spreads
+  # such as current week, next week, and the following event week.
+  options_max_expiries: 4
+  options_include_watchlist: true
+  options_extra_symbols: []
   # How often to refresh S&P 500 constituent list (days)
   constituent_refresh_days: 7
 
