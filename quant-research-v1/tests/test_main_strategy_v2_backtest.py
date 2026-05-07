@@ -236,6 +236,8 @@ class MainStrategyV2BacktestTests(unittest.TestCase):
             self.assertTrue((output_dir / "cn_opportunity_ranker.json").exists())
             self.assertTrue((output_dir / "cn_opportunity_ranker.duckdb").exists())
             self.assertIn("## 今日交易决策 / Production Decision", text)
+            self.assertIn("R 口径: 全部是归一化风险单位，不换算 RMB", text)
+            self.assertIn("归一化 R 占用", text)
             self.assertIn("### 可以小仓 / Actionable", text)
             self.assertIn("### 只能观察 / Watch", text)
             self.assertIn("### 禁止碰 / 0R / 未闭环", text)
