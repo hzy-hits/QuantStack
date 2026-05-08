@@ -2,6 +2,9 @@ use crate::DeliveryMode;
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::NaiveDate;
 use clap::Parser;
+use quant_stack_core::alpha::{self, AlphaEvalConfig};
+use quant_stack_core::report_model;
+use serde_json::Value;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -44,6 +47,14 @@ pub(crate) struct UsDailyArgs {
     /// Repository root containing quant-research-v1 and factor-lab.
     #[arg(long, default_value = ".")]
     pub(crate) stack_root: PathBuf,
+    /// Shared alpha/report-model history database.
+    #[arg(long, default_value = "data/strategy_backtest_history.duckdb")]
+    pub(crate) history_db: PathBuf,
+    /// Shared alpha dashboard output root.
+    #[arg(long, default_value = "reports/review_dashboard/strategy_backtest")]
+    pub(crate) output_root: PathBuf,
+    #[arg(long, default_value_t = 30)]
+    pub(crate) lookback_days: i64,
     /// Disable the legacy single retry. Useful for local debugging.
     #[arg(long)]
     pub(crate) no_retry: bool,
@@ -65,6 +76,8 @@ enum UsPipelineState {
     DataProducerComplete,
     FactorLabRefreshComplete,
     FactorLabImportComplete,
+    SharedAlphaEvaluated,
+    SharedReportModelWritten,
     PayloadReady,
     PayloadSplit,
     FactorLabInjected,
@@ -83,6 +96,8 @@ impl UsPipelineState {
             Self::DataProducerComplete => "data_producer_complete",
             Self::FactorLabRefreshComplete => "factor_lab_refresh_complete",
             Self::FactorLabImportComplete => "factor_lab_import_complete",
+            Self::SharedAlphaEvaluated => "shared_alpha_evaluated",
+            Self::SharedReportModelWritten => "shared_report_model_written",
             Self::PayloadReady => "payload_ready",
             Self::PayloadSplit => "payload_split",
             Self::FactorLabInjected => "factor_lab_injected",
@@ -132,8 +147,12 @@ impl UsPipelineFailure {
 struct UsPipelineContext {
     date: String,
     session: String,
+    stack_root: PathBuf,
     project_dir: PathBuf,
     factor_lab_root: PathBuf,
+    history_db: PathBuf,
+    output_root: PathBuf,
+    lookback_days: i64,
     delivery_mode: DeliveryMode,
     test_recipient: Option<String>,
     skip_data: bool,
@@ -296,8 +315,12 @@ impl UsPipelineContext {
         Ok(Self {
             date,
             session,
+            stack_root: stack_root.clone(),
             project_dir,
             factor_lab_root,
+            history_db: absolutize_under(&stack_root, &args.history_db),
+            output_root: absolutize_under(&stack_root, &args.output_root),
+            lookback_days: args.lookback_days,
             delivery_mode: args.delivery_mode,
             test_recipient: args.test_recipient,
             skip_data: args.skip_data,
@@ -339,6 +362,13 @@ fn run_attempt(ctx: &UsPipelineContext, attempt: u8) -> std::result::Result<(), 
     run_factor_lab_import(ctx).map_err(|e| UsPipelineFailure::new(UsPipelineStep::FactorLab, e))?;
     enter_state(ctx, UsPipelineState::FactorLabImportComplete, attempt);
 
+    run_shared_alpha_gate(ctx)
+        .map_err(|e| UsPipelineFailure::new(UsPipelineStep::DataPipeline, e))?;
+    enter_state(ctx, UsPipelineState::SharedAlphaEvaluated, attempt);
+    materialize_us_report_model(ctx)
+        .map_err(|e| UsPipelineFailure::new(UsPipelineStep::DataPipeline, e))?;
+    enter_state(ctx, UsPipelineState::SharedReportModelWritten, attempt);
+
     let payload = ctx
         .project_dir
         .join("reports")
@@ -350,6 +380,8 @@ fn run_attempt(ctx: &UsPipelineContext, attempt: u8) -> std::result::Result<(), 
 
     split_payload(ctx).map_err(|e| UsPipelineFailure::new(UsPipelineStep::PayloadSplit, e))?;
     validate_split_payloads(ctx)
+        .map_err(|e| UsPipelineFailure::new(UsPipelineStep::PayloadSplit, e))?;
+    inject_shared_report_model_status(ctx)
         .map_err(|e| UsPipelineFailure::new(UsPipelineStep::PayloadSplit, e))?;
     enter_state(ctx, UsPipelineState::PayloadSplit, attempt);
 
@@ -366,6 +398,8 @@ fn run_attempt(ctx: &UsPipelineContext, attempt: u8) -> std::result::Result<(), 
         .join("reports")
         .join(format!("{}_report_zh_{}.md", ctx.date, ctx.session));
     ensure_nonempty(&report)
+        .map_err(|e| UsPipelineFailure::new(UsPipelineStep::AgentAnalysis, e))?;
+    enforce_shared_report_model_status(ctx, &report)
         .map_err(|e| UsPipelineFailure::new(UsPipelineStep::AgentAnalysis, e))?;
     println!(
         "Chinese report: {} ({} bytes)",
@@ -490,6 +524,69 @@ fn run_factor_lab_import(ctx: &UsPipelineContext) -> Result<()> {
     Ok(())
 }
 
+fn run_shared_alpha_gate(ctx: &UsPipelineContext) -> Result<()> {
+    println!();
+    println!("[3.5/7] Shared alpha gate + report model");
+    if ctx.dry_run {
+        println!("dry-run: would run shared US alpha gate");
+        return Ok(());
+    }
+    let as_of = NaiveDate::parse_from_str(&ctx.date, "%Y-%m-%d")
+        .with_context(|| format!("invalid date {}", ctx.date))?;
+    let config = AlphaEvalConfig {
+        as_of,
+        markets: vec!["us".to_string()],
+        lookback_days: ctx.lookback_days,
+        auto_select: true,
+        emit_bulletin: true,
+        history_db: ctx.history_db.clone(),
+        output_root: ctx.output_root.clone(),
+        us_db: us_report_db(ctx),
+        cn_db: ctx
+            .stack_root
+            .join("quant-research-cn/data/quant_cn_report.duckdb"),
+        us_horizon_days: 3,
+        cn_horizon_days: 2,
+        write_project_copies: true,
+    };
+    alpha::evaluate(&config)?;
+    Ok(())
+}
+
+fn us_report_db(ctx: &UsPipelineContext) -> PathBuf {
+    let session_db = ctx
+        .project_dir
+        .join("data")
+        .join(format!("quant_report_{}_{}.duckdb", ctx.date, ctx.session));
+    if session_db.is_file() {
+        session_db
+    } else {
+        ctx.project_dir.join("data/quant.duckdb")
+    }
+}
+
+fn materialize_us_report_model(ctx: &UsPipelineContext) -> Result<()> {
+    if ctx.dry_run {
+        println!("dry-run: would materialize US shared report model");
+        return Ok(());
+    }
+    let written = report_model::write_models_from_history(
+        &ctx.history_db,
+        &ctx.date,
+        &["us".to_string()],
+        "post",
+        &ctx.project_dir.join("reports"),
+    )?;
+    if written == 0 {
+        bail!(
+            "shared report model missing for US {} in {}",
+            ctx.date,
+            ctx.history_db.display()
+        );
+    }
+    Ok(())
+}
+
 fn split_payload(ctx: &UsPipelineContext) -> Result<()> {
     println!();
     println!("[4/7] Split payload");
@@ -515,6 +612,29 @@ fn validate_split_payloads(ctx: &UsPipelineContext) -> Result<()> {
             ctx.date, section, ctx.session
         )))?;
     }
+    Ok(())
+}
+
+fn inject_shared_report_model_status(ctx: &UsPipelineContext) -> Result<()> {
+    if ctx.dry_run {
+        return Ok(());
+    }
+    let structural = ctx.project_dir.join("reports").join(format!(
+        "{}_payload_structural_{}.md",
+        ctx.date, ctx.session
+    ));
+    if !structural.is_file() {
+        bail!(
+            "structural payload missing for shared report model status: {}",
+            structural.display()
+        );
+    }
+    let block = shared_report_model_status_block(ctx)?;
+    let text = fs::read_to_string(&structural)?;
+    fs::write(
+        &structural,
+        upsert_shared_report_model_status(&text, &block),
+    )?;
     Ok(())
 }
 
@@ -664,6 +784,116 @@ fn send_report(ctx: &UsPipelineContext) -> Result<()> {
     run_command("us delivery", cmd, ctx.dry_run)
 }
 
+fn enforce_shared_report_model_status(ctx: &UsPipelineContext, report: &Path) -> Result<()> {
+    if ctx.dry_run {
+        return Ok(());
+    }
+    let block = shared_report_model_status_block(ctx)?;
+    let text = fs::read_to_string(report)
+        .with_context(|| format!("failed to read final report {}", report.display()))?;
+    fs::write(report, upsert_shared_report_model_status(&text, &block))
+        .with_context(|| format!("failed to write final report {}", report.display()))?;
+    Ok(())
+}
+
+fn upsert_shared_report_model_status(text: &str, block: &str) -> String {
+    const HEADING: &str = "## Shared Report Model Status";
+    let normalized_block = block.trim_end();
+    if let Some(start) = text.find(HEADING) {
+        if let Some(separator) = text[start..].find("\n---\n") {
+            let end = start + separator + "\n---\n".len();
+            let prefix = &text[..start];
+            let tail = text[end..].trim_start_matches('\n');
+            return format!("{prefix}{normalized_block}\n\n{tail}");
+        }
+    }
+    format!("{normalized_block}\n\n{text}")
+}
+
+fn shared_report_model_status_block(ctx: &UsPipelineContext) -> Result<String> {
+    let model_path = ctx
+        .project_dir
+        .join("reports")
+        .join(format!("{}_report_model_us_post.json", ctx.date));
+    let text = fs::read_to_string(&model_path)
+        .with_context(|| format!("shared report model missing: {}", model_path.display()))?;
+    let model: Value = serde_json::from_str(&text)
+        .with_context(|| format!("invalid shared report model JSON: {}", model_path.display()))?;
+    let alpha = model
+        .get("alpha_bulletin")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow!("shared report model missing alpha_bulletin"))?;
+    let ev_status = alpha
+        .get("ev_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let selected_policy = alpha
+        .get("selected_policy")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let tactical_policy = alpha
+        .get("tactical_policy")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let evaluated_through = alpha
+        .get("evaluated_through")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let count = |key: &str| {
+        alpha
+            .get(key)
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0)
+    };
+    let probation_symbols = section_symbols(alpha, "probation_alpha");
+    Ok(format!(
+        "## Shared Report Model Status\n\
+         - market: `us`\n\
+         - as_of: `{}`\n\
+         - session: `{}` (stable alpha model source: `post`)\n\
+         - ev_status: `{}`\n\
+         - selected_policy: `{}`\n\
+         - tactical_policy: `{}`\n\
+         - evaluated_through: `{}`\n\
+         - section_counts: execution={} probation={} tactical={} options={} recall={} blocked={}\n\
+         - probation_symbols: `{}` (trial-only max 0.25R/0.5R, not a formal Fresh Entry)\n\
+         - rule: final report must not create formal Fresh Entry Tickets unless `execution_alpha` is non-empty in this shared model; `probation_alpha` is trial-only sizing, not formal execution.\n\
+         \n\
+         ---\n",
+        ctx.date,
+        ctx.session,
+        ev_status,
+        selected_policy,
+        tactical_policy,
+        evaluated_through,
+        count("execution_alpha"),
+        count("probation_alpha"),
+        count("tactical_alpha"),
+        count("options_alpha"),
+        count("recall_alpha"),
+        count("blocked_alpha"),
+        probation_symbols,
+    ))
+}
+
+fn section_symbols(alpha: &serde_json::Map<String, Value>, key: &str) -> String {
+    let symbols: Vec<String> = alpha
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("symbol").and_then(Value::as_str))
+        .take(5)
+        .map(ToString::to_string)
+        .collect();
+    if symbols.is_empty() {
+        "none".to_string()
+    } else {
+        symbols.join(", ")
+    }
+}
+
 fn send_failure_alert(ctx: &UsPipelineContext, step: UsPipelineStep, attempt: u8, detail: &str) {
     let subject = format!(
         "[Quant Pipeline FAILED] {} ({}) - {} (attempt {})",
@@ -799,6 +1029,14 @@ fn resolve_stack_root(input: &Path) -> Result<PathBuf> {
             .ok_or_else(|| anyhow!("cannot infer stack root from {}", base.display()))?);
     }
     Ok(base)
+}
+
+fn absolutize_under(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
 }
 
 fn resolve_factor_lab_root(stack_root: &Path, project_dir: &Path) -> Result<PathBuf> {

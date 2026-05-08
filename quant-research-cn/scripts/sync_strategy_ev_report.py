@@ -426,19 +426,19 @@ def sanitize_report_language(report_text: str, reports_dir: Path, db_path: Path,
                 [
                     "### 做多",
                     "",
-                    "本期无可执行做多。原因不是没有候选，而是历史EV层未放行；当前候选只能进入回踩/盘口复核层。Headline=uncertain、gate_multiplier=0.70 时，个股线索不能上升成市场主线。",
+                    "本期无可执行做多。原因不是没有候选，而是主系统 execution/liquidity/risk 门禁未放行；当前候选只能进入回踩/盘口复核层。Headline=uncertain、gate_multiplier=0.70 时，个股线索不能上升成市场主线。",
                 ]
             )
             + "\n",
         )
 
     replacements = {
-        "Recall→EV→Gate 转化链断裂": "候选已召回，但历史EV/30日稳定门禁未放行",
-        "Recall → EV → Gate 转化链断裂": "候选已召回，但历史EV/30日稳定门禁未放行",
-        "CN Stable Alpha Bulletin": "30日稳定门禁",
-        "Stable Alpha Bulletin": "30日稳定门禁",
-        "Stable Champion Policy=none": "30日稳定门禁未放行",
-        "EV unknown: no stable champion policy": "30日稳定门禁未放行",
+        "Recall→EV→Gate 转化链断裂": "候选已召回，但主系统 execution/liquidity/risk 门禁未放行",
+        "Recall → EV → Gate 转化链断裂": "候选已召回，但主系统 execution/liquidity/risk 门禁未放行",
+        "CN Stable Alpha Bulletin": "当前执行门禁",
+        "Stable Alpha Bulletin": "当前执行门禁",
+        "Stable Champion Policy=none": "历史EV未放行",
+        "EV unknown: no stable champion policy": "历史EV未放行",
         "CORE BOOK": "主候选池",
         "TACTICAL CONTINUATION": "战术延续",
         "Blocked Chase": "追价阻断",

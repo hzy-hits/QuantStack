@@ -4,6 +4,14 @@ import pandas as pd
 from scipy.stats import spearmanr
 
 
+def _rank_monotonicity(values: list[float], n_groups: int) -> float:
+    arr = np.asarray(values, dtype=float)
+    if arr.size < 3 or not np.isfinite(arr).all() or np.nanstd(arr) <= 1e-12:
+        return 0.0
+    mono, _ = spearmanr(list(range(1, n_groups + 1)), arr)
+    return float(mono) if not np.isnan(mono) else 0.0
+
+
 def compute_quintile_returns(factor_values: pd.Series, forward_returns: pd.Series,
                              dates: pd.Series, n_groups: int = 5) -> dict:
     """
@@ -48,17 +56,15 @@ def compute_quintile_returns(factor_values: pd.Series, forward_returns: pd.Serie
         vals = daily_quintile_returns[q]
         q_means.append(float(np.mean(vals)) if vals else 0.0)
 
-    # Monotonicity: rank correlation of quintile index vs mean return
-    if len(q_means) >= 3:
-        mono, _ = spearmanr(list(range(1, n_groups + 1)), q_means)
-    else:
-        mono = 0.0
+    # Monotonicity: rank correlation of quintile index vs mean return.
+    # Degenerate factors can produce flat bucket means; treat that as no signal.
+    mono = _rank_monotonicity(q_means, n_groups)
 
     n_days = min(len(v) for v in daily_quintile_returns.values()) if daily_quintile_returns[1] else 0
 
     return {
         "quintile_returns": [round(x * 100, 3) for x in q_means],  # as percentage
         "long_short_pct": round((q_means[-1] - q_means[0]) * 100, 3),
-        "monotonicity": round(float(mono), 3) if not np.isnan(mono) else 0.0,
+        "monotonicity": round(float(mono), 3),
         "n_days": n_days,
     }

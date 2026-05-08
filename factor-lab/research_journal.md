@@ -289,3 +289,33 @@ Legend: . = tested weak, + = decent IC, ++ = strong IC, +++ = promoted, ! = stro
 - Experiments run: 21
 - OOS passed: 3/3
 - Passing factors: low_lottery_weekly_turnover_evenness_20, low_lottery_weekly_relvol_stability_20, turnover_stability_20
+
+## Session 20260506_060002_3a2ce6 — CN
+- Timestamp: 2026-05-06 06:57
+- Experiments run: 25
+- OOS passed: 3/3
+- Passing factors: anti_autocorr_openclose_floorstd_20, anti_autocorr_weekly_amount_change_stability_20, quiet_accumulation_amount_stability_20
+
+## Session 20260506_140032_3bdad6 — CN
+- Timestamp: 2026-05-06 14:59
+- Experiments run: 24
+- OOS passed: 2/3
+- Passing factors: anti_autocorr_weekly_amount_change_stability_20, low_lottery_openclose_floorstd_20
+
+## Session 20260507_060002_3ed25b — CN
+- Timestamp: 2026-05-07 06:58
+- Experiments run: 19
+- OOS passed: 3/3
+- Passing factors: low_lottery_log_amount_smooth_20_5, anti_autocorr_weekly_amount_change_stability_20, turnover_floor_body_stability_20
+
+## Session 20260507_140002_35890e — CN
+- Timestamp: 2026-05-07 14:56
+- Experiments run: 16
+- OOS passed: 3/3
+- Passing factors: weekly_float_body_evenness_20, log_amount_change_stability_20_5, float_even_underreaction_20
+
+## Session 20260508_060002_187722 — CN
+- Timestamp: 2026-05-08 06:55
+- Experiments run: 17
+- OOS passed: 2/3
+- Passing factors: anti_autocorr_weekly_amount_change_stability_20, weekly_turnchg_body_stability_20

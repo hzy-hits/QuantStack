@@ -97,11 +97,13 @@ def render_factor_lab_report_section(signal_block: str) -> str:
         return (
             f"{REPORT_HEADING}\n\n"
             f"{unavailable_match.group(0).strip()} "
-            "本期不展示 Factor Lab research prior / recall lead 候选表，也不把其方向性结论写入正文。"
+            "本期只保留状态摘要；完整实验流水另存附录，不把其方向性结论写入正文。"
         ).strip()
 
     parsed = _parse_factor_lab_signal(signal_block)
     if parsed:
+        rows = parsed["rows"][:5]
+        omitted_count = max(len(parsed["rows"]) - len(rows), 0)
         summary_bits = [
             "research prior / recall lead，不是交易指令；不改变主系统结论；未通过主系统 V2/EV gate 的票只能观察。"
         ]
@@ -111,26 +113,26 @@ def render_factor_lab_report_section(signal_block: str) -> str:
             summary_bits.append(parsed["trade_date_line"])
         if parsed["factor_name"]:
             summary_bits.append(f"当前因子：`{parsed['factor_name']}`。")
-        summary_bits.append(
-            f"contract=`{parsed['contract']}`；sleeve=`{parsed['sleeve']}`；money_status=`{parsed['money_status']}`。"
-        )
         if parsed["hold_days_line"]:
             summary_bits.append(parsed["hold_days_line"])
         if parsed["cleaning_line"]:
             summary_bits.append(parsed["cleaning_line"])
+        summary_bits.append("完整候选表、旧 research journal 和 promoted factor table 不进入邮件正文。")
+        if omitted_count:
+            summary_bits.append(f"下表只展示前{len(rows)}个代表性候选，另有{omitted_count}个在附录。")
 
         lines = [
             REPORT_HEADING,
             "",
             " ".join(summary_bits),
             "",
-            "| 代码 | 名称 | 研究参考价 | 失效观察线 | 复核上沿 | 排序权重 | contract | sleeve | money_status | 备注 |",
-            "|---|---|---:|---:|---:|---:|---|---|---|---|",
+            "| 代码 | 名称 | 研究参考价 | 失效观察线 | 复核上沿 | 排序权重 | 备注 |",
+            "|---|---|---:|---:|---:|---:|---|",
         ]
-        for row in parsed["rows"]:
+        for row in rows:
             lines.append(
                 f"| `{row['symbol']}` | {row['name']} | {row['entry']} | {row['stop']} | {row['target']} | {row['weight']} | "
-                f"{parsed['contract']} | {parsed['sleeve']} | {parsed['money_status']} | 强度#{row['rank']} |"
+                f"研究附录代表候选#{row['rank']} |"
             )
         return "\n".join(lines).strip()
 

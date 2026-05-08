@@ -27,11 +27,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from src.dsl.parser import parse
 from src.dsl.compute import compute_factor
 from src.mining.contracts import ensure_contract_tables
-from src.paths import FACTOR_LAB_DB, QUANT_CN_DB, QUANT_US_DB
+from src.paths import FACTOR_LAB_DB, QUANT_CN_REPORT_DB, QUANT_US_DB
 
 PIPELINE_CONFIGS = {
     "cn": {
-        "db_path": str(QUANT_CN_DB),
+        "db_path": str(QUANT_CN_REPORT_DB),
         "price_sql": """
             SELECT p.ts_code, p.trade_date, p.open, p.high, p.low, p.close,
                    p.vol as volume, p.amount,
@@ -110,10 +110,14 @@ def _is_pipeline_exportable(
     readiness = str(money_readiness or "research_only").strip().lower()
     gate_status = str((alpha_gate or {}).get("alpha_factory_status") or "").strip().lower()
     gate_contract = str((alpha_gate or {}).get("report_contract") or "").strip().lower()
+    if gate_status in {"blocked", "research_only"}:
+        return False
     if gate_status == "overlay_allowed" and gate_contract in PIPELINE_POSITIVE_OVERLAY_CONTRACTS:
         return True
     if gate_status == "pass":
         return True
+    if alpha_gate is not None and gate_status:
+        return False
     if contract in PIPELINE_POSITIVE_OVERLAY_CONTRACTS:
         return True
     if contract != "fresh_buy_gate" or readiness != "money_ready":

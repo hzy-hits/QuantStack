@@ -69,7 +69,7 @@ def _compact_items(
     chosen: list[str] = []
     used: set[str] = set()
     symbol_lanes: dict[str, str] = {}
-    lane_caps = {"CORE": 4, "RANGE_CORE": 4, "TACTICAL_CONTINUATION": 6, "THEME_ROTATION": 6, "RADAR": 2}
+    lane_caps = {"CORE": 4, "RANGE_CORE": 2, "TACTICAL_CONTINUATION": 2, "THEME_ROTATION": 2, "RADAR": 1}
     lane_order = ["CORE", "RANGE_CORE", "TACTICAL_CONTINUATION", "THEME_ROTATION", "RADAR", "OTHER"]
     bucket_order = ["HIGH", "MODERATE", "WATCH", "LOW", "OTHER", "NO_SIGNAL"]
     selected_lane_counts: Counter[str] = Counter()
@@ -99,8 +99,13 @@ def _compact_items(
     if len(chosen) < max_items:
         lane_priority = {lane: idx for idx, lane in enumerate(lane_order)}
         bucket_priority = {bucket: idx for idx, bucket in enumerate(bucket_order)}
+        fallback_lanes = {"CORE", "RANGE_CORE", "TACTICAL_CONTINUATION"}
         remaining = sorted(
-            [section for section in sections if _symbol(section) not in used],
+            [
+                section
+                for section in sections
+                if _symbol(section) not in used and _lane(section) in fallback_lanes
+            ],
             key=lambda section: (
                 lane_priority.get(_lane(section), len(lane_priority)),
                 bucket_priority.get(_bucket(section), len(bucket_priority)),
@@ -121,7 +126,7 @@ def _compact_items(
         f"- 总条目: {len(sections)}",
         f"- 报告层级: CORE {lane_counts.get('CORE', 0)} | RANGE_CORE {lane_counts.get('RANGE_CORE', 0)} | TACTICAL_CONTINUATION {lane_counts.get('TACTICAL_CONTINUATION', 0)} | THEME_ROTATION {lane_counts.get('THEME_ROTATION', 0)} | RADAR {lane_counts.get('RADAR', 0)} | OTHER {lane_counts.get('OTHER', 0)}",
         f"- HIGH: {counts.get('HIGH', 0)} | MODERATE: {counts.get('MODERATE', 0)} | WATCH: {counts.get('WATCH', 0)} | LOW: {counts.get('LOW', 0)} | no-signal: {counts.get('NO_SIGNAL', 0)}",
-        f"- 保留: {len(chosen)} 条，优先级为 CORE -> RANGE_CORE -> TACTICAL_CONTINUATION -> THEME_ROTATION -> RADAR；其余 {omitted} 条只保留在统计摘要中",
+        f"- 保留: {len(chosen)} 条，优先级为 CORE -> RANGE_CORE -> TACTICAL_CONTINUATION；THEME/RADAR 只保留少量影子期权/复核样本，不回填正文；其余 {omitted} 条只保留在统计摘要中",
         f"- 保留代码: {', '.join(_symbol(section) for section in chosen)}",
     ])
 

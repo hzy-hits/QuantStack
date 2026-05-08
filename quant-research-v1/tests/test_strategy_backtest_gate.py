@@ -33,6 +33,23 @@ def _load_gate_module():
 gate = _load_gate_module()
 
 
+def _positive_us_pulse() -> dict:
+    return {
+        "market": "us",
+        "symbol": "__US__",
+        "section": "recent_alpha_pulse",
+        "reason": "recent US alpha pulse is positive",
+        "blockers": [],
+        "details": {
+            "basis": "test basis",
+            "core_weighted_avg_next_pct": 1.25,
+            "lane_summary": [],
+            "leaders": [],
+            "drags": [],
+        },
+    }
+
+
 def _make_history_db(path: Path) -> None:
     con = duckdb.connect(str(path))
     con.execute(
@@ -608,6 +625,287 @@ class StrategyBacktestGateTests(unittest.TestCase):
         self.assertIn("### Legacy / Blocked Alpha", rendered)
         self.assertNotIn("buy", rendered.lower())
 
+    def test_us_options_blocked_keeps_core_equity_execution_stock_only(self) -> None:
+        current = {
+            "market": "us",
+            "symbol": "ALFA",
+            "policy_id": "us:core:long:low:executable_now:trending:h3",
+            "policy_label": "US core long low executable now trending 3D",
+            "report_bucket": "core",
+            "signal_direction": "long",
+            "signal_confidence": "LOW",
+            "selection_status": "ignored",
+            "execution_mode": "executable_now",
+            "details_json": json.dumps(
+                {
+                    "main_signal_gate": {"status": "pass", "role": "main_signal", "action_intent": "TRADE"},
+                    "execution_gate": {"trend_regime": "trending"},
+                }
+            ),
+        }
+        options_row = {
+            "market": "us",
+            "symbol": "ALFA",
+            "source": "real_options",
+            "expression": "blocked",
+            "reason": "no clean options edge",
+            "details": {
+                "directional_edge": 0.12,
+                "vol_edge": -0.05,
+                "flow_edge": 0.01,
+                "liquidity_gate": "pass",
+            },
+        }
+
+        bulletin = gate.build_bulletin(
+            date(2026, 4, 24),
+            {"us": "2026-04-21"},
+            {"us": "us:core:long:low:executable_now:trending:h3"},
+            {"us": []},
+            {"us": [current]},
+            {"us": [options_row]},
+            {"us": [_positive_us_pulse()]},
+        )
+        rendered = gate.render_market_bulletin_md(bulletin, "us")
+
+        self.assertEqual([row["symbol"] for row in bulletin["execution_alpha"]], ["ALFA"])
+        self.assertEqual(bulletin["recall_alpha"], [])
+        self.assertEqual(bulletin["core_options_cross"][0]["tier"], "stock_only_unconfirmed")
+        self.assertEqual(bulletin["execution_candidates"][0]["action"], "stock_only_probe_if_other_gates_pass")
+        self.assertEqual(bulletin["options_alpha"], [])
+        self.assertIn("Execution Candidates", rendered)
+        self.assertIn("Core + Options Cross", rendered)
+        self.assertIn("stock_only_unconfirmed", rendered)
+
+    def test_execution_candidates_promote_confirmed_core_options_pulse(self) -> None:
+        current = {
+            "market": "us",
+            "symbol": "ALFA",
+            "policy_id": "us:core:long:low:executable_now:trending:h3",
+            "policy_label": "US core long low executable now trending 3D",
+            "report_bucket": "core",
+            "signal_direction": "long",
+            "signal_confidence": "LOW",
+            "selection_status": "selected",
+            "execution_mode": "executable_now",
+            "rr_ratio": 1.8,
+            "details_json": json.dumps(
+                {
+                    "main_signal_gate": {"status": "pass", "role": "main_signal", "action_intent": "TRADE"},
+                    "execution_gate": {"trend_regime": "trending", "effective_stretch_score": 0.12},
+                    "overnight_alpha": {"alpha_already_paid_risk": 0.18},
+                }
+            ),
+        }
+        options_row = {
+            "market": "us",
+            "symbol": "ALFA",
+            "source": "real_options",
+            "expression": "call_spread",
+            "reason": "bullish direction with cheap convexity",
+            "details": {
+                "directional_edge": 0.42,
+                "vol_edge": 0.18,
+                "flow_edge": 0.20,
+                "liquidity_gate": "pass",
+            },
+        }
+
+        bulletin = gate.build_bulletin(
+            date(2026, 4, 24),
+            {"us": "2026-04-21"},
+            {"us": "us:core:long:low:executable_now:trending:h3"},
+            {"us": []},
+            {"us": [current]},
+            {"us": [options_row]},
+            {"us": [_positive_us_pulse()]},
+        )
+        rendered = gate.render_market_bulletin_md(bulletin, "us")
+
+        self.assertEqual([row["symbol"] for row in bulletin["execution_alpha"]], ["ALFA"])
+        self.assertEqual(bulletin["execution_candidates"][0]["action"], "execute_option_confirmed_probe")
+        self.assertIn("execute_option_confirmed_probe", rendered)
+
+    def test_us_options_direction_conflict_demotes_core_execution(self) -> None:
+        current = {
+            "market": "us",
+            "symbol": "BRAV",
+            "policy_id": "us:core:long:low:executable_now:trending:h3",
+            "policy_label": "US core long low executable now trending 3D",
+            "report_bucket": "core",
+            "signal_direction": "long",
+            "signal_confidence": "LOW",
+            "selection_status": "selected",
+            "execution_mode": "executable_now",
+            "details_json": json.dumps(
+                {
+                    "main_signal_gate": {"status": "pass", "role": "main_signal", "action_intent": "TRADE"},
+                    "execution_gate": {"trend_regime": "trending"},
+                }
+            ),
+        }
+        options_row = {
+            "market": "us",
+            "symbol": "BRAV",
+            "source": "real_options",
+            "expression": "put_spread",
+            "reason": "bearish direction with acceptable/cheap convexity",
+            "details": {
+                "directional_edge": -0.56,
+                "vol_edge": 0.22,
+                "flow_edge": -0.30,
+                "liquidity_gate": "pass",
+            },
+        }
+
+        bulletin = gate.build_bulletin(
+            date(2026, 4, 24),
+            {"us": "2026-04-21"},
+            {"us": "us:core:long:low:executable_now:trending:h3"},
+            {"us": []},
+            {"us": [current]},
+            {"us": [options_row]},
+            {"us": [_positive_us_pulse()]},
+        )
+
+        self.assertEqual(bulletin["execution_alpha"], [])
+        self.assertEqual([row["symbol"] for row in bulletin["recall_alpha"]], ["BRAV"])
+        self.assertEqual(bulletin["core_options_cross"][0]["tier"], "core_options_conflict")
+        self.assertEqual(bulletin["execution_candidates"][0]["action"], "do_not_promote_conflict")
+        self.assertIn("core/options direction conflict", bulletin["recall_alpha"][0]["blockers"])
+
+    def test_recent_alpha_pulse_renders_pending_as_unresolved_not_failed(self) -> None:
+        bulletin = gate.build_bulletin(
+            date(2026, 4, 24),
+            {"cn": "2026-04-22"},
+            {"cn": None},
+            {"cn": []},
+            {"cn": []},
+            {},
+            {
+                "cn": [
+                    {
+                        "market": "cn",
+                        "symbol": "__CN__",
+                        "section": "recent_alpha_pulse",
+                        "reason": "recent CN pulse is pending",
+                        "blockers": [],
+                        "details": {
+                            "basis": "test basis",
+                            "state_summary": [
+                                {
+                                    "report_date": "2026-04-24",
+                                    "alpha_state": "positive_ev_setup",
+                                    "fill_status": "pending",
+                                    "n": 1,
+                                    "avg_realized_pct": None,
+                                    "avg_best_pct": None,
+                                    "win_rate": None,
+                                }
+                            ],
+                            "best_realized_or_favorable": [],
+                            "pending_watch": [
+                                {
+                                    "report_date": "2026-04-24",
+                                    "symbol": "002773.SZ",
+                                    "ev_norm_lcb_80": 51.1534,
+                                }
+                            ],
+                        },
+                    }
+                ]
+            },
+            learning_queue_by_market={
+                "cn": [
+                    {
+                        "market": "cn",
+                        "symbol": "__MISSED_ALPHA__",
+                        "section": "learning_queue",
+                        "label": "missed_alpha",
+                        "reason": "Find recall features that appeared before missed winners; do not invent unrelated factors.",
+                        "blockers": [],
+                        "details": {
+                            "n": 2,
+                            "avg_best_ret_pct": 3.2,
+                            "positive_best_rate": 1.0,
+                            "examples": [
+                                {
+                                    "report_date": "2026-04-23",
+                                    "symbol": "600000.SH",
+                                    "best_ret_pct": 4.2,
+                                }
+                            ],
+                        },
+                    }
+                ]
+            },
+        )
+
+        rendered = gate.render_market_bulletin_md(bulletin, "cn")
+
+        self.assertIn("### Recent Alpha Pulse", rendered)
+        self.assertIn("| 2026-04-24 | positive_ev_setup | pending | 1 | - | - | - |", rendered)
+        self.assertIn("`002773.SZ` 51.1534", rendered)
+        self.assertIn("### Learning Queue", rendered)
+        self.assertIn("`missed_alpha`", rendered)
+
+    def test_cn_do_not_chase_shadow_setup_is_not_execution_alpha(self) -> None:
+        current = {
+            "market": "cn",
+            "symbol": "002393.SZ",
+            "policy_id": "cn:oversold_contrarian:long:ev_positive:planned_entry:na:h2",
+            "policy_label": "CN oversold contrarian EV-positive planned entry 2D",
+            "strategy_family": "oversold_contrarian",
+            "report_bucket": "oversold_contrarian",
+            "action_intent": "TRADE",
+            "alpha_state": "positive_ev_setup",
+            "signal_direction": "long",
+            "signal_confidence": "EV_POSITIVE",
+            "execution_mode": "do_not_chase",
+            "execution_rule": "do_not_chase",
+            "ev_lcb_80_pct": 0.8,
+            "ev_norm_lcb_80": 50.0,
+            "features_json": json.dumps(
+                {
+                    "shadow_alpha_prob": 0.42,
+                    "entry_quality_score": 0.22,
+                    "stale_chase_risk": 0.72,
+                    "execution_mode": "do_not_chase",
+                }
+            ),
+            "details_json": "{}",
+        }
+        pulse = {
+            "market": "cn",
+            "symbol": "__CN__",
+            "section": "recent_alpha_pulse",
+            "reason": "recent CN shadow-option pulse has realized alpha",
+            "blockers": [],
+            "details": {
+                "basis": "test basis",
+                "filled_avg_realized_pct": 1.2,
+                "filled_avg_best_pct": 2.1,
+                "state_summary": [],
+                "best_realized_or_favorable": [],
+                "pending_watch": [],
+            },
+        }
+
+        bulletin = gate.build_bulletin(
+            date(2026, 4, 24),
+            {"cn": "2026-04-22"},
+            {"cn": "cn:oversold_contrarian:long:ev_positive:planned_entry:na:h2"},
+            {"cn": []},
+            {"cn": [current]},
+            {},
+            {"cn": [pulse]},
+        )
+
+        self.assertEqual(bulletin["execution_alpha"], [])
+        self.assertEqual(bulletin["execution_candidates"][0]["action"], "do_not_chase_wait_reset")
+        self.assertEqual([row["symbol"] for row in bulletin["recall_alpha"]], ["002393.SZ"])
+        self.assertIn("stale_chase_or_do_not_chase", bulletin["recall_alpha"][0]["blockers"])
+
     def test_bulletin_surfaces_stable_theme_rotation_as_tactical_alpha(self) -> None:
         current = {
             "market": "cn",
@@ -714,20 +1012,16 @@ class PipelineHookTests(unittest.TestCase):
         daily_pipeline = (STACK_ROOT / "quant-research-cn" / "scripts" / "daily_pipeline.sh").read_text(
             encoding="utf-8"
         )
-        gate_marker = "alpha evaluate"
-        render_marker = './target/release/quant-cn render --date "$DATE" 2>&1'
-
-        self.assertIn(gate_marker, daily_pipeline)
+        self.assertIn("canonical state machine", daily_pipeline)
+        self.assertIn("daily", daily_pipeline)
+        self.assertIn("--markets cn", daily_pipeline)
+        self.assertIn("--run-producers", daily_pipeline)
+        self.assertIn("--with-narrative", daily_pipeline)
+        self.assertIn("--send-reports", daily_pipeline)
         self.assertIn("QUANT_STACK_BIN", daily_pipeline)
-        self.assertIn("review-backfill", daily_pipeline)
-        self.assertIn("QUANT_CN_REVIEW_BACKFILL_TIMING", daily_pipeline)
-        self.assertIn("Review history backfill deferred until after email", daily_pipeline)
-        self.assertIn("Post-email review maintenance", daily_pipeline)
-        self.assertIn("run_strategy_backtest_report.py", daily_pipeline)
-        self.assertEqual(daily_pipeline.count(render_marker), 2)
-        self.assertLess(daily_pipeline.index(gate_marker), daily_pipeline.rindex(render_marker))
-        self.assertIn("## Factor Lab research prior / recall lead", daily_pipeline)
-        self.assertIn("研究候选清单如下（仅 recall lead，进入主书前仍需 gate）", daily_pipeline)
+        self.assertNotIn("review-backfill --date-from", daily_pipeline)
+        self.assertNotIn('quant-cn render --date "$DATE"', daily_pipeline)
+        self.assertNotIn("run_strategy_backtest_report.py", daily_pipeline)
         self.assertNotIn('cat "$FACTOR_TMP"', daily_pipeline)
 
     def test_delivery_mode_defaults_to_test_in_us_and_cn_wrappers(self) -> None:

@@ -96,10 +96,17 @@ echo "  Report: $WEEKLY_REPORT ($(wc -c < "$WEEKLY_REPORT") bytes)"
 echo ""
 echo "[3/3] Sending weekly report email..."
 
-"$PYTHON_BIN" scripts/send_email.py "$WEEKLY_REPORT" \
-    --charts "reports/charts/$DATE/" \
-    --subject "A股周报 — $DATE" \
-    2>&1 || echo "  Email send failed (non-fatal)"
+DELIVERY_MODE="${QUANT_DELIVERY_MODE:-prod}"
+SEND_ARGS=(
+    "$WEEKLY_REPORT"
+    --charts "reports/charts/$DATE/"
+    --subject "A股周报 — $DATE"
+    --delivery-mode "$DELIVERY_MODE"
+)
+if [[ -n "${QUANT_TEST_RECIPIENT:-}" ]]; then
+    SEND_ARGS+=(--test-recipient "$QUANT_TEST_RECIPIENT")
+fi
+"$PYTHON_BIN" scripts/send_email.py "${SEND_ARGS[@]}" 2>&1 || echo "  Email send failed (non-fatal)"
 
 echo ""
 echo "=========================================="

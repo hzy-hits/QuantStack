@@ -611,16 +611,18 @@ class FactorLabReportSyncTests(unittest.TestCase):
 
         self.assertIn("**Factor Lab research prior / recall lead**", synced)
         self.assertIn(
-            "| `AAA` | ALPHA | 10.00 | 9.00 | 12.00 | 18.2% | research_only | daily_price_overlay | research_only | 强度#1 |",
+            "| `AAA` | ALPHA | 10.00 | 9.00 | 12.00 | 18.2% | 研究附录代表候选#1 |",
             synced,
         )
         self.assertIn(
-            "| `BBB` | BETA | 20.00 | 18.00 | 24.00 | 16.4% | research_only | daily_price_overlay | research_only | 强度#2 |",
+            "| `BBB` | BETA | 20.00 | 18.00 | 24.00 | 16.4% | 研究附录代表候选#2 |",
             synced,
         )
         self.assertIn("当前因子：`d2_3_516`。", synced)
         self.assertIn("未通过主系统 V2/EV gate 的票只能观察", synced)
+        self.assertIn("完整候选表、旧 research journal 和 promoted factor table 不进入邮件正文", synced)
         self.assertIn("数据清洗: 已剔除 3 个异常候选", synced)
+        self.assertNotIn("| contract | sleeve | money_status |", synced)
         self.assertNotIn("怎么操作:", synced)
         self.assertNotIn("本期为因子研究实验报告，非个股选股清单。", synced)
 
@@ -657,7 +659,7 @@ class FactorLabReportSyncTests(unittest.TestCase):
         synced = sync_factor_lab_signal_section(report_text, structural_text)
 
         self.assertIn("状态: UNAVAILABLE", synced)
-        self.assertIn("本期不展示 Factor Lab research prior / recall lead 候选表", synced)
+        self.assertIn("本期只保留状态摘要", synced)
         self.assertNotIn("| `AAA` |", synced)
         self.assertNotIn("怎么操作:", synced)
 

@@ -9,8 +9,8 @@ from pathlib import Path
 
 
 SYNC_INTRO = (
-    "系统自动生成的价格计划，不是订单。正式执行仍以 Stable Alpha / Execution Alpha "
-    "放行为准；未放行的名字只能复核、等待或回避。"
+    "系统自动生成的 fresh-entry ticket 价格计划，不是订单。No ticket, no new trade；"
+    "已持有盈利票必须另看 My Book / Winner Hold Overlay，不能被 fresh-entry gate 自动误杀。"
 )
 
 
@@ -25,6 +25,14 @@ def _section(text: str, heading: str, next_headings: tuple[str, ...]) -> str:
         if idx >= 0:
             end = min(end, idx)
     return text[body_start:end].strip()
+
+
+def _section_any(text: str, headings: tuple[str, ...], next_headings: tuple[str, ...]) -> str:
+    for heading in headings:
+        section = _section(text, heading, next_headings)
+        if section:
+            return section
+    return ""
 
 
 def _parse_table(section: str) -> list[dict[str, str]]:
@@ -87,6 +95,7 @@ def _reason(value: str) -> str:
         "not a setup-alpha candidate": "不属于复核型机会",
         "review only": "仅复核",
         "stable EV gate not passed": "稳定EV门禁未通过",
+        "fresh-entry ticket passed with complete entry/stop/target": "fresh-entry ticket通过，入场/止损/目标完整",
     }
     parts = [part.strip() for part in value.split(";") if part.strip()]
     translated = [replacements.get(part, part) for part in parts]
@@ -121,21 +130,19 @@ def build_action_plan_snippet(structural_text: str, max_blocked: int = 8) -> str
     if not ledger:
         return ""
 
+    setup_markers = ("### Positive EV / Setup Tickets", "### Setup / Wait Plans")
+    blocked_markers = ("### Blocked / No-Ticket", "### Blocked / No-Chase Plans")
     gate_rows = _parse_table(
-        _section(ledger, "### Gate-Pass Plans", ("### Setup / Wait Plans", "### Blocked / No-Chase Plans"))
+        _section_any(ledger, ("### Fresh Entry Tickets", "### Gate-Pass Plans"), setup_markers + blocked_markers)
     )
-    setup_rows = _parse_table(
-        _section(ledger, "### Setup / Wait Plans", ("### Blocked / No-Chase Plans",))
-    )
-    blocked_rows = _parse_table(
-        _section(ledger, "### Blocked / No-Chase Plans", ("\n---",))
-    )
+    setup_rows = _parse_table(_section_any(ledger, setup_markers, blocked_markers))
+    blocked_rows = _parse_table(_section_any(ledger, blocked_markers, ("\n---",)))
 
     if not gate_rows and not setup_rows and not blocked_rows:
         return ""
 
     lines = [
-        "### 价格计划",
+        "### Fresh-entry ticket 价格计划",
         "",
         SYNC_INTRO,
         "",
@@ -164,7 +171,7 @@ def sync_action_plan(report_path: Path, structural_path: Path, max_blocked: int 
         flags=re.DOTALL,
     )
     report = re.sub(
-        rf"\n?### 价格计划\n\n{re.escape(SYNC_INTRO)}.*?(?=\n### |\n## |\Z)",
+        r"\n?### (?:Fresh-entry ticket )?价格计划\n\n.*?(?=\n### |\n## |\Z)",
         "\n",
         report,
         flags=re.DOTALL,

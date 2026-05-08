@@ -7,6 +7,7 @@ members = [
 exclude = [
     "quant-research-cn",
     "quant-research-v1/rust",
+    "factor-lab/rust-bootstrap",
 ]
 resolver = "2"
 

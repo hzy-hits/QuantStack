@@ -3,6 +3,7 @@ use chrono::NaiveDate;
 use clap::{Parser, Subcommand, ValueEnum};
 use quant_stack_core::alpha::{self, AlphaEvalConfig};
 use quant_stack_core::report_model;
+use serde_json::Value;
 use std::fs::{self, File};
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -55,6 +56,8 @@ enum AlphaCommand {
 enum ReportCommand {
     /// Materialize report model JSON files from the history DB.
     Model(ReportModelArgs),
+    /// Enforce shared report model status on an existing final report.
+    Stamp(ReportStampArgs),
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -97,6 +100,20 @@ struct ReportModelArgs {
     history_db: PathBuf,
     #[arg(long, default_value = "reports")]
     reports_dir: PathBuf,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct ReportStampArgs {
+    #[arg(long)]
+    date: String,
+    #[arg(long)]
+    market: String,
+    #[arg(long, default_value = "post")]
+    session: String,
+    #[arg(long)]
+    report: PathBuf,
+    #[arg(long, default_value = ".")]
+    stack_root: PathBuf,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -242,6 +259,20 @@ fn main() -> Result<()> {
                     &args.reports_dir,
                 )?;
                 println!("report models written: {n}");
+            }
+            ReportCommand::Stamp(args) => {
+                let stack_root = args
+                    .stack_root
+                    .canonicalize()
+                    .unwrap_or_else(|_| args.stack_root.clone());
+                enforce_shared_report_model_status(
+                    &stack_root,
+                    &args.market,
+                    &args.date,
+                    &args.session,
+                    &args.report,
+                )?;
+                println!("report stamped: {}", args.report.display());
             }
         },
         Commands::Daily(args) => run_daily(args)?,
@@ -547,6 +578,24 @@ fn finalize_cn_report(stack_root: &Path, args: &DailyArgs, markets: &[String]) -
 
     append_cn_factor_prior(stack_root, &args.date)?;
     annotate_and_snapshot_cn_payloads(&cn_root, &args.date, &cn_slot(&args.session))?;
+    let cn_structural_payload = if cn_slot(&args.session) == "daily" {
+        cn_root
+            .join("reports")
+            .join(format!("{}_payload_structural.md", args.date))
+    } else {
+        cn_root.join("reports").join(format!(
+            "{}_payload_structural_{}.md",
+            args.date,
+            cn_slot(&args.session)
+        ))
+    };
+    inject_shared_report_model_status(
+        stack_root,
+        "cn",
+        &args.date,
+        &args.session,
+        &cn_structural_payload,
+    )?;
     verify_cn_payloads(&cn_root, &args.date)?;
     enter_daily_state(DailyPipelineState::CnPayloadsFinalized, args, markets);
 
@@ -555,6 +604,17 @@ fn finalize_cn_report(stack_root: &Path, args: &DailyArgs, markets: &[String]) -
 
     if args.with_narrative || args.send_reports {
         run_cn_agents(stack_root, args)?;
+        let slot = cn_slot(&args.session);
+        let report = if slot == "daily" {
+            cn_root
+                .join("reports")
+                .join(format!("{}_report_zh.md", args.date))
+        } else {
+            cn_root
+                .join("reports")
+                .join(format!("{}_report_zh_{}.md", args.date, slot))
+        };
+        enforce_shared_report_model_status(stack_root, "cn", &args.date, &args.session, &report)?;
         enter_daily_state(DailyPipelineState::CnNarrativeRendered, args, markets);
     }
     Ok(())
@@ -781,6 +841,165 @@ fn run_cn_review_maintenance(
     Ok(())
 }
 
+fn inject_shared_report_model_status(
+    stack_root: &Path,
+    market: &str,
+    date: &str,
+    session: &str,
+    payload: &Path,
+) -> Result<()> {
+    if !payload.is_file() {
+        anyhow::bail!(
+            "payload missing for shared report model status injection: {}",
+            payload.display()
+        );
+    }
+    let block = shared_report_model_status_block(stack_root, market, date, session)?;
+    let text = fs::read_to_string(payload)?;
+    fs::write(payload, upsert_shared_report_model_status(&text, &block))?;
+    Ok(())
+}
+
+fn enforce_shared_report_model_status(
+    stack_root: &Path,
+    market: &str,
+    date: &str,
+    session: &str,
+    report: &Path,
+) -> Result<()> {
+    if !report.is_file() {
+        anyhow::bail!(
+            "final report missing for shared report model status enforcement: {}",
+            report.display()
+        );
+    }
+    let block = shared_report_model_status_block(stack_root, market, date, session)?;
+    let text = fs::read_to_string(report)?;
+    fs::write(report, upsert_shared_report_model_status(&text, &block))?;
+    Ok(())
+}
+
+fn upsert_shared_report_model_status(text: &str, block: &str) -> String {
+    const HEADING: &str = "## Shared Report Model Status";
+    let normalized_block = block.trim_end();
+    if let Some(start) = text.find(HEADING) {
+        if let Some(separator) = text[start..].find("\n---\n") {
+            let end = start + separator + "\n---\n".len();
+            let prefix = &text[..start];
+            let tail = text[end..].trim_start_matches('\n');
+            return format!("{prefix}{normalized_block}\n\n{tail}");
+        }
+    }
+    format!("{normalized_block}\n\n{text}")
+}
+
+fn shared_report_model_status_block(
+    stack_root: &Path,
+    market: &str,
+    date: &str,
+    session: &str,
+) -> Result<String> {
+    let model_path = find_shared_report_model(stack_root, market, date)?;
+    let text = fs::read_to_string(&model_path)
+        .with_context(|| format!("shared report model missing: {}", model_path.display()))?;
+    let model: Value = serde_json::from_str(&text)
+        .with_context(|| format!("invalid shared report model JSON: {}", model_path.display()))?;
+    let alpha = model
+        .get("alpha_bulletin")
+        .and_then(Value::as_object)
+        .ok_or_else(|| anyhow::anyhow!("shared report model missing alpha_bulletin"))?;
+    let ev_status = alpha
+        .get("ev_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let selected_policy = alpha
+        .get("selected_policy")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let tactical_policy = alpha
+        .get("tactical_policy")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let evaluated_through = alpha
+        .get("evaluated_through")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let count = |key: &str| {
+        alpha
+            .get(key)
+            .and_then(Value::as_array)
+            .map(Vec::len)
+            .unwrap_or(0)
+    };
+    let probation_symbols = section_symbols(alpha, "probation_alpha");
+    Ok(format!(
+        "## Shared Report Model Status\n\
+         - market: `{}`\n\
+         - as_of: `{}`\n\
+         - session: `{}` (stable alpha model source: `post`)\n\
+         - ev_status: `{}`\n\
+         - selected_policy: `{}`\n\
+         - tactical_policy: `{}`\n\
+         - evaluated_through: `{}`\n\
+         - section_counts: execution={} probation={} tactical={} options={} recall={} blocked={}\n\
+         - probation_symbols: `{}` (trial-only max 0.25R/0.5R, not a formal Fresh Entry)\n\
+         - rule: final report must not create formal Fresh Entry Tickets unless `execution_alpha` is non-empty in this shared model; `probation_alpha` is trial-only sizing, not formal execution.\n\
+         \n\
+         ---\n",
+        market,
+        date,
+        session,
+        ev_status,
+        selected_policy,
+        tactical_policy,
+        evaluated_through,
+        count("execution_alpha"),
+        count("probation_alpha"),
+        count("tactical_alpha"),
+        count("options_alpha"),
+        count("recall_alpha"),
+        count("blocked_alpha"),
+        probation_symbols,
+    ))
+}
+
+fn section_symbols(alpha: &serde_json::Map<String, Value>, key: &str) -> String {
+    let symbols: Vec<String> = alpha
+        .get(key)
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("symbol").and_then(Value::as_str))
+        .take(5)
+        .map(ToString::to_string)
+        .collect();
+    if symbols.is_empty() {
+        "none".to_string()
+    } else {
+        symbols.join(", ")
+    }
+}
+
+fn find_shared_report_model(stack_root: &Path, market: &str, date: &str) -> Result<PathBuf> {
+    let candidates = [
+        stack_root
+            .join("reports")
+            .join(format!("{date}_report_model_{market}_post.json")),
+        stack_root
+            .join("reports/review_dashboard/strategy_backtest")
+            .join(date)
+            .join(format!("report_model_{market}_post.json")),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "shared report model missing for {market} {date}; checked root reports and review_dashboard"
+            )
+        })
+}
+
 fn find_previous_cn_report(cn_root: &Path, date: &str, slot: &str) -> Option<PathBuf> {
     let reports_dir = cn_root.join("reports");
     let current_rank = slot_rank(slot);
@@ -877,6 +1096,13 @@ fn send_reports(
             "post" | "evening" | "daily" => "post",
             other => other,
         };
+        let report_path = stack_root
+            .join("quant-research-v1")
+            .join("reports")
+            .join(format!("{date}_report_zh_{us_session}.md"));
+        if !args.dry_run {
+            enforce_shared_report_model_status(&stack_root, "us", date, us_session, &report_path)?;
+        }
         let mut cmd = ProcessCommand::new("uv");
         cmd.arg("run")
             .arg("python")
@@ -924,6 +1150,9 @@ fn send_reports(
         } else {
             format!("A股量化研究{slot}日报 — {date}")
         };
+        if !args.dry_run {
+            enforce_shared_report_model_status(&stack_root, "cn", date, session, &report_path)?;
+        }
         let mut cmd = ProcessCommand::new("python3");
         cmd.arg("scripts/send_email.py")
             .arg(report_path)
@@ -1003,4 +1232,106 @@ fn parse_markets(markets: &str) -> Vec<String> {
         .map(|m| m.trim().to_lowercase())
         .filter(|m| !m.is_empty())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "quant_stack_cli_{name}_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn write_model(path: &Path) {
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            path,
+            r#"{
+  "as_of": "2026-05-07",
+  "market": "cn",
+  "session": "post",
+  "alpha_bulletin": {
+    "ev_status": "failed",
+    "selected_policy": null,
+    "tactical_policy": null,
+    "evaluated_through": "2026-05-05",
+    "execution_alpha": [],
+    "tactical_alpha": [],
+    "options_alpha": [{"symbol": "510300"}],
+    "recall_alpha": [],
+    "blocked_alpha": [{"symbol": "000001.SZ"}]
+  }
+}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn shared_report_model_status_falls_back_to_review_dashboard() {
+        let root = temp_root("model_fallback");
+        let model = root
+            .join("reports/review_dashboard/strategy_backtest/2026-05-07")
+            .join("report_model_cn_post.json");
+        write_model(&model);
+
+        let block = shared_report_model_status_block(&root, "cn", "2026-05-07", "evening").unwrap();
+
+        assert!(block.contains("## Shared Report Model Status"));
+        assert!(block.contains("- market: `cn`"));
+        assert!(block.contains("- ev_status: `failed`"));
+        assert!(block.contains("execution=0"));
+        assert!(block.contains("options=1"));
+        assert!(block.contains("blocked=1"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn enforce_shared_report_model_status_prepends_final_report() {
+        let root = temp_root("report_enforce");
+        write_model(
+            &root
+                .join("reports")
+                .join("2026-05-07_report_model_cn_post.json"),
+        );
+        let report = root.join("report.md");
+        fs::write(&report, "# 市场日报\n\n正文").unwrap();
+
+        enforce_shared_report_model_status(&root, "cn", "2026-05-07", "evening", &report).unwrap();
+        let text = fs::read_to_string(&report).unwrap();
+
+        assert!(text.starts_with("## Shared Report Model Status"));
+        assert!(text.contains("# 市场日报"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn enforce_shared_report_model_status_replaces_existing_block() {
+        let root = temp_root("report_replace");
+        write_model(
+            &root
+                .join("reports")
+                .join("2026-05-07_report_model_cn_post.json"),
+        );
+        let report = root.join("report.md");
+        fs::write(
+            &report,
+            "## Shared Report Model Status\n- old: true\n\n---\n\n# 市场日报\n\n正文",
+        )
+        .unwrap();
+
+        enforce_shared_report_model_status(&root, "cn", "2026-05-07", "evening", &report).unwrap();
+        let text = fs::read_to_string(&report).unwrap();
+
+        assert!(text.starts_with("## Shared Report Model Status"));
+        assert!(!text.contains("old: true"));
+        assert!(text.contains("probation=0"));
+        assert!(text.contains("# 市场日报"));
+        let _ = fs::remove_dir_all(root);
+    }
 }

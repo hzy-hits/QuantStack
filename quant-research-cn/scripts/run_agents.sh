@@ -636,12 +636,14 @@ if [[ -s "$OUT_DIR/outputs/merge-report.md" ]]; then
     echo "  Size: $(wc -c < "$FINAL_REPORT") bytes"
     echo "  Chars: $(wc -m < "$FINAL_REPORT") chars"
 
-    # Append Factor Lab experiment report section (non-fatal)
-    echo "  Appending Factor Lab section..."
-    if ! "$PYTHON_BIN" "$FACTOR_LAB_ROOT/scripts/generate_factor_report.py" \
-        --date "$DATE" \
-        --append-to "$FINAL_REPORT"; then
-        echo "  Factor Lab section append failed (non-fatal)"
+    # Write Factor Lab experiment details as a separate appendix (non-fatal).
+    echo "  Writing Factor Lab appendix..."
+    FACTOR_APPENDIX="$REPORTS_DIR/${DATE}_factor_lab_appendix_${SLOT}.md"
+    if "$PYTHON_BIN" "$FACTOR_LAB_ROOT/scripts/generate_factor_report.py" \
+        --date "$DATE" > "$FACTOR_APPENDIX"; then
+        echo "  Factor Lab appendix: $FACTOR_APPENDIX"
+    else
+        echo "  Factor Lab appendix generation failed (non-fatal)"
     fi
     echo "  Syncing Strategy EV ledger..."
     if ! "$PYTHON_BIN" "$PROJ_DIR/scripts/sync_strategy_ev_report.py" \

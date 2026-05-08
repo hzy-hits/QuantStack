@@ -115,6 +115,8 @@ pub struct AlphaBulletin {
     pub stability: BTreeMap<String, Vec<PolicyCandidate>>,
     pub execution_alpha: Vec<BulletinItem>,
     #[serde(default)]
+    pub probation_alpha: Vec<BulletinItem>,
+    #[serde(default)]
     pub tactical_alpha: Vec<BulletinItem>,
     pub options_alpha: Vec<BulletinItem>,
     pub recall_alpha: Vec<BulletinItem>,

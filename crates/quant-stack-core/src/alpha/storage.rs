@@ -6,7 +6,7 @@ use super::{
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use duckdb::{params, Connection};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -121,6 +121,14 @@ pub(super) fn write_result_tables(
     let con = Connection::open(path)?;
     ensure_result_schema(&con)?;
     let as_of_s = as_of.to_string();
+    let markets_to_replace = markets_for_write(
+        bulletin,
+        candidates_by_market,
+        current_by_market,
+        selection_rows,
+        evaluated_trade_rows,
+        selected_trade_rows,
+    );
     for table in [
         "playbook_candidates",
         "playbook_selection",
@@ -134,10 +142,12 @@ pub(super) fn write_result_tables(
         "daily_alpha_bulletin",
         "daily_report_model",
     ] {
-        con.execute(
-            &format!("DELETE FROM {table} WHERE as_of = ?"),
-            params![as_of_s],
-        )?;
+        for market in &markets_to_replace {
+            con.execute(
+                &format!("DELETE FROM {table} WHERE as_of = ? AND market = ?"),
+                params![&as_of_s, market],
+            )?;
+        }
     }
 
     for (market, candidates) in candidates_by_market {
@@ -269,6 +279,7 @@ pub(super) fn write_result_tables(
         for item in bulletin
             .execution_alpha
             .iter()
+            .chain(bulletin.probation_alpha.iter())
             .chain(bulletin.tactical_alpha.iter())
             .chain(bulletin.options_alpha.iter())
             .chain(bulletin.recall_alpha.iter())
@@ -351,6 +362,7 @@ pub(super) fn write_result_tables(
     for item in bulletin
         .execution_alpha
         .iter()
+        .chain(bulletin.probation_alpha.iter())
         .chain(bulletin.tactical_alpha.iter())
         .chain(bulletin.options_alpha.iter())
         .chain(bulletin.recall_alpha.iter())
@@ -397,7 +409,13 @@ pub(super) fn write_result_tables(
                 item.market,
                 item.symbol,
                 item.policy_id,
-                if item.section == "execution_alpha" { "pass" } else { "blocked" },
+                if item.section == "execution_alpha" {
+                    "pass"
+                } else if item.section == "probation_alpha" {
+                    "probation"
+                } else {
+                    "blocked"
+                },
                 item.section,
                 serde_json::to_string(&item.blockers)?,
                 item.reason,
@@ -409,6 +427,34 @@ pub(super) fn write_result_tables(
     write_report_models_to_db(&con, as_of, bulletin, session)?;
     con.execute_batch("CHECKPOINT")?;
     Ok(())
+}
+
+fn markets_for_write(
+    bulletin: &AlphaBulletin,
+    candidates_by_market: &BTreeMap<String, Vec<PolicyCandidate>>,
+    current_by_market: &BTreeMap<String, Vec<TradeRow>>,
+    selection_rows: &[SelectionRow],
+    evaluated_trade_rows: &[TradeRow],
+    selected_trade_rows: &[TradeRow],
+) -> BTreeSet<String> {
+    let mut markets = BTreeSet::new();
+    markets.extend(candidates_by_market.keys().cloned());
+    markets.extend(current_by_market.keys().cloned());
+    markets.extend(selection_rows.iter().map(|row| row.market.clone()));
+    markets.extend(evaluated_trade_rows.iter().map(|row| row.market.clone()));
+    markets.extend(selected_trade_rows.iter().map(|row| row.market.clone()));
+    for item in bulletin
+        .execution_alpha
+        .iter()
+        .chain(bulletin.probation_alpha.iter())
+        .chain(bulletin.tactical_alpha.iter())
+        .chain(bulletin.options_alpha.iter())
+        .chain(bulletin.recall_alpha.iter())
+        .chain(bulletin.blocked_alpha.iter())
+    {
+        markets.insert(item.market.clone());
+    }
+    markets
 }
 
 fn parse_policy_horizon(policy_id: &str) -> Option<i64> {

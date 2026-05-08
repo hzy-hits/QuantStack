@@ -748,6 +748,7 @@ class FactorSession:
         self._client = None
         self.repo_root = Path(__file__).resolve().parents[2]
         self.branch_context = _detect_branch_context(self.repo_root)
+        self.last_checks_output = ""
 
     def _load_existing_factors(self) -> list[dict]:
         """Load promoted + recently retired factors from registry for agent context."""
@@ -1063,10 +1064,13 @@ class FactorSession:
                 cost_per_trade=self.cfg["cost_per_trade"],
             )
             checks_status = "skipped"
+            checks_output = ""
             decision = "revert"
             status = "reverted"
             if oos_pass:
+                self.last_checks_output = ""
                 checks_status = self._run_checks()
+                checks_output = self.last_checks_output
                 if checks_status == "passed":
                     decision = "keep"
                     status = "kept"
@@ -1079,6 +1083,7 @@ class FactorSession:
             print(f"  {exp['name']}: IS IC={exp['is_ic']:.4f}, OOS={'PASS' if oos_pass else 'FAIL'}")
             exp["oos"] = "PASS" if oos_pass else "FAIL"
             exp["checks_status"] = checks_status
+            exp["checks_output"] = checks_output
             exp["decision"] = decision
             exp["status"] = status
             self._record_ledger(
@@ -1101,6 +1106,7 @@ class FactorSession:
                 "is_ic_ir": exp["is_ic_ir"],
                 "oos_pass": oos_pass,
                 "checks_status": checks_status,
+                "checks_output": checks_output,
                 "decision": decision,
                 "status": status,
             })
@@ -1147,76 +1153,242 @@ class FactorSession:
         )
 
     def _build_summary(self, top3_oos: list[dict]) -> str:
-        """Build a human-readable session summary."""
+        """Build a readable research report for a Factor Lab session."""
+        def as_float(value: object, default: float = 0.0) -> float:
+            try:
+                if value is None:
+                    return default
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
+        def metric(value: object, digits: int = 3) -> str:
+            return f"{as_float(value):.{digits}f}"
+
+        def pass_fail(value: object) -> str:
+            return "PASS" if bool(value) else "FAIL"
+
+        def gate_reason(exp: dict) -> str:
+            if exp.get("error"):
+                return str(exp["error"])
+            details = exp.get("gate_details") or {}
+            failed = []
+            if isinstance(details, dict):
+                for key, value in details.items():
+                    if value is False:
+                        failed.append(key)
+                    elif isinstance(value, dict) and value.get("passed") is False:
+                        failed.append(key)
+            if failed:
+                return ", ".join(failed[:4])
+            if exp.get("gates_passed"):
+                return "IS gates passed"
+            return str(exp.get("status") or "gate failed")
+
+        def checks_excerpt(text: str) -> str:
+            text = (text or "").strip()
+            if not text:
+                return "checks 没有输出 stdout/stderr；请看对应 cron log。"
+            lines = text.splitlines()
+            excerpt = "\n".join(lines[-20:])
+            if len(excerpt) > 2000:
+                excerpt = excerpt[-2000:]
+            return excerpt
+
+        ranked = sorted(
+            self.experiments,
+            key=lambda exp: abs(as_float(exp.get("is_ic"))),
+            reverse=True,
+        )
+        passed_gates = [exp for exp in self.experiments if exp.get("gates_passed")]
+        passed_oos = [exp for exp in top3_oos if exp.get("oos_pass")]
+        kept_oos = [exp for exp in top3_oos if exp.get("decision") == "keep"]
+        oos_not_kept = [
+            exp for exp in top3_oos
+            if exp.get("oos_pass") and exp.get("decision") != "keep"
+        ]
+
+        if kept_oos:
+            conclusion = (
+                f"本轮有 {len(kept_oos)} 个因子通过 IS gate、OOS 和 checks，"
+                "可以进入主系统候选池复核。"
+            )
+        elif passed_oos:
+            conclusion = (
+                f"本轮有 {len(passed_oos)} 个因子 OOS PASS，但没有 keep；"
+                "主要问题是 OOS 之后的系统 checks 未通过或缺少可审计放行。"
+            )
+        elif passed_gates:
+            conclusion = (
+                f"本轮有 {len(passed_gates)} 个因子通过 IS gate，但 Top OOS 没有形成可保留结果。"
+            )
+        else:
+            conclusion = "本轮没有因子通过完整研究门槛，应回到假设和数据口径重构。"
+
         lines = [
-            f"# Factor Lab Session Report",
-            f"",
+            "# Factor Lab 自研简报",
+            "",
             f"- Session ID: {self.session_id}",
             f"- Market: {self.market.upper()}",
             f"- Budget: {self.budget} experiments",
             f"- Experiments run: {len(self.experiments)}",
             f"- Date: {datetime.now().strftime('%Y-%m-%d %H:%M')}",
             f"- Branch: {self.branch_context.get('session_branch') or 'n/a'}",
-            f"",
-            f"## All Experiments",
-            f"",
-            f"| # | Name | Formula | IC | IC_IR | Sharpe | Gates | Decision |",
-            f"|---|------|---------|-----|-------|--------|-------|----------|",
+            "",
+            "## 结论",
+            "",
+            conclusion,
+            "",
+            f"- IS gate 通过：{len(passed_gates)}/{len(self.experiments)}",
+            f"- OOS 通过：{len(passed_oos)}/{len(top3_oos)}",
+            f"- keep：{len(kept_oos)}/{len(top3_oos)}",
+            "",
+            "## 为什么有效 / 无效",
+            "",
+            "| 因子 | IS IC | IC_IR | Sharpe | IS gate | OOS | Checks | 结论 |",
+            "|---|---:|---:|---:|---|---|---|---|",
         ]
 
-        for i, exp in enumerate(self.experiments, 1):
-            gates_str = "PASS" if exp.get("gates_passed") else "FAIL"
-            formula_short = exp.get("formula", "")[:40]
+        top_by_name = {exp.get("name"): exp for exp in top3_oos}
+        for exp in ranked[:8]:
+            oos_exp = top_by_name.get(exp.get("name"), {})
+            oos_label = pass_fail(oos_exp.get("oos_pass")) if oos_exp else "not tested"
+            checks_label = oos_exp.get("checks_status") or exp.get("checks_status") or "skipped"
+            decision = oos_exp.get("decision") or exp.get("decision") or "revert"
             lines.append(
-                f"| {i} | {exp.get('name', '?')} | `{formula_short}` | "
-                f"{exp.get('is_ic', 0):.4f} | {exp.get('is_ic_ir', 0):.3f} | "
-                f"{exp.get('is_sharpe', 0):.3f} | {gates_str} | {exp.get('decision', 'revert')} |"
+                f"| {exp.get('name', '?')} | {metric(exp.get('is_ic'), 4)} | "
+                f"{metric(exp.get('is_ic_ir'))} | {metric(exp.get('is_sharpe'))} | "
+                f"{pass_fail(exp.get('gates_passed'))} | {oos_label} | {checks_label} | {decision} |"
             )
 
-        lines.extend([
-            f"",
-            f"## OOS Results (Top 3 by IS IC)",
-            f"",
-            f"| Name | Formula | IS IC | OOS |",
-            f"|------|---------|-------|-----|",
-        ])
+        if ranked:
+            lines.extend(["", "### 代表实验拆解"])
 
-        for exp in top3_oos:
-            oos_str = "PASS" if exp.get("oos_pass") else "FAIL"
-            lines.append(
-                f"| {exp['name']} | `{exp['formula'][:50]}` | {exp['is_ic']:.4f} | {oos_str} |"
-            )
+        for i, exp in enumerate(ranked[:5], 1):
+            oos_exp = top_by_name.get(exp.get("name"), {})
+            formula = (exp.get("formula") or "").strip()
+            hypothesis = (exp.get("hypothesis") or "").strip() or "未写清 hypothesis。"
+            mispricing = (exp.get("mispricing_source") or "").strip()
+            failure = (exp.get("failure_mode") or "").strip()
+            if exp.get("gates_passed"):
+                why = (
+                    f"IS 端有可测信号：IC={metric(exp.get('is_ic'), 4)}，"
+                    f"IC_IR={metric(exp.get('is_ic_ir'))}，Sharpe={metric(exp.get('is_sharpe'))}。"
+                )
+            else:
+                why = f"未通过 IS gate：{gate_reason(exp)}。"
+            if oos_exp:
+                why += f" OOS={pass_fail(oos_exp.get('oos_pass'))}。"
+                if oos_exp.get("oos_pass") and oos_exp.get("decision") != "keep":
+                    checks_status = (
+                        oos_exp.get("checks_status")
+                        or exp.get("checks_status")
+                        or "unknown"
+                    )
+                    why += f" 但 decision={oos_exp.get('decision')}，checks={checks_status}。"
 
-        passed_oos = [e for e in top3_oos if e.get("oos_pass")]
-        kept_oos = [e for e in top3_oos if e.get("decision") == "keep"]
-        lines.extend([
-            f"",
-            f"## Summary",
-            f"",
-            f"- Factors passing OOS: {len(passed_oos)}/{len(top3_oos)}",
-            f"- Factors kept after checks: {len(kept_oos)}/{len(top3_oos)}",
-        ])
+            lines.extend([
+                "",
+                f"#### {i}. {exp.get('name', '?')}",
+                "",
+                "公式（不截断）：",
+                "",
+                "```text",
+                formula,
+                "```",
+                "",
+                f"- 假设：{hypothesis}",
+                f"- 判断：{why}",
+            ])
+            if mispricing:
+                lines.append(f"- 为什么可能有效：{mispricing}")
+            if failure:
+                lines.append(f"- 主要失效方式：{failure}")
 
-        if kept_oos:
-            lines.append(f"- Candidates for promotion:")
-            for e in kept_oos:
-                fid = hashlib.sha256(e["formula"].encode()).hexdigest()[:12]
-                lines.append(f"  - {e['name']} (id={fid}): `{e['formula']}`")
+        lines.extend(["", "## 为什么 OOS PASS 但不 keep", ""])
+        if oos_not_kept:
+            for exp in oos_not_kept:
+                lines.extend([
+                    f"### {exp.get('name', '?')}",
+                    "",
+                    "公式（不截断）：",
+                    "",
+                    "```text",
+                    exp.get("formula", ""),
+                    "```",
+                    "",
+                    f"- OOS：PASS",
+                    f"- checks：{exp.get('checks_status', 'unknown')}",
+                    f"- decision：{exp.get('decision', 'revert')}",
+                    f"- 不能 keep 的原因：OOS 只说明样本外方向还有信号；主系统还要求 registry/composite checks 可复现、可落库、不会破坏现有组合。这里 checks 未放行，所以不进入主系统。",
+                    "",
+                    "checks 输出摘要：",
+                    "",
+                    "```text",
+                    checks_excerpt(exp.get("checks_output", "")),
+                    "```",
+                    "",
+                ])
         else:
-            lines.append(f"- No factors passed the full OOS + checks gate. Consider different hypotheses next session.")
+            lines.append("没有出现 OOS PASS 但不 keep 的因子。")
 
-        lines.append(f"\n---\n*Generated by Factor Lab agent loop.*")
+        lines.extend(["", "## 下一步", ""])
+        if kept_oos:
+            lines.append("1. 先把 keep 因子转成 reviewable branch / registry 候选，做组合相关性和容量复核。")
+            lines.append("2. 对同一 mispricing source 做小范围变体，不要大规模随机扩散。")
+            lines.append("3. 在下一次日报前确认 export_to_pipeline 能生成主系统可读的 promoted factor payload。")
+        elif oos_not_kept:
+            lines.append("1. 先修 checks 失败项，再谈新增因子；否则 OOS PASS 仍然不能进入生产链路。")
+            lines.append("2. 把失败 checks 输出回填到 session doc，下一轮直接围绕可复现性和组合冲突排查。")
+            lines.append("3. 暂停 promoted table 扩张，避免把未放行结果写进日报正文。")
+        elif passed_gates:
+            lines.append("1. 保留通过 IS gate 的假设族，但收窄公式自由度，重点检查 OOS regime shift。")
+            lines.append("2. 复查数据口径和交易成本假设，确认不是 IS 段过拟合。")
+        else:
+            lines.append("1. 重写 hypothesis，必须先讲清谁在被迫交易、错误定价从哪里来。")
+            lines.append("2. 降低公式复杂度，先用单一行为假设跑通 IS gate。")
+
+        lines.extend(["", "## 是否进入主系统", ""])
+        if kept_oos:
+            lines.append("是，作为候选进入主系统复核；不是直接真钱交易指令。")
+            for exp in kept_oos:
+                fid = hashlib.sha256(exp["formula"].encode()).hexdigest()[:12]
+                lines.append(
+                    f"- {exp['name']} (id={fid})：sleeve={exp.get('sleeve_id', 'daily_price_overlay')}，"
+                    f"contract={exp.get('report_contract', 'research_only')}，"
+                    f"money_status={exp.get('money_readiness', 'research_only')}"
+                )
+                lines.extend(["", "```text", exp["formula"], "```", ""])
+        else:
+            lines.append("否。本轮没有因子同时通过 OOS 和 checks，不进入主系统。")
+
+        lines.extend([
+            "",
+            "## 实验明细",
+            "",
+            "| # | Name | IC | IC_IR | Sharpe | Gates | Decision | 失败/阻断原因 |",
+            "|---|---|---:|---:|---:|---|---|---|",
+        ])
+
+        for i, exp in enumerate(self.experiments, 1):
+            lines.append(
+                f"| {i} | {exp.get('name', '?')} | {metric(exp.get('is_ic'), 4)} | "
+                f"{metric(exp.get('is_ic_ir'))} | {metric(exp.get('is_sharpe'))} | "
+                f"{pass_fail(exp.get('gates_passed'))} | {exp.get('decision', 'revert')} | {gate_reason(exp)} |"
+            )
+
+        lines.append("\n---\n*Generated by Factor Lab agent loop.*")
 
         return "\n".join(lines)
 
     def _run_checks(self) -> str:
         if self.checks_script_path is None or not self.checks_script_path.exists():
+            self.last_checks_output = ""
             return "skipped"
         try:
-            subprocess.run(
+            result = subprocess.run(
                 [str(self.checks_script_path)],
                 cwd=self.repo_root,
-                check=True,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1224,8 +1396,25 @@ class FactorSession:
                 timeout=300,
                 env=os.environ.copy(),
             )
-            return "passed"
+            self.last_checks_output = "\n".join(
+                part.strip()
+                for part in [result.stdout, result.stderr]
+                if part and part.strip()
+            ).strip()
+            if result.returncode == 0:
+                return "passed"
+            logger.warning(
+                "Autoresearch checks failed with exit %s:\n%s",
+                result.returncode,
+                self.last_checks_output[-4000:],
+            )
+            return "failed"
         except Exception as exc:
+            stdout = getattr(exc, "stdout", "") or ""
+            stderr = getattr(exc, "stderr", "") or ""
+            self.last_checks_output = "\n".join(
+                part.strip() for part in [str(stdout), str(stderr)] if part and str(part).strip()
+            ).strip()
             logger.warning(f"Autoresearch checks failed: {exc}")
             return "failed"
 

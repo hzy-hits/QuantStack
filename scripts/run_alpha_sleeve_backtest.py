@@ -1307,11 +1307,66 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
         con.close()
 
 
+def _metric_float(value: Any) -> float | None:
+    return v2.round_or_none(value)
+
+
+def _note_metric_value(notes: str, name: str) -> float | None:
+    marker = f"{name}="
+    if marker not in notes:
+        return None
+    value = notes.split(marker, 1)[1].split(";", 1)[0].strip()
+    if value in {"-", ""}:
+        return None
+    if value.endswith("%"):
+        value = value[:-1]
+    return _metric_float(value)
+
+
+def factor_lab_money_gate_blockers(row: dict[str, Any]) -> list[str]:
+    notes = str(row.get("notes") or "")
+    blockers: list[str] = []
+
+    lcb80 = _metric_float(row.get("lcb80_pct"))
+    if lcb80 is not None and lcb80 <= 0:
+        blockers.append("lcb80<=0")
+
+    double_cost_lcb80 = _metric_float(row.get("double_cost_lcb80_pct"))
+    if double_cost_lcb80 is None:
+        double_cost_lcb80 = _note_metric_value(notes, "double_cost_lcb80")
+    if double_cost_lcb80 is not None and double_cost_lcb80 <= 0:
+        blockers.append("double_cost_lcb80<=0")
+
+    top_share = _metric_float(row.get("top5_pnl_share"))
+    if top_share is not None and top_share > 0.30:
+        blockers.append("top5_pnl_share>30%")
+
+    max_corr = _metric_float(row.get("max_abs_corr"))
+    if max_corr is not None and max_corr >= FACTOR_LAB_CORR_BLOCK_THRESHOLD:
+        blockers.append(f"corr>={FACTOR_LAB_CORR_BLOCK_THRESHOLD:.2f}")
+
+    marginal = _metric_float(row.get("marginal_daily_sharpe_delta"))
+    if marginal is not None and marginal <= 0:
+        blockers.append("marginal_sharpe<=0")
+
+    for marker in ("opportunity_flags=", "portfolio_flags="):
+        if marker in notes:
+            parsed = notes.split(marker, 1)[1].split(";", 1)[0]
+            blockers.extend(item.strip() for item in parsed.split(",") if item.strip())
+
+    return list(dict.fromkeys(blockers))
+
+
 def alpha_factory_status_for_factor_lab(row: dict[str, Any]) -> tuple[str, list[str]]:
     status = str(row.get("money_status") or "research_only")
+    blockers = factor_lab_money_gate_blockers(row)
     if status == "money_candidate":
+        if blockers:
+            return "blocked", blockers
         return "pass", []
     if status == "report_overlay":
+        if blockers:
+            return "blocked", blockers
         return "overlay_allowed", []
     if status == "research_only":
         return "research_only", ["report_contract_research_only"]

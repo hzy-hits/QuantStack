@@ -133,7 +133,7 @@ class SetupAlphaRenderTests(unittest.TestCase):
         )
 
         self.assertIn("## Action Plan Ledger", text)
-        self.assertIn("| Gate-pass plan | 0 |", text)
+        self.assertIn("| Fresh-entry ticket | 0 |", text)
         self.assertIn("PWR / PWR Corp", text)
         self.assertIn("stable EV gate not passed", text)
 
@@ -169,8 +169,8 @@ class SetupAlphaRenderTests(unittest.TestCase):
             )
         )
 
-        self.assertIn("| Gate-pass plan | 0 |", text)
-        self.assertIn("| Setup / wait plan | 1 |", text)
+        self.assertIn("| Fresh-entry ticket | 0 |", text)
+        self.assertIn("| Positive EV / setup ticket | 1 |", text)
         self.assertIn("LOWEV / LOWEV Corp", text)
         self.assertIn("positive-EV recall policy", text)
 

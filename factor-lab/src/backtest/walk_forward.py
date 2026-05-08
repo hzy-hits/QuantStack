@@ -39,6 +39,22 @@ class BacktestResult:
     oos_pass: bool | None  # None = not yet checked
 
 
+def _safe_spearman(xs: list[float], ys: list[float]) -> float:
+    x_arr = np.asarray(xs, dtype=float)
+    y_arr = np.asarray(ys, dtype=float)
+    if (
+        x_arr.size < 3
+        or y_arr.size < 3
+        or not np.isfinite(x_arr).all()
+        or not np.isfinite(y_arr).all()
+        or np.nanstd(x_arr) <= 1e-12
+        or np.nanstd(y_arr) <= 1e-12
+    ):
+        return 0.0
+    rho, _ = spearmanr(x_arr, y_arr)
+    return float(rho) if not np.isnan(rho) else 0.0
+
+
 def _daily_ic(df: pd.DataFrame) -> pd.DataFrame:
     """Compute daily rank IC between factor_value and fwd_5d.
 
@@ -56,7 +72,7 @@ def _daily_ic(df: pd.DataFrame) -> pd.DataFrame:
         valid = group.dropna(subset=["factor_value", "fwd_5d"])
         if len(valid) < 10:
             continue
-        rho, _ = spearmanr(valid["factor_value"], valid["fwd_5d"])
+        rho = _safe_spearman(valid["factor_value"].tolist(), valid["fwd_5d"].tolist())
         if not np.isnan(rho):
             results.append({"date": dt, "ic": rho})
     return pd.DataFrame(results)
@@ -144,8 +160,7 @@ def _quintile_monotonicity(df: pd.DataFrame, n_groups: int = 5) -> float:
 
     if len(q_means) < 3:
         return 0.0
-    mono, _ = spearmanr(list(range(1, n_groups + 1)), q_means)
-    return float(mono) if not np.isnan(mono) else 0.0
+    return _safe_spearman(list(range(1, n_groups + 1)), q_means)
 
 
 def _compute_fold(

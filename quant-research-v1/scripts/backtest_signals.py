@@ -68,6 +68,7 @@ SOURCE_VIEWS = [
     "options_snapshot",
     "options_analysis",
     "options_sentiment",
+    "company_profile",
     "report_decisions",
     "report_outcomes",
     "alpha_postmortem",

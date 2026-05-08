@@ -45,6 +45,12 @@ def _write_if_missing(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+def _write_if_changed(path: Path, content: str) -> None:
+    if path.exists() and path.read_text(encoding="utf-8", errors="replace") == content:
+        return
+    path.write_text(content, encoding="utf-8")
+
+
 def _mark_executable(path: Path) -> None:
     mode = path.stat().st_mode
     path.chmod(mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -133,8 +139,10 @@ ROOT="{FACTOR_LAB_ROOT}"
 cd "$ROOT"
 
 MARKET="{market}"
-uv run python eval_factor.py --show-registry --market "$MARKET" >/dev/null
-uv run python eval_factor.py --eval-composite --market "$MARKET" >/dev/null
+echo "== show-registry =="
+uv run python eval_factor.py --show-registry --market "$MARKET"
+echo "== eval-composite =="
+uv run python eval_factor.py --eval-composite --market "$MARKET"
 """
 
 
@@ -152,7 +160,7 @@ def ensure_session_files(
 
     _write_if_missing(paths.session_doc, _session_doc_template(market, goal))
     _write_if_missing(paths.benchmark_script, _benchmark_script_template(market))
-    _write_if_missing(paths.checks_script, _checks_script_template(market))
+    _write_if_changed(paths.checks_script, _checks_script_template(market))
     paths.log_file.touch(exist_ok=True)
 
     _mark_executable(paths.benchmark_script)

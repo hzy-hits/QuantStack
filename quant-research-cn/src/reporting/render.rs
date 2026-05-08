@@ -1489,7 +1489,7 @@ fn render_structural(
     )?;
     writeln!(
         md,
-        "- `RANGE CORE` = 区间复核层；Headline Gate 只作背景解释，是否可执行仍看主信号、execution gate、RR 和追价约束。"
+        "- `RANGE CORE` = 区间复核层；Headline Gate 只作背景解释，是否可执行仍看 A股V2主信号、execution gate、RR 和追价约束。"
     )?;
     writeln!(
         md,
@@ -1506,7 +1506,7 @@ fn render_structural(
     if headline_gate.mode != "trend" {
         writeln!(
             md,
-            "- 当前 Headline Gate = `{}`，它只约束市场叙事强度，不单独决定个股是否可执行；个股执行仍服从主信号、execution gate、RR 和追价约束。",
+            "- 当前 Headline Gate = `{}`，它只约束市场叙事强度，不单独决定个股是否可执行；个股执行仍服从 A股V2主信号、execution gate、RR 和追价约束。",
             headline_gate.mode.to_uppercase(),
         )?;
     }
@@ -1671,6 +1671,69 @@ struct PaperTradeLifecycleView {
     strategy_samples: Option<i64>,
     fail_reasons: Option<String>,
     alpha_state: Option<String>,
+}
+
+#[derive(Default)]
+struct V2SignalContext {
+    strategy_family: Option<String>,
+    action_intent: Option<String>,
+    alpha_state: Option<String>,
+    ev_pct: Option<f64>,
+    ev_lcb_80_pct: Option<f64>,
+    samples: Option<i64>,
+    fills: Option<i64>,
+    fail_reasons: Option<String>,
+}
+
+impl V2SignalContext {
+    fn ev_passes(&self) -> bool {
+        self.strategy_family.as_deref() == Some("oversold_contrarian")
+            && self.action_intent.as_deref() == Some("TRADE")
+            && self.ev_lcb_80_pct.unwrap_or(f64::NEG_INFINITY) > 0.0
+    }
+
+    fn is_mainline(&self) -> bool {
+        self.strategy_family.as_deref() == Some("oversold_contrarian")
+    }
+
+    fn summary(&self) -> String {
+        let Some(family) = self.strategy_family.as_deref() else {
+            return "no_v2_ticket; A股V2真钱门槛=oversold_contrarian + TRADE + EV80>0，当前不可执行"
+                .to_string();
+        };
+        let status = if self.ev_passes() {
+            "PASS A股V2真钱门槛"
+        } else if family != "oversold_contrarian" {
+            "NO_MAINLINE_V2 非A股V2主线"
+        } else {
+            "BLOCKED/SETUP A股V2真钱门槛"
+        };
+        let mut parts = vec![
+            format!(
+                "{}; required=oversold_contrarian+TRADE+EV80>0; family={}",
+                status, family
+            ),
+            format!("intent={}", self.action_intent.as_deref().unwrap_or("-")),
+            format!("alpha_state={}", self.alpha_state.as_deref().unwrap_or("-")),
+            format!("EV80={}", fmt_opt_f64(self.ev_lcb_80_pct, 2)),
+            format!("EV={}", fmt_opt_f64(self.ev_pct, 2)),
+        ];
+        if self.samples.is_some() || self.fills.is_some() {
+            parts.push(format!(
+                "samples={}/fills={}",
+                self.samples
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+                self.fills
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            ));
+        }
+        if let Some(fail) = self.fail_reasons.as_deref().filter(|v| !v.is_empty()) {
+            parts.push(format!("fail={}", fail));
+        }
+        parts.join("; ")
+    }
 }
 
 fn render_strategy_ev_summary(md: &mut String, db: &Connection, date_str: &str) -> Result<()> {
@@ -1920,6 +1983,51 @@ fn query_recent_paper_trades(db: &Connection, date_str: &str) -> Vec<PaperTradeL
     query_paper_trade_rows(db, sql, [date_str, date_str, date_str])
 }
 
+fn query_v2_signal_context(db: &Connection, ts_code: &str, date_str: &str) -> V2SignalContext {
+    let sql = "
+        SELECT
+            m.strategy_family,
+            m.action_intent,
+            m.alpha_state,
+            m.ev_pct,
+            m.ev_lcb_80_pct,
+            ev.samples,
+            ev.fills,
+            ev.fail_reasons
+        FROM strategy_model_dataset m
+        LEFT JOIN strategy_ev ev
+          ON ev.as_of = m.evaluation_date
+         AND ev.strategy_key = m.strategy_key
+        WHERE m.report_date = CAST(? AS DATE)
+          AND m.symbol = ?
+          AND m.session = 'daily'
+          AND m.selection_status IN ('selected', 'exploration')
+        ORDER BY
+          CASE WHEN m.strategy_family = 'oversold_contrarian' THEN 0 ELSE 1 END,
+          CASE m.action_intent WHEN 'TRADE' THEN 0 WHEN 'SETUP' THEN 1 WHEN 'OBSERVE' THEN 2 ELSE 3 END,
+          COALESCE(m.ev_lcb_80_pct, -999.0) DESC,
+          COALESCE(m.ev_pct, -999.0) DESC,
+          CASE m.alpha_state WHEN 'positive_ev_setup' THEN 0 WHEN 'research_setup' THEN 1 ELSE 2 END
+        LIMIT 1";
+
+    db.prepare(sql)
+        .and_then(|mut stmt| {
+            stmt.query_row(duckdb::params![date_str, ts_code], |row| {
+                Ok(V2SignalContext {
+                    strategy_family: row.get::<_, Option<String>>(0).ok().flatten(),
+                    action_intent: row.get::<_, Option<String>>(1).ok().flatten(),
+                    alpha_state: row.get::<_, Option<String>>(2).ok().flatten(),
+                    ev_pct: row.get::<_, Option<f64>>(3).ok().flatten(),
+                    ev_lcb_80_pct: row.get::<_, Option<f64>>(4).ok().flatten(),
+                    samples: row.get::<_, Option<i64>>(5).ok().flatten(),
+                    fills: row.get::<_, Option<i64>>(6).ok().flatten(),
+                    fail_reasons: row.get::<_, Option<String>>(7).ok().flatten(),
+                })
+            })
+        })
+        .unwrap_or_default()
+}
+
 fn query_paper_trade_rows(
     db: &Connection,
     sql: &str,
@@ -2065,7 +2173,7 @@ fn render_setup_alpha_summary(
     writeln!(md)?;
     writeln!(
         md,
-        "该段由系统在叙事前计算，专门区分“还没过热的布局/回踩复核”和“已经追高或定价过满”的候选。它不是买入清单；Execution Alpha 仍必须通过主信号、execution gate、RR 与 A股执行约束。"
+        "该段由系统在叙事前计算，专门区分“还没过热的布局/回踩复核”和“已经追高或定价过满”的候选。它不是买入清单；Execution Alpha 仍必须通过 A股V2主信号、execution gate、RR 与 A股执行约束。"
     )?;
     writeln!(md)?;
     writeln!(md, "| 分组 | 数量 | 报告用法 |")?;
@@ -2961,7 +3069,6 @@ fn render_notable_item(
 
     let detail = &item.detail;
     let main_gate = detail.get("main_signal_gate").and_then(|v| v.as_object());
-    let mut main_gate_pass = false;
     let mut main_gate_blockers = "none".to_string();
     if let Some(gate) = main_gate {
         let status = gate.get("status").and_then(|v| v.as_str()).unwrap_or("-");
@@ -2970,7 +3077,6 @@ fn render_notable_item(
             .get("action_intent")
             .and_then(|v| v.as_str())
             .unwrap_or("OBSERVE");
-        main_gate_pass = status == "pass";
         main_gate_blockers = gate
             .get("blockers")
             .and_then(|v| v.as_array())
@@ -2986,13 +3092,15 @@ fn render_notable_item(
             .unwrap_or_else(|| "none".to_string());
         writeln!(
             md,
-            "- **主信号门槛**: {} | role={} | intent={} | blockers={}",
+            "- **旧结构门槛**: {} | role={} | intent={} | blockers={} | 用途=legacy/notability context，不是 A股V2 真钱门槛",
             status.to_uppercase(),
             role,
             intent,
             main_gate_blockers,
         )?;
     }
+    let v2_context = query_v2_signal_context(db, &item.ts_code, date_str);
+    writeln!(md, "- **A股V2主信号**: {}", v2_context.summary())?;
 
     // ── 价格 ──────────────────────────────────────────────────────────────
     let ret_5d = detail.get("ret_5d").and_then(|v| v.as_f64());
@@ -3035,12 +3143,20 @@ fn render_notable_item(
     )?;
     writeln!(
         md,
-        "- **Log/K线去噪**: log20={}%, denoised_slope10={}%/day, vol_norm={}σ, FFT trend/noise={}, Haar noise={}%",
+        "- **Log/K线去噪**: source={}, feature_date={}, log20={}%, residual_z={}, denoised_slope10={}%/day, vol_norm={}σ, FFT trend/noise={}, Haar noise={}%",
+        momentum_detail.log_feature_source.as_deref().unwrap_or("-"),
+        momentum_detail.log_feature_as_of.as_deref().unwrap_or("-"),
         fmt_opt_f64(momentum_detail.log_return_20d_pct, 2),
+        fmt_opt_f64(momentum_detail.denoise_residual_zscore, 2),
         fmt_opt_f64(momentum_detail.denoised_log_slope_10d_pct, 3),
         fmt_opt_f64(momentum_detail.log_return_vol_norm_20d, 2),
         fmt_opt_f64(momentum_detail.fft_signal_to_noise, 2),
         fmt_opt_f64(momentum_detail.haar_noise_energy.map(|v| v * 100.0), 1),
+    )?;
+    writeln!(
+        md,
+        "- **Log回测接入口径**: {}",
+        log_denoise_report_action(&momentum_detail, &v2_context),
     )?;
 
     // ── 信息分 (flow components) ──────────────────────────────────────────
@@ -3230,7 +3346,7 @@ fn render_notable_item(
                 max_chase_gap_pct,
                 pullback_trigger_pct,
                 pullback_price,
-                main_gate_pass,
+                &v2_context,
                 &main_gate_blockers,
             )
         )?;
@@ -3289,8 +3405,65 @@ fn execution_mode_sentence(mode: Option<&str>) -> &'static str {
     match mode.unwrap_or("executable") {
         "do_not_chase" => "当前更像情绪拉伸后的高波区，不适合机械追价",
         "wait_pullback" => "方向和结构还在，但更适合等回踩后再评估",
-        _ => "主信号结构通过，但仍需 EV/盘口复核后才可升级为执行候选",
+        _ => "旧结构信号通过，但仍需 A股V2 EV/盘口复核后才可升级为执行候选",
     }
+}
+
+fn log_denoise_report_action(detail: &MomentumDetail, v2_context: &V2SignalContext) -> String {
+    let log20 = detail.log_return_20d_pct;
+    let residual_z = detail.denoise_residual_zscore;
+    let fft_snr = detail.fft_signal_to_noise;
+    let haar_noise = detail.haar_noise_energy;
+
+    if residual_z.is_none() && log20.is_none() && fft_snr.is_none() && haar_noise.is_none() {
+        return "无 causal log 特征覆盖；先重跑 momentum analytics，不用该层做动作判断".to_string();
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(z) = residual_z {
+        if z <= -1.5 {
+            if v2_context.ev_passes() {
+                parts.push(format!(
+                    "action overlay: residual_z={:.2}<=-1.5，A股V2主信号已过 EV80>0；历史 EV+ 子样本 n=29、LCB80 +2.20%，支持 planned-entry/T+1 小探针；不是追高信号",
+                    z
+                ));
+            } else {
+                parts.push(format!(
+                    "residual_z={:.2}<=-1.5 只在 oversold_contrarian + TRADE + EV80>0 后增强动作；当前 A股V2主信号未通过（{}），仍为 setup/watch",
+                    z,
+                    v2_context.summary()
+                ));
+            }
+        }
+    }
+    if let Some(value) = log20 {
+        if value <= -20.0 {
+            parts.push(format!(
+                "setup overlay: log20={:.2}%<=-20%，历史全体 oversold n=223、LCB80 +0.67%，提高候选优先级但不能绕过 EV gate",
+                value
+            ));
+        }
+    }
+    if let Some(noise) = haar_noise {
+        if noise <= 0.60 {
+            parts.push(format!(
+                "risk note: Haar noise={:.1}%<=60%，回测不是正向条件，全体 oversold LCB80 -0.77%，不要因低噪音升级买入",
+                noise * 100.0
+            ));
+        }
+    }
+    if parts.is_empty() {
+        if let Some(snr) = fft_snr {
+            if snr >= 0.50 {
+                return format!(
+                    "FFT S/N={:.2} 只作上下文；EV+ 子样本 LCB80 几乎不变，不提升 fresh-buy gate",
+                    snr
+                );
+            }
+        }
+        return "中性诊断：log/FFT/Haar 不改变动作；仍按 oversold EV、planned-entry、T+1/T+3/T+5 管理".to_string();
+    }
+    parts.join("；")
 }
 
 fn execution_summary_sentence(
@@ -3301,28 +3474,9 @@ fn execution_summary_sentence(
     max_chase_gap_pct: Option<f64>,
     pullback_trigger_pct: Option<f64>,
     pullback_price: Option<f64>,
-    main_gate_pass: bool,
-    main_gate_blockers: &str,
+    v2_context: &V2SignalContext,
+    legacy_gate_blockers: &str,
 ) -> String {
-    if !main_gate_pass {
-        let lane = match report_bucket {
-            "CORE BOOK" => "主书候选",
-            "RANGE CORE" => "区间复核",
-            "TACTICAL CONTINUATION" => "战术观察",
-            "THEME ROTATION" => "主题轮动观察",
-            "RADAR" => "雷达观察",
-            _ => "复核",
-        };
-        return format!(
-            "主信号门槛未通过（blockers={}），{}层不输出买入/追价指令；执行得分={}，仅记录回踩复核约 {}%，参考复核价={}。A股 T+1 下止损不是硬止损，涨跌停可能导致不可成交；最终研报只写观察与失效条件，不写入场、止盈或T1/T2。",
-            main_gate_blockers,
-            lane,
-            fmt_opt_f64(execution_score, 3),
-            fmt_opt_f64(pullback_trigger_pct, 2),
-            fmt_opt_f64(pullback_price, 2)
-        );
-    }
-
     let headline_note = if headline_mode != "trend" {
         format!(
             "Headline Gate={} 仅作辅助上下文，不单独否决；",
@@ -3332,31 +3486,61 @@ fn execution_summary_sentence(
         String::new()
     };
 
+    if !v2_context.ev_passes() {
+        let lane = match report_bucket {
+            "CORE BOOK" => "主书候选",
+            "RANGE CORE" => "区间复核",
+            "TACTICAL CONTINUATION" => "战术观察",
+            "THEME ROTATION" => "主题轮动观察",
+            "RADAR" => "雷达观察",
+            _ => "复核",
+        };
+        let v2_reason = if v2_context.is_mainline() {
+            "A股V2主线未放行"
+        } else {
+            "非A股V2主线"
+        };
+        return format!(
+            "{}{}（{}），{}层不输出真钱买入/追价指令；执行得分={}，仅记录回踩复核约 {}%，参考复核价={}。旧结构门槛只作背景，legacy_blockers={}，不参与 A股V2 钱仓拦截。A股 T+1 下止损不是硬止损，涨跌停可能导致不可成交；最终研报只写观察与失效条件，不写入场、止盈或T1/T2。",
+            headline_note,
+            v2_reason,
+            v2_context.summary(),
+            lane,
+            fmt_opt_f64(execution_score, 3),
+            fmt_opt_f64(pullback_trigger_pct, 2),
+            fmt_opt_f64(pullback_price, 2),
+            legacy_gate_blockers
+        );
+    }
+
     match mode.unwrap_or("executable") {
         "do_not_chase" => format!(
-            "{}{}；执行得分={}，当前不建议新开仓，至少等待约 {}% 的回踩后再评估，参考回踩价={}；A股 T+1 与涨跌停约束下不得把静态止损写成硬止损",
+            "{}A股V2主信号已过，但 {}；执行得分={}，当前不建议新开仓，至少等待约 {}% 的回踩后再评估，参考回踩价={}；旧结构门槛只作背景 legacy_blockers={}；A股 T+1 与涨跌停约束下不得把静态止损写成硬止损",
             headline_note,
             execution_mode_sentence(mode),
             fmt_opt_f64(execution_score, 3),
             fmt_opt_f64(pullback_trigger_pct, 2),
-            fmt_opt_f64(pullback_price, 2)
+            fmt_opt_f64(pullback_price, 2),
+            legacy_gate_blockers
         ),
         "wait_pullback" => format!(
-            "{}{}；执行得分={}，当前不宜直接追价，优先观察约 {}% 的回踩，参考回踩价={}；A股 T+1 与涨跌停约束下不得把静态止损写成硬止损",
+            "{}A股V2主信号已过，但 {}；执行得分={}，当前不宜直接追价，优先观察约 {}% 的回踩，参考回踩价={}；旧结构门槛只作背景 legacy_blockers={}；A股 T+1 与涨跌停约束下不得把静态止损写成硬止损",
             headline_note,
             execution_mode_sentence(mode),
             fmt_opt_f64(execution_score, 3),
             fmt_opt_f64(pullback_trigger_pct, 2),
-            fmt_opt_f64(pullback_price, 2)
+            fmt_opt_f64(pullback_price, 2),
+            legacy_gate_blockers
         ),
         _ => format!(
-            "{}{}；执行得分={}，追价上限约 {}% 与回踩触发约 {}% 仅作复核边界，参考回踩价={}；未被 Execution Alpha 门禁放行前不写新开仓、止盈或仓位，A股 T+1 与涨跌停约束下需写清次日处理线而非硬止损",
+            "{}A股V2主信号已过；{}；执行得分={}，追价上限约 {}% 与回踩触发约 {}% 仅作复核边界，参考回踩价={}；旧结构门槛只作背景 legacy_blockers={}；未被 Execution Alpha 门禁放行前不写新开仓、止盈或仓位，A股 T+1 与涨跌停约束下需写清次日处理线而非硬止损",
             headline_note,
             execution_mode_sentence(mode),
             fmt_opt_f64(execution_score, 3),
             fmt_opt_f64(max_chase_gap_pct, 2),
             fmt_opt_f64(pullback_trigger_pct, 2),
-            fmt_opt_f64(pullback_price, 2)
+            fmt_opt_f64(pullback_price, 2),
+            legacy_gate_blockers
         ),
     }
 }
@@ -4705,35 +4889,47 @@ struct MomentumDetail {
     vol_bucket: Option<String>,
     ci_low: Option<f64>,
     ci_high: Option<f64>,
+    log_feature_as_of: Option<String>,
+    log_feature_source: Option<String>,
     log_return_20d_pct: Option<f64>,
     denoised_log_slope_10d_pct: Option<f64>,
     log_return_vol_norm_20d: Option<f64>,
+    denoise_residual_zscore: Option<f64>,
     fft_signal_to_noise: Option<f64>,
     haar_noise_energy: Option<f64>,
 }
 
 /// Fetch momentum detail: regime, vol_bucket, CI, and log/denoise diagnostics.
 fn query_momentum_detail(db: &Connection, ts_code: &str, date_str: &str) -> MomentumDetail {
-    let sql = "SELECT metric, value, detail
+    let sql = "SELECT CAST(as_of AS VARCHAR), metric, value, detail
                FROM analytics
-               WHERE ts_code = ? AND as_of = ? AND module = 'momentum'
+               WHERE ts_code = ?
+                 AND module = 'momentum'
+                 AND as_of = (
+                     SELECT MAX(as_of)
+                     FROM analytics
+                     WHERE ts_code = ?
+                       AND module = 'momentum'
+                       AND as_of <= CAST(? AS DATE)
+                 )
                ORDER BY metric";
 
     let mut detail_out = MomentumDetail::default();
 
     if let Ok(mut stmt) = db.prepare(sql) {
-        let rows: Vec<(String, f64, Option<String>)> = stmt
-            .query_map(duckdb::params![ts_code, date_str], |row| {
+        let rows: Vec<(String, String, f64, Option<String>)> = stmt
+            .query_map(duckdb::params![ts_code, ts_code, date_str], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, f64>(1)?,
-                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })
             .map(|r| r.filter_map(|x| x.ok()).collect())
             .unwrap_or_default();
 
-        for (metric, value, detail) in &rows {
+        for (as_of, metric, value, detail) in &rows {
             match metric.as_str() {
                 "regime" => {
                     detail_out.regime = Some(
@@ -4770,21 +4966,306 @@ fn query_momentum_detail(db: &Connection, ts_code: &str, date_str: &str) -> Mome
                 "trend_prob_ci_high" => {
                     detail_out.ci_high = Some(*value);
                 }
-                "log_return_20d_pct" => detail_out.log_return_20d_pct = Some(*value),
+                "log_return_20d_pct" => {
+                    detail_out.log_return_20d_pct = Some(*value);
+                    detail_out.log_feature_as_of = Some(as_of.to_string());
+                    detail_out.log_feature_source = Some("analytics".to_string());
+                }
                 "denoised_log_slope_10d_pct" => {
                     detail_out.denoised_log_slope_10d_pct = Some(*value);
+                    detail_out.log_feature_as_of = Some(as_of.to_string());
+                    detail_out.log_feature_source = Some("analytics".to_string());
                 }
                 "log_return_vol_norm_20d" => {
                     detail_out.log_return_vol_norm_20d = Some(*value);
+                    detail_out.log_feature_as_of = Some(as_of.to_string());
+                    detail_out.log_feature_source = Some("analytics".to_string());
                 }
-                "fft_signal_to_noise" => detail_out.fft_signal_to_noise = Some(*value),
-                "haar_noise_energy" => detail_out.haar_noise_energy = Some(*value),
+                "denoise_residual_zscore" => {
+                    detail_out.denoise_residual_zscore = Some(*value);
+                    detail_out.log_feature_as_of = Some(as_of.to_string());
+                    detail_out.log_feature_source = Some("analytics".to_string());
+                }
+                "fft_signal_to_noise" => {
+                    detail_out.fft_signal_to_noise = Some(*value);
+                    detail_out.log_feature_as_of = Some(as_of.to_string());
+                    detail_out.log_feature_source = Some("analytics".to_string());
+                }
+                "haar_noise_energy" => {
+                    detail_out.haar_noise_energy = Some(*value);
+                    detail_out.log_feature_as_of = Some(as_of.to_string());
+                    detail_out.log_feature_source = Some("analytics".to_string());
+                }
                 _ => {}
             }
         }
     }
 
+    if detail_out.log_return_20d_pct.is_none()
+        || detail_out.denoise_residual_zscore.is_none()
+        || detail_out.fft_signal_to_noise.is_none()
+        || detail_out.haar_noise_energy.is_none()
+    {
+        if let Some(fallback) = query_price_log_features(db, ts_code, date_str) {
+            if detail_out.log_return_20d_pct.is_none() {
+                detail_out.log_return_20d_pct = fallback.log_return_20d_pct;
+            }
+            if detail_out.denoised_log_slope_10d_pct.is_none() {
+                detail_out.denoised_log_slope_10d_pct = fallback.denoised_log_slope_10d_pct;
+            }
+            if detail_out.log_return_vol_norm_20d.is_none() {
+                detail_out.log_return_vol_norm_20d = fallback.log_return_vol_norm_20d;
+            }
+            if detail_out.denoise_residual_zscore.is_none() {
+                detail_out.denoise_residual_zscore = fallback.denoise_residual_zscore;
+            }
+            if detail_out.fft_signal_to_noise.is_none() {
+                detail_out.fft_signal_to_noise = fallback.fft_signal_to_noise;
+            }
+            if detail_out.haar_noise_energy.is_none() {
+                detail_out.haar_noise_energy = fallback.haar_noise_energy;
+            }
+            detail_out.log_feature_as_of = fallback.log_feature_as_of;
+            detail_out.log_feature_source = fallback.log_feature_source;
+        }
+    }
+
     detail_out
+}
+
+fn query_price_log_features(
+    db: &Connection,
+    ts_code: &str,
+    date_str: &str,
+) -> Option<MomentumDetail> {
+    let sql = "SELECT CAST(trade_date AS VARCHAR), close
+               FROM prices
+               WHERE ts_code = ?
+                 AND trade_date <= CAST(? AS DATE)
+                 AND close IS NOT NULL
+                 AND close > 0
+               ORDER BY trade_date DESC
+               LIMIT 96";
+
+    let mut rows: Vec<(String, f64)> = db
+        .prepare(sql)
+        .ok()?
+        .query_map(duckdb::params![ts_code, date_str], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+        })
+        .ok()?
+        .filter_map(|row| row.ok())
+        .collect();
+    rows.reverse();
+    if rows.len() < 21 {
+        return None;
+    }
+    let feature_as_of = rows.last().map(|(date, _)| date.to_string());
+    let closes: Vec<f64> = rows.iter().map(|(_, close)| *close).collect();
+    compute_log_detail_from_closes(&closes, feature_as_of)
+}
+
+fn compute_log_detail_from_closes(
+    closes: &[f64],
+    feature_as_of: Option<String>,
+) -> Option<MomentumDetail> {
+    if closes.len() < 2 {
+        return None;
+    }
+    let log_prices: Vec<f64> = closes.iter().map(|close| close.max(1e-9).ln()).collect();
+    let log_rets: Vec<f64> = log_prices.windows(2).map(|w| w[1] - w[0]).collect();
+    let ema_log = ema_series(&log_prices, 5);
+    let residuals: Vec<f64> = log_prices
+        .iter()
+        .zip(ema_log.iter())
+        .map(|(price, smooth)| price - smooth)
+        .collect();
+    let residual_z = if residuals.len() >= 20 {
+        stddev_slice(&residuals[residuals.len() - 20..])
+            .map(|sigma| residuals[residuals.len() - 1] / sigma)
+    } else {
+        None
+    };
+    let vol_norm = if log_rets.len() >= 20 {
+        stddev_slice(&log_rets[log_rets.len() - 20..])
+            .map(|sigma| log_rets[log_rets.len() - 1] / sigma)
+    } else {
+        None
+    };
+    let (_, _, fft_snr) = spectral_energy_from_returns(&log_rets, 32);
+    let (_, haar_noise) = haar_energy_from_returns(&log_rets, 32);
+    Some(MomentumDetail {
+        log_feature_as_of: feature_as_of,
+        log_feature_source: Some("price_fallback".to_string()),
+        log_return_20d_pct: log_return_from_prices(&log_prices, 20),
+        denoised_log_slope_10d_pct: tail_slope_slice(&ema_log, 10).map(|slope| slope * 100.0),
+        log_return_vol_norm_20d: vol_norm,
+        denoise_residual_zscore: residual_z,
+        fft_signal_to_noise: fft_snr,
+        haar_noise_energy: haar_noise,
+        ..MomentumDetail::default()
+    })
+}
+
+fn mean_slice(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        return None;
+    }
+    Some(values.iter().sum::<f64>() / values.len() as f64)
+}
+
+fn stddev_slice(values: &[f64]) -> Option<f64> {
+    let mu = mean_slice(values)?;
+    let var = values
+        .iter()
+        .map(|value| {
+            let delta = *value - mu;
+            delta * delta
+        })
+        .sum::<f64>()
+        / values.len() as f64;
+    let sigma = var.sqrt();
+    if sigma.is_finite() && sigma > 1e-12 {
+        Some(sigma)
+    } else {
+        None
+    }
+}
+
+fn tail_slope_slice(values: &[f64], window: usize) -> Option<f64> {
+    if values.len() < window || window < 2 {
+        return None;
+    }
+    let y = &values[values.len() - window..];
+    if y.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    let x_mean = (window as f64 - 1.0) / 2.0;
+    let y_mean = mean_slice(y)?;
+    let mut num = 0.0;
+    let mut den = 0.0;
+    for (idx, value) in y.iter().enumerate() {
+        let dx = idx as f64 - x_mean;
+        num += dx * (*value - y_mean);
+        den += dx * dx;
+    }
+    if den <= 0.0 {
+        None
+    } else {
+        Some(num / den)
+    }
+}
+
+fn ema_series(values: &[f64], span: usize) -> Vec<f64> {
+    if values.is_empty() {
+        return Vec::new();
+    }
+    let alpha = 2.0 / (span as f64 + 1.0);
+    let mut out = Vec::with_capacity(values.len());
+    let mut prev = values[0];
+    out.push(prev);
+    for value in values.iter().skip(1) {
+        prev = alpha * *value + (1.0 - alpha) * prev;
+        out.push(prev);
+    }
+    out
+}
+
+fn log_return_from_prices(log_prices: &[f64], days: usize) -> Option<f64> {
+    if log_prices.len() <= days {
+        return None;
+    }
+    Some((log_prices[log_prices.len() - 1] - log_prices[log_prices.len() - 1 - days]) * 100.0)
+}
+
+fn spectral_energy_from_returns(
+    log_rets: &[f64],
+    window: usize,
+) -> (Option<f64>, Option<f64>, Option<f64>) {
+    if log_rets.len() < 8 {
+        return (None, None, None);
+    }
+    let n = window.min(log_rets.len());
+    if n < 8 {
+        return (None, None, None);
+    }
+    let mut tail = log_rets[log_rets.len() - n..].to_vec();
+    if tail.iter().any(|v| !v.is_finite()) {
+        return (None, None, None);
+    }
+    let mu = mean_slice(&tail).unwrap_or(0.0);
+    for value in &mut tail {
+        *value -= mu;
+    }
+    let mut powers: Vec<f64> = Vec::new();
+    for k in 1..=(n / 2) {
+        let mut re = 0.0;
+        let mut im = 0.0;
+        for (t, value) in tail.iter().enumerate() {
+            let angle = -2.0 * std::f64::consts::PI * k as f64 * t as f64 / n as f64;
+            re += *value * angle.cos();
+            im += *value * angle.sin();
+        }
+        powers.push(re * re + im * im);
+    }
+    if powers.is_empty() {
+        return (None, None, None);
+    }
+    let total = powers.iter().sum::<f64>();
+    if total <= 1e-18 {
+        return (Some(0.0), Some(0.0), None);
+    }
+    let split = (powers.len() / 3).max(1);
+    let low = powers[..split].iter().sum::<f64>();
+    let high = powers[split..].iter().sum::<f64>();
+    (
+        Some(low / total),
+        Some(high / total),
+        Some(low / (high + 1e-12)),
+    )
+}
+
+fn haar_energy_from_returns(log_rets: &[f64], window: usize) -> (Option<f64>, Option<f64>) {
+    if log_rets.len() < 8 {
+        return (None, None);
+    }
+    let cap = window.min(log_rets.len());
+    let mut n = 1usize;
+    while n * 2 <= cap {
+        n *= 2;
+    }
+    if n < 8 {
+        return (None, None);
+    }
+    let mut cur = log_rets[log_rets.len() - n..].to_vec();
+    if cur.iter().any(|v| !v.is_finite()) {
+        return (None, None);
+    }
+    let mu = mean_slice(&cur).unwrap_or(0.0);
+    for value in &mut cur {
+        *value -= mu;
+    }
+    let total = cur.iter().map(|value| value * value).sum::<f64>();
+    if total <= 1e-18 {
+        return (Some(0.0), Some(0.0));
+    }
+    let inv_sqrt2 = 1.0 / 2.0_f64.sqrt();
+    let mut detail_energies: Vec<f64> = Vec::new();
+    while cur.len() >= 2 {
+        let mut next = Vec::with_capacity(cur.len() / 2);
+        let mut detail_energy = 0.0;
+        for pair in cur.chunks_exact(2) {
+            let avg = (pair[0] + pair[1]) * inv_sqrt2;
+            let detail = (pair[0] - pair[1]) * inv_sqrt2;
+            next.push(avg);
+            detail_energy += detail * detail;
+        }
+        detail_energies.push(detail_energy);
+        cur = next;
+    }
+    let noise = detail_energies.iter().take(2).sum::<f64>();
+    let trend = detail_energies.iter().skip(2).sum::<f64>();
+    (Some(trend / total), Some(noise / total))
 }
 
 /// Fetch flow component z-scores from analytics.
@@ -4964,14 +5445,21 @@ fn macro_cadence(series_id: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        cn_priced_in_score, execution_summary_sentence, macro_cadence, render_alpha_bulletin,
-        report_bucket_description, setup_alpha_view,
+        cn_priced_in_score, execution_summary_sentence, log_denoise_report_action, macro_cadence,
+        render_alpha_bulletin, report_bucket_description, setup_alpha_view, MomentumDetail,
+        V2SignalContext,
     };
     use crate::filtering::notable::{NotableItem, Signal};
     use serde_json::json;
 
     #[test]
     fn uncertain_headline_is_context_not_execution_blocker() {
+        let v2_context = V2SignalContext {
+            strategy_family: Some("oversold_contrarian".to_string()),
+            action_intent: Some("TRADE".to_string()),
+            ev_lcb_80_pct: Some(0.10),
+            ..V2SignalContext::default()
+        };
         let summary = execution_summary_sentence(
             "TACTICAL CONTINUATION",
             "uncertain",
@@ -4980,7 +5468,7 @@ mod tests {
             Some(2.20),
             Some(0.99),
             Some(3.81),
-            true,
+            &v2_context,
             "none",
         );
 
@@ -4992,7 +5480,14 @@ mod tests {
     }
 
     #[test]
-    fn blocked_main_signal_gate_suppresses_trade_instructions() {
+    fn v2_gate_suppresses_trade_instructions_without_legacy_blocking() {
+        let v2_context = V2SignalContext {
+            strategy_family: Some("oversold_contrarian".to_string()),
+            action_intent: Some("TRADE".to_string()),
+            ev_lcb_80_pct: Some(-0.10),
+            fail_reasons: Some("ev_lcb80_lte_0pct".to_string()),
+            ..V2SignalContext::default()
+        };
         let summary = execution_summary_sentence(
             "CORE BOOK",
             "trend",
@@ -5001,12 +5496,14 @@ mod tests {
             Some(2.20),
             Some(0.99),
             Some(3.81),
-            false,
+            &v2_context,
             "execution_score_below_core",
         );
 
-        assert!(summary.contains("主信号门槛未通过"));
-        assert!(summary.contains("不输出买入/追价指令"));
+        assert!(summary.contains("A股V2主线未放行"));
+        assert!(summary.contains("不输出真钱买入/追价指令"));
+        assert!(summary.contains("legacy_blockers=execution_score_below_core"));
+        assert!(summary.contains("旧结构门槛只作背景"));
         assert!(summary.contains("T+1"));
         assert!(summary.contains("止损不是硬止损"));
         assert!(summary.contains("不写入场、止盈或T1/T2"));
@@ -5044,6 +5541,38 @@ mod tests {
         let score = cn_priced_in_score("executable", 10.0, 24.0, 0.48, 0.10, 0.20);
 
         assert!(score >= 0.66);
+    }
+
+    #[test]
+    fn cn_log_denoise_overlay_requires_ev_gate_for_action() {
+        let detail = MomentumDetail {
+            log_return_20d_pct: Some(-24.0),
+            denoise_residual_zscore: Some(-1.8),
+            ..MomentumDetail::default()
+        };
+
+        let blocked_context = V2SignalContext {
+            strategy_family: Some("oversold_contrarian".to_string()),
+            action_intent: Some("TRADE".to_string()),
+            ev_lcb_80_pct: Some(-0.10),
+            fail_reasons: Some("profit_policy_requires_oversold_ev_positive".to_string()),
+            ..V2SignalContext::default()
+        };
+        let blocked = log_denoise_report_action(&detail, &blocked_context);
+        assert!(blocked.contains("只在 oversold_contrarian + TRADE + EV80>0 后增强动作"));
+        assert!(blocked.contains("setup overlay"));
+        assert!(blocked.contains("不能绕过 EV gate"));
+
+        let passed_context = V2SignalContext {
+            strategy_family: Some("oversold_contrarian".to_string()),
+            action_intent: Some("TRADE".to_string()),
+            ev_lcb_80_pct: Some(0.10),
+            ..V2SignalContext::default()
+        };
+        let passed = log_denoise_report_action(&detail, &passed_context);
+        assert!(passed.contains("action overlay"));
+        assert!(passed.contains("A股V2主信号已过"));
+        assert!(passed.contains("planned-entry/T+1"));
     }
 
     #[test]

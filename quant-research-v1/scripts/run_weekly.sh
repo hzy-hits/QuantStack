@@ -76,16 +76,12 @@ echo "  Report: $WEEKLY_REPORT ($(wc -c < "$WEEKLY_REPORT") bytes)"
 # ── 3. Send email ─────────────────────────────────────────────────────────
 echo ""
 echo "[3/3] Sending weekly report email..."
-uv run python scripts/send_report.py --send --date "$DATE" --session weekly --lang zh 2>&1 || {
-    echo "  WARNING: send_report.py doesn't support --session weekly yet."
-    echo "  Falling back to direct email..."
-    # Fallback: use send_alert.py with the report content
-    SUBJECT="[Quant Weekly] 美股周报 — $DATE"
-    BODY="$(cat "$WEEKLY_REPORT")"
-    uv run python scripts/send_alert.py --subject "$SUBJECT" --body "$BODY" 2>&1 || {
-        echo "  Email send failed (non-fatal)"
-    }
-}
+DELIVERY_MODE="${QUANT_DELIVERY_MODE:-prod}"
+SEND_ARGS=(--send --date "$DATE" --session weekly --lang zh --delivery-mode "$DELIVERY_MODE")
+if [ -n "${QUANT_TEST_RECIPIENT:-}" ]; then
+    SEND_ARGS+=(--test-recipient "$QUANT_TEST_RECIPIENT")
+fi
+uv run python scripts/send_report.py "${SEND_ARGS[@]}" 2>&1 || echo "  Email send failed (non-fatal)"
 
 echo ""
 echo "=========================================="

@@ -185,6 +185,17 @@ quant-stack/
 └── factor-lab/               # research factor discovery
 ```
 
+## Operating Docs
+
+- [Module Boundaries](docs/MODULE_BOUNDARIES.md): what each market, shared
+  crate, Factor Lab, options, and reporting module owns.
+- [Report Quality Audit](docs/REPORT_QUALITY_AUDIT.md): concrete criteria for a
+  report that can guide trading decisions without inventing tickets.
+- [Simplification Audit](docs/SIMPLIFICATION_AUDIT.md): overdesign risks,
+  unused simplification paths, and the next cleanup backlog.
+- [Loopholes and Fixes](docs/LOOPHOLES_AND_FIXES.md): process loopholes found
+  in the daily strategy loop and the concrete enforcement fixes.
+
 ## Verification
 
 Useful checks after changes:

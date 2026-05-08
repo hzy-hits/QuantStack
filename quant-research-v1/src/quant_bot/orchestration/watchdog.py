@@ -18,6 +18,8 @@ NY_TZ = ZoneInfo("America/New_York")
 PIPELINE_LOCK_FILE = Path("/tmp/quant-research-pipeline.lock")
 DEFAULT_STATE_RETENTION_DAYS = 30
 GLOBAL_BUSY_PATTERNS = (
+    "target/release/quant-stack us-daily",
+    "target/release/quant-stack daily",
     "bash scripts/run_full.sh",
     "bash scripts/run_weekly.sh",
     "bash scripts/daily_pipeline.sh",
@@ -156,15 +158,16 @@ def scheduled_logical_date(local_day: date, task: TaskConfig) -> date:
 
 def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
     us_root, cn_root, factor_lab_root = resolve_stack_roots(project_dir)
+    stack_root = Path(os.environ["QUANT_STACK_ROOT"]).resolve() if os.environ.get("QUANT_STACK_ROOT") else us_root.parent
 
     return (
         TaskConfig(
             name="us-premarket",
-            workdir=us_root,
-            command=("bash", "scripts/run_full.sh", "--prod", "--premarket", "{logical_date}"),
+            workdir=stack_root,
+            command=("target/release/quant-stack", "us-daily", "--stack-root", str(stack_root), "--delivery-mode", "prod", "--premarket", "{logical_date}"),
             completion=CompletionCheck(
                 kind="file_exists",
-                path_template="reports/{logical_date}_report_zh_pre.md",
+                path_template="quant-research-v1/reports/{logical_date}_report_zh_pre.md",
                 min_size=200,
             ),
             local_weekdays=(0, 1, 2, 3, 4),
@@ -176,11 +179,11 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         ),
         TaskConfig(
             name="us-postmarket",
-            workdir=us_root,
-            command=("bash", "scripts/run_full.sh", "--prod", "{logical_date}"),
+            workdir=stack_root,
+            command=("target/release/quant-stack", "us-daily", "--stack-root", str(stack_root), "--delivery-mode", "prod", "{logical_date}"),
             completion=CompletionCheck(
                 kind="file_exists",
-                path_template="reports/{logical_date}_report_zh_post.md",
+                path_template="quant-research-v1/reports/{logical_date}_report_zh_post.md",
                 min_size=200,
             ),
             local_weekdays=(1, 2, 3, 4, 5),
@@ -207,11 +210,11 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         ),
         TaskConfig(
             name="cn-morning",
-            workdir=cn_root,
-            command=("bash", "scripts/daily_pipeline.sh", "--prod", "morning", "{logical_date}"),
+            workdir=stack_root,
+            command=("target/release/quant-stack", "daily", "--stack-root", str(stack_root), "--date", "{logical_date}", "--markets", "cn", "--session", "morning", "--run-producers", "--with-narrative", "--send-reports", "--delivery-mode", "prod"),
             completion=CompletionCheck(
                 kind="file_exists",
-                path_template="reports/{logical_date}_report_zh_morning.md",
+                path_template="quant-research-cn/reports/{logical_date}_report_zh_morning.md",
                 min_size=200,
             ),
             local_weekdays=(0, 1, 2, 3, 4),
@@ -222,11 +225,11 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         ),
         TaskConfig(
             name="cn-evening",
-            workdir=cn_root,
-            command=("bash", "scripts/daily_pipeline.sh", "--prod", "evening", "{logical_date}"),
+            workdir=stack_root,
+            command=("target/release/quant-stack", "daily", "--stack-root", str(stack_root), "--date", "{logical_date}", "--markets", "cn", "--session", "evening", "--run-producers", "--with-narrative", "--send-reports", "--delivery-mode", "prod"),
             completion=CompletionCheck(
                 kind="file_exists",
-                path_template="reports/{logical_date}_report_zh_evening.md",
+                path_template="quant-research-cn/reports/{logical_date}_report_zh_evening.md",
                 min_size=200,
             ),
             local_weekdays=(0, 1, 2, 3, 4),

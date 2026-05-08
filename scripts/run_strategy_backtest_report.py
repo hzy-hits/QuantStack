@@ -24,6 +24,7 @@ STACK_ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "strategy_backtest"
 HISTORY_DB = STACK_ROOT / "data" / "strategy_backtest_history.duckdb"
 ONE_SIDED_80_Z = 1.2816
+US_TRADEABLE_OPTION_EXPRESSIONS = {"stock_long", "call_spread", "put_spread"}
 
 
 STABILITY_THRESHOLDS = {
@@ -86,6 +87,15 @@ def safe_json_loads(value: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def nested_get(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
+    cur: Any = data
+    for key in keys:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+    return default if cur is None else cur
+
+
 def round_or_none(value: Any, digits: int = 4) -> float | None:
     try:
         fval = float(value)
@@ -94,6 +104,11 @@ def round_or_none(value: Any, digits: int = 4) -> float | None:
     if math.isnan(fval) or math.isinf(fval):
         return None
     return round(fval, digits)
+
+
+def float_or(value: Any, default: float = 0.0) -> float:
+    parsed = round_or_none(value, 8)
+    return default if parsed is None else float(parsed)
 
 
 def table_exists(con: duckdb.DuckDBPyConnection, table_name: str) -> bool:
@@ -120,6 +135,10 @@ def rows_as_dicts(con: duckdb.DuckDBPyConnection, sql: str, params: list[Any]) -
     cur = con.execute(sql, params)
     names = [desc[0] for desc in cur.description]
     return [dict(zip(names, row, strict=False)) for row in cur.fetchall()]
+
+
+def sql_in_placeholders(values: list[Any]) -> str:
+    return ",".join("?" for _ in values)
 
 
 def sql_col(
@@ -1035,6 +1054,470 @@ def load_options_alpha_candidates(db_path: Path, market: str, as_of: date) -> li
     return []
 
 
+def load_recent_alpha_pulse(db_path: Path, market: str, as_of: date) -> list[dict[str, Any]]:
+    if not db_path.exists():
+        return []
+    if market == "us":
+        return load_us_recent_alpha_pulse(db_path, as_of)
+    if market == "cn":
+        return load_cn_recent_alpha_pulse(db_path, as_of)
+    return []
+
+
+def load_learning_queue(db_path: Path, market: str, as_of: date) -> list[dict[str, Any]]:
+    if not db_path.exists():
+        return []
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        if not table_exists(con, "alpha_postmortem"):
+            return []
+        queue_labels = ["missed_alpha", "false_positive", "alpha_already_paid", "good_signal_bad_timing", "captured"]
+        placeholders = sql_in_placeholders(queue_labels)
+        summary_rows = rows_as_dicts(
+            con,
+            f"""
+            SELECT
+                label,
+                COUNT(*) AS n,
+                AVG(best_ret_pct) AS avg_best_ret_pct,
+                AVG(CASE WHEN best_ret_pct > 0 THEN 1.0 ELSE 0.0 END) AS positive_best_rate,
+                AVG(factor_feedback_weight) AS avg_feedback_weight
+            FROM alpha_postmortem
+            WHERE report_date <= CAST(? AS DATE)
+              AND report_date >= CAST(? AS DATE) - INTERVAL 5 DAY
+              AND label IN ({placeholders})
+            GROUP BY 1
+            ORDER BY
+              CASE label
+                WHEN 'missed_alpha' THEN 0
+                WHEN 'false_positive' THEN 1
+                WHEN 'alpha_already_paid' THEN 2
+                WHEN 'good_signal_bad_timing' THEN 3
+                WHEN 'captured' THEN 4
+                ELSE 5
+              END
+            """,
+            [as_of.isoformat(), as_of.isoformat(), *queue_labels],
+        )
+        examples = rows_as_dicts(
+            con,
+            f"""
+            SELECT
+                report_date,
+                symbol,
+                label,
+                best_ret_pct,
+                factor_feedback_action,
+                factor_feedback_weight,
+                review_note
+            FROM alpha_postmortem
+            WHERE report_date <= CAST(? AS DATE)
+              AND report_date >= CAST(? AS DATE) - INTERVAL 5 DAY
+              AND label IN ({placeholders})
+            ORDER BY
+              CASE label
+                WHEN 'missed_alpha' THEN 0
+                WHEN 'false_positive' THEN 1
+                WHEN 'alpha_already_paid' THEN 2
+                WHEN 'good_signal_bad_timing' THEN 3
+                WHEN 'captured' THEN 4
+                ELSE 5
+              END,
+              ABS(COALESCE(factor_feedback_weight, 0)) DESC,
+              ABS(COALESCE(best_ret_pct, 0)) DESC,
+              report_date DESC,
+              symbol
+            LIMIT 40
+            """,
+            [as_of.isoformat(), as_of.isoformat(), *queue_labels],
+        )
+    finally:
+        con.close()
+
+    examples_by_label: dict[str, list[dict[str, Any]]] = {}
+    for row in examples:
+        label = str(row.get("label") or "")
+        examples_by_label.setdefault(label, []).append(
+            {
+                **row,
+                "report_date": to_iso_date(row.get("report_date")),
+                "best_ret_pct": round_or_none(row.get("best_ret_pct")),
+                "factor_feedback_weight": round_or_none(row.get("factor_feedback_weight")),
+            }
+        )
+
+    rows: list[dict[str, Any]] = []
+    for row in summary_rows:
+        label = str(row.get("label") or "")
+        rows.append(
+            {
+                "market": market,
+                "symbol": f"__{label.upper()}__",
+                "section": "learning_queue",
+                "label": label,
+                "reason": learning_queue_task(label),
+                "blockers": [],
+                "details": {
+                    "n": int(row.get("n") or 0),
+                    "avg_best_ret_pct": round_or_none(row.get("avg_best_ret_pct")),
+                    "positive_best_rate": round_or_none(row.get("positive_best_rate")),
+                    "avg_feedback_weight": round_or_none(row.get("avg_feedback_weight")),
+                    "examples": examples_by_label.get(label, [])[:6],
+                },
+            }
+        )
+    return rows
+
+
+def learning_queue_task(label: str) -> str:
+    return {
+        "missed_alpha": "Find recall features that appeared before missed winners; do not invent unrelated factors.",
+        "false_positive": "Find blockers that would have filtered losing promoted names before entry.",
+        "alpha_already_paid": "Improve entry timing and anti-chase exits; this is not a new-factor task.",
+        "good_signal_bad_timing": "Move from direction discovery to pullback/exit timing rules.",
+        "captured": "Codify what repeated in captured winners and check whether it adds marginal Sharpe.",
+    }.get(label, "Review this label before assigning Factor Lab work.")
+
+
+def load_us_recent_alpha_pulse(db_path: Path, as_of: date) -> list[dict[str, Any]]:
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        if not (table_exists(con, "report_decisions") and table_exists(con, "report_outcomes")):
+            return []
+        date_rows = rows_as_dicts(
+            con,
+            """
+            SELECT DISTINCT d.report_date
+            FROM report_decisions d
+            INNER JOIN report_outcomes o
+              ON d.report_date = o.report_date
+             AND d.session = o.session
+             AND d.symbol = o.symbol
+             AND d.selection_status = o.selection_status
+            WHERE d.report_date <= CAST(? AS DATE)
+              AND d.selection_status = 'selected'
+              AND COALESCE(o.data_ready, TRUE)
+              AND lower(COALESCE(d.signal_direction, '')) IN ('long', 'short')
+              AND o.next_close_ret_pct IS NOT NULL
+            ORDER BY d.report_date DESC
+            LIMIT 2
+            """,
+            [as_of.isoformat()],
+        )
+        dates = [to_iso_date(row.get("report_date")) for row in date_rows if to_iso_date(row.get("report_date"))]
+        if not dates:
+            return []
+        placeholders = sql_in_placeholders(dates)
+        signed_next = """
+            CASE
+              WHEN lower(COALESCE(d.signal_direction, '')) = 'short' THEN -o.next_close_ret_pct
+              ELSE o.next_close_ret_pct
+            END
+        """
+        summary_rows = rows_as_dicts(
+            con,
+            f"""
+            SELECT
+                d.report_date,
+                d.session,
+                d.report_bucket,
+                COUNT(*) AS n,
+                AVG({signed_next}) AS avg_next_pct,
+                AVG(CASE WHEN {signed_next} > 0 THEN 1.0 ELSE 0.0 END) AS win_rate,
+                SUM(CASE WHEN {signed_next} >= 5.0 THEN 1 ELSE 0 END) AS big_winners,
+                SUM(CASE WHEN {signed_next} <= -3.0 THEN 1 ELSE 0 END) AS big_drags
+            FROM report_decisions d
+            INNER JOIN report_outcomes o
+              ON d.report_date = o.report_date
+             AND d.session = o.session
+             AND d.symbol = o.symbol
+             AND d.selection_status = o.selection_status
+            WHERE d.report_date IN ({placeholders})
+              AND d.selection_status = 'selected'
+              AND COALESCE(o.data_ready, TRUE)
+              AND lower(COALESCE(d.signal_direction, '')) IN ('long', 'short')
+              AND o.next_close_ret_pct IS NOT NULL
+            GROUP BY 1, 2, 3
+            ORDER BY 1 DESC, 2, 3
+            """,
+            dates,
+        )
+        leader_rows = rows_as_dicts(
+            con,
+            f"""
+            SELECT
+                d.report_date,
+                d.session,
+                d.symbol,
+                d.report_bucket,
+                d.signal_direction,
+                d.signal_confidence,
+                {signed_next} AS signed_next_pct
+            FROM report_decisions d
+            INNER JOIN report_outcomes o
+              ON d.report_date = o.report_date
+             AND d.session = o.session
+             AND d.symbol = o.symbol
+             AND d.selection_status = o.selection_status
+            WHERE d.report_date IN ({placeholders})
+              AND d.selection_status = 'selected'
+              AND COALESCE(o.data_ready, TRUE)
+              AND lower(COALESCE(d.signal_direction, '')) IN ('long', 'short')
+              AND o.next_close_ret_pct IS NOT NULL
+            ORDER BY signed_next_pct DESC, d.symbol
+            LIMIT 8
+            """,
+            dates,
+        )
+        drag_rows = rows_as_dicts(
+            con,
+            f"""
+            SELECT
+                d.report_date,
+                d.session,
+                d.symbol,
+                d.report_bucket,
+                d.signal_direction,
+                d.signal_confidence,
+                {signed_next} AS signed_next_pct
+            FROM report_decisions d
+            INNER JOIN report_outcomes o
+              ON d.report_date = o.report_date
+             AND d.session = o.session
+             AND d.symbol = o.symbol
+             AND d.selection_status = o.selection_status
+            WHERE d.report_date IN ({placeholders})
+              AND d.selection_status = 'selected'
+              AND COALESCE(o.data_ready, TRUE)
+              AND lower(COALESCE(d.signal_direction, '')) IN ('long', 'short')
+              AND o.next_close_ret_pct IS NOT NULL
+            ORDER BY signed_next_pct ASC, d.symbol
+            LIMIT 6
+            """,
+            dates,
+        )
+    finally:
+        con.close()
+
+    core_rows = [row for row in summary_rows if normalize_bucket(row.get("report_bucket")) == "core"]
+    total_n = sum(int(row.get("n") or 0) for row in core_rows)
+    weighted_core = (
+        sum(float(row.get("avg_next_pct") or 0.0) * int(row.get("n") or 0) for row in core_rows) / total_n
+        if total_n
+        else None
+    )
+    top_gain = max((float(row.get("signed_next_pct") or 0.0) for row in leader_rows), default=0.0)
+    if weighted_core is not None and weighted_core > 0.5:
+        verdict = "recent US alpha pulse is positive, but it is concentrated; promote only clean core/options or stock-only leaders"
+    elif top_gain >= 5.0:
+        verdict = "recent US alpha pulse exists, but the core basket is noisy; use the pulse as a selector, not a basket trade"
+    else:
+        verdict = "recent US pulse is weak; require fresh confirmation before adding risk"
+    return [
+        {
+            "market": "us",
+            "symbol": "__US__",
+            "section": "recent_alpha_pulse",
+            "reason": verdict,
+            "blockers": [],
+            "details": {
+                "basis": "last two report dates with data-ready T+1 outcomes; 3D hold may still be incomplete",
+                "dates": dates,
+                "core_weighted_avg_next_pct": round_or_none(weighted_core),
+                "lane_summary": [
+                    {
+                        **row,
+                        "report_date": to_iso_date(row.get("report_date")),
+                        "avg_next_pct": round_or_none(row.get("avg_next_pct")),
+                        "win_rate": round_or_none(row.get("win_rate")),
+                    }
+                    for row in summary_rows
+                ],
+                "leaders": [
+                    {**row, "report_date": to_iso_date(row.get("report_date")), "signed_next_pct": round_or_none(row.get("signed_next_pct"))}
+                    for row in leader_rows
+                ],
+                "drags": [
+                    {**row, "report_date": to_iso_date(row.get("report_date")), "signed_next_pct": round_or_none(row.get("signed_next_pct"))}
+                    for row in drag_rows
+                ],
+            },
+        }
+    ]
+
+
+def load_cn_recent_alpha_pulse(db_path: Path, as_of: date) -> list[dict[str, Any]]:
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        if not table_exists(con, "strategy_model_dataset"):
+            return []
+        date_rows = rows_as_dicts(
+            con,
+            """
+            SELECT DISTINCT report_date
+            FROM strategy_model_dataset
+            WHERE report_date <= CAST(? AS DATE)
+              AND strategy_family = 'oversold_contrarian'
+              AND action_intent = 'TRADE'
+            ORDER BY report_date DESC
+            LIMIT 2
+            """,
+            [as_of.isoformat()],
+        )
+        dates = [to_iso_date(row.get("report_date")) for row in date_rows if to_iso_date(row.get("report_date"))]
+        if not dates:
+            return []
+        placeholders = sql_in_placeholders(dates)
+        summary_rows = rows_as_dicts(
+            con,
+            f"""
+            SELECT
+                report_date,
+                alpha_state,
+                fill_status,
+                COUNT(*) AS n,
+                AVG(realized_ret_pct) AS avg_realized_pct,
+                AVG(max_favorable_pct) AS avg_best_pct,
+                AVG(
+                    CASE
+                      WHEN realized_ret_pct IS NULL THEN NULL
+                      WHEN realized_ret_pct > 0 THEN 1.0
+                      ELSE 0.0
+                    END
+                ) AS win_rate
+            FROM strategy_model_dataset
+            WHERE report_date IN ({placeholders})
+              AND strategy_family = 'oversold_contrarian'
+              AND action_intent = 'TRADE'
+              AND alpha_state IN ('positive_ev_setup', 'research_setup', 'blocked_negative_ev')
+            GROUP BY 1, 2, 3
+            ORDER BY 1 DESC, 2, 3
+            """,
+            dates,
+        )
+        best_rows = rows_as_dicts(
+            con,
+            f"""
+            SELECT
+                report_date,
+                symbol,
+                alpha_state,
+                fill_status,
+                realized_ret_pct,
+                max_favorable_pct,
+                ev_lcb_80_pct,
+                ev_norm_lcb_80
+            FROM strategy_model_dataset
+            WHERE report_date IN ({placeholders})
+              AND strategy_family = 'oversold_contrarian'
+              AND action_intent = 'TRADE'
+              AND alpha_state IN ('positive_ev_setup', 'research_setup')
+              AND max_favorable_pct IS NOT NULL
+            ORDER BY max_favorable_pct DESC, symbol
+            LIMIT 8
+            """,
+            dates,
+        )
+        pending_rows = rows_as_dicts(
+            con,
+            """
+            SELECT
+                report_date,
+                symbol,
+                alpha_state,
+                fill_status,
+                ev_lcb_80_pct,
+                ev_norm_lcb_80,
+                p_fill,
+                mu_ret_pct,
+                tail_loss_pct
+            FROM strategy_model_dataset
+            WHERE report_date = CAST(? AS DATE)
+              AND strategy_family = 'oversold_contrarian'
+              AND action_intent = 'TRADE'
+              AND alpha_state IN ('positive_ev_setup', 'research_setup')
+              AND fill_status = 'pending'
+            ORDER BY
+              CASE alpha_state WHEN 'positive_ev_setup' THEN 0 ELSE 1 END,
+              COALESCE(ev_norm_lcb_80, -999) DESC,
+              symbol
+            LIMIT 8
+            """,
+            [dates[0]],
+        )
+    finally:
+        con.close()
+
+    filled = [row for row in summary_rows if str(row.get("fill_status") or "") == "filled_open"]
+    total_n = sum(int(row.get("n") or 0) for row in filled)
+    avg_best = (
+        sum(float(row.get("avg_best_pct") or 0.0) * int(row.get("n") or 0) for row in filled) / total_n
+        if total_n
+        else None
+    )
+    avg_realized_rows = [row for row in filled if row.get("avg_realized_pct") is not None]
+    total_realized_n = sum(int(row.get("n") or 0) for row in avg_realized_rows)
+    avg_realized = (
+        sum(float(row.get("avg_realized_pct") or 0.0) * int(row.get("n") or 0) for row in avg_realized_rows) / total_realized_n
+        if total_realized_n
+        else None
+    )
+    if avg_realized is not None and avg_realized > 0.5:
+        verdict = "recent CN shadow-option pulse has realized alpha; keep execution/exit discipline ahead of more factor discovery"
+    elif avg_best is not None and avg_best > 1.0:
+        verdict = "recent CN shadow-option pulse has intraday/short-horizon convexity, but exits are not yet closed"
+    else:
+        verdict = "recent CN pulse is not confirmed; keep pending names as setup only"
+    return [
+        {
+            "market": "cn",
+            "symbol": "__CN__",
+            "section": "recent_alpha_pulse",
+            "reason": verdict,
+            "blockers": [],
+            "details": {
+                "basis": "last two oversold_contrarian report dates; realized return can be pending while max_favorable shows short convexity",
+                "dates": dates,
+                "filled_avg_realized_pct": round_or_none(avg_realized),
+                "filled_avg_best_pct": round_or_none(avg_best),
+                "state_summary": [
+                    {
+                        **row,
+                        "report_date": to_iso_date(row.get("report_date")),
+                        "avg_realized_pct": round_or_none(row.get("avg_realized_pct")),
+                        "avg_best_pct": round_or_none(row.get("avg_best_pct")),
+                        "win_rate": round_or_none(row.get("win_rate")),
+                    }
+                    for row in summary_rows
+                ],
+                "best_realized_or_favorable": [
+                    {
+                        **row,
+                        "report_date": to_iso_date(row.get("report_date")),
+                        "realized_ret_pct": round_or_none(row.get("realized_ret_pct")),
+                        "max_favorable_pct": round_or_none(row.get("max_favorable_pct")),
+                        "ev_lcb_80_pct": round_or_none(row.get("ev_lcb_80_pct")),
+                        "ev_norm_lcb_80": round_or_none(row.get("ev_norm_lcb_80")),
+                    }
+                    for row in best_rows
+                ],
+                "pending_watch": [
+                    {
+                        **row,
+                        "report_date": to_iso_date(row.get("report_date")),
+                        "ev_lcb_80_pct": round_or_none(row.get("ev_lcb_80_pct")),
+                        "ev_norm_lcb_80": round_or_none(row.get("ev_norm_lcb_80")),
+                        "p_fill": round_or_none(row.get("p_fill")),
+                        "mu_ret_pct": round_or_none(row.get("mu_ret_pct")),
+                        "tail_loss_pct": round_or_none(row.get("tail_loss_pct")),
+                    }
+                    for row in pending_rows
+                ],
+            },
+        }
+    ]
+
+
 def load_us_options_alpha_candidates(db_path: Path, as_of: date) -> list[dict[str, Any]]:
     con = duckdb.connect(str(db_path), read_only=True)
     try:
@@ -1047,12 +1530,15 @@ def load_us_options_alpha_candidates(db_path: Path, as_of: date) -> list[dict[st
                    liquidity_gate, expression, reason, detail_json
             FROM options_alpha
             WHERE as_of = CAST(? AS DATE)
-              AND expression IN ('stock_long', 'call_spread', 'put_spread')
-              AND liquidity_gate = 'pass'
             ORDER BY
+              CASE
+                WHEN liquidity_gate = 'pass' AND expression IN ('call_spread', 'stock_long', 'put_spread') THEN 0
+                WHEN liquidity_gate = 'pass' THEN 1
+                ELSE 2
+              END,
               ABS(COALESCE(directional_edge, 0)) + ABS(COALESCE(vol_edge, 0)) DESC,
               symbol
-            LIMIT 20
+            LIMIT 1000
             """,
             [as_of.isoformat()],
         )
@@ -1061,6 +1547,13 @@ def load_us_options_alpha_candidates(db_path: Path, as_of: date) -> list[dict[st
     out: list[dict[str, Any]] = []
     for row in rows:
         detail = safe_json_loads(row.get("detail_json"))
+        expression = str(row.get("expression") or "").lower()
+        liquidity = str(row.get("liquidity_gate") or "").lower()
+        blockers: list[str] = []
+        if liquidity != "pass":
+            blockers.append(row.get("reason") or f"options liquidity gate {liquidity or 'missing'}")
+        elif expression not in US_TRADEABLE_OPTION_EXPRESSIONS:
+            blockers.append(row.get("reason") or f"options expression {expression or 'missing'}")
         out.append(
             {
                 "market": "us",
@@ -1069,7 +1562,7 @@ def load_us_options_alpha_candidates(db_path: Path, as_of: date) -> list[dict[st
                 "source": "real_options",
                 "expression": row.get("expression"),
                 "reason": row.get("reason") or "real-options edge candidate",
-                "blockers": [],
+                "blockers": blockers,
                 "details": {
                     "directional_edge": round_or_none(row.get("directional_edge")),
                     "vol_edge": round_or_none(row.get("vol_edge")),
@@ -1081,6 +1574,13 @@ def load_us_options_alpha_candidates(db_path: Path, as_of: date) -> list[dict[st
             }
         )
     return out
+
+
+def is_tradeable_us_options_alpha(item: dict[str, Any]) -> bool:
+    expression = str(item.get("expression") or "").lower()
+    details = item.get("details") or {}
+    liquidity = str(details.get("liquidity_gate") or "").lower()
+    return expression in US_TRADEABLE_OPTION_EXPRESSIONS and liquidity == "pass"
 
 
 def load_cn_shadow_options_alpha_candidates(db_path: Path, as_of: date) -> list[dict[str, Any]]:
@@ -1189,18 +1689,572 @@ def load_cn_shadow_options_alpha_candidates(db_path: Path, as_of: date) -> list[
 
 def long_options_expression_pass(item: dict[str, Any] | None) -> tuple[bool, str]:
     if not item:
-        return False, "options expression missing or blocked"
+        return True, "options expression missing; use stock-only expression"
     expression = str(item.get("expression") or "").lower()
     details = item.get("details") or {}
+    liquidity = str(details.get("liquidity_gate") or "").lower()
     directional = round_or_none(details.get("directional_edge"))
     vol_edge = round_or_none(details.get("vol_edge"))
+    if liquidity and liquidity != "pass":
+        return True, f"options liquidity {liquidity}; use stock-only expression"
     if expression == "call_spread" and (directional or 0.0) > 0.0 and (vol_edge or 0.0) > 0.0:
         return True, "call_spread direction+vol edge passed"
     if expression == "stock_long" and (directional or 0.0) > 0.0:
         return True, "stock_long direction edge passed; options not cheap enough"
-    if expression in {"wait", "blocked", "put_spread"}:
-        return False, f"expression {expression} is not a long-expression pass"
-    return False, "options direction/vol edge did not pass"
+    if expression == "put_spread" or (directional is not None and directional < -0.35):
+        return False, f"expression {expression} conflicts with a long equity ticket"
+    if expression in {"wait", "blocked"}:
+        return True, f"expression {expression} is not a long option expression; use stock-only"
+    return True, "options direction/vol edge weak; use stock-only expression"
+
+
+def is_us_core_options_cross_candidate(row: dict[str, Any]) -> bool:
+    selection = str(row.get("selection_status") or "selected").strip().lower()
+    details = safe_json_loads(row.get("details_json"))
+    gate = main_signal_gate(details)
+    execution = normalize_execution(
+        row.get("execution_mode")
+        or gate.get("execution_action")
+        or gate.get("execution_mode")
+        or gate.get("action_intent")
+    )
+    return (
+        selection in {"selected", "ignored", "trade", "active"}
+        and normalize_bucket(row.get("report_bucket") or gate.get("report_bucket")) == "core"
+        and normalize_direction(row.get("signal_direction") or gate.get("direction")) in {"long", "short"}
+        and execution == "executable_now"
+    )
+
+
+def us_core_options_cross(row: dict[str, Any], item: dict[str, Any] | None) -> dict[str, Any]:
+    direction = normalize_direction(row.get("signal_direction"))
+    if not item:
+        return {
+            "tier": "stock_only_unconfirmed",
+            "execution_pass": True,
+            "expression": "missing",
+            "liquidity_gate": "missing",
+            "directional_edge": None,
+            "vol_edge": None,
+            "flow_edge": None,
+            "reason": "options row missing; keep the core equity ticket stock-only and do not use options",
+            "blockers": ["options_missing_for_expression"],
+        }
+
+    details = item.get("details") or {}
+    expression = str(item.get("expression") or "").lower()
+    liquidity = str(details.get("liquidity_gate") or "").lower()
+    directional = round_or_none(details.get("directional_edge"))
+    vol_edge = round_or_none(details.get("vol_edge"))
+    flow_edge = round_or_none(details.get("flow_edge"))
+    reason = str(item.get("reason") or "").strip()
+
+    base = {
+        "expression": expression or "missing",
+        "liquidity_gate": liquidity or "missing",
+        "directional_edge": directional,
+        "vol_edge": vol_edge,
+        "flow_edge": flow_edge,
+    }
+
+    if liquidity != "pass":
+        return {
+            **base,
+            "tier": "stock_only_unconfirmed",
+            "execution_pass": True,
+            "reason": f"options liquidity failed ({reason or liquidity or 'unknown'}); use stock-only expression",
+            "blockers": [reason or "options_liquidity_failed"],
+        }
+
+    dir_val = directional or 0.0
+    vol_val = vol_edge or 0.0
+    if direction == "long":
+        if expression == "call_spread" and dir_val > 0.0 and vol_val > 0.0:
+            return {
+                **base,
+                "tier": "core_options_confirmed",
+                "execution_pass": True,
+                "reason": "core long and call-spread tape agree; options expression may be used",
+                "blockers": [],
+            }
+        if expression == "stock_long" and dir_val > 0.0:
+            return {
+                **base,
+                "tier": "core_stock_only_options_overpaid",
+                "execution_pass": True,
+                "reason": "core long is confirmed directionally, but listed options look overpaid; use stock-only",
+                "blockers": ["options_overpaid_for_spread"],
+            }
+        if expression == "put_spread" or dir_val < -0.35:
+            return {
+                **base,
+                "tier": "core_options_conflict",
+                "execution_pass": False,
+                "reason": "core long conflicts with bearish options tape; do not promote without manual override",
+                "blockers": ["core/options direction conflict"],
+            }
+        return {
+            **base,
+            "tier": "stock_only_unconfirmed",
+            "execution_pass": True,
+            "reason": f"core long remains a stock-only ticket; options expression is {expression or 'missing'} ({reason or 'not clean'})",
+            "blockers": [reason or "options_not_clean_for_long"],
+        }
+
+    if direction == "short":
+        if expression == "put_spread" and dir_val < 0.0 and vol_val > 0.0:
+            return {
+                **base,
+                "tier": "core_options_confirmed_short",
+                "execution_pass": True,
+                "reason": "core short and put-spread tape agree; options expression may be used",
+                "blockers": [],
+            }
+        if expression in {"call_spread", "stock_long"} or dir_val > 0.35:
+            return {
+                **base,
+                "tier": "core_options_conflict",
+                "execution_pass": False,
+                "reason": "core short conflicts with bullish options tape; do not promote without manual override",
+                "blockers": ["core/options direction conflict"],
+            }
+        return {
+            **base,
+            "tier": "stock_only_unconfirmed",
+            "execution_pass": True,
+            "reason": f"core short remains a stock-only ticket; options expression is {expression or 'missing'} ({reason or 'not clean'})",
+            "blockers": [reason or "options_not_clean_for_short"],
+        }
+
+    return {
+        **base,
+        "tier": "core_options_conflict",
+        "execution_pass": False,
+        "reason": "core/options cross requires a long or short core direction",
+        "blockers": ["core direction missing"],
+    }
+
+
+def core_options_cross_bulletin_item(row: dict[str, Any], cross: dict[str, Any]) -> dict[str, Any]:
+    item = bulletin_item(
+        row,
+        "core_options_cross",
+        str(cross.get("reason") or "core/options cross classified"),
+        list(cross.get("blockers") or []),
+    )
+    item["tier"] = cross.get("tier")
+    item["expression"] = cross.get("expression")
+    item["details"]["core_options_cross"] = cross
+    return item
+
+
+def fmt_pct(value: Any, digits: int = 2) -> str:
+    parsed = round_or_none(value, digits)
+    return "-" if parsed is None else f"{parsed:+.{digits}f}%"
+
+
+def fmt_rate(value: Any, digits: int = 1) -> str:
+    parsed = round_or_none(value, 6)
+    return "-" if parsed is None else f"{parsed * 100.0:.{digits}f}%"
+
+
+def render_recent_alpha_pulse_md(bulletin: dict[str, Any], market: str) -> list[str]:
+    items = [item for item in bulletin.get("recent_alpha_pulse", []) if item.get("market") == market]
+    if not items:
+        return [
+            "### Recent Alpha Pulse",
+            "",
+            "- No recent outcome pulse was available from the local ledgers.",
+            "",
+        ]
+    item = items[0]
+    details = item.get("details") or {}
+    lines = [
+        "### Recent Alpha Pulse",
+        "",
+        f"- Verdict: {item.get('reason')}",
+        f"- Basis: {details.get('basis')}",
+        "",
+    ]
+    if market == "us":
+        lines += [
+            "| Date | Session | Lane | N | Avg T+1 | Win | Big winners | Big drags |",
+            "|------|---------|------|--:|--------:|----:|------------:|----------:|",
+        ]
+        for row in (details.get("lane_summary") or [])[:10]:
+            lines.append(
+                "| {date} | {session} | {lane} | {n} | {avg} | {win} | {winners} | {drags} |".format(
+                    date=row.get("report_date") or "-",
+                    session=row.get("session") or "-",
+                    lane=row.get("report_bucket") or "-",
+                    n=int(row.get("n") or 0),
+                    avg=fmt_pct(row.get("avg_next_pct")),
+                    win=fmt_rate(row.get("win_rate")),
+                    winners=int(row.get("big_winners") or 0),
+                    drags=int(row.get("big_drags") or 0),
+                )
+            )
+        lines += [
+            "",
+            "- Leaders: " + _pulse_symbol_list(details.get("leaders"), value_key="signed_next_pct"),
+            "- Drags: " + _pulse_symbol_list(details.get("drags"), value_key="signed_next_pct"),
+            "",
+        ]
+        return lines
+
+    lines += [
+        "| Date | State | Fill | N | Avg realized | Avg best | Win |",
+        "|------|-------|------|--:|-------------:|---------:|----:|",
+    ]
+    for row in (details.get("state_summary") or [])[:12]:
+        lines.append(
+            "| {date} | {state} | {fill} | {n} | {realized} | {best} | {win} |".format(
+                date=row.get("report_date") or "-",
+                state=row.get("alpha_state") or "-",
+                fill=row.get("fill_status") or "-",
+                n=int(row.get("n") or 0),
+                realized=fmt_pct(row.get("avg_realized_pct")),
+                best=fmt_pct(row.get("avg_best_pct")),
+                win=fmt_rate(row.get("win_rate")),
+            )
+        )
+    lines += [
+        "",
+        "- Best realized/favorable: "
+        + _pulse_symbol_list(details.get("best_realized_or_favorable"), value_key="max_favorable_pct"),
+        "- Pending watch: "
+        + _pulse_symbol_list(details.get("pending_watch"), value_key="ev_norm_lcb_80", pct=False),
+        "",
+    ]
+    return lines
+
+
+def _pulse_symbol_list(rows: Any, *, value_key: str, pct: bool = True, limit: int = 6) -> str:
+    if not isinstance(rows, list) or not rows:
+        return "-"
+    parts: list[str] = []
+    for row in rows[:limit]:
+        symbol = str(row.get("symbol") or "-")
+        date_s = str(row.get("report_date") or "")
+        value = fmt_pct(row.get(value_key)) if pct else str(row.get(value_key) if row.get(value_key) is not None else "-")
+        parts.append(f"`{symbol}` {value} ({date_s})")
+    return ", ".join(parts)
+
+
+def md_cell(value: Any) -> str:
+    text = str(value if value is not None else "-").replace("\n", " ").replace("|", "/").strip()
+    return text or "-"
+
+
+def render_execution_candidates_md(bulletin: dict[str, Any], market: str) -> list[str]:
+    items = [item for item in bulletin.get("execution_candidates", []) if item.get("market") == market]
+    lines = ["### Execution Candidates", ""]
+    if not items:
+        return [
+            *lines,
+            "- None. No current candidate has enough pulse/execution evidence for today's action list.",
+            "",
+        ]
+
+    priority = {
+        "execute_option_confirmed_probe": 0,
+        "execute_stock_only_probe": 1,
+        "planned_entry_probe": 2,
+        "stock_only_probe_if_other_gates_pass": 3,
+        "wait_pullback_probe": 4,
+        "do_not_promote_conflict": 5,
+        "research_shadow_probe": 6,
+        "setup_watch_only": 7,
+        "observe_or_wait": 7,
+        "wait_reset": 8,
+        "do_not_chase_wait_reset": 9,
+        "observe_only": 11,
+    }
+    tier_priority = {
+        "core_options_confirmed": 0,
+        "core_options_confirmed_short": 0,
+        "core_stock_only_options_overpaid": 1,
+        "core_options_conflict": 2,
+        "positive_ev_setup": 3,
+        "research_setup": 4,
+        "stock_only_unconfirmed": 5,
+    }
+    items = sorted(
+        items,
+        key=lambda item: (
+            priority.get(str(item.get("action") or ""), 99),
+            1 if "outside selected stable EV policy" in (item.get("blockers") or []) else 0,
+            tier_priority.get(str(item.get("tier") or ""), 99),
+            str(item.get("symbol") or ""),
+        ),
+    )
+    lines += [
+        "| Symbol | Action | Tier | Expression | Why | Blockers |",
+        "|--------|--------|------|------------|-----|----------|",
+    ]
+    for item in items[:14]:
+        details = (item.get("details") or {}).get("execution_candidate") or {}
+        why = str(item.get("reason") or "")
+        if market == "us":
+            metrics = [
+                f"paid_risk={details.get('paid_risk')}",
+                f"rr={details.get('rr_ratio')}",
+            ]
+            why = f"{why}; " + ", ".join(metric for metric in metrics if not metric.endswith("=None"))
+        elif market == "cn":
+            metrics = [
+                f"shadow_prob={details.get('shadow_alpha_prob')}",
+                f"entry={details.get('entry_quality_score')}",
+                f"stale={details.get('stale_chase_risk')}",
+            ]
+            why = f"{why}; " + ", ".join(metric for metric in metrics if not metric.endswith("=None"))
+        blockers = item.get("blockers") or []
+        lines.append(
+            "| {symbol} | `{action}` | `{tier}` | `{expression}` | {why} | {blockers} |".format(
+                symbol=f"`{md_cell(item.get('symbol'))}`",
+                action=md_cell(item.get("action")),
+                tier=md_cell(item.get("tier")),
+                expression=md_cell(item.get("expression")),
+                why=md_cell(why),
+                blockers=md_cell(", ".join(blockers) if blockers else "none"),
+            )
+        )
+    lines.append("")
+    return lines
+
+
+def render_learning_queue_md(bulletin: dict[str, Any], market: str) -> list[str]:
+    items = [item for item in bulletin.get("learning_queue", []) if item.get("market") == market]
+    lines = ["### Learning Queue", ""]
+    if not items:
+        return [
+            *lines,
+            "- None. No recent postmortem labels require Factor Lab follow-up.",
+            "",
+        ]
+
+    label_priority = {
+        "missed_alpha": 0,
+        "false_positive": 1,
+        "alpha_already_paid": 2,
+        "good_signal_bad_timing": 3,
+        "captured": 4,
+    }
+    items = sorted(
+        items,
+        key=lambda item: (
+            label_priority.get(str(item.get("label") or ""), 99),
+            -int((item.get("details") or {}).get("n") or 0),
+        ),
+    )
+    lines += [
+        "| Label | N | Avg best | Positive best | Task | Examples |",
+        "|-------|--:|---------:|--------------:|------|----------|",
+    ]
+    for item in items[:8]:
+        details = item.get("details") or {}
+        examples: list[str] = []
+        for example in (details.get("examples") or [])[:4]:
+            examples.append(
+                "`{symbol}` {best} ({date})".format(
+                    symbol=md_cell(example.get("symbol")),
+                    best=fmt_pct(example.get("best_ret_pct")),
+                    date=md_cell(example.get("report_date")),
+                )
+            )
+        lines.append(
+            "| `{label}` | {n} | {avg_best} | {positive_best} | {task} | {examples} |".format(
+                label=md_cell(item.get("label")),
+                n=int(details.get("n") or 0),
+                avg_best=fmt_pct(details.get("avg_best_ret_pct")),
+                positive_best=fmt_rate(details.get("positive_best_rate")),
+                task=md_cell(item.get("reason")),
+                examples=md_cell(", ".join(examples) if examples else "-"),
+            )
+        )
+    lines.append("")
+    return lines
+
+
+def recent_pulse_for_market(
+    recent_alpha_pulse_by_market: dict[str, list[dict[str, Any]]],
+    market: str,
+) -> dict[str, Any] | None:
+    rows = recent_alpha_pulse_by_market.get(market) or []
+    return rows[0] if rows else None
+
+
+def recent_pulse_is_positive(pulse: dict[str, Any] | None, market: str) -> bool:
+    details = (pulse or {}).get("details") or {}
+    if market == "us":
+        return float_or(details.get("core_weighted_avg_next_pct"), 0.0) > 0.5
+    if market == "cn":
+        return (
+            float_or(details.get("filled_avg_realized_pct"), 0.0) > 0.5
+            or float_or(details.get("filled_avg_best_pct"), 0.0) > 1.0
+        )
+    return False
+
+
+def build_us_execution_candidate_item(
+    row: dict[str, Any],
+    cross: dict[str, Any] | None,
+    *,
+    selected_policy_id: str | None,
+    recent_pulse: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not is_us_core_options_cross_candidate(row):
+        return None
+    cross = cross or us_core_options_cross(row, None)
+    details = safe_json_loads(row.get("details_json"))
+    gate = main_signal_gate(details)
+    overnight = details.get("overnight_alpha") if isinstance(details.get("overnight_alpha"), dict) else {}
+    execution_gate = details.get("execution_gate") if isinstance(details.get("execution_gate"), dict) else {}
+    cross_tier = str(cross.get("tier") or "")
+    expression = str(cross.get("expression") or "-")
+    policy_id = str(row.get("policy_id") or "")
+    if policy_id != (selected_policy_id or "") and cross_tier == "stock_only_unconfirmed":
+        return None
+    paid_risk = max(
+        float_or(overnight.get("alpha_already_paid_risk"), 0.0),
+        float_or(overnight.get("fade_or_paid_risk"), 0.0),
+        float_or(execution_gate.get("effective_stretch_score"), 0.0),
+    )
+    rr = round_or_none(row.get("rr_ratio"), 4)
+    blockers: list[str] = []
+    notes: list[str] = []
+
+    if not recent_pulse_is_positive(recent_pulse, "us"):
+        blockers.append("recent_alpha_pulse_not_positive")
+    if cross_tier == "core_options_conflict":
+        blockers.append("core/options direction conflict")
+    if selected_policy_id and policy_id != selected_policy_id:
+        blockers.append("outside selected stable EV policy")
+    if str(gate.get("status") or "").lower() not in {"pass", ""}:
+        notes.extend(str(x) for x in (gate.get("blockers") or [])[:2])
+    if paid_risk >= 0.45 or str(execution_gate.get("action") or "").lower() == "do_not_chase":
+        blockers.append("alpha_already_paid_or_chase_risk")
+    if rr is not None and rr < 1.2:
+        blockers.append("rr_below_probe_floor")
+
+    if cross_tier in {"core_options_confirmed", "core_options_confirmed_short"}:
+        action = "execute_option_confirmed_probe"
+    elif cross_tier == "core_stock_only_options_overpaid":
+        action = "execute_stock_only_probe"
+        notes.append("options overpaid; no option money")
+    elif cross_tier == "stock_only_unconfirmed":
+        action = "stock_only_probe_if_other_gates_pass"
+        notes.append("options unconfirmed; do not use options")
+    else:
+        action = "observe_only"
+
+    if blockers:
+        action = "observe_or_wait"
+        if "core/options direction conflict" in blockers:
+            action = "do_not_promote_conflict"
+        elif "alpha_already_paid_or_chase_risk" in blockers:
+            action = "wait_reset"
+
+    item = bulletin_item(
+        row,
+        "execution_candidates",
+        "; ".join(notes) if notes else str(cross.get("reason") or "US execution candidate classified"),
+        dedupe(blockers),
+    )
+    item["action"] = action
+    item["tier"] = cross_tier or "unclassified"
+    item["expression"] = expression
+    item["details"]["execution_candidate"] = {
+        "recent_pulse_positive": recent_pulse_is_positive(recent_pulse, "us"),
+        "cross": cross,
+        "paid_risk": round_or_none(paid_risk),
+        "rr_ratio": rr,
+        "stable_policy_selected": selected_policy_id,
+        "policy_id": policy_id,
+    }
+    return item
+
+
+def build_cn_execution_candidate_item(
+    row: dict[str, Any],
+    *,
+    recent_pulse: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if str(row.get("strategy_family") or "").lower() != "oversold_contrarian":
+        return None
+    if str(row.get("action_intent") or "").upper() != "TRADE":
+        return None
+    alpha_state = str(row.get("alpha_state") or "")
+    if alpha_state not in {"positive_ev_setup", "research_setup"}:
+        return None
+    features = safe_json_loads(row.get("features_json"))
+    detail = safe_json_loads(row.get("details_json"))
+    shadow = nested_get(features, "details", "shadow_option_alpha", default={})
+    shadow_prob = float_or(features.get("shadow_alpha_prob") or shadow.get("shadow_alpha_prob"), 0.0)
+    entry_quality = float_or(
+        features.get("entry_quality_score")
+        or nested_get(features, "details", "entry_quality_score")
+        or shadow.get("entry_quality_score")
+        or features.get("setup_score"),
+        0.0,
+    )
+    stale_risk = float_or(features.get("stale_chase_risk") or shadow.get("stale_chase_risk"), 1.0)
+    execution_mode = str(features.get("execution_mode") or row.get("execution_mode") or row.get("execution_rule") or "").lower()
+    ev_lcb = round_or_none(row.get("ev_lcb_80_pct"))
+    ev_norm = round_or_none(row.get("ev_norm_lcb_80"))
+
+    blockers: list[str] = []
+    if not recent_pulse_is_positive(recent_pulse, "cn"):
+        blockers.append("recent_shadow_pulse_not_confirmed")
+    if execution_mode == "do_not_chase" or stale_risk >= 0.55:
+        blockers.append("stale_chase_or_do_not_chase")
+    if alpha_state != "positive_ev_setup" and shadow_prob < 0.30:
+        blockers.append("shadow_alpha_prob<0.30")
+    if entry_quality < 0.30:
+        blockers.append("entry_quality_low")
+
+    if alpha_state == "positive_ev_setup" and execution_mode == "wait_pullback":
+        action = "wait_pullback_probe"
+    elif alpha_state == "positive_ev_setup":
+        action = "planned_entry_probe"
+    elif not blockers and shadow_prob >= 0.30 and entry_quality >= 0.38 and stale_risk <= 0.40:
+        action = "research_shadow_probe"
+    else:
+        action = "setup_watch_only"
+    if "stale_chase_or_do_not_chase" in blockers:
+        action = "do_not_chase_wait_reset"
+
+    item = {
+        "market": "cn",
+        "symbol": row.get("symbol"),
+        "section": "execution_candidates",
+        "policy_id": row.get("policy_id"),
+        "policy_label": row.get("policy_label"),
+        "report_bucket": row.get("report_bucket"),
+        "signal_direction": row.get("signal_direction"),
+        "signal_confidence": row.get("signal_confidence"),
+        "headline_mode": None,
+        "execution_mode": execution_mode,
+        "action": action,
+        "tier": alpha_state,
+        "expression": "shadow_option_stock",
+        "reason": "CN shadow-option execution candidate; exit discipline matters more than new factor discovery",
+        "blockers": dedupe(blockers),
+        "details": {
+            "execution_candidate": {
+                "recent_pulse_positive": recent_pulse_is_positive(recent_pulse, "cn"),
+                "alpha_state": alpha_state,
+                "ev_lcb_80_pct": ev_lcb,
+                "ev_norm_lcb_80": ev_norm,
+                "shadow_alpha_prob": round_or_none(shadow_prob),
+                "entry_quality_score": round_or_none(entry_quality),
+                "stale_chase_risk": round_or_none(stale_risk),
+                "exit_rule": "next_open_or_pullback; trim fast into max_favorable; time stop if no follow-through within 2 sessions",
+                "detail": detail,
+            }
+        },
+    }
+    return item
 
 
 def has_factor_lab_prior(row: dict[str, Any]) -> bool:
@@ -1399,14 +2453,22 @@ def build_bulletin(
     candidates_by_market: dict[str, list[dict[str, Any]]],
     current_by_market: dict[str, list[dict[str, Any]]],
     options_by_market: dict[str, list[dict[str, Any]]] | None = None,
+    recent_alpha_pulse_by_market: dict[str, list[dict[str, Any]]] | None = None,
     ev_status_override: dict[str, str] | None = None,
+    learning_queue_by_market: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     execution: list[dict[str, Any]] = []
     tactical: list[dict[str, Any]] = []
     options_alpha: list[dict[str, Any]] = []
+    core_options_cross: list[dict[str, Any]] = []
+    execution_candidates: list[dict[str, Any]] = []
+    recent_alpha_pulse: list[dict[str, Any]] = []
+    learning_queue: list[dict[str, Any]] = []
     recall: list[dict[str, Any]] = []
     blocked: list[dict[str, Any]] = []
     options_by_market = options_by_market or {}
+    recent_alpha_pulse_by_market = recent_alpha_pulse_by_market or {}
+    learning_queue_by_market = learning_queue_by_market or {}
     tactical_policies = {
         market: select_tactical_policy(candidates)
         for market, candidates in candidates_by_market.items()
@@ -1424,25 +2486,62 @@ def build_bulletin(
         selected_policy_id = selected_policies.get(market)
         tactical_policy_id = tactical_policies.get(market)
         research_policy_id = research_policies.get(market)
+        recent_pulse = recent_pulse_for_market(recent_alpha_pulse_by_market, market)
         option_lookup = {
             str(item.get("symbol") or "").upper(): item
             for item in options_by_market.get(market, [])
             if item.get("source") == "real_options"
         }
         for row in current_rows:
+            symbol_key = str(row.get("symbol") or "").upper()
+            option_item = option_lookup.get(symbol_key)
+            cross_context = (
+                us_core_options_cross(row, option_item)
+                if market == "us" and is_us_core_options_cross_candidate(row)
+                else None
+            )
+            if cross_context is not None:
+                core_options_cross.append(core_options_cross_bulletin_item(row, cross_context))
+            execution_candidate = (
+                build_us_execution_candidate_item(
+                    row,
+                    cross_context,
+                    selected_policy_id=selected_policy_id,
+                    recent_pulse=recent_pulse,
+                )
+                if market == "us"
+                else build_cn_execution_candidate_item(row, recent_pulse=recent_pulse)
+                if market == "cn"
+                else None
+            )
+            if execution_candidate is not None:
+                execution_candidates.append(execution_candidate)
             blockers = candidate_blockers(row, selected_policy_id)
             if selected_policy_id and row.get("policy_id") == selected_policy_id and gate_passes(row):
                 options_ok = True
                 options_reason = ""
                 if market == "us":
-                    options_ok, options_reason = long_options_expression_pass(
-                        option_lookup.get(str(row.get("symbol") or "").upper())
-                    )
+                    if cross_context is None:
+                        cross_context = us_core_options_cross(row, option_item)
+                    options_ok = bool(cross_context.get("execution_pass"))
+                    options_reason = str(cross_context.get("reason") or "")
+                    if execution_candidate and execution_candidate.get("blockers"):
+                        options_ok = False
+                        options_reason = str(execution_candidate.get("reason") or options_reason)
+                elif market == "cn":
+                    execution_action = str((execution_candidate or {}).get("action") or "")
+                    execution_candidate_blockers = list((execution_candidate or {}).get("blockers") or [])
+                    if execution_candidate_blockers or execution_action not in {"planned_entry_probe", "wait_pullback_probe"}:
+                        options_ok = False
+                        options_reason = str(
+                            (execution_candidate or {}).get("reason")
+                            or "CN shadow-option setup failed entry/chase/exit execution discipline"
+                        )
                 if options_ok:
                     reason = (
                         "Execution Alpha: CN oversold_contrarian has EV LCB80>0 and planned-entry constraints passed"
                         if market == "cn"
-                        else "Execution Alpha: V2 main strategy with EV LCB80>0, execution constraints passed, and options expression passed"
+                        else f"Execution Alpha: V2 main strategy with EV LCB80>0 and execution constraints passed; {options_reason}"
                     )
                     execution.append(
                         bulletin_item(
@@ -1452,12 +2551,26 @@ def build_bulletin(
                         )
                     )
                 else:
+                    cross_blockers = list((cross_context or {}).get("blockers") or [])
+                    execution_candidate_blockers = list((execution_candidate or {}).get("blockers") or [])
+                    recall_reason = (
+                        "Positive EV Setup: CN shadow-option setup has positive EV evidence, but entry/chase/exit gates do not allow execution today"
+                        if market == "cn"
+                        else "Positive EV Setup: V2 main strategy has positive EV evidence, but core/options cross is conflicted or incomplete"
+                    )
                     recall.append(
                         bulletin_item(
                             row,
                             "recall_alpha",
-                            "Positive EV Setup: V2 main strategy has positive EV evidence, but expression/stable execution is not fully passed",
-                            dedupe([*blockers, options_reason]),
+                            recall_reason,
+                            dedupe(
+                                [
+                                    *blockers,
+                                    *cross_blockers,
+                                    *execution_candidate_blockers,
+                                    *([options_reason] if market == "us" and options_reason else []),
+                                ]
+                            ),
                         )
                     )
             elif tactical_policy_id and row.get("policy_id") == tactical_policy_id and tactical_gate_passes(row):
@@ -1498,7 +2611,13 @@ def build_bulletin(
                         blockers,
                     )
                 )
-        options_alpha.extend(options_by_market.get(market, []))
+        market_options = options_by_market.get(market, [])
+        if market == "us":
+            options_alpha.extend([item for item in market_options if is_tradeable_us_options_alpha(item)])
+        else:
+            options_alpha.extend(market_options)
+        recent_alpha_pulse.extend(recent_alpha_pulse_by_market.get(market, []))
+        learning_queue.extend(learning_queue_by_market.get(market, []))
 
     stability = {
         market: [
@@ -1536,6 +2655,10 @@ def build_bulletin(
         "execution_alpha": execution,
         "tactical_alpha": tactical,
         "options_alpha": options_alpha,
+        "core_options_cross": core_options_cross,
+        "execution_candidates": execution_candidates,
+        "recent_alpha_pulse": recent_alpha_pulse,
+        "learning_queue": learning_queue,
         "recall_alpha": recall,
         "blocked_alpha": blocked,
     }
@@ -1568,11 +2691,19 @@ def render_market_bulletin_md(bulletin: dict[str, Any], market: str) -> str:
         "- headline: advisory context only, not an execution blocker",
         "",
     ]
-    for title, key, empty in [
+    lines += render_recent_alpha_pulse_md(bulletin, market)
+    lines += render_execution_candidates_md(bulletin, market)
+    lines += render_learning_queue_md(bulletin, market)
+    section_specs = [
         (
             "Equity Execution Alpha",
             "execution_alpha",
             "None. No current candidate passed both the stability champion and execution gates.",
+        ),
+        (
+            "Core + Options Cross",
+            "core_options_cross",
+            "None. No current US core candidate had a matching options-alpha row to classify.",
         ),
         (
             "Tactical / Theme Rotation Alpha",
@@ -1594,13 +2725,28 @@ def render_market_bulletin_md(bulletin: dict[str, Any], market: str) -> str:
             "blocked_alpha",
             "None. No blocked current candidates were found.",
         ),
-    ]:
+    ]
+    if market != "us":
+        section_specs = [spec for spec in section_specs if spec[1] != "core_options_cross"]
+
+    for title, key, empty in section_specs:
         lines += [f"### {title}", ""]
         items = [item for item in bulletin[key] if item.get("market") == market]
         if not items:
             lines += [f"- {empty}", ""]
             continue
         for item in items[:20]:
+            if key == "core_options_cross":
+                cross = ((item.get("details") or {}).get("core_options_cross") or {})
+                blockers = item.get("blockers") or []
+                blocker_text = f" Blockers: {', '.join(blockers)}." if blockers else ""
+                lines.append(
+                    f"- `{item.get('symbol')}` - Tier `{item.get('tier') or cross.get('tier')}`; "
+                    f"direction `{item.get('signal_direction')}`; expression `{item.get('expression') or cross.get('expression')}`; "
+                    f"dir_edge `{cross.get('directional_edge')}`; vol_edge `{cross.get('vol_edge')}`; "
+                    f"flow_edge `{cross.get('flow_edge')}`. {item.get('reason')}.{blocker_text}"
+                )
+                continue
             if key == "options_alpha":
                 blockers = item.get("blockers") or []
                 blocker_text = f" Blockers: {', '.join(blockers)}." if blockers else ""
@@ -1859,7 +3005,17 @@ def write_result_tables(
                 ],
             )
 
-        for section in ["execution_alpha", "tactical_alpha", "options_alpha", "recall_alpha", "blocked_alpha"]:
+        for section in [
+            "recent_alpha_pulse",
+            "execution_candidates",
+            "learning_queue",
+            "execution_alpha",
+            "core_options_cross",
+            "tactical_alpha",
+            "options_alpha",
+            "recall_alpha",
+            "blocked_alpha",
+        ]:
             for item in bulletin[section]:
                 con.execute(
                     """
@@ -2011,6 +3167,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     candidates_by_market: dict[str, list[dict[str, Any]]] = {}
     current_by_market: dict[str, list[dict[str, Any]]] = {}
     options_by_market: dict[str, list[dict[str, Any]]] = {}
+    recent_alpha_pulse_by_market: dict[str, list[dict[str, Any]]] = {}
+    learning_queue_by_market: dict[str, list[dict[str, Any]]] = {}
     selected_policies: dict[str, str | None] = {}
     ev_status: dict[str, str] = {}
     selection_rows: list[dict[str, Any]] = []
@@ -2030,6 +3188,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             candidates_by_market[cfg.market] = []
             current_by_market[cfg.market] = []
             options_by_market[cfg.market] = []
+            recent_alpha_pulse_by_market[cfg.market] = []
+            learning_queue_by_market[cfg.market] = []
             selected_policies[cfg.market] = None
             ev_status[cfg.market] = "pending"
             selection_rows.append(
@@ -2073,6 +3233,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             )
         except duckdb.Error:
             options_by_market[cfg.market] = []
+        try:
+            recent_alpha_pulse_by_market[cfg.market] = load_recent_alpha_pulse(
+                cfg.db_path,
+                cfg.market,
+                as_of,
+            )
+        except duckdb.Error:
+            recent_alpha_pulse_by_market[cfg.market] = []
+        try:
+            learning_queue_by_market[cfg.market] = load_learning_queue(
+                cfg.db_path,
+                cfg.market,
+                as_of,
+            )
+        except duckdb.Error:
+            learning_queue_by_market[cfg.market] = []
 
         selected_candidate = next((c for c in candidates if c.get("selected")), None)
         challenger = max(
@@ -2095,13 +3271,15 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             selected_trade_rows.extend([row for row in rows if row.get("policy_id") == selected])
 
     bulletin = build_bulletin(
-        as_of,
-        evaluated_through,
-        selected_policies,
-        candidates_by_market,
-        current_by_market,
-        options_by_market,
-        ev_status,
+        as_of=as_of,
+        evaluated_through=evaluated_through,
+        selected_policies=selected_policies,
+        candidates_by_market=candidates_by_market,
+        current_by_market=current_by_market,
+        options_by_market=options_by_market,
+        recent_alpha_pulse_by_market=recent_alpha_pulse_by_market,
+        ev_status_override=ev_status,
+        learning_queue_by_market=learning_queue_by_market,
     )
 
     output_dir = args.output_root / as_of.isoformat()

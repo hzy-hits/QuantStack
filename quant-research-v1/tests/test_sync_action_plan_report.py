@@ -15,13 +15,13 @@ class SyncActionPlanReportTests(unittest.TestCase):
         structural = """
 ## Action Plan Ledger
 
-### Setup / Wait Plans
+### Positive EV / Setup Tickets
 
 | Symbol / Company | Direction | Confidence | Entry / Review | Stop / Invalid | Target | R:R | Exp move | Time exit | State reason |
 |------------------|-----------|------------|----------------|----------------|--------|-----|----------|-----------|--------------|
 | MPWR / Monolithic Power Systems Inc | long | MODERATE | $1614.41 | $1510.93 | $1921.15 | 2.96 | +19.0% | 3 sessions / next catalyst | event known; require second-day acceptance |
 
-### Blocked / No-Chase Plans
+### Blocked / No-Ticket
 
 | Symbol / Company | Direction | Confidence | Entry / Review | Stop / Invalid | Target | R:R | Exp move | Time exit | State reason |
 |------------------|-----------|------------|----------------|----------------|--------|-----|----------|-----------|--------------|
@@ -33,7 +33,9 @@ class SyncActionPlanReportTests(unittest.TestCase):
 """
         snippet = sync_action_plan_report.build_action_plan_snippet(structural)
 
-        self.assertIn("### 价格计划", snippet)
+        self.assertIn("### Fresh-entry ticket 价格计划", snippet)
+        self.assertIn("No ticket, no new trade", snippet)
+        self.assertIn("Winner Hold Overlay", snippet)
         self.assertIn("MPWR / Monolithic Power Systems Inc", snippet)
         self.assertIn("$1510.93", snippet)
         self.assertIn("事件已公开；只看第二日承接", snippet)

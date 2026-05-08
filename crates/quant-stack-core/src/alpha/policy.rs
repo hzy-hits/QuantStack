@@ -346,3 +346,125 @@ pub(super) fn mark_selected(candidates: &mut [PolicyCandidate], selected_policy_
         candidate.selected = selected_policy_id == Some(candidate.policy_id.as_str());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn trade(policy_id: &str, day: usize, return_pct: f64) -> TradeRow {
+        TradeRow {
+            market: "us".to_string(),
+            report_date: Some(format!("2026-04-{day:02}")),
+            evaluation_date: Some(format!("2026-04-{day:02}")),
+            symbol: format!("T{day:02}"),
+            selection_status: Some("selected".to_string()),
+            report_bucket: Some("core".to_string()),
+            signal_direction: Some("long".to_string()),
+            signal_confidence: Some("HIGH".to_string()),
+            execution_mode: Some("executable_now".to_string()),
+            return_pct: Some(return_pct),
+            policy_id: policy_id.to_string(),
+            policy_label: policy_id.to_string(),
+            ..Default::default()
+        }
+    }
+
+    fn candidate(policy_id: &str, score: f64) -> PolicyCandidate {
+        PolicyCandidate {
+            market: "us".to_string(),
+            policy_id: policy_id.to_string(),
+            policy_label: policy_id.to_string(),
+            horizon_days: 3,
+            lookback_days: 30,
+            fills: 20,
+            active_buckets: 10,
+            avg_trade_pct: Some(0.5),
+            median_trade_pct: Some(0.3),
+            strict_win_rate: Some(0.6),
+            max_drawdown_pct: Some(-2.0),
+            top1_winner_contribution: Some(0.2),
+            stability_score: score,
+            eligible: true,
+            fail_reasons: Vec::new(),
+            selected: false,
+        }
+    }
+
+    #[test]
+    fn policy_candidate_fails_when_scope_is_not_core_execution() {
+        let rows = (1..=25)
+            .map(|day| trade("us:radar:long:watch:wait_pullback:h3", day, 0.8))
+            .collect::<Vec<_>>();
+
+        let candidates = build_policy_candidates(&rows, "us", 3, 30);
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert!(!candidate.eligible);
+        assert!(candidate
+            .fail_reasons
+            .contains(&"policy_bucket_not_core".to_string()));
+        assert!(candidate
+            .fail_reasons
+            .contains(&"policy_confidence_not_high_mod".to_string()));
+        assert!(candidate
+            .fail_reasons
+            .contains(&"policy_execution_not_now".to_string()));
+    }
+
+    #[test]
+    fn policy_candidate_passes_us_thresholds_for_core_executable_high_mod() {
+        let mut rows = Vec::new();
+        for day in 1..=10 {
+            rows.push(trade("us:core:long:high_mod:executable_now:h3", day, 0.9));
+            rows.push(trade("us:core:long:high_mod:executable_now:h3", day, 0.6));
+        }
+
+        let candidates = build_policy_candidates(&rows, "us", 3, 30);
+
+        assert_eq!(candidates.len(), 1);
+        let candidate = &candidates[0];
+        assert!(candidate.eligible, "{:?}", candidate.fail_reasons);
+        assert_eq!(candidate.fills, 20);
+        assert_eq!(candidate.active_buckets, 10);
+        assert!(candidate.stability_score > 0.0);
+    }
+
+    #[test]
+    fn champion_hysteresis_keeps_incumbent_until_margin_clears() {
+        let previous = candidate("us:core:long:high_mod:executable_now:h3", 1.0);
+        let challenger = candidate("us:core:long:high_mod:executable_now:h5", 1.1);
+        let candidates = vec![previous, challenger];
+
+        let (selected, reason) = select_champion(
+            &candidates,
+            Some("us:core:long:high_mod:executable_now:h3"),
+            0.15,
+        );
+
+        assert_eq!(
+            selected.as_deref(),
+            Some("us:core:long:high_mod:executable_now:h3")
+        );
+        assert!(reason.contains("incumbent held"));
+    }
+
+    #[test]
+    fn champion_hysteresis_allows_stronger_challenger() {
+        let previous = candidate("us:core:long:high_mod:executable_now:h3", 1.0);
+        let challenger = candidate("us:core:long:high_mod:executable_now:h5", 1.2);
+        let candidates = vec![previous, challenger];
+
+        let (selected, reason) = select_champion(
+            &candidates,
+            Some("us:core:long:high_mod:executable_now:h3"),
+            0.15,
+        );
+
+        assert_eq!(
+            selected.as_deref(),
+            Some("us:core:long:high_mod:executable_now:h5")
+        );
+        assert!(reason.contains("challenger replaced"));
+    }
+}

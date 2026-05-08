@@ -21,7 +21,9 @@ PYTHON="${PYTHON_BIN:-python3}"
 export FACTOR_LAB_AGENT_BACKEND="${FACTOR_LAB_AGENT_BACKEND:-codex}"
 export FACTOR_LAB_CODEX_MODEL="${FACTOR_LAB_CODEX_MODEL:-gpt-5.4}"
 export FACTOR_LAB_CODEX_REASONING_EFFORT="${FACTOR_LAB_CODEX_REASONING_EFFORT:-xhigh}"
-US_EXPECTED_DATE="${FACTOR_LAB_US_EXPECTED_DATE:-$(TZ=America/New_York date +%Y-%m-%d)}"
+US_EXPECTED_DATE_ENV="${FACTOR_LAB_US_EXPECTED_DATE:-}"
+US_EXPECTED_DATE="${US_EXPECTED_DATE_ENV:-$(TZ=America/New_York date +%Y-%m-%d)}"
+US_READY_DATE="$US_EXPECTED_DATE"
 MARKET="all"
 
 while [[ $# -gt 0 ]]; do
@@ -49,7 +51,26 @@ RUN_US=false
 [[ "$MARKET" == "all" || "$MARKET" == "us" ]] && RUN_US=true
 
 check_us_ready() {
-    $PYTHON -m src.data_readiness --market us --expected-date "$US_EXPECTED_DATE"
+    if $PYTHON -m src.data_readiness --market us --expected-date "$US_EXPECTED_DATE"; then
+        US_READY_DATE="$US_EXPECTED_DATE"
+        export FACTOR_LAB_US_EXPECTED_DATE="$US_READY_DATE"
+        return 0
+    fi
+    if [[ -n "$US_EXPECTED_DATE_ENV" ]]; then
+        return 1
+    fi
+
+    local fallback_date
+    fallback_date="$(TZ=America/New_York date -d 'yesterday' +%Y-%m-%d 2>/dev/null || true)"
+    if [[ -n "$fallback_date" && "$fallback_date" != "$US_EXPECTED_DATE" ]]; then
+        echo "US $US_EXPECTED_DATE not ready; trying latest completed US date $fallback_date"
+        if $PYTHON -m src.data_readiness --market us --expected-date "$fallback_date"; then
+            US_READY_DATE="$fallback_date"
+            export FACTOR_LAB_US_EXPECTED_DATE="$US_READY_DATE"
+            return 0
+        fi
+    fi
+    return 1
 }
 
 echo "=========================================="

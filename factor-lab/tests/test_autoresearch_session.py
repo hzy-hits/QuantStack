@@ -27,6 +27,7 @@ class AutoresearchSessionTests(unittest.TestCase):
             self.assertIn("Optimize US factor mining loop", context_text)
             self.assertIn("METRIC is_ic_ir", benchmark_text)
             self.assertIn("--eval-composite --market \"$MARKET\"", checks_text)
+            self.assertNotIn(">/dev/null", checks_text)
 
     def test_system_prompt_embeds_resumable_session_context(self) -> None:
         prompt = build_system_prompt(
@@ -103,9 +104,14 @@ class AutoresearchSessionTests(unittest.TestCase):
             ]
         )
 
-        self.assertIn("Factors passing OOS: 1/1", summary)
-        self.assertIn("Factors kept after checks: 0/1", summary)
-        self.assertNotIn("Candidates for promotion:", summary)
+        self.assertIn("## 结论", summary)
+        self.assertIn("OOS 通过：1/1", summary)
+        self.assertIn("keep：0/1", summary)
+        self.assertIn("为什么 OOS PASS 但不 keep", summary)
+        self.assertIn("## 是否进入主系统", summary)
+        self.assertIn("否。本轮没有因子同时通过 OOS 和 checks", summary)
+        self.assertIn("公式（不截断）", summary)
+        self.assertIn("rank(close)", summary)
         self.assertNotIn("reverted_oos_pass (id=", summary)
 
 

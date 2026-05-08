@@ -316,31 +316,31 @@ def render_action_plan_summary(bundle: dict) -> list[str]:
     lines: list[str] = [
         "## Action Plan Ledger",
         "",
-        "This section is computed before narrative writing. It is the price plan ledger, not an order list: the Stable Alpha Bulletin above still decides whether any row can be called Execution Alpha.",
+        "This section is computed before narrative writing. It is the fresh-entry ticket ledger, not a portfolio liquidation instruction. No ticket means no new trade; existing profitable positions must be handled by My Book / Winner Hold Overlay, not killed by the fresh-entry gate.",
         "",
         "| State | Count | Report use |",
         "|-------|------:|------------|",
-        f"| Gate-pass plan | {len(gate_pass)} | May be discussed as a conditional single-name plan only if stable-alpha gate also supports it. |",
-        f"| Setup / wait plan | {len(setup)} | Review, pullback, or second-day confirmation only. |",
-        f"| Blocked / no-chase | {len(blocked)} | Explicitly blocked; do not rewrite as a long idea. |",
+        f"| Fresh-entry ticket | {len(gate_pass)} | May be discussed as a new-trade ticket only if stable-alpha gate also supports it. |",
+        f"| Positive EV / setup ticket | {len(setup)} | Review, 0.10R stock probe, pullback, or second-day confirmation only; no options money. |",
+        f"| Blocked / no-ticket | {len(blocked)} | No new buy and no add. If already held, route to Winner Hold Overlay instead of automatic full exit. |",
         "",
     ]
     lines += _render_action_plan_table(
-        "Gate-Pass Plans",
+        "Fresh Entry Tickets",
         gate_pass,
-        empty="No current notable item has both main signal gate pass and a complete price plan.",
+        empty="No current notable item has a fresh-entry ticket with stable-alpha support and a complete price plan.",
         limit=6,
     )
     lines += _render_action_plan_table(
-        "Setup / Wait Plans",
+        "Positive EV / Setup Tickets",
         setup,
         empty="No setup/wait plans in the current notable set.",
         limit=8,
     )
     lines += _render_action_plan_table(
-        "Blocked / No-Chase Plans",
+        "Blocked / No-Ticket",
         blocked,
-        empty="No blocked/no-chase plans in the current notable set.",
+        empty="No blocked/no-ticket rows in the current notable set.",
         limit=8,
     )
     lines += ["---", ""]
@@ -390,7 +390,7 @@ def _action_plan_view(item: dict[str, Any]) -> dict[str, Any]:
         and action not in {"wait_pullback", "pullback_only"}
     ):
         state = "gate_pass_plan"
-        reason = "main signal gate passed with complete entry/stop/target"
+        reason = "fresh-entry ticket passed with complete entry/stop/target"
     elif positive_ev_recall and not chase_blocked and not rr_blocked:
         state = "setup_wait_plan"
         reason = _positive_ev_reason(policy_metrics)
@@ -537,7 +537,7 @@ def render_setup_alpha_summary(bundle: dict) -> list[str]:
         f"| Post-event second day | {len(groups['post_event_second_day'])} | Event is known; require second-day acceptance instead of day-one chase. |",
         f"| Blocked chase / priced-in | {len(groups['blocked_chase'])} | Do not promote to Execution Alpha unless it resets. |",
         "",
-        "**Rules:** Execution Alpha still requires main signal pass + execution gate + R:R. Headline Gate is context only; anti-chase is an execution constraint. Price extension is allowed only when trend/event/options confirmation pays for it.",
+        "**Rules:** Fresh entry still requires a valid ticket, execution gate, R:R, and Strategy EV support. Headline Gate is context only; anti-chase is an execution constraint. Price extension is allowed only when trend/event/options confirmation pays for it. A blocked fresh-entry ticket is not an automatic sell signal for an existing winner; route that case through My Book / Winner Hold Overlay.",
         "",
     ]
 
@@ -805,7 +805,7 @@ def _render_notable_items(bundle: dict) -> list[str]:
     if headline_mode != "trend":
         lines += [
             f"**Headline context:** Headline Gate is `{headline_mode.upper()}`. Treat this as source-quality / regime context, not an execution blocker.",
-            "Execution eligibility below is controlled by the main signal and execution gates.",
+            "Fresh-entry eligibility below is controlled by ticket, execution, R:R, Strategy EV, and anti-chase gates. Existing winners require a separate hold/trim/exit decision.",
             "",
         ]
 

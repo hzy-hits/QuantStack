@@ -1,50 +1,28 @@
 #!/bin/bash
-# Full daily pipeline: fetch → enrich → analytics → filter → render → agents → email
+# Compatibility wrapper for the A-share daily pipeline.
 #
-# Designed for cron. Logs everything to reports/logs/{date}_{slot}.log
+# The canonical state machine is the root Rust command:
+#   quant-stack daily --markets cn --run-producers --with-narrative --send-reports ...
 #
-# Usage:
-#   ./scripts/daily_pipeline.sh                      # auto-detect date (Shanghai time)
-#   ./scripts/daily_pipeline.sh morning              # morning slot (8:30 AM label)
-#   ./scripts/daily_pipeline.sh evening              # evening slot (6:00 PM label)
-#   ./scripts/daily_pipeline.sh morning 2026-04-16   # rerun specific date/slot
-#   ./scripts/daily_pipeline.sh 2026-04-16 morning   # same as above
-#   ./scripts/daily_pipeline.sh --prod evening       # send to full config recipients
+# This wrapper intentionally contains no producer/render/agent/email logic. Keeping
+# the old shell workflow here would create a second cron path that can bypass the
+# shared alpha gate and report-model checks.
 
 set -euo pipefail
 
 PROJ_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-
-resolve_repo_dir() {
-    for candidate in "$@"; do
-        if [[ -n "${candidate:-}" && -d "$candidate" ]]; then
-            (cd "$candidate" && pwd)
-            return 0
-        fi
-    done
-    return 1
-}
-
 STACK_ROOT="${QUANT_STACK_ROOT:-$(cd "$PROJ_DIR/.." && pwd)}"
-FACTOR_LAB_ROOT="${FACTOR_LAB_ROOT:-$(resolve_repo_dir \
-    "${STACK_ROOT:+$STACK_ROOT/factor-lab}" \
-    "$PROJ_DIR/../factor-lab" \
-    "$PROJ_DIR/../../python/factor-lab" \
-)}"
-
-if [[ -z "$FACTOR_LAB_ROOT" ]]; then
-    echo "ERROR: factor-lab repo not found. Set FACTOR_LAB_ROOT or QUANT_STACK_ROOT."
-    exit 1
-fi
 
 DATE=""
 SLOT=""
 DELIVERY_MODE="${QUANT_DELIVERY_MODE:-test}"
 TEST_RECIPIENT="${QUANT_TEST_RECIPIENT:-}"
-for arg in "$@"; do
+EXTRA_ARGS=()
+
+while [[ $# -gt 0 ]]; do
+    arg="$1"
     case "$arg" in
-        morning|evening)
+        morning|evening|daily)
             SLOT="$arg"
             ;;
         --prod)
@@ -53,437 +31,75 @@ for arg in "$@"; do
         --test)
             DELIVERY_MODE="test"
             ;;
+        --delivery-mode=*)
+            DELIVERY_MODE="${arg#--delivery-mode=}"
+            ;;
+        --delivery-mode)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "ERROR: --delivery-mode requires test or prod"
+                exit 1
+            fi
+            DELIVERY_MODE="$1"
+            ;;
         --test-recipient=*)
             TEST_RECIPIENT="${arg#--test-recipient=}"
+            ;;
+        --test-recipient)
+            shift
+            if [[ $# -eq 0 ]]; then
+                echo "ERROR: --test-recipient requires an email"
+                exit 1
+            fi
+            TEST_RECIPIENT="$1"
+            ;;
+        --delivery-dry-run|--dry-run)
+            EXTRA_ARGS+=("$arg")
             ;;
         [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9])
             DATE="$arg"
             ;;
         *)
             echo "ERROR: Unknown argument '$arg'"
-            echo "Usage: ./scripts/daily_pipeline.sh [--test|--prod|--test-recipient=email] [morning|evening] [YYYY-MM-DD]"
+            echo "Usage: ./scripts/daily_pipeline.sh [--test|--prod|--delivery-dry-run|--dry-run|--test-recipient=email] [morning|evening|daily] [YYYY-MM-DD]"
             exit 1
             ;;
     esac
+    shift
 done
 
 DATE="${DATE:-$(TZ=Asia/Shanghai date +%Y-%m-%d)}"
 SLOT="${SLOT:-$(TZ=Asia/Shanghai date +%H | awk '{print ($1 < 12) ? "morning" : "evening"}')}"
-LOG_DIR="$PROJ_DIR/reports/logs"
-mkdir -p "$LOG_DIR"
-LOG="$LOG_DIR/${DATE}_${SLOT}.log"
-BRIDGE_PID=""
-REVIEW_BACKFILL_TIMING="${QUANT_CN_REVIEW_BACKFILL_TIMING:-post-email}"
-if [[ "$SLOT" == "morning" ]]; then
-    SLOT_LABEL_CN="盘前"
-elif [[ "$SLOT" == "evening" ]]; then
-    SLOT_LABEL_CN="盘后"
-else
-    SLOT_LABEL_CN="$SLOT"
-fi
 
-cleanup() {
-    # Ensure the background bridge never keeps the cron shell alive after failures.
-    if [[ -n "${BRIDGE_PID:-}" ]]; then
-        echo "  Stopping AKShare bridge (PID $BRIDGE_PID)..."
-        kill "$BRIDGE_PID" 2>/dev/null || true
-        wait "$BRIDGE_PID" 2>/dev/null || true
-        BRIDGE_PID=""
-    fi
-}
-
-trap cleanup EXIT
-
-find_previous_report() {
-    "$PYTHON_BIN" - "$PROJ_DIR" "$DATE" "$SLOT" <<'PY'
-from __future__ import annotations
-
-import sys
-from pathlib import Path
-
-project_dir = Path(sys.argv[1])
-date = sys.argv[2]
-slot = sys.argv[3]
-rank = {"morning": 0, "evening": 1}
-current_key = (date, rank.get(slot, 1))
-reports: list[tuple[tuple[str, int], Path]] = []
-
-for path in (project_dir / "reports").glob("*_report_zh_*.md"):
-    stem = path.stem
-    if "_report_zh_" not in stem:
-        continue
-    report_date, report_slot = stem.split("_report_zh_", 1)
-    if report_slot not in rank:
-        continue
-    reports.append(((report_date, rank[report_slot]), path))
-
-# Legacy evening reports from before slot-aware output existed.
-for path in (project_dir / "reports").glob("*_report_zh.md"):
-    report_date = path.stem.split("_report_zh", 1)[0]
-    reports.append(((report_date, rank["evening"]), path))
-
-reports.sort()
-previous = [path for key, path in reports if key < current_key]
-print(previous[-1] if previous else "", end="")
-PY
-}
-
-annotate_and_snapshot_payloads() {
-    "$PYTHON_BIN" - "$PROJ_DIR" "$DATE" "$SLOT" "$SLOT_LABEL_CN" <<'PY'
-from __future__ import annotations
-
-import shutil
-import sys
-from pathlib import Path
-
-import duckdb
-
-project_dir = Path(sys.argv[1])
-date = sys.argv[2]
-slot = sys.argv[3]
-slot_label = sys.argv[4]
-reports_dir = project_dir / "reports"
-db_path = project_dir / "data" / "quant_cn_report.duckdb"
-
-latest_trade_date = "unknown"
-try:
-    con = duckdb.connect(str(db_path), read_only=True)
-    latest = con.execute(
-        """
-        SELECT MAX(trade_date)
-        FROM prices
-        WHERE ts_code IN ('000300.SH', '000016.SH', '399006.SZ')
-          AND trade_date <= CAST(? AS DATE)
-        """,
-        [date],
-    ).fetchone()[0]
-    con.close()
-    latest_trade_date = str(latest) if latest is not None else "unknown"
-except Exception as exc:
-    latest_trade_date = f"unknown ({exc})"
-
-if slot == "morning":
-    meaning = (
-        "盘前报告：价格/资金数据按最新可用收盘解释，重点是隔夜事件、今日触发条件、"
-        "开盘后确认与撤销规则；不要把它写成收盘复盘。"
-    )
-else:
-    meaning = (
-        "盘后报告：应以今日收盘、全天资金流、事件兑现和早盘假设复盘为主；"
-        "不要把早盘条件原样复制。"
-    )
-
-block = "\n".join(
-    [
-        "## 报告时段",
-        f"- Slot: {slot} / {slot_label}",
-        f"- 报告日期: {date}",
-        f"- 最新指数价格交易日: {latest_trade_date}",
-        f"- 解释: {meaning}",
-        "",
-        "---",
-        "",
-    ]
+ARGS=(
+    daily
+    --stack-root "$STACK_ROOT"
+    --date "$DATE"
+    --markets cn
+    --session "$SLOT"
+    --run-producers
+    --with-narrative
+    --send-reports
+    --delivery-mode "$DELIVERY_MODE"
 )
 
-for section in ("macro", "structural", "events"):
-    src = reports_dir / f"{date}_payload_{section}.md"
-    if not src.exists():
-        continue
-    text = src.read_text(encoding="utf-8", errors="replace")
-    if "## 报告时段" not in text[:1000]:
-        src.write_text(block + text, encoding="utf-8")
-    dst = reports_dir / f"{date}_payload_{section}_{slot}.md"
-    shutil.copy2(src, dst)
-    print(f"  Snapshot payload: {dst}")
-PY
-}
-
-run_review_backfill() {
-    local review_backfill_days review_from
-    review_backfill_days="${QUANT_CN_REVIEW_BACKFILL_DAYS:-7}"
-    if [[ "$review_backfill_days" =~ ^[0-9]+$ ]] && [[ "$review_backfill_days" -gt 0 ]]; then
-        review_from="$("$PYTHON_BIN" - "$DATE" "$review_backfill_days" <<'PY'
-import sys
-from datetime import date, timedelta
-
-as_of = date.fromisoformat(sys.argv[1])
-days = int(sys.argv[2])
-print((as_of - timedelta(days=days)).isoformat())
-PY
-)"
-        echo "  Review backfill window: ${review_from} -> ${DATE} (${review_backfill_days} calendar days)"
-        ./target/release/quant-cn review-backfill --date-from "$review_from" --date-to "$DATE" 2>&1 || echo "  Review history backfill failed (non-fatal)"
-    else
-        echo "  Review history backfill skipped (QUANT_CN_REVIEW_BACKFILL_DAYS=${review_backfill_days})"
-    fi
-}
-
-exec > >(tee -a "$LOG") 2>&1
-
-echo "=========================================="
-echo "  A-Share Daily Pipeline"
-echo "  Date:  $DATE"
-echo "  Slot:  $SLOT"
-echo "  Delivery mode: $DELIVERY_MODE"
-echo "  Start: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST')"
-echo "=========================================="
-echo ""
-
-cd "$PROJ_DIR"
-
-# ── Step 0: Ensure binary is built ────────────────────────────────────────────
-echo "[0/6] Checking binary..."
-if [[ ! -x target/release/quant-cn ]]; then
-    echo "  Building release binary..."
-    cargo build --release 2>&1
+if [[ -n "$TEST_RECIPIENT" ]]; then
+    ARGS+=(--test-recipient "$TEST_RECIPIENT")
 fi
+ARGS+=("${EXTRA_ARGS[@]}")
+export QUANT_DELIVERY_MODE="$DELIVERY_MODE"
 
-# ── Step 1: Start AKShare bridge (if not running) ────────────────────────────
-echo "[1/6] AKShare bridge..."
-if ! curl -sf http://localhost:8321/health >/dev/null 2>&1; then
-    echo "  Starting AKShare bridge..."
-    cd bridge && "$PYTHON_BIN" -m uvicorn akshare_bridge:app --host 0.0.0.0 --port 8321 &
-    BRIDGE_PID=$!
-    cd "$PROJ_DIR"
-    sleep 3
-    if curl -sf http://localhost:8321/health >/dev/null 2>&1; then
-        echo "  Bridge started (PID $BRIDGE_PID)"
-    else
-        echo "  Bridge failed to start — continuing without AKShare data"
-        kill $BRIDGE_PID 2>/dev/null || true
-        BRIDGE_PID=""
-    fi
-else
-    echo "  Bridge already running"
-fi
-
-# ── Step 2: Fetch + Enrich + Analytics + Filter + Render ─────────────────────
-echo "[2/6] Running pipeline (fetch → analyze → filter → render)..."
-./target/release/quant-cn run --date "$DATE" 2>&1
-
-# ── Step 2.5: Import Factor Lab promoted factors ──────────────────────────────
-echo "[2.5/6] Importing Factor Lab factors..."
-(cd "$FACTOR_LAB_ROOT" && "$PYTHON_BIN" -m src.mining.export_to_pipeline --market cn --date "$DATE") 2>&1 || echo "  Factor Lab import failed (non-fatal)"
-
-# `quant-cn run` already performed enrichment. Re-render after Factor Lab,
-# emit the stable-alpha bulletin, then render final payloads with it. Historical
-# review backfill is maintenance and stays out of the email critical path by
-# default.
-echo "[3/6] Refreshing payloads and stable alpha bulletin..."
-./target/release/quant-cn render --date "$DATE" 2>&1
-if [[ "$REVIEW_BACKFILL_TIMING" == "pre-alpha" || "$REVIEW_BACKFILL_TIMING" == "pre_email" ]]; then
-    run_review_backfill
-else
-    echo "  Review history backfill deferred until after email (QUANT_CN_REVIEW_BACKFILL_TIMING=${REVIEW_BACKFILL_TIMING})"
-fi
 if [[ -n "${QUANT_STACK_BIN:-}" ]]; then
-    "$QUANT_STACK_BIN" alpha evaluate \
-        --date "$DATE" \
-        --lookback-days 30 \
-        --auto-select \
-        --emit-bulletin \
-        --history-db "$STACK_ROOT/data/strategy_backtest_history.duckdb" \
-        --output-root "$PROJ_DIR/reports/review_dashboard/strategy_backtest" \
-        --us-db "$STACK_ROOT/quant-research-v1/data/quant.duckdb" \
-        --cn-db "$PROJ_DIR/data/quant_cn_report.duckdb" \
-        --no-project-copies \
-        2>&1 || echo "  Stable alpha bulletin failed (non-fatal)"
-elif [[ -x "$STACK_ROOT/target/release/quant-stack" ]]; then
-    "$STACK_ROOT/target/release/quant-stack" alpha evaluate \
-        --date "$DATE" \
-        --lookback-days 30 \
-        --auto-select \
-        --emit-bulletin \
-        --history-db "$STACK_ROOT/data/strategy_backtest_history.duckdb" \
-        --output-root "$PROJ_DIR/reports/review_dashboard/strategy_backtest" \
-        --us-db "$STACK_ROOT/quant-research-v1/data/quant.duckdb" \
-        --cn-db "$PROJ_DIR/data/quant_cn_report.duckdb" \
-        --no-project-copies \
-        2>&1 || echo "  Stable alpha bulletin failed (non-fatal)"
-elif [[ -x "$STACK_ROOT/target/debug/quant-stack" ]]; then
-    "$STACK_ROOT/target/debug/quant-stack" alpha evaluate \
-        --date "$DATE" \
-        --lookback-days 30 \
-        --auto-select \
-        --emit-bulletin \
-        --history-db "$STACK_ROOT/data/strategy_backtest_history.duckdb" \
-        --output-root "$PROJ_DIR/reports/review_dashboard/strategy_backtest" \
-        --us-db "$STACK_ROOT/quant-research-v1/data/quant.duckdb" \
-        --cn-db "$PROJ_DIR/data/quant_cn_report.duckdb" \
-        --no-project-copies \
-        2>&1 || echo "  Stable alpha bulletin failed (non-fatal)"
-elif [[ -f "$STACK_ROOT/Cargo.toml" ]]; then
-    cargo run --quiet --manifest-path "$STACK_ROOT/Cargo.toml" --bin quant-stack -- alpha evaluate \
-        --date "$DATE" \
-        --lookback-days 30 \
-        --auto-select \
-        --emit-bulletin \
-        --history-db "$STACK_ROOT/data/strategy_backtest_history.duckdb" \
-        --output-root "$PROJ_DIR/reports/review_dashboard/strategy_backtest" \
-        --us-db "$STACK_ROOT/quant-research-v1/data/quant.duckdb" \
-        --cn-db "$PROJ_DIR/data/quant_cn_report.duckdb" \
-        --no-project-copies \
-        2>&1 || echo "  Stable alpha bulletin failed (non-fatal)"
-elif [[ -f "$STACK_ROOT/scripts/run_strategy_backtest_report.py" ]]; then
-    "$PYTHON_BIN" "$STACK_ROOT/scripts/run_strategy_backtest_report.py" \
-        --date "$DATE" \
-        --lookback-days 30 \
-        --auto-select \
-        --emit-bulletin \
-        --history-db "$STACK_ROOT/data/strategy_backtest_history.duckdb" \
-        --output-root "$PROJ_DIR/reports/review_dashboard/strategy_backtest" \
-        --us-db "$STACK_ROOT/quant-research-v1/data/quant.duckdb" \
-        --cn-db "$PROJ_DIR/data/quant_cn_report.duckdb" \
-        2>&1 || echo "  Stable alpha bulletin failed (non-fatal)"
-else
-    echo "  Stable alpha gate script not found; skipping bulletin"
-fi
-./target/release/quant-cn render --date "$DATE" 2>&1
-
-# Append Factor Lab research candidates AFTER render (so they don't get overwritten)
-STRUCT_PAYLOAD="reports/${DATE}_payload_structural.md"
-if [ -f "$STRUCT_PAYLOAD" ]; then
-    FACTOR_TMP="$(mktemp)"
-    FACTOR_STATUS="missing"
-    FACTOR_TRADE_DATE=""
-    FACTOR_AGE_DAYS=""
-    if (cd "$FACTOR_LAB_ROOT" && "$PYTHON_BIN" scripts/run_strategy.py --market cn --today --date "$DATE") > "$FACTOR_TMP" 2>&1; then
-        FACTOR_TRADE_DATE="$("$PYTHON_BIN" - "$FACTOR_TMP" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-text = Path(sys.argv[1]).read_text(errors="ignore")
-m = re.search(r"数据截止:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})", text)
-print(m.group(1) if m else "")
-PY
-)"
-        if [ -n "$FACTOR_TRADE_DATE" ]; then
-            FACTOR_AGE_DAYS="$("$PYTHON_BIN" - "$DATE" "$FACTOR_TRADE_DATE" <<'PY'
-import sys
-from datetime import date
-
-as_of = date.fromisoformat(sys.argv[1])
-trade = date.fromisoformat(sys.argv[2])
-print((as_of - trade).days)
-PY
-)"
-            if [ "${FACTOR_AGE_DAYS:-999}" -le 3 ]; then
-                FACTOR_STATUS="fresh"
-            else
-                FACTOR_STATUS="stale"
-            fi
-        else
-            FACTOR_STATUS="fresh"
-        fi
-    else
-        echo "  Factor Lab signal failed"
-    fi
-
-    echo "" >> "$STRUCT_PAYLOAD"
-    echo "## Factor Lab research prior / recall lead" >> "$STRUCT_PAYLOAD"
-    echo "" >> "$STRUCT_PAYLOAD"
-    echo "以下是 Factor Lab research prior / recall lead，不是独立交易指令。" >> "$STRUCT_PAYLOAD"
-    echo "它不能决定 Headline Gate、今日市场主方向或主书排序；只有通过主系统方向、execution gate、流动性和追价过滤后，才能进入主书。" >> "$STRUCT_PAYLOAD"
-    if [ "$FACTOR_STATUS" = "stale" ]; then
-        echo "状态: STALE。候选输出使用的最新交易日为 ${FACTOR_TRADE_DATE}，较报告日 ${DATE} 滞后 ${FACTOR_AGE_DAYS} 天。只允许放在附录，不得作为主书确认信号。" >> "$STRUCT_PAYLOAD"
-    elif [ "$FACTOR_STATUS" = "fresh" ]; then
-        if [ -n "$FACTOR_TRADE_DATE" ]; then
-            echo "状态: FRESH。候选输出交易日 ${FACTOR_TRADE_DATE}，可作为研究附录展示，但不得覆盖主系统结论。" >> "$STRUCT_PAYLOAD"
-        else
-            echo "状态: FRESH。未发现明显日期滞后，可作为研究附录展示，但不得覆盖主系统结论。" >> "$STRUCT_PAYLOAD"
-        fi
-    else
-        echo "状态: UNAVAILABLE。候选输出失败或缺少交易日信息，忽略其方向性结论。" >> "$STRUCT_PAYLOAD"
-    fi
-    echo "每只股票附带参考价、风控线、观察上沿和研究权重。" >> "$STRUCT_PAYLOAD"
-    echo "" >> "$STRUCT_PAYLOAD"
-    if [ -s "$FACTOR_TMP" ]; then
-        "$PYTHON_BIN" - "$FACTOR_TMP" >> "$STRUCT_PAYLOAD" <<'PY'
-import re
-import sys
-from pathlib import Path
-
-text = Path(sys.argv[1]).read_text(errors="ignore").replace("\r\n", "\n")
-for old, new in {
-    "## Factor Lab Independent Trading Signal": "## Factor Lab research prior / recall lead",
-    "## Factor Lab Research Candidates": "## Factor Lab research prior / recall lead",
-    "怎么操作:": "研究观察:",
-    "买入价": "参考价",
-    "止损": "风控线",
-    "止盈": "观察上沿",
-    "仓位": "研究权重",
-}.items():
-    text = text.replace(old, new)
-
-text = re.sub(
-    r"(?m)^(\s*\d+\.\s*)明天开盘买入下面\s*([0-9]+)\s*只.*$",
-    r"\1研究候选清单如下（仅 recall lead，进入主书前仍需 gate）",
-    text,
-)
-text = re.sub(r"(?m)^(\s*\d+\.\s*)持有\s*([^\n]+)$", r"\1研究观察窗口：\2", text)
-text = text.replace("买入", "研究关注")
-print(text.strip())
-PY
-    fi
-    echo "" >> "$STRUCT_PAYLOAD"
-    echo "请在最终研报中完整展示上述清单，但明确标注为研究附录，不得让其主导 headline 或主书排序。" >> "$STRUCT_PAYLOAD"
-    rm -f "$FACTOR_TMP"
+    exec "$QUANT_STACK_BIN" "${ARGS[@]}"
 fi
 
-echo "[4/8] Annotating + snapshotting $SLOT payloads..."
-annotate_and_snapshot_payloads
-
-# ── Step 3: Generate charts ──────────────────────────────────────────────────
-echo "[5/8] Generating charts..."
-"$PYTHON_BIN" scripts/generate_charts.py --date "$DATE" 2>&1 || echo "  Charts failed (non-fatal)"
-if [[ -d "reports/charts/$DATE" ]]; then
-    mkdir -p "reports/charts/$DATE/$SLOT"
-    find "reports/charts/$DATE" -maxdepth 1 -type f -name '*.png' -exec cp {} "reports/charts/$DATE/$SLOT/" \;
+if [[ -x "$STACK_ROOT/target/release/quant-stack" ]]; then
+    exec "$STACK_ROOT/target/release/quant-stack" "${ARGS[@]}"
 fi
 
-# ── Step 4: Verify payload files ─────────────────────────────────────────────
-echo "[6/8] Checking payload files..."
-PAYLOADS_OK=1
-for f in macro structural events; do
-    payload="reports/${DATE}_payload_${f}.md"
-    if [[ -s "$payload" ]]; then
-        echo "  $payload ($(wc -c < "$payload") bytes)"
-    else
-        echo "  MISSING: $payload"
-        PAYLOADS_OK=0
-    fi
-done
-
-if [[ "$PAYLOADS_OK" -eq 0 ]]; then
-    echo "  ERROR: Payload files incomplete. Aborting agent run."
-    exit 1
+if [[ -x "$STACK_ROOT/target/debug/quant-stack" ]]; then
+    exec "$STACK_ROOT/target/debug/quant-stack" "${ARGS[@]}"
 fi
 
-# ── Step 5: Run multi-agent report ───────────────────────────────────────────
-echo "[7/8] Running multi-agent analysis..."
-
-# Pass the immediate previous slot report for hypothesis validation (if exists).
-PREV_REPORT="$(find_previous_report)"
-if [[ -f "$PREV_REPORT" ]]; then
-    echo "  Using previous report: $PREV_REPORT"
-    SEND_EMAIL=1 QUANT_DELIVERY_MODE="$DELIVERY_MODE" QUANT_TEST_RECIPIENT="$TEST_RECIPIENT" \
-        bash scripts/run_agents.sh "$DATE" "$SLOT" "$PREV_REPORT"
-else
-    SEND_EMAIL=1 QUANT_DELIVERY_MODE="$DELIVERY_MODE" QUANT_TEST_RECIPIENT="$TEST_RECIPIENT" \
-        bash scripts/run_agents.sh "$DATE" "$SLOT"
-fi
-
-if [[ "$REVIEW_BACKFILL_TIMING" == "post-email" || "$REVIEW_BACKFILL_TIMING" == "post_email" ]]; then
-    echo "[8/8] Post-email review maintenance..."
-    run_review_backfill
-else
-    echo "[8/8] Post-email review maintenance skipped (QUANT_CN_REVIEW_BACKFILL_TIMING=${REVIEW_BACKFILL_TIMING})"
-fi
-
-echo ""
-echo "=========================================="
-echo "  Pipeline complete: $(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S CST')"
-echo "  Report: reports/${DATE}_report_zh_${SLOT}.md"
-echo "=========================================="
+cd "$STACK_ROOT"
+exec cargo run --quiet --bin quant-stack -- "${ARGS[@]}"

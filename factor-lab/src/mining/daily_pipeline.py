@@ -74,6 +74,9 @@ HEALTH_WATCH_DAYS = 5      # consecutive days
 HEALTH_RETIRE_DAYS = 5     # days on watchlist before retire
 HEALTH_RECOVER_IC = 0.01   # IC above this → recover from watchlist
 LCB80_Z = 1.2816
+MONEY_GATE_RETIRE_MARKETS = {"cn"}
+MONEY_GATE_RETIRE_CORR = 0.90
+MONEY_GATE_RETIRE_TOP5_SHARE = 0.30
 
 HORIZON_WEIGHTS = {7: 0.5, 14: 0.3, 30: 0.2}
 SIGREG_REDUNDANCY_SOFT = 0.55
@@ -393,6 +396,93 @@ def _lcb80(values: pd.Series | np.ndarray | list[float]) -> float:
     std = float(clean.std(ddof=1))
     se = std / float(np.sqrt(len(clean))) if std > 1e-12 else 0.0
     return float(clean.mean() - LCB80_Z * se)
+
+
+def _table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
+    try:
+        return bool(
+            con.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name=?",
+                [table],
+            ).fetchone()[0]
+        )
+    except duckdb.Error:
+        return False
+
+
+def _float_or_none(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _latest_money_gate_row(
+    con: duckdb.DuckDBPyConnection,
+    market: str,
+    factor_id: str,
+) -> dict | None:
+    if not _table_exists(con, "factor_money_gate_daily"):
+        return None
+    result = con.execute(
+        """
+        SELECT as_of, alpha_factory_status, money_status, lcb80_pct,
+               double_cost_lcb80_pct, top5_pnl_share, max_abs_corr,
+               marginal_daily_sharpe_delta, blockers_json
+        FROM factor_money_gate_daily
+        WHERE market=? AND factor_id=?
+        ORDER BY as_of DESC
+        LIMIT 1
+        """,
+        [market, factor_id],
+    )
+    row = result.fetchone()
+    if not row:
+        return None
+    return {desc[0]: row[idx] for idx, desc in enumerate(result.description)}
+
+
+def _money_gate_retire_reasons(market: str, row: dict | None) -> list[str]:
+    if market not in MONEY_GATE_RETIRE_MARKETS or not row:
+        return []
+    reasons: list[str] = []
+
+    lcb80 = _float_or_none(row.get("lcb80_pct"))
+    if lcb80 is not None and lcb80 <= 0:
+        reasons.append("lcb80<=0")
+
+    double_cost_lcb80 = _float_or_none(row.get("double_cost_lcb80_pct"))
+    if double_cost_lcb80 is not None and double_cost_lcb80 <= 0:
+        reasons.append("double_cost_lcb80<=0")
+
+    top_share = _float_or_none(row.get("top5_pnl_share"))
+    if top_share is not None and top_share > MONEY_GATE_RETIRE_TOP5_SHARE:
+        reasons.append("top5_pnl_share>30%")
+
+    max_corr = _float_or_none(row.get("max_abs_corr"))
+    if max_corr is not None and max_corr >= MONEY_GATE_RETIRE_CORR:
+        reasons.append(f"corr>={MONEY_GATE_RETIRE_CORR:.2f}")
+
+    marginal = _float_or_none(row.get("marginal_daily_sharpe_delta"))
+    if marginal is not None and marginal <= 0:
+        reasons.append("marginal_sharpe<=0")
+
+    status = str(row.get("alpha_factory_status") or "")
+    if status == "blocked" and not reasons:
+        reasons.append("alpha_factory_blocked")
+
+    return list(dict.fromkeys(reasons))
+
+
+def _json_ready(row: dict | None) -> dict | None:
+    if not row:
+        return None
+    clean = {}
+    for key, value in row.items():
+        clean[key] = value.isoformat() if hasattr(value, "isoformat") else value
+    return clean
 
 
 def _apply_sigreg_penalties(candidates: list[dict], market: str, prices: pd.DataFrame) -> list[dict]:
@@ -1277,6 +1367,9 @@ def step4_health_check(market: str):
             # Lifecycle transitions
             new_status = status
             new_watch = watch_count
+            retire_reason = None
+            money_gate_row = _latest_money_gate_row(con, market, factor_id)
+            money_gate_reasons: list[str] = []
             if status == "promoted":
                 # IC is computed after applying stored direction, so negative IC
                 # means the promoted factor has flipped against us.
@@ -1344,6 +1437,18 @@ def step4_health_check(market: str):
                             f"({remaining}d to retire)"
                         )
 
+            money_gate_reasons = _money_gate_retire_reasons(market, money_gate_row)
+            if money_gate_reasons:
+                new_status = "retired"
+                new_watch = 0
+                retire_reason = "Alpha Factory money gate failed: " + ", ".join(money_gate_reasons)
+                print(
+                    f"  Retiring {factor_id}: latest money gate failed "
+                    f"({', '.join(money_gate_reasons)})"
+                )
+            elif new_status == "retired":
+                retire_reason = "IC/LCB decay"
+
             # Update
             update_fields = {
                 "promoted": ("promoted_at", None),
@@ -1357,10 +1462,10 @@ def step4_health_check(market: str):
                     last_health_check=CURRENT_TIMESTAMP,
                     watchlist_at = CASE WHEN ?='watchlist' AND status!='watchlist' THEN CURRENT_TIMESTAMP ELSE watchlist_at END,
                     retired_at = CASE WHEN ?='retired' THEN CURRENT_TIMESTAMP ELSE retired_at END,
-                    retire_reason = CASE WHEN ?='retired' THEN 'IC decay' ELSE retire_reason END
+                    retire_reason = CASE WHEN ?='retired' THEN ? ELSE retire_reason END
                 WHERE factor_id=?
             """, [new_status, rolling_ic, new_watch,
-                  new_status, new_status, new_status, factor_id])
+                  new_status, new_status, new_status, retire_reason, factor_id])
 
             # Log
             con.execute("""
@@ -1395,7 +1500,7 @@ def step4_health_check(market: str):
                 status,
                 new_status,
                 new_watch,
-                "IC/LCB decay" if new_status == "retired" else None,
+                retire_reason,
                 json.dumps(
                     {
                         "regime_change": regime_change,
@@ -1403,6 +1508,8 @@ def step4_health_check(market: str):
                         "recent_ic_20d_lcb80": _lcb80(recent_ic_series_20["ic"])
                         if len(recent_ic_series_20) > 0
                         else 0.0,
+                        "money_gate": _json_ready(money_gate_row),
+                        "money_gate_reasons": money_gate_reasons,
                     },
                     ensure_ascii=True,
                     sort_keys=True,
