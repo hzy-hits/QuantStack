@@ -12,6 +12,28 @@ Payload分为四层：
 - 战术延续：headline 不明时仍可保留的战术续涨名额
 - 主题轮动：主题轮动观察
 - 雷达：边缘跟踪
+- 影子期权/涨停可选性：有 p_limit_up、p_touch_limit 或 EV LCB 的可选性观察，必须与主候选池分开
+
+## Alpha Permission Contract（先读，优先级最高）
+
+所有信号必须先归入权限层，再提取数据；你可以降级，但不能升级。
+
+| 系统层 | 提取层级 | 允许措辞 | 禁止措辞 |
+|---|---|---|---|
+| `execution_alpha` | 正式执行 | 正式执行、可执行 alpha | 观察、待定 |
+| `probation_alpha` | 小仓试错 | 小仓试错、0.25R/0.5R、trial-only | 正式买入、加仓、Fresh Entry |
+| `recall_alpha` / Setup | 复核层 | 回踩复核、次日承接、观察 | 可买、半执行 |
+| Factor Lab | 研究层 | 研究附录、主系统未放行 | 交易指令、主线排序 |
+| `blocked_alpha` | 阻断层 | 不追、等待、风险回避 | 机会、推荐 |
+
+`Shared Report Model Status` 若存在，必须服从其中的 section_counts 和 probation_symbols。`execution=0` 时不得写“正式可执行”；`probation>0` 只能提取为“小仓试错观察”，不得放入主候选池或 Fresh Entry。
+
+## A股动量质量门（必须执行）
+
+- `cn_lukewarm_momentum_3_8d` 是硬阻断：5D涨幅落在 3%-8% 的半强不强票只能写“温吞动量/弱反弹风险”，不得写成试错或正式执行。
+- `cn_not_strong_trend_continuation` 表示没有进入强趋势延续层：只能写观察/回避，不得包装成主题机会。
+- A股 `probation_alpha` 只允许强趋势延续试错：优先 `ret_20d>=25%` 且避开 5D 3%-8% 温吞区间，或系统已明确放行的高分强势票。
+- `RADAR`、低分、rank>10、缺 5D/20D 动量质量字段的名字不得进入试错层。
 
 ---
 
@@ -29,9 +51,12 @@ Payload分为四层：
 - 数据缺失写 `[缺失]`
 - 不给交易建议，不做叙事，不判断方向
 - 追高约束必须显式提取：若 5D/20D 涨幅极端、涨停、trend_prob <= 0.50、execution_mode=do_not_chase/wait_pullback、或 main gate blocked，只能标为观察/回踩复核/耗竭风险，不得写成可执行趋势多头
+- 温吞动量必须显式提取：若 blocker 出现 `cn_lukewarm_momentum_3_8d`，或 5D 在 3%-8% 且 20D 未达到强趋势延续，必须写成“半强不强/弱反弹/次日兑现风险”，不得放进主候选池或小仓试错
 - 必须单独读取 `Setup Alpha / Anti-Chase`：`Breakout Acceptance` 是“已涨但趋势/承接/事件确认仍支持延续”，不得机械当成追高；`Blocked Chase / Priced-In` 才能写成追价风险
-- 必须读取稳定门禁的 `ev_status`：`pending` 表示历史EV/稳定门禁尚未完成评估，不得写成稳定门禁失败；`failed` 写成“30日稳定门禁未放行”；`passed` 时也只有 Execution Alpha 可以写成可执行 alpha
-- 如果主候选池为0、`ev_status=failed`、或主信号门槛未过，要写成“候选已召回，但历史EV/30日稳定门禁未放行”，不得说成做多机会不足或硬拔区间/战术候选进主书
+- 必须读取稳定门禁的 `ev_status`：`pending` 表示历史EV/稳定门禁尚未完成评估，不得写成稳定门禁失败；`failed` 写成“历史EV未放行”；`cn_direct` 表示 A股30日稳定门禁已绕开，按当前执行门禁放行；`passed` 时也只有 Execution Alpha 可以写成可执行 alpha
+- 必须读取 `probation_alpha`：它只代表小仓试错层，最大 0.25R/0.5R；不得写成正式执行、不得计入主候选池、不得覆盖 `execution_alpha=0`
+- A股不要当 Meme 提取。涨停/触板概率和 shadow-option payoff 只能放在“影子期权 / 涨停可选性”，不得升级为主候选或趋势做多。
+- 如果主候选池为0、`ev_status=failed`、或主信号门槛未过，要写成“候选已召回，但主系统 execution/liquidity/risk 门禁未放行”，不得说成做多机会不足或硬拔区间/战术候选进主书
 - 禁用词：综合考量、谨慎乐观、值得关注、密切跟踪、不确定性较大
 - P值禁止写1.00或0.00
 - 概率标注样本量
@@ -46,10 +71,23 @@ Payload分为四层：
 - direction_concentration: [值]
 - rule: [原样摘录 payload 中 reporting_rule]
 
+## 权限层审计
+- execution_alpha: [数量；若为0写“无正式执行”]
+- probation_alpha: [数量 + 代码；trial-only，不是正式执行]
+- recall/setup: [数量或“有/无”；复核层]
+- Factor Lab: [fresh/stale/unavailable；研究层]
+- blocked_alpha: [数量或主要阻断原因]
+- 动量质量门: [温吞动量阻断数量/代码；强趋势延续候选数量/代码；缺5D/20D质量字段数量]
+
 ## 主候选池
 | 代码 | 名称 | 方向 | composite | regime | 5D% | 20D% | trend_prob | info_score | 资金方向 | 冲突 |
 |------|------|------|-----------|--------|-----|------|------------|------------|----------|------|
 （每个CORE item一行，最多约12行）
+
+## Probation / Trial Tickets
+| 代码 | 名称 | 试错理由 | 最大风险 | 仍未正式放行的原因 |
+|------|------|----------|----------|--------------------|
+（只提取 `probation_alpha`；没有就写“本期无小仓试错名额”；每行必须说明为什么不是 5D 3%-8% 温吞动量；不得混入主候选池）
 
 ## Composite拆解 (仅CORE HIGH)
 对每个HIGH item：
@@ -72,10 +110,20 @@ Payload分为四层：
 |------|------|
 （20D涨幅极端 + trend_prob背离 + 换手率突变的标的）
 
+## 温吞动量 / 弱反弹阻断
+| 代码 | 5D% | 20D% | blocker | 为什么不能试错 |
+|------|-----|------|---------|----------------|
+（只列 5D 3%-8%、`cn_lukewarm_momentum_3_8d` 或 `cn_not_strong_trend_continuation`；没有就写“无温吞动量阻断”）
+
 ## Setup Alpha / Anti-Chase
 | 分组 | 代码 | 执行含义 |
 |------|------|----------|
 （从 payload 的同名区块提取；Breakout Acceptance 写成突破承接观察，Blocked Chase 写成不追价/风险回避）
 
+## 影子期权 / 涨停可选性
+| 代码 | p_limit_up/p_touch_limit | EV LCB | 盘口确认 | 失败风险 |
+|------|-------------------------|--------|----------|----------|
+（最多3行；没有就写“本期无影子期权观察名额”；不得放入主候选池）
+
 ## 判断
-（恰好3句话，每句必须包含一个来自payload的数字。领域：信号质量、区分能力、关键冲突。如果 gate=uncertain，要明确指出“这批信号更像主题轮动/观察名单”。）
+（恰好3句话，每句必须包含一个来自payload的数字。领域：权限层、信号质量、关键冲突。如果 gate=uncertain，要明确指出“这批信号更像主题轮动/观察名单”；若 probation>0，必须说明它不是正式执行。）
