@@ -1,0 +1,51 @@
+ticker,company,market_country,asset_pool,bfs_depth,module,current_pool,total_score,score_bucket,evidence_state,counterevidence
+000660.KS,SK hynix,韩国,卫星资产池,D2,HBM/DRAM,核心池,100,core_review,"待原文核验: HBM revenue, capacity, margins",HBM供给扩张、Samsung/Micron竞争
+2308.TW,Delta Electronics,台湾,卫星资产池,D2-D3,Power supply + thermal,核心候选,100,core_review,待原文核验,业务多元，AI占比需拆
+2330.TW / TSM,TSMC,台湾,卫星资产池,D2,Leading-edge foundry + CoWoS,核心池,100,core_review,原文已证明: quarterly results线索; AI/HPC detail需核验,地缘、客户集中、CoWoS扩产后定价
+3037.TW,Unimicron,台湾,卫星资产池,D3,ABF substrate / PCB,核心候选,100,core_review,待原文核验,"ABF cycle, pricing"
+3661.TW,Alchip,台湾,卫星资产池,D3,ASIC design service,核心候选,100,core_review,待原文核验: customer concentration/tape-outs,客户集中、project delay
+4062.T,Ibiden,日本,卫星资产池,D3,ABF substrate,核心候选,100,core_review,待原文核验,ABF周期、CoWoS瓶颈转移
+6146.T,DISCO,日本,卫星资产池,D3,Dicing/grinding/thinning,核心候选,100,core_review,待原文核验,订单周期、工艺替代
+6315.T,TOWA,日本,卫星资产池,D3,Molding/advanced packaging equipment,核心候选,100,core_review,待原文核验,HBM技术路线变化、订单集中
+6857.T,Advantest,日本,卫星资产池,D3,ATE / memory & SoC test,核心候选,100,core_review,待原文核验: AI tester mix,测试订单周期、需求提前透支
+BESI.AS,BE Semiconductor Industries,欧洲,卫星资产池,D3,Hybrid bonding / advanced packaging equipment,核心候选,100,core_review,待原文核验,订单时点、路线切换
+3711.TW / ASX,ASE Technology,台湾,卫星资产池,D2-D3,OSAT / advanced packaging,候选池,99,core_review,待原文核验,OSAT毛利、先进封装占比
+042700.KQ,Hanmi Semiconductor,韩国,卫星资产池,D3,HBM bonding equipment,核心候选,98,core_review,待原文核验,客户集中、技术路线切换
+CAMT,Camtek,以色列/US,卫星资产池,D3,Advanced packaging inspection,核心候选,98,core_review,待原文核验,订单周期、客户集中、估值
+SUSS.DE,SÜSS MicroTec,欧洲,卫星资产池,D3,Advanced packaging tools,核心候选,98,core_review,待原文核验,订单周期、客户集中
+2802.T,Ajinomoto,日本,卫星资产池,D3,ABF material,候选池,96,core_review,待原文核验,公司多元化，AI占比小
+009150.KS,Samsung Electro-Mechanics,韩国,卫星资产池,D3,Substrate / components,候选池,93,core_review,待原文核验,消费电子混杂、ABF周期
+058470.KQ,Leeno,韩国,卫星资产池,D3,Test sockets/probes,候选池,93,core_review,待原文核验,AI mix不清、测试周期
+2360.TW,Chroma,台湾,卫星资产池,D3,Power/semiconductor test,候选池,93,core_review,待原文核验,AI占比不清、订单周期
+3443.TW,GUC,台湾,卫星资产池,D3,ASIC design service,候选池,93,core_review,待原文核验,客户集中、设计失败
+6223.TW,MPI,台湾,卫星资产池,D3,Probe card/test interface,候选池,93,core_review,待原文核验,客户集中、泛测试beta
+8046.TW,Nan Ya PCB,台湾,卫星资产池,D3,Substrate / PCB,候选池,93,core_review,待原文核验,AI占比、周期
+8299.TWO,Phison,台湾,卫星资产池,D3,SSD controller,候选池,93,core_review,待原文核验,NAND周期、enterprise占比
+NVMI,Nova,以色列/US,卫星资产池,D3,Metrology,候选池,93,core_review,待原文核验,WFE周期、AI间接
+2301.TW,Lite-On,台湾,卫星资产池,D3,Power supply / optoelectronics,候选/雷达池,92,core_review,待原文核验,AI占比、价格竞争
+2382.TW,Quanta,台湾,卫星资产池,D2,AI server ODM,候选池,92,core_review,待原文核验,低毛利、客户集中、库存
+6669.TW,Wiwynn,台湾,卫星资产池,D2,AI server ODM,候选池,92,core_review,待原文核验,客户集中、低毛利
+MTRS.ST,Munters,欧洲,卫星资产池,D3,Thermal management,候选/雷达池,92,core_review,待原文核验,AI占比/竞争
+SU.PA,Schneider Electric,欧洲,卫星资产池,D2-D4,Data center electrical equipment,核心池,91,core_review,待原文核验,AI占比、订单透支、估值
+095340.KQ,ISC,韩国,卫星资产池,D3,Test sockets,候选池,90,core_review,待原文核验,客户集中、周期
+6515.TW,WinWay,台湾,卫星资产池,D3,Probe card / test socket,候选池,90,core_review,待原文核验,客户集中、订单周期
+131290.KQ,TSE,韩国,卫星资产池,D3,Probe/test interface,雷达/候选池,89,core_review,待原文核验,AI证据弱、周期
+3189.TW,Kinsus,台湾,卫星资产池,D3,Substrate,雷达/候选池,89,core_review,待原文核验,良率/客户/周期
+005930.KS,Samsung Electronics,韩国,卫星资产池,D2-D4,HBM/DRAM/foundry/packaging,候选池,83,core_review,待原文核验,"HBM qualification, cyclicality, foundry losses"
+ABBN.SW / ABB,ABB,欧洲,卫星资产池,D2-D4,Grid/electrification/automation,核心/候选池,80,core_review,待原文核验,AI占比、周期
+4004.T,Resonac,日本,卫星资产池,D3-D4,Packaging/semiconductor materials,候选池,79,high_priority,待原文核验,材料需求分散、传统周期
+IFX.DE,Infineon,欧洲,卫星资产池,D3-D4,Power semiconductors,候选/雷达池,78,high_priority,待原文核验,auto/industrial混杂、AI占比低
+TSEM,Tower Semiconductor,以色列/US,卫星资产池,D3-D4,Specialty foundry / SiPh,雷达池,73,high_priority,待原文核验,AI SiPh客户不清、mature cycle
+ALFA.ST,Alfa Laval,欧洲,卫星资产池,D3-D4,Heat exchangers / thermal,雷达池,70,high_priority,待原文核验,AI间接、工业周期
+SIVE.ST,Sivers Semiconductors,欧洲,卫星资产池,D3-D4,Photonics/mmWave,雷达池,70,high_priority,待原文核验,技术/商业化风险、客户验证
+IQE.L,IQE,欧洲,卫星资产池,D3-D4,Compound semiconductor epi,雷达池,67,high_priority,待原文核验,客户集中、收入弱、路线不确定
+8035.T,Tokyo Electron,日本,卫星资产池,D4,WFE,核心beta/雷达,66,radar,待原文核验,大盘半导体beta、出口管制
+ASML.AS,ASML,欧洲,卫星资产池,D4,EUV lithography,核心beta/雷达,64,radar,待原文核验,出口管制、WFE周期、估值
+SOIT.PA,Soitec,欧洲,卫星资产池,D4,SOI/SmartSiC substrate,雷达/候选池,60,radar,待原文核验,AI相关性需证明、RF/auto混杂
+6361.T,Ebara,日本,卫星资产池,D4,CMP/vacuum/fab infra,雷达/候选池,58,radar,待原文核验,AI间接、周期
+6920.T,Lasertec,日本,卫星资产池,D4,Mask inspection/metrology,候选/雷达池,58,radar,待原文核验,AI间接、WFE周期
+AIXA.DE,Aixtron,欧洲,卫星资产池,D4,Compound semi equipment,雷达/候选池,58,radar,待原文核验,AI链条间接、LED/power周期
+ASM.AS,ASM International,欧洲,卫星资产池,D4,ALD/deposition,候选/雷达池,58,radar,待原文核验,WFE周期、AI间接
+ENR.DE,Siemens Energy,欧洲,卫星资产池,D4,Grid/power equipment,候选/雷达池,58,radar,待原文核验,非AI需求混杂、项目周期
+VATN.SW,VAT Group,欧洲,卫星资产池,D4,Vacuum valves,雷达/候选池,58,radar,待原文核验,AI链条间接、WFE周期
+6368.T,Organo,日本,卫星资产池,D4,UPW systems,雷达池,52,radar,待原文核验,AI链条间接、项目周期

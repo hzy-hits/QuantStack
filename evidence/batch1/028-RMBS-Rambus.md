@@ -1,0 +1,92 @@
+# RMBS Rambus evidence card
+
+状态：draft evidence card, pending original-source verification
+
+边界：这张卡只用于原文核验和研究分层，不是投资建议、买卖建议、目标价或仓位建议。
+
+## 基本信息
+
+| 字段 | 内容 |
+| --- | --- |
+| Rank | 28 |
+| Priority tier | P0_first_batch |
+| 公司 / 证券代码 | Rambus / RMBS |
+| 市场 / 资产池 | US / 美国资产池 |
+| BFS depth | D3 |
+| 产业链模块 | Memory interface IP |
+| 当前分池 | 候选池 |
+| Universe score | 96 / core_review |
+| 核验状态 | pending_original_source_verification |
+
+## 依赖链假设
+
+| 字段 | 内容 |
+| --- | --- |
+| Dependency path | HBM/DDR/CXL demand → memory interface IP → royalties |
+| Dependency edge | 技术边+BOM边 |
+| ETF clue | semis ETFs待查 |
+| Smart money clue | 13F小中盘 |
+
+## 本轮优先核验
+
+| 项目 | 内容 |
+| --- | --- |
+| Source priority | Find latest annual report, latest quarterly results, earnings call transcript, investor presentation, and official product/capacity pages first. |
+| Primary sources to find | 10-K/20-F / quarterly results / earnings call / investor presentation / product roadmap |
+| Metrics to verify | data center revenue; custom silicon revenue; design wins; NRE vs mass production; IP royalty; customer concentration |
+| Upgrade conditions | Original sources prove sustained AI compute or ASIC demand and supply-chain pull-through to D2/D3. |
+| Downgrade conditions | Revenue is concentrated, one-off NRE, software moat blocks adoption, or customer disclosures are too thin. |
+
+## 原文来源登记
+
+| 来源类型 | 链接 / 文件 | 发布日期 | 覆盖期间 | 备注 |
+| --- | --- | --- | --- | --- |
+| Annual report / 10-K / 20-F |  |  |  |  |
+| Quarterly results / 10-Q / 6-K |  |  |  |  |
+| Earnings call transcript |  |  |  |  |
+| Investor presentation |  |  |  |  |
+| Company product / technical page |  |  |  |  |
+| Exchange filing / regulatory filing |  |  |  |  |
+| Upstream/downstream cross-disclosure |  |  |  |  |
+
+## 原文证据
+
+| 指标 | 原文位置 | 原文能证明什么 | 不能证明什么 | 口径备注 |
+| --- | --- | --- | --- | --- |
+| Revenue / segment revenue |  |  |  | GAAP/non-GAAP、币种、期间 |
+| Gross margin / operating margin |  |  |  | 产品 mix、一次性项目 |
+| CapEx / inventory / FCF |  |  |  | 现金流与扩产周期 |
+| Backlog / RPO / orders |  |  |  | 是否可取消、是否已进收入 |
+| ASP / shipment / capacity |  |  |  | 单位、同比/环比 |
+| Customer / product evidence |  |  |  | 客户是否直接披露 |
+| Technical roadmap / qualification |  |  |  | 技术路线与量产时间 |
+
+## 结论分层
+
+| 层级 | 内容 |
+| --- | --- |
+| 原文已证明 |  |
+| 合理推论 |  |
+| 待原文核验 | 待原文核验 |
+| 主要反证 | IP attach率、客户内化 |
+
+## 研究判断
+
+| 维度 | 评分 1-5 | 依据 |
+| --- | --- | --- |
+| AI 需求相关度 |  |  |
+| 供给瓶颈 |  |  |
+| 议价权 |  |  |
+| 持续性 |  |  |
+| 财务传导 |  |  |
+| 技术护城河 |  |  |
+| 估值空间 |  |  |
+| 反证清晰度 |  |  |
+
+## 当前动作
+
+- [ ] 找到最新 annual report / 10-K / 20-F 或交易所年报。
+- [ ] 找到最新季度 earnings release / investor presentation。
+- [ ] 找到 earnings call transcript 或公司说明会材料。
+- [ ] 核对收入、订单、backlog、产能、毛利率、客户关系和技术路线。
+- [ ] 写清楚升级 / 保持候选 / 降为雷达 / 排除的条件。
