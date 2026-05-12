@@ -1,0 +1,28 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Generated local database; rebuild from a private universe seed.
+data/*.sqlite
+data/*.sqlite-*
+
+# Private research artifacts. The public repo should contain methodology,
+# scripts, templates, and safe examples only.
+notes/
+reports/
+evidence/
+data/global_universe_v2.jsonl
+data/private/
+data/raw/
+data/normalized/
+
+# Future private market/account data.
+private/
+secrets/
+ibkr/
+*.key
+*.pem
+*.env

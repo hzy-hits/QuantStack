@@ -1,0 +1,49 @@
+ticker,company,market_country,asset_pool,bfs_depth,module,current_pool,total_score,score_bucket,evidence_state,counterevidence
+COHR,Coherent,US,美国资产池,D2-D3,800G/1.6T optics + lasers,候选/核心候选,100,core_review,"待原文核验: datacom AI mix, customer concentration",价格战、客户集中、CPO延后/路线切换
+NVDA,NVIDIA,US,美国资产池,D1,GPU/CUDA + networking + rack-scale systems,核心池,100,core_review,原文已证明: data center segment strong; 具体客户/平台仍逐项核验,ASIC替代、毛利率下行、客户CapEx放缓、出口管制
+VRT,Vertiv,US,美国资产池,D2,AI data center power/thermal,核心池,100,core_review,待原文核验: data center order/backlog/margins,订单透支、冷却ASP下行、DC延期
+AVGO,Broadcom,US,美国资产池,D1-D2,Custom ASIC + networking + CPO,核心池,99,core_review,合理推论+待原文核验: ASIC/CPO客户与收入拆分需公司原文,单客户集中、ASIC项目取消、网络价格竞争
+FN,Fabrinet,US,美国资产池,D2-D3,Optical manufacturing,候选池,96,core_review,待原文核验: datacom mix/customer risk,低毛利代工、客户集中、库存
+MOD,Modine,US,美国资产池,D2-D3,Thermal management,候选池,96,core_review,待原文核验: DC mix/margins,冷却标准化、价格战、非AI业务混杂
+RMBS,Rambus,US,美国资产池,D3,Memory interface IP,候选池,96,core_review,待原文核验,IP attach率、客户内化
+SNPS,Synopsys,US,美国资产池,D3,EDA/IP,核心beta/候选,95,core_review,待原文核验: AI chip design mix,估值、客户CapEx周期
+ALAB,Astera Labs,US,美国资产池,D3,PCIe/CXL retimer + connectivity,候选池,93,core_review,待原文核验: AI platform mix/customer concentration,客户集中、attach rate、标准变化
+CRDO,Credo,US,美国资产池,D3,AEC/SerDes/connectivity,候选池,93,core_review,待原文核验: hyperscaler concentration and revenue mix,客户集中、铜/光路线变化、ASP下行
+FORM,FormFactor,US,美国资产池,D3,Probe card,候选池,93,core_review,待原文核验: HBM/GPU mix,泛测试beta、订单周期
+LITE,Lumentum,US,美国资产池,D2-D3,Lasers/datacom optics,候选池,93,core_review,待原文核验: AI datacom revenue/customer qualification,光模块价格战、客户集中、capex cycle
+MRVL,Marvell,US,美国资产池,D1-D3,Custom silicon + optical DSP + networking,候选池,93,core_review,合理推论+待原文核验: AI revenue mix与客户集中,ASIC项目时点、DSP被LPO/CPO挤压、客户集中
+MTSI,MACOM,US,美国资产池,D3,RF/photonic components,候选池,93,core_review,待原文核验,AI暴露分散、周期混杂
+ONTO,Onto Innovation,US,美国资产池,D3,Metrology / inspection,候选池,93,core_review,待原文核验,WFE周期、客户capex
+PSTG,Pure Storage,US,美国资产池,D3,AI storage systems,候选池,93,core_review,待原文核验: AI customer/AI storage revenue；ticker/公司名以交易所主数据刷新,软件/存储周期混杂、客户ROI
+TER,Teradyne,US,美国资产池,D3,Semiconductor ATE,候选池,93,core_review,待原文核验: AI tester demand,消费/工业测试周期、测试时间缩短
+AMZN,Amazon,US,美国资产池,D0-D1,AWS + Trainium + Anthropic,核心beta,92,core_review,原文已证明: Anthropic 5GW agreement线索; 财务拆分待核验,Trainium性能/生态、CapEx回报、AWS margin
+ANET,Arista Networks,US,美国资产池,D2,AI Ethernet networking,核心/候选池,92,core_review,待原文核验: AI cluster revenue/backlog,客户集中、Ethernet价格竞争、NVLink/IB替代
+CDNS,Cadence,US,美国资产池,D3,EDA/simulation,核心beta/候选,92,core_review,待原文核验,估值、EDA周期、并购监管
+GOOGL,Alphabet / Google,US,美国资产池,D0-D1,Gemini + TPU + GCP,核心beta,92,core_review,原文已证明: CapEx/technical infra/TPU线索; 细分客户待核验,TPU硬件销售波动、AI搜索商业化、能耗/折旧
+SMTC,Semtech,US,美国资产池,D3,Signal integrity / optical DSP adjacent,雷达/候选池,92,core_review,待原文核验,非AI业务拖累、路线替代
+AAOI,Applied Optoelectronics,US,美国资产池,D2-D3,Datacom optical modules,候选/雷达池,89,core_review,待原文核验: customer wins and margins,毛利率、客户集中、价格战、执行风险
+MU,Micron,US,美国资产池,D2,HBM + DRAM + eSSD,核心/候选池,89,core_review,"待原文核验: HBM sold-out, ASP, margins",HBM供给过剩、NAND周期误判、ASP反转
+CRWV,CoreWeave,US,美国资产池,D1-D4,NeoCloud / GPU-as-a-Service,候选池,86,core_review,原文已证明: backlog/active power线索; contract quality待核验,高杠杆、客户集中、GPU残值、利息/折旧
+COHU,Cohu,US,美国资产池,D3,Test handlers / sockets,雷达池,84,core_review,待原文核验,AI相关性弱/周期性
+KLA,KLA,US,美国资产池,D3-D4,Inspection/metrology,核心beta/候选,83,core_review,原文需核验: advanced packaging/AI mix,大盘beta、估值已反映
+DOCN,DigitalOcean,US,美国资产池,D1-D3,SMB cloud / AI cloud services,雷达池,81,core_review,待原文核验,hyperscaler competition、GPU economics
+ORCL,Oracle,US,美国资产池,D1,AI cloud / Stargate cloud capacity,候选池,81,core_review,合理推论+待原文核验: RPO/合同质量/CapEx细节,客户集中、项目融资、电力/许可、毛利率
+ETN,Eaton,US,美国资产池,D2-D4,Electrical equipment,核心/候选池,80,core_review,待原文核验: DC mix/backlog,AI占比不透明、周期/估值
+CSCO,Cisco,US,美国资产池,D2-D4,Networking + optics + security,候选/雷达池,79,high_priority,待原文核验: AI-specific revenue,增长慢、AI专用度弱、毛利压力
+META,Meta Platforms,US,美国资产池,D0-D1,Open-source frontier + AI products + internal infra,核心beta/需求验证,78,high_priority,"待原文核验: AI CapEx, MTIA, infra depreciation",广告ROI、CapEx回报、开源模型成本
+NTAP,NetApp,US,美国资产池,D3-D4,Enterprise/data center storage,雷达/候选池,78,high_priority,待原文核验,AI专用度弱
+SPXC,SPX Technologies,US,美国资产池,D3-D4,Cooling/HVAC/electrical niches,雷达/候选池,78,high_priority,待原文核验,AI暴露间接
+AMD,AMD,US,美国资产池,D1,GPU/CPU AI compute,核心/候选池,77,high_priority,原文需核验: data center / Instinct / EPYC segment metrics,CUDA生态、毛利率、供给链、客户集中
+MSFT,Microsoft,US,美国资产池,D0-D1,Azure + OpenAI demand aggregator,核心beta,77,high_priority,"原文需核验: Azure AI contribution, RPO, CapEx, depreciation",AI毛利率、CapEx回报、OpenAI集中、反垄断
+NBIS,Nebius,US,美国资产池,D1-D4,NeoCloud / AI cloud,候选池,76,high_priority,待原文核验: revenue/backlog/utilization/debt,融资、客户质量、利用率、GPU残值
+POWL,Powell Industries,US,美国资产池,D3-D4,Electrical switchgear,候选池,76,high_priority,待原文核验: DC customer and backlog,周期订单、客户集中、扩产后瓶颈缓解
+STX,Seagate,US,美国资产池,D3-D4,Nearline HDD/object storage,雷达/候选池,75,high_priority,待原文核验: AI storage use cases,AI相关性间接、HDD周期
+WDC,Western Digital / SanDisk,US,美国资产池,D3-D4,NAND/eSSD/storage,候选/雷达池,75,high_priority,待原文核验: eSSD vs consumer NAND split,传统NAND周期误判、ASP波动
+IREN,IREN,US,美国资产池,D1-D4,AI cloud + powered land from crypto mining,候选/雷达池,72,high_priority,待原文核验: AI contracts/utilization/debt,比特币业务混杂、融资、客户质量
+APLD,Applied Digital,US,美国资产池,D1-D4,AI data center developer,候选/雷达池,68,high_priority,待原文核验,融资、施工、客户集中
+CORZ,Core Scientific,US,美国资产池,D1-D4,AI hosting / power campuses,雷达/候选池,68,high_priority,待原文核验,BTC周期混杂、客户/债务风险
+WULF,TeraWulf,US,美国资产池,D1-D4,Powered data center / HPC transition,雷达池,66,high_priority,待原文核验,BTC混杂、融资、执行风险
+GEV,GE Vernova,US,美国资产池,D4,Grid + gas turbines,雷达/候选池,58,radar,待原文核验,项目周期长、非AI需求混杂
+BE,Bloom Energy,US,美国资产池,D4-D5,On-site power / fuel cells,雷达/候选池,50,radar,"待原文核验: DC contract economics, fuel costs",燃料成本、技术/规模验证、监管
+CCJ,Cameco,US,美国资产池,D4-D5,Uranium,雷达池,46,radar,待原文核验,AI相关性间接，商品周期
+LEU,Centrus Energy,US,美国资产池,D4-D5,Nuclear fuel / HALEU,雷达池,42,radar,待原文核验: contracts/regulatory milestones,AI链条很间接、监管/项目周期长

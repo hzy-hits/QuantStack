@@ -1,0 +1,82 @@
+ticker,company,market_country,asset_pool,bfs_depth,module,current_pool,total_score,score_bucket,evidence_state,counterevidence
+000063.SZ / 0763.HK,中兴通讯,A股主板/H股,中国资产池,D2-D3,Networking/telecom/DC equipment,候选/雷达池,95,core_review,待原文核验,AI DC专用度弱、出口限制
+000938.SZ,紫光股份,A股主板,中国资产池,D2-D3,Network/server/cloud infra,候选/雷达池,95,core_review,待原文核验,AI专用度不清、低毛利
+002185.SZ,华天科技,A股主板,中国资产池,D3,OSAT,雷达/候选池,92,core_review,待原文核验,AI高端封装证据弱
+002436.SZ,兴森科技,A股主板,中国资产池,D3,IC substrate/PCB,雷达/候选池,92,core_review,待原文核验,产能爬坡、良率、客户认证
+603228.SH,景旺电子,A股主板,中国资产池,D3,PCB,雷达/候选池,92,core_review,待原文核验,AI相关性待拆分
+2301.TW,Lite-On,台湾,卫星资产池,D3,Power supply / optoelectronics,候选/雷达池,92,core_review,待原文核验,AI占比、价格竞争
+MTRS.ST,Munters,欧洲,卫星资产池,D3,Thermal management,候选/雷达池,92,core_review,待原文核验,AI占比/竞争
+SMTC,Semtech,US,美国资产池,D3,Signal integrity / optical DSP adjacent,雷达/候选池,92,core_review,待原文核验,非AI业务拖累、路线替代
+SU.PA,Schneider Electric,欧洲,卫星资产池,D2-D4,Data center electrical equipment,核心池,91,core_review,待原文核验,AI占比、订单透支、估值
+603083.SH,剑桥科技,A股主板,中国资产池,D2-D3,Optical modules,候选/雷达池,89,core_review,待原文核验,客户集中、价格战、订单波动
+131290.KQ,TSE,韩国,卫星资产池,D3,Probe/test interface,雷达/候选池,89,core_review,待原文核验,AI证据弱、周期
+3189.TW,Kinsus,台湾,卫星资产池,D3,Substrate,雷达/候选池,89,core_review,待原文核验,良率/客户/周期
+AAOI,Applied Optoelectronics,US,美国资产池,D2-D3,Datacom optical modules,候选/雷达池,89,core_review,待原文核验: customer wins and margins,毛利率、客户集中、价格战、执行风险
+002384.SZ,东山精密,A股主板,中国资产池,D3,PCB/precision components,雷达池,87,core_review,待原文核验,消费电子混杂、AI纯度弱
+002913.SZ,奥士康,A股主板,中国资产池,D3,PCB,雷达池,87,core_review,待原文核验,客户/AI占比弱
+CRWV,CoreWeave,US,美国资产池,D1-D4,NeoCloud / GPU-as-a-Service,候选池,86,core_review,原文已证明: backlog/active power线索; contract quality待核验,高杠杆、客户集中、GPU残值、利息/折旧
+COHU,Cohu,US,美国资产池,D3,Test handlers / sockets,雷达池,84,core_review,待原文核验,AI相关性弱/周期性
+005930.KS,Samsung Electronics,韩国,卫星资产池,D2-D4,HBM/DRAM/foundry/packaging,候选池,83,core_review,待原文核验,"HBM qualification, cyclicality, foundry losses"
+KLA,KLA,US,美国资产池,D3-D4,Inspection/metrology,核心beta/候选,83,core_review,原文需核验: advanced packaging/AI mix,大盘beta、估值已反映
+DOCN,DigitalOcean,US,美国资产池,D1-D3,SMB cloud / AI cloud services,雷达池,81,core_review,待原文核验,hyperscaler competition、GPU economics
+ABBN.SW / ABB,ABB,欧洲,卫星资产池,D2-D4,Grid/electrification/automation,核心/候选池,80,core_review,待原文核验,AI占比、周期
+ETN,Eaton,US,美国资产池,D2-D4,Electrical equipment,核心/候选池,80,core_review,待原文核验: DC mix/backlog,AI占比不透明、周期/估值
+002335.SZ,科华数据,A股主板,中国资产池,D2-D4,UPS/IDC/power,候选/雷达池,79,high_priority,待原文核验,AI占比不清、IDC财务压力
+002518.SZ,科士达,A股主板,中国资产池,D2-D4,UPS/power electronics,候选/雷达池,79,high_priority,待原文核验,新能源业务混杂、价格竞争
+4004.T,Resonac,日本,卫星资产池,D3-D4,Packaging/semiconductor materials,候选池,79,high_priority,待原文核验,材料需求分散、传统周期
+CSCO,Cisco,US,美国资产池,D2-D4,Networking + optics + security,候选/雷达池,79,high_priority,待原文核验: AI-specific revenue,增长慢、AI专用度弱、毛利压力
+IFX.DE,Infineon,欧洲,卫星资产池,D3-D4,Power semiconductors,候选/雷达池,78,high_priority,待原文核验,auto/industrial混杂、AI占比低
+NTAP,NetApp,US,美国资产池,D3-D4,Enterprise/data center storage,雷达/候选池,78,high_priority,待原文核验,AI专用度弱
+SPXC,SPX Technologies,US,美国资产池,D3-D4,Cooling/HVAC/electrical niches,雷达/候选池,78,high_priority,待原文核验,AI暴露间接
+NBIS,Nebius,US,美国资产池,D1-D4,NeoCloud / AI cloud,候选池,76,high_priority,待原文核验: revenue/backlog/utilization/debt,融资、客户质量、利用率、GPU残值
+POWL,Powell Industries,US,美国资产池,D3-D4,Electrical switchgear,候选池,76,high_priority,待原文核验: DC customer and backlog,周期订单、客户集中、扩产后瓶颈缓解
+STX,Seagate,US,美国资产池,D3-D4,Nearline HDD/object storage,雷达/候选池,75,high_priority,待原文核验: AI storage use cases,AI相关性间接、HDD周期
+WDC,Western Digital / SanDisk,US,美国资产池,D3-D4,NAND/eSSD/storage,候选/雷达池,75,high_priority,待原文核验: eSSD vs consumer NAND split,传统NAND周期误判、ASP波动
+000021.SZ,深科技,A股主板,中国资产池,D3-D4,EMS/storage packaging/test,雷达池,73,high_priority,待原文核验,AI证据弱、低毛利
+TSEM,Tower Semiconductor,以色列/US,卫星资产池,D3-D4,Specialty foundry / SiPh,雷达池,73,high_priority,待原文核验,AI SiPh客户不清、mature cycle
+IREN,IREN,US,美国资产池,D1-D4,AI cloud + powered land from crypto mining,候选/雷达池,72,high_priority,待原文核验: AI contracts/utilization/debt,比特币业务混杂、融资、客户质量
+3896.HK / KC,金山云,H股/ADR,中国资产池,D1-D4,Cloud / AI cloud,雷达池,70,high_priority,待原文核验,亏损/毛利、竞争
+603912.SH,佳力图,A股主板,中国资产池,D3-D4,Data center cooling,雷达池,70,high_priority,待原文核验,AI专用度弱、订单周期
+ALFA.ST,Alfa Laval,欧洲,卫星资产池,D3-D4,Heat exchangers / thermal,雷达池,70,high_priority,待原文核验,AI间接、工业周期
+SIVE.ST,Sivers Semiconductors,欧洲,卫星资产池,D3-D4,Photonics/mmWave,雷达池,70,high_priority,待原文核验,技术/商业化风险、客户验证
+9698.HK / GDS,万国数据 GDS,H股/ADR,中国资产池,D1-D4,IDC / AI data center,候选/雷达池,68,high_priority,待原文核验,融资成本、利用率、客户集中
+APLD,Applied Digital,US,美国资产池,D1-D4,AI data center developer,候选/雷达池,68,high_priority,待原文核验,融资、施工、客户集中
+CORZ,Core Scientific,US,美国资产池,D1-D4,AI hosting / power campuses,雷达/候选池,68,high_priority,待原文核验,BTC周期混杂、客户/债务风险
+IQE.L,IQE,欧洲,卫星资产池,D3-D4,Compound semiconductor epi,雷达池,67,high_priority,待原文核验,客户集中、收入弱、路线不确定
+8035.T,Tokyo Electron,日本,卫星资产池,D4,WFE,核心beta/雷达,66,radar,待原文核验,大盘半导体beta、出口管制
+WULF,TeraWulf,US,美国资产池,D1-D4,Powered data center / HPC transition,雷达池,66,high_priority,待原文核验,BTC混杂、融资、执行风险
+ASML.AS,ASML,欧洲,卫星资产池,D4,EUV lithography,核心beta/雷达,64,radar,待原文核验,出口管制、WFE周期、估值
+002028.SZ,思源电气,A股主板,中国资产池,D4,Switchgear/transformer/electrical equipment,候选池,62,radar,待原文核验,非AI需求混杂、订单周期
+002902.SZ,铭普光磁,A股主板,中国资产池,D3-D5,Optical/magnetic components,雷达池,62,radar,待原文核验,AI证据弱、低毛利/主题映射
+0728.HK / 601728.SH,中国电信,H股/A股,中国资产池,D4,IDC/cloud/network,雷达/候选池,60,radar,待原文核验,AI毛利/资本开支回报
+0941.HK / 600941.SH,中国移动,H股/A股,中国资产池,D4,IDC/network/AI infra buyer,雷达/候选池,60,radar,待原文核验,运营商AI收入不清、政策
+0981.HK,中芯国际 SMIC,H股,中国资产池,D4,Foundry / China localization,雷达/候选池,60,radar,待原文核验,先进制程限制、AI直接度
+600312.SH,平高电气,A股主板,中国资产池,D4,High-voltage equipment,雷达/候选池,60,radar,待原文核验,AI相关性间接
+SOIT.PA,Soitec,欧洲,卫星资产池,D4,SOI/SmartSiC substrate,雷达/候选池,60,radar,待原文核验,AI相关性需证明、RF/auto混杂
+002371.SZ,北方华创,A股主板,中国资产池,D4,Semiconductor equipment,候选/雷达池,58,radar,待原文核验,AI直接度弱、政策/周期
+002409.SZ,雅克科技,A股主板,中国资产池,D4,Semiconductor materials,候选/雷达池,58,radar,待原文核验,AI专用度待拆、周期
+600406.SH,国电南瑞,A股主板,中国资产池,D4,Grid automation,雷达/候选池,58,radar,待原文核验,AI链条间接、政策周期
+6361.T,Ebara,日本,卫星资产池,D4,CMP/vacuum/fab infra,雷达/候选池,58,radar,待原文核验,AI间接、周期
+6920.T,Lasertec,日本,卫星资产池,D4,Mask inspection/metrology,候选/雷达池,58,radar,待原文核验,AI间接、WFE周期
+AIXA.DE,Aixtron,欧洲,卫星资产池,D4,Compound semi equipment,雷达/候选池,58,radar,待原文核验,AI链条间接、LED/power周期
+ASM.AS,ASM International,欧洲,卫星资产池,D4,ALD/deposition,候选/雷达池,58,radar,待原文核验,WFE周期、AI间接
+ENR.DE,Siemens Energy,欧洲,卫星资产池,D4,Grid/power equipment,候选/雷达池,58,radar,待原文核验,非AI需求混杂、项目周期
+VATN.SW,VAT Group,欧洲,卫星资产池,D4,Vacuum valves,雷达/候选池,58,radar,待原文核验,AI链条间接、WFE周期
+GEV,GE Vernova,US,美国资产池,D4,Grid + gas turbines,雷达/候选池,58,radar,待原文核验,项目周期长、非AI需求混杂
+601179.SH,中国西电,A股主板,中国资产池,D4,Transformer/switchgear,雷达池,56,radar,待原文核验,AI直接证据弱
+1347.HK,华虹半导体,H股,中国资产池,D4,Specialty foundry,雷达池,52,radar,待原文核验,AI直接度弱、成熟制程周期
+603690.SH,至纯科技,A股主板,中国资产池,D4,Wet process / high-purity systems,雷达池,52,radar,待原文核验,AI间接、周期
+6368.T,Organo,日本,卫星资产池,D4,UPW systems,雷达池,52,radar,待原文核验,AI链条间接、项目周期
+BE,Bloom Energy,US,美国资产池,D4-D5,On-site power / fuel cells,雷达/候选池,50,radar,"待原文核验: DC contract economics, fuel costs",燃料成本、技术/规模验证、监管
+600089.SH,特变电工,A股主板,中国资产池,D4-D5,Transformer/power equipment + energy,雷达池,46,radar,待原文核验,能源/硅料周期混杂、AI间接
+CCJ,Cameco,US,美国资产池,D4-D5,Uranium,雷达池,46,radar,待原文核验,AI相关性间接，商品周期
+LEU,Centrus Energy,US,美国资产池,D4-D5,Nuclear fuel / HALEU,雷达池,42,radar,待原文核验: contracts/regulatory milestones,AI链条很间接、监管/项目周期长
+300249.SZ,依米康,A股创业板,中国资产池,D3-D4,Cooling/IDC,排除池,0,exclude,产业相关但因创业板排除,板块规则排除+AI证据需核验
+300308.SZ,中际旭创,A股创业板,中国资产池,D2-D3,Optical modules,排除池,0,exclude,产业相关但因创业板排除；如用非A通道需另核验,板块规则排除，不进中国A主板池
+300394.SZ,天孚通信,A股创业板,中国资产池,D3,Optical components,排除池,0,exclude,产业相关但因创业板排除,板块规则排除
+300476.SZ,胜宏科技,A股创业板,中国资产池,D3,PCB,排除池,0,exclude,产业相关但因创业板排除,板块规则排除
+300502.SZ,新易盛,A股创业板,中国资产池,D2-D3,Optical modules,排除池,0,exclude,产业相关但因创业板排除,板块规则排除
+300666.SZ,江丰电子,A股创业板,中国资产池,D4,Semiconductor materials,排除池,0,exclude,产业相关但因创业板排除,板块规则排除
+603986.SH,兆易创新,A股主板,中国资产池,D4-D5,Memory/MCU,排除/雷达池,0,exclude,待原文核验,与LLM infra距离远、消费周期
+688008.SH,澜起科技,A股科创板,中国资产池,D3,Memory interface/CXL,排除池,0,exclude,产业相关但因科创板排除,板块规则排除
+688012.SH,中微公司,A股科创板,中国资产池,D4,Semiconductor equipment,排除池,0,exclude,产业相关但因科创板排除,板块规则排除
