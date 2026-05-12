@@ -1,0 +1,111 @@
+ticker,company,market_country,asset_pool,bfs_depth,module,current_pool,total_score,score_bucket,evidence_state,counterevidence
+002463.SZ,沪电股份,A股主板,中国资产池,D3,AI server PCB/high-speed board,核心候选,100,core_review,待原文核验: AI/server PCB mix,消费/汽车PCB混杂、ASP下行
+002837.SZ,英维克,A股主板,中国资产池,D2-D3,Data center cooling/liquid cooling,候选/核心候选,100,core_review,待原文核验,液冷渗透率、ASP、竞争
+601138.SH,工业富联,A股主板,中国资产池,D2,AI server/rack manufacturing,候选/核心候选,100,core_review,待原文核验: AI server revenue/margins/customer concentration,低毛利组装、库存、客户集中
+000660.KS,SK hynix,韩国,卫星资产池,D2,HBM/DRAM,核心池,100,core_review,"待原文核验: HBM revenue, capacity, margins",HBM供给扩张、Samsung/Micron竞争
+2308.TW,Delta Electronics,台湾,卫星资产池,D2-D3,Power supply + thermal,核心候选,100,core_review,待原文核验,业务多元，AI占比需拆
+2330.TW / TSM,TSMC,台湾,卫星资产池,D2,Leading-edge foundry + CoWoS,核心池,100,core_review,原文已证明: quarterly results线索; AI/HPC detail需核验,地缘、客户集中、CoWoS扩产后定价
+3037.TW,Unimicron,台湾,卫星资产池,D3,ABF substrate / PCB,核心候选,100,core_review,待原文核验,"ABF cycle, pricing"
+3661.TW,Alchip,台湾,卫星资产池,D3,ASIC design service,核心候选,100,core_review,待原文核验: customer concentration/tape-outs,客户集中、project delay
+4062.T,Ibiden,日本,卫星资产池,D3,ABF substrate,核心候选,100,core_review,待原文核验,ABF周期、CoWoS瓶颈转移
+6146.T,DISCO,日本,卫星资产池,D3,Dicing/grinding/thinning,核心候选,100,core_review,待原文核验,订单周期、工艺替代
+6315.T,TOWA,日本,卫星资产池,D3,Molding/advanced packaging equipment,核心候选,100,core_review,待原文核验,HBM技术路线变化、订单集中
+6857.T,Advantest,日本,卫星资产池,D3,ATE / memory & SoC test,核心候选,100,core_review,待原文核验: AI tester mix,测试订单周期、需求提前透支
+BESI.AS,BE Semiconductor Industries,欧洲,卫星资产池,D3,Hybrid bonding / advanced packaging equipment,核心候选,100,core_review,待原文核验,订单时点、路线切换
+COHR,Coherent,US,美国资产池,D2-D3,800G/1.6T optics + lasers,候选/核心候选,100,core_review,"待原文核验: datacom AI mix, customer concentration",价格战、客户集中、CPO延后/路线切换
+NVDA,NVIDIA,US,美国资产池,D1,GPU/CUDA + networking + rack-scale systems,核心池,100,core_review,原文已证明: data center segment strong; 具体客户/平台仍逐项核验,ASIC替代、毛利率下行、客户CapEx放缓、出口管制
+VRT,Vertiv,US,美国资产池,D2,AI data center power/thermal,核心池,100,core_review,待原文核验: data center order/backlog/margins,订单透支、冷却ASP下行、DC延期
+000988.SZ,华工科技,A股主板,中国资产池,D2-D3,Optics/laser/equipment,候选池,99,core_review,待原文核验,AI datacom占比待拆
+3711.TW / ASX,ASE Technology,台湾,卫星资产池,D2-D3,OSAT / advanced packaging,候选池,99,core_review,待原文核验,OSAT毛利、先进封装占比
+AVGO,Broadcom,US,美国资产池,D1-D2,Custom ASIC + networking + CPO,核心池,99,core_review,合理推论+待原文核验: ASIC/CPO客户与收入拆分需公司原文,单客户集中、ASIC项目取消、网络价格竞争
+0522.HK,ASMPT,H股,中国资产池,D3,Packaging equipment / TCB,核心候选,98,core_review,待原文核验,订单周期、HBM技术路线变化
+042700.KQ,Hanmi Semiconductor,韩国,卫星资产池,D3,HBM bonding equipment,核心候选,98,core_review,待原文核验,客户集中、技术路线切换
+CAMT,Camtek,以色列/US,卫星资产池,D3,Advanced packaging inspection,核心候选,98,core_review,待原文核验,订单周期、客户集中、估值
+SUSS.DE,SÜSS MicroTec,欧洲,卫星资产池,D3,Advanced packaging tools,核心候选,98,core_review,待原文核验,订单周期、客户集中
+002281.SZ,光迅科技,A股主板,中国资产池,D2-D3,Optical modules/components,候选池,96,core_review,待原文核验,电信周期混杂、海外客户/毛利
+2802.T,Ajinomoto,日本,卫星资产池,D3,ABF material,候选池,96,core_review,待原文核验,公司多元化，AI占比小
+FN,Fabrinet,US,美国资产池,D2-D3,Optical manufacturing,候选池,96,core_review,待原文核验: datacom mix/customer risk,低毛利代工、客户集中、库存
+MOD,Modine,US,美国资产池,D2-D3,Thermal management,候选池,96,core_review,待原文核验: DC mix/margins,冷却标准化、价格战、非AI业务混杂
+RMBS,Rambus,US,美国资产池,D3,Memory interface IP,候选池,96,core_review,待原文核验,IP attach率、客户内化
+000063.SZ / 0763.HK,中兴通讯,A股主板/H股,中国资产池,D2-D3,Networking/telecom/DC equipment,候选/雷达池,95,core_review,待原文核验,AI DC专用度弱、出口限制
+000938.SZ,紫光股份,A股主板,中国资产池,D2-D3,Network/server/cloud infra,候选/雷达池,95,core_review,待原文核验,AI专用度不清、低毛利
+SNPS,Synopsys,US,美国资产池,D3,EDA/IP,核心beta/候选,95,core_review,待原文核验: AI chip design mix,估值、客户CapEx周期
+002916.SZ,深南电路,A股主板,中国资产池,D3,PCB / substrate / packaging support,候选池,93,core_review,待原文核验,通信周期混杂、AI占比不清
+600183.SH,生益科技,A股主板,中国资产池,D3,CCL / high-speed materials,候选池,93,core_review,待原文核验,材料价格周期、AI规格占比
+600584.SH,长电科技,A股主板,中国资产池,D3,OSAT / advanced packaging,候选池,93,core_review,待原文核验,AI封装占比不清、周期/毛利
+009150.KS,Samsung Electro-Mechanics,韩国,卫星资产池,D3,Substrate / components,候选池,93,core_review,待原文核验,消费电子混杂、ABF周期
+058470.KQ,Leeno,韩国,卫星资产池,D3,Test sockets/probes,候选池,93,core_review,待原文核验,AI mix不清、测试周期
+2360.TW,Chroma,台湾,卫星资产池,D3,Power/semiconductor test,候选池,93,core_review,待原文核验,AI占比不清、订单周期
+3443.TW,GUC,台湾,卫星资产池,D3,ASIC design service,候选池,93,core_review,待原文核验,客户集中、设计失败
+6223.TW,MPI,台湾,卫星资产池,D3,Probe card/test interface,候选池,93,core_review,待原文核验,客户集中、泛测试beta
+8046.TW,Nan Ya PCB,台湾,卫星资产池,D3,Substrate / PCB,候选池,93,core_review,待原文核验,AI占比、周期
+8299.TWO,Phison,台湾,卫星资产池,D3,SSD controller,候选池,93,core_review,待原文核验,NAND周期、enterprise占比
+NVMI,Nova,以色列/US,卫星资产池,D3,Metrology,候选池,93,core_review,待原文核验,WFE周期、AI间接
+ALAB,Astera Labs,US,美国资产池,D3,PCIe/CXL retimer + connectivity,候选池,93,core_review,待原文核验: AI platform mix/customer concentration,客户集中、attach rate、标准变化
+CRDO,Credo,US,美国资产池,D3,AEC/SerDes/connectivity,候选池,93,core_review,待原文核验: hyperscaler concentration and revenue mix,客户集中、铜/光路线变化、ASP下行
+FORM,FormFactor,US,美国资产池,D3,Probe card,候选池,93,core_review,待原文核验: HBM/GPU mix,泛测试beta、订单周期
+LITE,Lumentum,US,美国资产池,D2-D3,Lasers/datacom optics,候选池,93,core_review,待原文核验: AI datacom revenue/customer qualification,光模块价格战、客户集中、capex cycle
+MRVL,Marvell,US,美国资产池,D1-D3,Custom silicon + optical DSP + networking,候选池,93,core_review,合理推论+待原文核验: AI revenue mix与客户集中,ASIC项目时点、DSP被LPO/CPO挤压、客户集中
+MTSI,MACOM,US,美国资产池,D3,RF/photonic components,候选池,93,core_review,待原文核验,AI暴露分散、周期混杂
+ONTO,Onto Innovation,US,美国资产池,D3,Metrology / inspection,候选池,93,core_review,待原文核验,WFE周期、客户capex
+PSTG,Pure Storage,US,美国资产池,D3,AI storage systems,候选池,93,core_review,待原文核验: AI customer/AI storage revenue；ticker/公司名以交易所主数据刷新,软件/存储周期混杂、客户ROI
+TER,Teradyne,US,美国资产池,D3,Semiconductor ATE,候选池,93,core_review,待原文核验: AI tester demand,消费/工业测试周期、测试时间缩短
+000977.SZ,浪潮信息,A股主板,中国资产池,D2,AI server OEM,候选池,92,core_review,待原文核验,供应链限制、毛利率、国内需求周期
+002185.SZ,华天科技,A股主板,中国资产池,D3,OSAT,雷达/候选池,92,core_review,待原文核验,AI高端封装证据弱
+002436.SZ,兴森科技,A股主板,中国资产池,D3,IC substrate/PCB,雷达/候选池,92,core_review,待原文核验,产能爬坡、良率、客户认证
+0992.HK,联想集团,H股,中国资产池,D2,AI server/OEM,候选池,92,core_review,待原文核验,低毛利、客户集中、库存
+603228.SH,景旺电子,A股主板,中国资产池,D3,PCB,雷达/候选池,92,core_review,待原文核验,AI相关性待拆分
+2301.TW,Lite-On,台湾,卫星资产池,D3,Power supply / optoelectronics,候选/雷达池,92,core_review,待原文核验,AI占比、价格竞争
+2382.TW,Quanta,台湾,卫星资产池,D2,AI server ODM,候选池,92,core_review,待原文核验,低毛利、客户集中、库存
+6669.TW,Wiwynn,台湾,卫星资产池,D2,AI server ODM,候选池,92,core_review,待原文核验,客户集中、低毛利
+MTRS.ST,Munters,欧洲,卫星资产池,D3,Thermal management,候选/雷达池,92,core_review,待原文核验,AI占比/竞争
+AMZN,Amazon,US,美国资产池,D0-D1,AWS + Trainium + Anthropic,核心beta,92,core_review,原文已证明: Anthropic 5GW agreement线索; 财务拆分待核验,Trainium性能/生态、CapEx回报、AWS margin
+ANET,Arista Networks,US,美国资产池,D2,AI Ethernet networking,核心/候选池,92,core_review,待原文核验: AI cluster revenue/backlog,客户集中、Ethernet价格竞争、NVLink/IB替代
+CDNS,Cadence,US,美国资产池,D3,EDA/simulation,核心beta/候选,92,core_review,待原文核验,估值、EDA周期、并购监管
+GOOGL,Alphabet / Google,US,美国资产池,D0-D1,Gemini + TPU + GCP,核心beta,92,core_review,原文已证明: CapEx/technical infra/TPU线索; 细分客户待核验,TPU硬件销售波动、AI搜索商业化、能耗/折旧
+SMTC,Semtech,US,美国资产池,D3,Signal integrity / optical DSP adjacent,雷达/候选池,92,core_review,待原文核验,非AI业务拖累、路线替代
+SU.PA,Schneider Electric,欧洲,卫星资产池,D2-D4,Data center electrical equipment,核心池,91,core_review,待原文核验,AI占比、订单透支、估值
+002156.SZ,通富微电,A股主板,中国资产池,D3,OSAT,候选池,90,core_review,待原文核验,客户集中、封测周期
+095340.KQ,ISC,韩国,卫星资产池,D3,Test sockets,候选池,90,core_review,待原文核验,客户集中、周期
+6515.TW,WinWay,台湾,卫星资产池,D3,Probe card / test socket,候选池,90,core_review,待原文核验,客户集中、订单周期
+603083.SH,剑桥科技,A股主板,中国资产池,D2-D3,Optical modules,候选/雷达池,89,core_review,待原文核验,客户集中、价格战、订单波动
+131290.KQ,TSE,韩国,卫星资产池,D3,Probe/test interface,雷达/候选池,89,core_review,待原文核验,AI证据弱、周期
+3189.TW,Kinsus,台湾,卫星资产池,D3,Substrate,雷达/候选池,89,core_review,待原文核验,良率/客户/周期
+AAOI,Applied Optoelectronics,US,美国资产池,D2-D3,Datacom optical modules,候选/雷达池,89,core_review,待原文核验: customer wins and margins,毛利率、客户集中、价格战、执行风险
+MU,Micron,US,美国资产池,D2,HBM + DRAM + eSSD,核心/候选池,89,core_review,"待原文核验: HBM sold-out, ASP, margins",HBM供给过剩、NAND周期误判、ASP反转
+002384.SZ,东山精密,A股主板,中国资产池,D3,PCB/precision components,雷达池,87,core_review,待原文核验,消费电子混杂、AI纯度弱
+002913.SZ,奥士康,A股主板,中国资产池,D3,PCB,雷达池,87,core_review,待原文核验,客户/AI占比弱
+CRWV,CoreWeave,US,美国资产池,D1-D4,NeoCloud / GPU-as-a-Service,候选池,86,core_review,原文已证明: backlog/active power线索; contract quality待核验,高杠杆、客户集中、GPU残值、利息/折旧
+COHU,Cohu,US,美国资产池,D3,Test handlers / sockets,雷达池,84,core_review,待原文核验,AI相关性弱/周期性
+005930.KS,Samsung Electronics,韩国,卫星资产池,D2-D4,HBM/DRAM/foundry/packaging,候选池,83,core_review,待原文核验,"HBM qualification, cyclicality, foundry losses"
+KLA,KLA,US,美国资产池,D3-D4,Inspection/metrology,核心beta/候选,83,core_review,原文需核验: advanced packaging/AI mix,大盘beta、估值已反映
+DOCN,DigitalOcean,US,美国资产池,D1-D3,SMB cloud / AI cloud services,雷达池,81,core_review,待原文核验,hyperscaler competition、GPU economics
+ORCL,Oracle,US,美国资产池,D1,AI cloud / Stargate cloud capacity,候选池,81,core_review,合理推论+待原文核验: RPO/合同质量/CapEx细节,客户集中、项目融资、电力/许可、毛利率
+ABBN.SW / ABB,ABB,欧洲,卫星资产池,D2-D4,Grid/electrification/automation,核心/候选池,80,core_review,待原文核验,AI占比、周期
+ETN,Eaton,US,美国资产池,D2-D4,Electrical equipment,核心/候选池,80,core_review,待原文核验: DC mix/backlog,AI占比不透明、周期/估值
+002335.SZ,科华数据,A股主板,中国资产池,D2-D4,UPS/IDC/power,候选/雷达池,79,high_priority,待原文核验,AI占比不清、IDC财务压力
+002518.SZ,科士达,A股主板,中国资产池,D2-D4,UPS/power electronics,候选/雷达池,79,high_priority,待原文核验,新能源业务混杂、价格竞争
+4004.T,Resonac,日本,卫星资产池,D3-D4,Packaging/semiconductor materials,候选池,79,high_priority,待原文核验,材料需求分散、传统周期
+CSCO,Cisco,US,美国资产池,D2-D4,Networking + optics + security,候选/雷达池,79,high_priority,待原文核验: AI-specific revenue,增长慢、AI专用度弱、毛利压力
+IFX.DE,Infineon,欧洲,卫星资产池,D3-D4,Power semiconductors,候选/雷达池,78,high_priority,待原文核验,auto/industrial混杂、AI占比低
+META,Meta Platforms,US,美国资产池,D0-D1,Open-source frontier + AI products + internal infra,核心beta/需求验证,78,high_priority,"待原文核验: AI CapEx, MTIA, infra depreciation",广告ROI、CapEx回报、开源模型成本
+NTAP,NetApp,US,美国资产池,D3-D4,Enterprise/data center storage,雷达/候选池,78,high_priority,待原文核验,AI专用度弱
+SPXC,SPX Technologies,US,美国资产池,D3-D4,Cooling/HVAC/electrical niches,雷达/候选池,78,high_priority,待原文核验,AI暴露间接
+AMD,AMD,US,美国资产池,D1,GPU/CPU AI compute,核心/候选池,77,high_priority,原文需核验: data center / Instinct / EPYC segment metrics,CUDA生态、毛利率、供给链、客户集中
+MSFT,Microsoft,US,美国资产池,D0-D1,Azure + OpenAI demand aggregator,核心beta,77,high_priority,"原文需核验: Azure AI contribution, RPO, CapEx, depreciation",AI毛利率、CapEx回报、OpenAI集中、反垄断
+NBIS,Nebius,US,美国资产池,D1-D4,NeoCloud / AI cloud,候选池,76,high_priority,待原文核验: revenue/backlog/utilization/debt,融资、客户质量、利用率、GPU残值
+POWL,Powell Industries,US,美国资产池,D3-D4,Electrical switchgear,候选池,76,high_priority,待原文核验: DC customer and backlog,周期订单、客户集中、扩产后瓶颈缓解
+STX,Seagate,US,美国资产池,D3-D4,Nearline HDD/object storage,雷达/候选池,75,high_priority,待原文核验: AI storage use cases,AI相关性间接、HDD周期
+WDC,Western Digital / SanDisk,US,美国资产池,D3-D4,NAND/eSSD/storage,候选/雷达池,75,high_priority,待原文核验: eSSD vs consumer NAND split,传统NAND周期误判、ASP波动
+000021.SZ,深科技,A股主板,中国资产池,D3-D4,EMS/storage packaging/test,雷达池,73,high_priority,待原文核验,AI证据弱、低毛利
+TSEM,Tower Semiconductor,以色列/US,卫星资产池,D3-D4,Specialty foundry / SiPh,雷达池,73,high_priority,待原文核验,AI SiPh客户不清、mature cycle
+IREN,IREN,US,美国资产池,D1-D4,AI cloud + powered land from crypto mining,候选/雷达池,72,high_priority,待原文核验: AI contracts/utilization/debt,比特币业务混杂、融资、客户质量
+3896.HK / KC,金山云,H股/ADR,中国资产池,D1-D4,Cloud / AI cloud,雷达池,70,high_priority,待原文核验,亏损/毛利、竞争
+603912.SH,佳力图,A股主板,中国资产池,D3-D4,Data center cooling,雷达池,70,high_priority,待原文核验,AI专用度弱、订单周期
+ALFA.ST,Alfa Laval,欧洲,卫星资产池,D3-D4,Heat exchangers / thermal,雷达池,70,high_priority,待原文核验,AI间接、工业周期
+SIVE.ST,Sivers Semiconductors,欧洲,卫星资产池,D3-D4,Photonics/mmWave,雷达池,70,high_priority,待原文核验,技术/商业化风险、客户验证
+9698.HK / GDS,万国数据 GDS,H股/ADR,中国资产池,D1-D4,IDC / AI data center,候选/雷达池,68,high_priority,待原文核验,融资成本、利用率、客户集中
+APLD,Applied Digital,US,美国资产池,D1-D4,AI data center developer,候选/雷达池,68,high_priority,待原文核验,融资、施工、客户集中
+CORZ,Core Scientific,US,美国资产池,D1-D4,AI hosting / power campuses,雷达/候选池,68,high_priority,待原文核验,BTC周期混杂、客户/债务风险
+IQE.L,IQE,欧洲,卫星资产池,D3-D4,Compound semiconductor epi,雷达池,67,high_priority,待原文核验,客户集中、收入弱、路线不确定
+WULF,TeraWulf,US,美国资产池,D1-D4,Powered data center / HPC transition,雷达池,66,high_priority,待原文核验,BTC混杂、融资、执行风险
