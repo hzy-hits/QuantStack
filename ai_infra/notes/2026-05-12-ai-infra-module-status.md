@@ -92,6 +92,7 @@
 | 模块 | 状态 | 本地文件 |
 | --- | --- | --- |
 | Company financials + K-line + options methodology | 已抓取，待原文核验；约 36k 字符，包含财报字段、K线特征、期权特征、market risk layer、agent pipeline、本地 schema 与 2 周 MVP | [2026-05-13-chatgpt-pro-company-financials-market-options-methodology.md](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/notes/2026-05-13-chatgpt-pro-company-financials-market-options-methodology.md), [prompt](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/notes/2026-05-13-chatgpt-pro-company-financials-market-options-methodology-prompt.md) |
+| 稳定方法论整合 | 已整合进 docs；明确 evidence first、K线只做 market layer、期权只做 risk/event layer | [company-financials-market-options-methodology.md](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/docs/company-financials-market-options-methodology.md), [financials_market_options_pro_delta_v1.md](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/reports/financials_market_options_pro_delta_v1.md) |
 
 ## D5 反证雷达已补充
 

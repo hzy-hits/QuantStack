@@ -13,6 +13,7 @@
 | [llm-dependency-bfs-framework.md](llm-dependency-bfs-framework.md) | D0-D5 LLM Dependency BFS 主框架 |
 | [research-checklist.md](research-checklist.md) | 原文核验、反证、打分和研究纪律 |
 | [source-evidence-template.md](source-evidence-template.md) | Evidence card 模板 |
+| [company-financials-market-options-methodology.md](company-financials-market-options-methodology.md) | 公司财报、K线、期权三层研究方法和 MVP 工程顺序 |
 | [credit-financing-evidence-card-template.md](credit-financing-evidence-card-template.md) | Credit / financing 反证卡模板 |
 | [firm-power-evidence-card-template.md](firm-power-evidence-card-template.md) | Nuclear / firm power 电力交付反证卡模板 |
 | [chatgpt-pro-agent-prompts.md](chatgpt-pro-agent-prompts.md) | ChatGPT Pro 多会话 prompt 包 |

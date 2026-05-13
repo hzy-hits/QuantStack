@@ -15,6 +15,7 @@
 | [docs/llm-dependency-bfs-framework.md](docs/llm-dependency-bfs-framework.md) | D0-D5 dependency BFS 框架 |
 | [docs/research-checklist.md](docs/research-checklist.md) | 公司/模块判断基线 |
 | [docs/source-evidence-template.md](docs/source-evidence-template.md) | 原始出处 evidence card 模板 |
+| [docs/company-financials-market-options-methodology.md](docs/company-financials-market-options-methodology.md) | 公司财报、K线、期权三层研究方法 |
 | [scripts/build_universe_system.py](scripts/build_universe_system.py) | universe 落库和 dashboard 生成脚本 |
 | [data/seed/global_universe_sample.jsonl](data/seed/global_universe_sample.jsonl) | 公开安全的最小样例数据 |
 
@@ -97,6 +98,12 @@ python3 scripts/scaffold_evidence_cards.py
 如果本地有 `data/global_universe_v2.jsonl`，脚本会使用完整 universe；如果没有，则用公开样例跑通流程。
 
 这套评分是研究优先级评分，不是投资评分。所有记录默认 `pending_original_source_verification`，不能直接作为买卖依据。
+
+## 公司财报、K线和期权
+
+项目已将公司研究拆成三层：原文证据层、市场行为层、期权风险层。原文证据层判断公司是否真的从 AI Infra 链条获得收入、订单、毛利率、现金流或产能传导；K线层只判断市场是否开始定价、是否拥挤和流动性风险；期权层只判断波动、事件、流动性和尾部风险。
+
+完整规则见 [docs/company-financials-market-options-methodology.md](docs/company-financials-market-options-methodology.md)。核心约束是：K线和期权不能提升 evidence status，也不能把弱证据公司升级为核心研究池。
 
 ### 1. LLM 基础模型与产品层
 

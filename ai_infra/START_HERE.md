@@ -20,11 +20,13 @@
    看公司/模块判断基线。
 4. [docs/source-evidence-template.md](docs/source-evidence-template.md)
    看普通 company evidence card 模板。
-5. [docs/credit-financing-evidence-card-template.md](docs/credit-financing-evidence-card-template.md) 和 [docs/firm-power-evidence-card-template.md](docs/firm-power-evidence-card-template.md)
+5. [docs/company-financials-market-options-methodology.md](docs/company-financials-market-options-methodology.md)
+   看公司财报、K线、期权三层研究方法；明确 K线/期权只能做市场和风险层，不能替代原文证据。
+6. [docs/credit-financing-evidence-card-template.md](docs/credit-financing-evidence-card-template.md) 和 [docs/firm-power-evidence-card-template.md](docs/firm-power-evidence-card-template.md)
    看 Credit/CDS 与 Nuclear/Firm Power 两类横向证据卡。
-6. [docs/github-repo-operating-model.md](docs/github-repo-operating-model.md)、[docs/public-private-boundary.md](docs/public-private-boundary.md)、[docs/data-security-rules.md](docs/data-security-rules.md)
+7. [docs/github-repo-operating-model.md](docs/github-repo-operating-model.md)、[docs/public-private-boundary.md](docs/public-private-boundary.md)、[docs/data-security-rules.md](docs/data-security-rules.md)
    看 GitHub 仓库化和公开/私有边界。
-7. [scripts](scripts) 和 [data/seed/global_universe_sample.jsonl](data/seed/global_universe_sample.jsonl)
+8. [scripts](scripts) 和 [data/seed/global_universe_sample.jsonl](data/seed/global_universe_sample.jsonl)
    用公开样例验证本地 pipeline。
 
 ## 项目结构

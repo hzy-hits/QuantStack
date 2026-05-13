@@ -11,6 +11,7 @@
 | [cds_nuclear_gap_radar_v1.md](cds_nuclear_gap_radar_v1.md) | CDS/信用风险和核电/firm power 的缺口雷达 |
 | [credit_nuclear_pro_delta_v1.md](credit_nuclear_pro_delta_v1.md) | ChatGPT Pro credit / nuclear 输出的整合判断和执行顺序 |
 | [fund_philosophy_pro_delta_v1.md](fund_philosophy_pro_delta_v1.md) | ChatGPT Pro 对基金哲学和 repo 工程的审稿 delta |
+| [financials_market_options_pro_delta_v1.md](financials_market_options_pro_delta_v1.md) | ChatGPT Pro 财报/K线/期权方法论输出的整合判断和工程任务 |
 | [credit_cds_radar_queue_v1.md](credit_cds_radar_queue_v1.md) | Credit/CDS 可执行核验队列 |
 | [credit_cds_radar_queue_v1.csv](credit_cds_radar_queue_v1.csv) | Credit/CDS 队列表 |
 | [nuclear_firm_power_queue_v1.md](nuclear_firm_power_queue_v1.md) | Nuclear/firm power 可执行核验队列 |
