@@ -1219,6 +1219,126 @@ def build_cn_earnings_calendar(
         con.close()
 
 
+SOURCE_REVIEW_QUEUE_PATH = STACK_ROOT / "ai_infra" / "reports" / "source_verification_queue_v1.csv"
+
+
+def _safe_relative_path(path: Path) -> str:
+    if path.is_absolute():
+        try:
+            return str(path.relative_to(STACK_ROOT))
+        except ValueError:
+            return str(path)
+    return str(path)
+
+# priority_tier values seen in source_verification_queue_v1.csv, ordered most → least urgent.
+_SOURCE_REVIEW_TIER_ORDER = {
+    "P0_first_batch": 0,
+    "P0": 0,
+    "P1": 1,
+    "P2": 2,
+    "P3": 3,
+}
+
+
+def _source_review_market_matches(row: dict[str, str], market: str) -> bool:
+    asset_pool = row.get("asset_pool") or ""
+    country = (row.get("market_country") or "").strip()
+    if market.upper() == "CN":
+        return "中国" in asset_pool or country in {"A股主板", "中国"}
+    # US standalone report covers US asset pool plus international satellites tracked
+    # through US ADRs / IBKR access.
+    return "美国" in asset_pool or "卫星" in asset_pool
+
+
+def build_source_review_calendar(
+    *,
+    focus_symbols: Iterable[str] | None = None,
+    queue_path: Path | None = None,
+    limit: int = 60,
+) -> dict[str, Any]:
+    """Read the curated AI-infra source-verification queue and bucket rows by market.
+
+    The queue lives in `ai_infra/reports/source_verification_queue_v1.csv` and is
+    maintained by the ai_infra research workbench. The daily report only consumes
+    it; it never modifies the file.
+    """
+    path = queue_path or SOURCE_REVIEW_QUEUE_PATH
+    if not path.exists():
+        return {"us": {"status": "missing_queue", "rows": []}, "cn": {"status": "missing_queue", "rows": []}}
+
+    focus = {str(symbol).upper() for symbol in (focus_symbols or []) if str(symbol).strip()}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            raw_rows = list(reader)
+    except Exception as exc:
+        return {
+            "us": {"status": f"error: {exc}", "rows": []},
+            "cn": {"status": f"error: {exc}", "rows": []},
+        }
+
+    def _project(row: dict[str, str]) -> dict[str, Any]:
+        rank_value = row.get("rank")
+        try:
+            rank_int: int | None = int(rank_value) if rank_value else None
+        except ValueError:
+            rank_int = None
+        score_value = row.get("total_score")
+        try:
+            score_float: float | None = float(score_value) if score_value else None
+        except ValueError:
+            score_float = None
+        ticker_aliases = [piece.strip() for piece in (row.get("ticker") or "").split("/") if piece.strip()]
+        return {
+            "rank": rank_int,
+            "priority_tier": row.get("priority_tier") or "",
+            "ticker": row.get("ticker") or "",
+            "primary_ticker": ticker_aliases[0] if ticker_aliases else row.get("ticker") or "",
+            "company": row.get("company") or "",
+            "market_country": row.get("market_country") or "",
+            "asset_pool": row.get("asset_pool") or "",
+            "bfs_depth": row.get("bfs_depth") or "",
+            "module": row.get("module") or "",
+            "current_pool": row.get("current_pool") or "",
+            "verification_status": row.get("verification_status") or "",
+            "total_score": score_float,
+            "score_bucket": row.get("score_bucket") or "",
+            "primary_sources_to_find": row.get("primary_sources_to_find") or "",
+            "metrics_to_verify": row.get("metrics_to_verify") or "",
+            "upgrade_conditions": row.get("upgrade_conditions") or "",
+            "downgrade_conditions": row.get("downgrade_conditions") or "",
+            "evidence_state": row.get("evidence_state") or "",
+            "counterevidence": row.get("counterevidence") or "",
+            "dependency_path": row.get("dependency_path") or "",
+            "in_focus": any(alias.upper() in focus for alias in ticker_aliases),
+        }
+
+    def _key(projected: dict[str, Any]) -> tuple[int, int, int]:
+        tier_rank = _SOURCE_REVIEW_TIER_ORDER.get(projected.get("priority_tier") or "", 9)
+        focus_rank = 0 if projected.get("in_focus") else 1
+        return (focus_rank, tier_rank, projected.get("rank") or 9_999)
+
+    buckets: dict[str, dict[str, Any]] = {}
+    for market in ("US", "CN"):
+        filtered = [
+            _project(row)
+            for row in raw_rows
+            if _source_review_market_matches(row, market)
+        ]
+        filtered.sort(key=_key)
+        focus_hits = sum(1 for row in filtered if row["in_focus"])
+        buckets[market.lower()] = {
+            "status": "ok",
+            "scope": "focused_report_symbols" if focus else "all_symbols",
+            "focus_symbol_count": len(focus),
+            "focus_match_count": focus_hits,
+            "total_rows": len(filtered),
+            "rows": filtered[:limit],
+            "queue_path": _safe_relative_path(path),
+        }
+    return buckets
+
+
 def cn_price_plan(row: dict[str, Any]) -> dict[str, Any]:
     entry = round_or_none(row.get("planned_entry") or row.get("reference_close"), 4)
     risk = round_or_none(row.get("risk_unit_pct"), 4)
@@ -3585,6 +3705,151 @@ def load_return_series(db_path: Path, market: str, symbols: list[str], as_of: da
     return {symbol: _returns_from_closes(values)[-lookback:] for symbol, values in closes.items()}
 
 
+US_REPORT_BENCHMARKS = ("SPY", "QQQ", "SMH", "IWM", "DIA")
+CN_REPORT_BENCHMARKS = ("000300.SH", "399006.SZ", "399001.SZ", "000001.SH")
+BENCHMARK_LABELS = {
+    "SPY": "SPY (S&P 500)",
+    "QQQ": "QQQ (Nasdaq 100)",
+    "SMH": "SMH (Semiconductors)",
+    "IWM": "IWM (Russell 2000)",
+    "DIA": "DIA (Dow 30)",
+    "000300.SH": "000300.SH (沪深300)",
+    "399006.SZ": "399006.SZ (创业板指)",
+    "399001.SZ": "399001.SZ (深成指)",
+    "000001.SH": "000001.SH (上证指数)",
+}
+
+
+def _load_benchmark_closes(
+    db_path: Path,
+    market: str,
+    symbols: Iterable[str],
+    as_of: date,
+    lookback_days: int = 320,
+) -> dict[str, list[tuple[date, float]]]:
+    syms = [str(symbol).upper() for symbol in symbols if symbol]
+    if not db_path.exists() or not syms:
+        return {}
+    if market.lower() == "us":
+        table, sym_col, date_col, close_col = "prices_daily", "symbol", "date", "close"
+    else:
+        table, sym_col, date_col, close_col = "prices", "ts_code", "trade_date", "close"
+    con = duckdb.connect(str(db_path), read_only=True)
+    try:
+        if not table_exists(con, table):
+            return {}
+        start = as_of - timedelta(days=lookback_days * 2)
+        rows = rows_as_dicts(
+            con,
+            f"""
+            SELECT {sym_col} AS symbol, {date_col} AS d, {close_col} AS close
+            FROM {table}
+            WHERE {date_col} >= CAST(? AS DATE)
+              AND {date_col} <= CAST(? AS DATE)
+              AND {sym_col} IN ({','.join('?' for _ in syms)})
+              AND {close_col} IS NOT NULL
+            ORDER BY symbol, d
+            """,
+            [start.isoformat(), as_of.isoformat(), *syms],
+        )
+    finally:
+        con.close()
+    series: dict[str, list[tuple[date, float]]] = {}
+    for row in rows:
+        symbol = str(row["symbol"]).upper()
+        trade_date = row["d"]
+        if not isinstance(trade_date, date):
+            try:
+                trade_date = date.fromisoformat(str(trade_date))
+            except ValueError:
+                continue
+        series.setdefault(symbol, []).append((trade_date, float(row["close"])))
+    return series
+
+
+def _trailing_return_pct(closes: list[tuple[date, float]], periods: int) -> float | None:
+    if not closes or len(closes) <= periods:
+        return None
+    latest = closes[-1][1]
+    prior = closes[-1 - periods][1]
+    if not prior:
+        return None
+    return (latest / prior - 1.0) * 100.0
+
+
+def _ytd_return_pct(closes: list[tuple[date, float]], as_of: date) -> float | None:
+    if not closes:
+        return None
+    year_start = date(as_of.year, 1, 1)
+    base = next((close for d, close in closes if d >= year_start), None)
+    if base is None or not base:
+        return None
+    latest = closes[-1][1]
+    return (latest / base - 1.0) * 100.0
+
+
+def build_benchmark_attribution(
+    us_db: Path,
+    cn_db: Path,
+    as_of: date,
+) -> dict[str, Any]:
+    """Snapshot trailing returns for canonical US/CN benchmarks.
+
+    The contract here is narrow: the daily report needs SPY/QQQ/SMH-style and
+    CN index context to attribute AI book returns. This function only computes
+    trailing returns for the indices themselves; production-basket relative
+    return is intentionally deferred to keep this read-only and cheap.
+    """
+    out: dict[str, Any] = {"as_of": as_of.isoformat(), "us": {}, "cn": {}}
+
+    for market, db_path, symbols, key in (
+        ("us", us_db, US_REPORT_BENCHMARKS, "us"),
+        ("cn", cn_db, CN_REPORT_BENCHMARKS, "cn"),
+    ):
+        series = _load_benchmark_closes(db_path, market, symbols, as_of)
+        rows: list[dict[str, Any]] = []
+        missing: list[str] = []
+        for symbol in symbols:
+            closes = series.get(symbol)
+            if not closes:
+                missing.append(symbol)
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "label": BENCHMARK_LABELS.get(symbol, symbol),
+                        "status": "missing_data",
+                        "latest_close": None,
+                        "latest_date": None,
+                        "ret_1d_pct": None,
+                        "ret_5d_pct": None,
+                        "ret_20d_pct": None,
+                        "ret_60d_pct": None,
+                        "ret_ytd_pct": None,
+                    }
+                )
+                continue
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "label": BENCHMARK_LABELS.get(symbol, symbol),
+                    "status": "ok",
+                    "latest_close": round(closes[-1][1], 4),
+                    "latest_date": closes[-1][0].isoformat(),
+                    "ret_1d_pct": _trailing_return_pct(closes, 1),
+                    "ret_5d_pct": _trailing_return_pct(closes, 5),
+                    "ret_20d_pct": _trailing_return_pct(closes, 20),
+                    "ret_60d_pct": _trailing_return_pct(closes, 60),
+                    "ret_ytd_pct": _ytd_return_pct(closes, as_of),
+                }
+            )
+        out[key] = {
+            "status": "ok" if rows else "missing_db",
+            "rows": rows,
+            "missing": missing,
+        }
+    return out
+
+
 def load_cn_future_return_series(db_path: Path, symbols: Iterable[str], as_of: date, lookback: int = 90) -> dict[str, list[float]]:
     clean_symbols = [str(symbol).upper() for symbol in symbols if symbol]
     if not db_path.exists() or not clean_symbols:
@@ -5820,6 +6085,94 @@ def render_earnings_calendar_section(payload: dict[str, Any], market: str, *, li
     return lines
 
 
+def render_benchmark_attribution_section(payload: dict[str, Any], market: str, *, limit: int = 8) -> list[str]:
+    data = (payload.get("benchmark_attribution") or {}).get(market.lower()) or {}
+    rows = data.get("rows") or []
+    title = "US Benchmark Snapshot" if market.upper() == "US" else "A股 Benchmark Snapshot"
+    note = (
+        "用法: benchmark 是 macro/beta context 和归因基线，不能成为 production candidate。"
+        " 主要看 AI book 相对 SPY/QQQ/SMH 或对应指数的方向。"
+        if market.upper() == "US"
+        else "用法: benchmark 仅作 macro/beta context 和归因基线，不能成为 production candidate。"
+        " A股 attribution 主要看 AI book 相对 沪深300/创业板指/深成指/上证指数 的方向。"
+    )
+    missing = data.get("missing") or []
+    lines = [
+        f"## {title}",
+        "",
+        note,
+        "",
+    ]
+    if missing:
+        lines.append(f"- 缺数据: {', '.join(missing)}")
+        lines.append("")
+    lines += [
+        "| Symbol | Latest Date | Close | 1D | 5D | 20D | 60D | YTD |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    if rows:
+        for row in rows[:limit]:
+            if row.get("status") != "ok":
+                lines.append(
+                    f"| {row.get('label') or row.get('symbol')} | - | - | - | - | - | - | - |"
+                )
+                continue
+            lines.append(
+                f"| {row.get('label') or row.get('symbol')} | {row.get('latest_date') or '-'} | "
+                f"{fmt_num(row.get('latest_close'), 2)} | {fmt_pct(row.get('ret_1d_pct'))} | "
+                f"{fmt_pct(row.get('ret_5d_pct'))} | {fmt_pct(row.get('ret_20d_pct'))} | "
+                f"{fmt_pct(row.get('ret_60d_pct'))} | {fmt_pct(row.get('ret_ytd_pct'))} |"
+            )
+    else:
+        lines.append("| - | - | - | - | - | - | - | - |")
+    lines.append("")
+    return lines
+
+
+def render_source_review_calendar_section(
+    payload: dict[str, Any],
+    market: str,
+    *,
+    limit: int = 12,
+) -> list[str]:
+    calendar = (payload.get("source_review_calendar") or {}).get(market.lower()) or {}
+    rows = calendar.get("rows") or []
+    title = "AI Infra Source Review Calendar (US)" if market.upper() == "US" else "AI Infra Source Review Calendar (A股)"
+    queue_path = calendar.get("queue_path") or "ai_infra/reports/source_verification_queue_v1.csv"
+    lines = [
+        f"## {title}",
+        "",
+        f"- 数据源: `{queue_path}`；状态: `{calendar.get('status') or 'unknown'}`；"
+        f"范围: `{calendar.get('scope') or 'unknown'}` (focus 命中 {calendar.get('focus_match_count') or 0} / {calendar.get('focus_symbol_count') or 0})。",
+        "- 用法: source-review 队列只用来跟踪原文核验进度；没有 evidence card 不能晋级为 production candidate。",
+        "",
+        "| Tier | Ticker | Company | Depth | Module | Verification | Upgrade Conditions |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    if rows:
+        for row in rows[:limit]:
+            ticker = row.get("primary_ticker") or row.get("ticker") or "-"
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        row.get("priority_tier") or "-",
+                        ticker,
+                        clean_table_text(row.get("company") or "-", 26),
+                        row.get("bfs_depth") or "-",
+                        clean_table_text(row.get("module") or "-", 36),
+                        clean_table_text(row.get("verification_status") or "-", 36),
+                        clean_table_text(row.get("upgrade_conditions") or "-", 60),
+                    ]
+                )
+                + " |"
+            )
+    else:
+        lines.append("| - | - | 无待核验候选 | - | - | - | - |")
+    lines.append("")
+    return lines
+
+
 def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     as_of = payload["as_of"]
     actions = market_actions(payload, "CN")
@@ -5866,6 +6219,8 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     ]
     lines += render_market_watch_table(market_watch_rows(payload, "CN"))
     lines += render_earnings_calendar_section(payload, "CN")
+    lines += render_source_review_calendar_section(payload, "CN")
+    lines += render_benchmark_attribution_section(payload, "CN")
     lines += [
         "## 风险口径",
         "",
@@ -5913,6 +6268,8 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     ]
     lines += render_market_watch_table(market_watch_rows(payload, "US"))
     lines += render_earnings_calendar_section(payload, "US")
+    lines += render_source_review_calendar_section(payload, "US")
+    lines += render_benchmark_attribution_section(payload, "US")
     lines += [
         "## 风险口径",
         "",
@@ -5960,6 +6317,8 @@ def render_report(payload: dict[str, Any]) -> str:
     lines += render_production_decision_summary(payload)
     lines += render_earnings_calendar_section(payload, "US", limit=18)
     lines += render_earnings_calendar_section(payload, "CN", limit=18)
+    lines += render_source_review_calendar_section(payload, "US", limit=12)
+    lines += render_source_review_calendar_section(payload, "CN", limit=12)
     lines += [
         "## 一句话结论",
         "",
@@ -7056,6 +7415,10 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "us": build_us_earnings_calendar(args.us_db, as_of, focus_symbols=us_calendar_focus),
         "cn": build_cn_earnings_calendar(args.cn_db, as_of, focus_symbols=cn_calendar_focus),
     }
+    source_review_calendar = build_source_review_calendar(
+        focus_symbols=sorted({*us_calendar_focus, *cn_calendar_focus}),
+    )
+    benchmark_attribution = build_benchmark_attribution(args.us_db, args.cn_db, as_of)
     payload = {
         "as_of": as_of.isoformat(),
         "start": start.isoformat(),
@@ -7070,6 +7433,8 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "portfolio_risk_overlay": portfolio_risk_overlay,
         "option_shadow_ledger": option_shadow_ledger,
         "earnings_calendar": earnings_calendar,
+        "source_review_calendar": source_review_calendar,
+        "benchmark_attribution": benchmark_attribution,
         "promotion_contract": promotion_contract,
     }
     assert_promoted_execution_rows(payload)
@@ -7132,6 +7497,28 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     (output_dir / "earnings_calendar.json").write_text(
         json.dumps(payload.get("earnings_calendar") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    (output_dir / "source_review_calendar.md").write_text(
+        "\n".join(
+            render_source_review_calendar_section(payload, "US", limit=60)
+            + render_source_review_calendar_section(payload, "CN", limit=60)
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "source_review_calendar.json").write_text(
+        json.dumps(payload.get("source_review_calendar") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    (output_dir / "benchmark_attribution.md").write_text(
+        "\n".join(
+            render_benchmark_attribution_section(payload, "US", limit=10)
+            + render_benchmark_attribution_section(payload, "CN", limit=10)
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "benchmark_attribution.json").write_text(
+        json.dumps(payload.get("benchmark_attribution") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
         encoding="utf-8",
     )
     (output_dir / "ai_supercycle_evidence.md").write_text(render_ai_supercycle_evidence(payload), encoding="utf-8")

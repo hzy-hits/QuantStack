@@ -23,12 +23,13 @@ ai_infra 原文研究 / BFS 发现
 ## Agent 必读顺序
 
 1. 本文件：仓库目标、边界和执行规则。
-2. `docs/AI_INFRA_SPECIALIST_PIPELINE_REORG.md`：AI Infra 专门基金改造方案。
-3. `docs/AI_SUPERCYCLE_PIPELINE_CONTRACT.md`：生产候选、source evidence、报告约束。
-4. `docs/AI_INFRA_QUANT_FUND_INTEGRATION.md`：`ai_infra` 与量化系统的集成关系。
-5. `docs/MODULE_BOUNDARIES.md`：US producer、CN producer、Factor Lab、shared gate、reporting 的职责边界。
-6. `docs/PROJECT_CONSOLIDATION_PLAN.md`：当前不要乱搬目录，先用 root ops/control plane 收敛。
-7. `ai_infra/START_HERE.md` 和 `ai_infra/docs/README.md`：`ai_infra` 的研究入口。
+2. `CLAUDE_HANDOFF.md`：给 Claude/其他 agent 的当前仓库状态、验证结果和接手提示。
+3. `docs/AI_INFRA_SPECIALIST_PIPELINE_REORG.md`：AI Infra 专门基金改造方案。
+4. `docs/AI_SUPERCYCLE_PIPELINE_CONTRACT.md`：生产候选、source evidence、报告约束。
+5. `docs/AI_INFRA_QUANT_FUND_INTEGRATION.md`：`ai_infra` 与量化系统的集成关系。
+6. `docs/MODULE_BOUNDARIES.md`：US producer、CN producer、Factor Lab、shared gate、reporting 的职责边界。
+7. `docs/PROJECT_CONSOLIDATION_PLAN.md`：当前不要乱搬目录，先用 root ops/control plane 收敛。
+8. `ai_infra/START_HERE.md` 和 `ai_infra/docs/README.md`：`ai_infra` 的研究入口。
 
 `ai_infra` 方法论文档：
 

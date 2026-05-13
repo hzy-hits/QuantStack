@@ -429,6 +429,46 @@ tasks:
     outputs:
       - reports/review_dashboard/ai_supercycle_readiness
 
+  research.main_strategy_v2_report:
+    group: research
+    schedule: "10 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/run_main_strategy_v2_backtest.py
+      - --date
+      - "{cst_date}"
+      - --ai-infra-mode
+      - enforce
+    log: ops/logs/research.main_strategy_v2_report.log
+    lock: ops/state/research.main_strategy_v2_report.lock
+    timeout_minutes: 60
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/main_strategy_v2
+
+  research.production_basket_audit:
+    group: research
+    schedule: "15 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/audit_production_basket_ai_universe.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.production_basket_audit.log
+    lock: ops/state/research.production_basket_audit.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ops/logs/research.production_basket_audit.log
+
   us.watchdog.reboot:
     group: watchdog
     schedule: "@reboot"

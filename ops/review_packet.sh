@@ -91,6 +91,20 @@ cat > "$OUT/commands_run.md" <<'EOF'
 Fill this in before review if command output matters.
 EOF
 
+{
+    echo "# AI Universe Production Basket Audit"
+    echo
+    audit_date="${REVIEW_PACKET_AUDIT_DATE:-$(TZ=Asia/Shanghai date +%Y-%m-%d)}"
+    echo "- Date: $audit_date"
+    if "${PYTHON_BIN:-python3}" scripts/audit_production_basket_ai_universe.py --as-of "$audit_date" 2>&1; then
+        echo
+        echo "Status: pass."
+    else
+        echo
+        echo "Status: FAIL or missing report. Inspect reports/review_dashboard/main_strategy_v2/$audit_date/."
+    fi
+} > "$OUT/production_basket_audit.md"
+
 cat > "$OUT/tests_run.md" <<'EOF'
 # Tests Run
 

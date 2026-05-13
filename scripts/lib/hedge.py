@@ -10,7 +10,7 @@ US_BETA_HEDGE_RATIO = 0.50
 CN_MARKET_BETA_FLOOR = 0.35
 US_MARKET_BETA_FLOOR = 0.30
 CN_HEDGE_BENCHMARKS = ("IM.CFX", "IC.CFX", "IF.CFX", "IH.CFX")
-US_HEDGE_BENCHMARKS = ("SPY", "IWM", "QQQ", "DIA")
+US_HEDGE_BENCHMARKS = ("SPY", "IWM", "QQQ", "DIA", "SMH")
 
 
 def corr(a: list[float], b: list[float], *, min_periods: int = 20) -> float | None:

@@ -78,6 +78,10 @@ class UsOpportunityRankerTests(unittest.TestCase):
             self.assertIn("ZZZ", payload["ai_infra_gate"]["excluded_symbols"])
             self.assertTrue(all(row.get("ai_infra_universe") for row in payload["all_rows"]))
             self.assertTrue(any(row.get("ai_infra_current_pool") == "P1" for row in payload["all_rows"]))
+            self.assertTrue(
+                all(row.get("ai_infra_universe") for row in payload.get("production_basket") or []),
+                "production_basket must only contain ai_infra_universe members",
+            )
 
     def test_supercycle_priority_is_scored_and_public(self) -> None:
         rows = ranker.score_rows(

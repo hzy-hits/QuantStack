@@ -196,6 +196,9 @@ quant-stack/
 
 ## Operating Docs
 
+- [Claude Handoff](CLAUDE_HANDOFF.md): current repository location, latest
+  pushed commits, validation notes, agent read order, and a ready-to-use
+  handoff prompt for Claude or another agent.
 - [Agent Operating Manual](AGENTS.md): the first entrypoint for future agents;
   defines the AI-infra specialist fund objective, source-review promotion path,
   universe boundary, report contract, and common commands.

@@ -266,6 +266,10 @@ class CnOpportunityRankerTests(unittest.TestCase):
             self.assertEqual(by_symbol["002281.SZ"]["ai_infra_bfs_depth"], "D3-D4")
             self.assertEqual(by_symbol["300308.SZ"]["ai_infra_module"], "CPO optical")
             self.assertTrue(all(row.get("ai_infra_universe") for row in payload["all_rows"]))
+            self.assertTrue(
+                all(row.get("ai_infra_universe") for row in payload.get("production_basket") or []),
+                "production_basket must only contain ai_infra_universe members",
+            )
 
     def test_ai_infra_right_side_tape_leadership_can_become_execution_sleeve(self) -> None:
         rows = ranker.score_rows(
