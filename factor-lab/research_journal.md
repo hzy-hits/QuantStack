@@ -367,3 +367,15 @@ Legend: . = tested weak, + = decent IC, ++ = strong IC, +++ = promoted, ! = stro
 - Experiments run: 14
 - OOS passed: 2/3
 - Passing factors: relvol_uniformity_40, relvol_floor_20
+
+## Session 20260513_140001_b22859 — CN
+- Timestamp: 2026-05-13 14:57
+- Experiments run: 15
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260513_145717_4932c6 — US
+- Timestamp: 2026-05-13 15:52
+- Experiments run: 15
+- OOS passed: 0/0
+- Passing factors: none
