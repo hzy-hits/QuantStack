@@ -1,0 +1,2 @@
+relationship_id,as_of,market,primary_symbol,counterparty_symbol,customer_symbol,symbols,layer,relationship_type,supply_chain_role,bottleneck_focus,source_name,source_type,source_url,source_date,confidence,notes
+us_example_official_relation_2026,2026-01-01,US,EXAMPLE,CP,,EXAMPLE;CP,ai_networking_optical_cpo,official_supplier_relationship,Example supplies optical modules to CP AI datacenter builds,datacenter optical links,Example official press release,official_press_release,https://example.com/source,2026-01-01,high,Replace with a real official/news/transcript source.

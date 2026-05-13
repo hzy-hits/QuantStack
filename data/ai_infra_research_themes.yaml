@@ -1,0 +1,146 @@
+version: 1
+contract: >
+  Machine-readable research queue for the AI Infra Investment Mandate.
+  Theme membership is research guidance only. It does not create trade R and
+  does not confirm supplier/customer relationships.
+themes:
+  - theme_id: hbm_structural_supercycle
+    priority: 1
+    title: HBM structural supercycle
+    deep_dive_doc: docs/AI_INFRA_HBM_COWOS_DEEP_DIVE.md
+    evidence_status: source_review_gated
+    layer_refs: [ai_memory_storage, ai_chip_equipment_materials_packaging]
+    research_question: Is HBM a short supply mismatch or a long-term AI accelerator memory standard?
+    current_thesis: >
+      HBM has likely moved beyond a 2-3 year supply mismatch and is becoming a
+      structural memory standard for high-end AI accelerators, but this does not
+      remove ASP, margin, oversupply, or yield-normalization risk.
+    source_review_focus:
+      - JEDEC HBM4 standard release
+      - NVIDIA H200, Blackwell Ultra, Rubin and Vera Rubin official specifications
+      - AMD Instinct MI325X and MI355X official specifications
+      - SK hynix, Samsung and Micron HBM3E/HBM4/HBM4E product, press and IR materials
+      - Hanmi, ASMPT, BESI, SUSS, TOWA, DISCO, Advantest and Teradyne HBM-related filings or product disclosures
+      - Chroma, MPI, WinWay, Leeno, ISC, TSE, Ibiden, Shinko, Unimicron and Resonac HBM-specific revenue or qualification evidence
+    company_pool: [SK hynix, Samsung, Micron, Hanmi, ASMPT, Advantest, TOWA, BESI, SUSS, Ibiden, Shinko, Ajinomoto, Resonac, Camtek]
+    key_metrics: [HBM revenue, HBM qualification, HBM stack height, TCB orders, hybrid bonding orders, memory tester revenue, substrate revenue]
+    disconfirming_evidence: [HBM supply expands faster than AI accelerator demand, one-off equipment orders, HBM4 route reduces equipment or material value]
+  - theme_id: cowos_advanced_packaging_bottleneck
+    priority: 1
+    title: CoWoS and advanced packaging capacity bottleneck
+    deep_dive_doc: docs/AI_INFRA_HBM_COWOS_DEEP_DIVE.md
+    evidence_status: source_review_gated
+    layer_refs: [ai_chip_equipment_materials_packaging]
+    research_question: Does the AI chip bottleneck shift from TSMC CoWoS to substrate, interposer, equipment, or test?
+    current_thesis: >
+      CoWoS and advanced packaging remain AI accelerator shipment bottlenecks,
+      but the constraint is no longer a single TSMC capacity point; it is TSMC as
+      the gatekeeper plus parallel pressure in high-end substrate, T-glass,
+      TCB/hybrid bonding, temporary bonding, dicing, molding, inspection,
+      metrology and selected test capacity.
+    source_review_focus:
+      - TSMC earnings call, annual report, CoWoS/advanced packaging and capex commentary
+      - ASE and Amkor advanced packaging, test, AI/HPC and capex disclosures
+      - Ibiden, AT&S, Shinko, Unimicron, Nan Ya PCB and Kinsus high-end substrate disclosures
+      - BESI, SUSS, ASMPT, TOWA and DISCO equipment order and shipment commentary
+      - Camtek and Nova CoWoS-like, HBM, chiplet, hybrid bonding, RDL/TSV and metrology disclosures
+      - Advantest, Teradyne, Amkor and ASE final-test or SLT evidence before calling test a primary bottleneck
+    company_pool: [TSMC, ASE, Amkor, Ibiden, Shinko, Unimicron, Nan Ya PCB, Kinsus, AT&S, BESI, SUSS, ASMPT, TOWA, Disco, Camtek, Nova]
+    key_metrics: [CoWoS capacity, advanced packaging revenue, substrate ASP, equipment orders, book-to-bill, interposer size, HBM stack count]
+    disconfirming_evidence: [CoWoS capacity catches up, packaging pricing absorbed by foundries, substrate shortage clears]
+  - theme_id: ai_hbm_test_metrology
+    priority: 1
+    title: AI and HBM test, probe, and metrology
+    layer_refs: [ai_chip_equipment_materials_packaging, ai_memory_storage]
+    research_question: Does AI chip complexity extend test time and create tester/probe/inspection bottlenecks?
+    company_pool: [Advantest, Teradyne, Chroma, MPI, WinWay, FormFactor, Technoprobe, Leeno, ISC, TSE, Camtek, Nova, Onto, KLA]
+    key_metrics: [SoC tester revenue, memory tester revenue, probe card ASP, HBM test time, advanced packaging inspection revenue, yield improvement]
+    disconfirming_evidence: [test orders pulled forward, test time compressed by process improvements, customer internalization]
+  - theme_id: optical_cpo_800g_1p6t
+    priority: 1
+    title: 800G to 1.6T to CPO optical interconnect
+    layer_refs: [ai_networking_optical_cpo]
+    research_question: Does AI cluster scale turn optics from a telecom cycle into a compute-network cycle?
+    company_pool: [Coherent, Lumentum, Broadcom, Marvell, Credo, MACOM, Semtech, InnoLight, Zhongji Innolight, Eoptolink, Fabrinet, Sivers, IQE, Tower, Corning]
+    key_metrics: [800G shipment, 1.6T shipment, laser capacity, DSP ASP, power per bit, CPO design wins, hyperscaler qualification]
+    disconfirming_evidence: [CPO delayed, pluggable optics life extends, optical module price war, DSP displaced by LPO or CPO]
+  - theme_id: rack_scale_connectivity
+    priority: 1
+    title: AI scale-up fabric and rack-scale connectivity
+    layer_refs: [ai_compute_accelerators, ai_networking_optical_cpo]
+    research_question: Which fabric captures value across NVLink, UALink, PCIe/CXL, InfiniBand, and Ethernet?
+    company_pool: [NVIDIA, Broadcom, Marvell, Astera Labs, Credo, Arista, Cisco, Rambus, Alphawave, Arm, AMD]
+    key_metrics: [data center networking revenue, PCIe/CXL revenue, switch radix, latency, power per bit, retimer attach, CXL memory pooling]
+    disconfirming_evidence: [network stack internalized by one vendor, Ethernet price competition, customer self-design]
+  - theme_id: custom_asic_xpu_supply_chain
+    priority: 1
+    title: Custom ASIC and XPU supply chain
+    layer_refs: [ai_compute_accelerators, ai_chip_equipment_materials_packaging]
+    research_question: Do hyperscaler ASICs shift value from GPU vendors into design, EDA/IP, HBM, CoWoS, and networking?
+    company_pool: [Broadcom, Marvell, Alchip, GUC, Faraday, Arm, Rambus, Synopsys, Cadence, TSMC, ASE, AWS, Google, Microsoft, Meta]
+    key_metrics: [custom silicon revenue, NRE, design wins, IP royalties, EDA backlog, CoWoS allocation, HBM attach]
+    disconfirming_evidence: [ASIC only replaces narrow workloads, weak software ecosystem, NVIDIA retains system-level advantage, single-customer pricing pressure]
+  - theme_id: neocloud_unit_economics_credit_risk
+    priority: 2
+    title: NeoCloud unit economics and credit risk
+    layer_refs: [ai_datacenter_edge_infra, ai_compute_accelerators]
+    research_question: Are NeoClouds cloud platforms or leveraged GPU leasing infrastructure cycles?
+    company_pool: [CoreWeave, Nebius, Oracle, Lambda, Crusoe, IREN, Applied Digital, Hut 8, TeraWulf, Core Scientific, DigitalOcean]
+    key_metrics: [contracted backlog, MW secured, GPU fleet, utilization, gross margin, depreciation, debt cost, customer concentration]
+    disconfirming_evidence: [financing costs rise, GPU residual value falls, customer contracts delayed or broken, utilization below underwriting]
+  - theme_id: ai_server_odm_liquid_cooled_rack
+    priority: 2
+    title: AI server ODM and liquid-cooled rack integration
+    layer_refs: [ai_compute_accelerators, ai_datacenter_edge_infra]
+    research_question: Can rack-scale AI turn ODMs from low-margin assemblers into system bottlenecks?
+    company_pool: [Quanta, QCT, Wiwynn, Wistron, Foxconn, Inventec, Gigabyte, Supermicro, Dell, HPE, Lenovo, Celestica, Jabil]
+    key_metrics: [AI server revenue, rack backlog, gross margin, inventory, liquid cooling rack ratio, customer concentration]
+    disconfirming_evidence: [revenue grows but margins do not, inventory stress, platform change, customer concentration]
+  - theme_id: ai_power_cooling_transformer
+    priority: 1
+    title: AI data center power, transformer, UPS, PDU, and liquid cooling
+    layer_refs: [ai_power_nuclear_grid, ai_datacenter_edge_infra]
+    research_question: Does the AI bottleneck shift from GPU availability to power equipment and cooling?
+    company_pool: [Vertiv, Schneider, Eaton, Siemens Energy, ABB, Hitachi Energy, Delta, Lite-On, AcBel, Vicor, MPS, Infineon, Fuji Electric, Mitsubishi Electric, Nidec, Munters, Alfa Laval, Modine]
+    key_metrics: [backlog, book-to-bill, transformer lead time, liquid cooling attach, rack kW, data center revenue, gross margin]
+    disconfirming_evidence: [data center delays, orders pulled forward, customer price pressure, grid permitting rather than equipment becomes the true bottleneck]
+  - theme_id: ai_essd_nand_storage_controller
+    priority: 2
+    title: AI eSSD, NAND, and storage controllers
+    layer_refs: [ai_memory_storage]
+    research_question: Is enterprise SSD becoming a new AI storage cycle or just traditional NAND recovery?
+    company_pool: [Samsung, SK hynix, Solidigm, Micron, Kioxia, WDC, SanDisk, Phison, Silicon Motion, Marvell, Pure Storage, NetApp, Weka, VAST]
+    key_metrics: [enterprise SSD revenue, NAND ASP, enterprise bit shipment, controller mix, PCIe Gen5 or Gen6 design wins, QLC adoption]
+    disconfirming_evidence: [consumer SSD drives the cycle, controller competition, enterprise qualification slow, NAND price rise mostly supply cuts]
+  - theme_id: silicon_photonics_inp_laser
+    priority: 1
+    title: Silicon photonics, InP, lasers, and compound semiconductors
+    layer_refs: [ai_networking_optical_cpo, ai_chip_equipment_materials_packaging]
+    research_question: Do 1.6T and CPO create bottlenecks in InP lasers, external light sources, and silicon photonics foundry capacity?
+    company_pool: [Sivers, IQE, Coherent, Lumentum, MACOM, Tower, GlobalFoundries, Ayar Labs, POET, DustPhotonics, Soitec, Aixtron]
+    key_metrics: [photonics revenue, InP revenue, laser capacity, design wins, DFB/EML/CW laser adoption, CPO attach]
+    disconfirming_evidence: [CPO adoption slow, reliability issues, pluggable optics persist, foundry supply catches up]
+  - theme_id: semiconductor_materials_gases_vacuum_cleanroom
+    priority: 1
+    title: Semiconductor materials, gases, vacuum, and cleanroom
+    layer_refs: [ai_chip_equipment_materials_packaging]
+    research_question: Does AI leading-edge, HBM, CoWoS, and silicon photonics drive long-term material volume and specification upgrades?
+    company_pool: [Ajinomoto, Resonac, Shin-Etsu, SUMCO, GlobalWafers, Siltronic, Soitec, JSR, Tokyo Ohka, Fujifilm, Merck, Entegris, Soulbrain, Dongjin, SK Materials, VAT, Organo, Kurita]
+    key_metrics: [semiconductor materials revenue, ABF layer count, EUV resist demand, gas purity, UPW demand, vacuum valve orders, gross margin]
+    disconfirming_evidence: [AI exposure too diluted, orders cyclical, customer pricing pressure, local substitution]
+  - theme_id: ai_datacenter_energy_grid
+    priority: 2
+    title: AI data center energy, gas, nuclear, SMR, fuel cell, and grid
+    layer_refs: [ai_power_nuclear_grid]
+    research_question: Will AI data centers reshape power-load growth and create new energy assets?
+    company_pool: [GE Vernova, Siemens Energy, Mitsubishi Heavy, Bloom Energy, Constellation, Vistra, Talen, NRG, Cameco, Kazatomprom, LEU, NuScale, Oklo, BWXT, Fluence]
+    key_metrics: [contracted MW, PPA price, interconnect queue, turbine backlog, nuclear capacity factor, SMR licensing, transmission capex]
+    disconfirming_evidence: [project cycles too long, local opposition, regulatory delay, data center demand slows, power price crushes AI cloud margins]
+  - theme_id: ai_infra_bear_case_dashboard
+    priority: 1
+    title: AI infra bear-case dashboard
+    layer_refs: [ai_labs_cloud_models, ai_compute_accelerators, ai_memory_storage, ai_networking_optical_cpo, ai_datacenter_edge_infra, ai_power_nuclear_grid]
+    research_question: Which metrics prove the AI infra cycle is turning from structural growth into overbuild or bubble?
+    company_pool: [Hyperscalers, NeoClouds, NVIDIA, memory vendors, optical vendors, power equipment, data center REITs]
+    key_metrics: [free cash flow, capex to sales, depreciation, gross margin, utilization, RPO conversion, customer concentration, token price, tokens per watt]
+    disconfirming_evidence: [API prices collapse faster than demand expands, utilization falls, RPO conversion slows, cloud margins deteriorate, GPU residual values drop]

@@ -1,0 +1,55 @@
+version: 1
+contract: >
+  Seed contract for an AI lab quality index. The index is intended to count
+  industrial-lab publications at NeurIPS, ICML, ICLR and CVPR, then map that
+  research strength into the AI-supercycle universe. This seed does not claim
+  current paper counts; rows remain data_required until a publication dataset
+  is loaded.
+conference_scope: [NeurIPS, ICML, ICLR, CVPR]
+index_formula: >
+  score = weighted_rolling_publication_count + accepted_oral_spotlight_bonus +
+  open_source_stack_bonus + recency_decay. Exact weights must be calibrated
+  once a publication dataset exists.
+companies:
+  - symbol: GOOGL
+    company: Alphabet
+    labs: [Google DeepMind, Google Research]
+    stack_aliases: [Gemini, TPU, JAX, TensorFlow]
+    supercycle_layer: ai_labs_cloud_models
+    data_status: data_required
+  - symbol: META
+    company: Meta Platforms
+    labs: [FAIR, Meta AI]
+    stack_aliases: [Llama, PyTorch, React]
+    supercycle_layer: ai_labs_cloud_models
+    data_status: data_required
+  - symbol: MSFT
+    company: Microsoft
+    labs: [Microsoft Research, Azure AI]
+    stack_aliases: [Azure AI, Copilot, DeepSpeed, ONNX]
+    supercycle_layer: ai_labs_cloud_models
+    data_status: data_required
+  - symbol: AMZN
+    company: Amazon
+    labs: [Amazon AGI, AWS AI, Alexa AI]
+    stack_aliases: [AWS, Trainium, Inferentia, Bedrock]
+    supercycle_layer: ai_labs_cloud_models
+    data_status: data_required
+  - symbol: NVDA
+    company: NVIDIA
+    labs: [NVIDIA Research]
+    stack_aliases: [CUDA, TensorRT, DGX, Omniverse]
+    supercycle_layer: ai_compute_accelerators
+    data_status: data_required
+  - symbol: ADBE
+    company: Adobe
+    labs: [Adobe Research]
+    stack_aliases: [Firefly, Creative Cloud]
+    supercycle_layer: ai_labs_cloud_models
+    data_status: data_required
+  - symbol: IBM
+    company: IBM
+    labs: [IBM Research]
+    stack_aliases: [watsonx, Granite]
+    supercycle_layer: ai_labs_cloud_models
+    data_status: data_required

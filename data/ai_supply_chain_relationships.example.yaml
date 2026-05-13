@@ -1,0 +1,19 @@
+version: 1
+relationships:
+  - relationship_id: us_example_primary_counterparty_YYYY
+    as_of: 2026-01-01
+    market: US
+    primary_symbol: EXAMPLE
+    counterparty_symbol: CP
+    customer_symbol:
+    symbols: [EXAMPLE, CP]
+    layer: ai_networking_optical_cpo
+    relationship_type: supplier_customer_or_platform_partner
+    supply_chain_role: Short factual description of what the company supplies or integrates.
+    bottleneck_focus: The bottleneck this relationship helps validate.
+    source_name: Official company press release
+    source_type: official_press_release
+    source_url: https://example.com/source
+    source_date: 2026-01-01
+    confidence: high
+    notes: Keep this evidence source-linked and company-specific.

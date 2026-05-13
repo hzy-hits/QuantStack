@@ -1,0 +1,65 @@
+symbol,company_zh,name_source
+NVDA,英伟达,common_cn_name
+AVGO,博通,common_cn_name
+AMD,超威半导体,common_cn_name
+MRVL,美满电子,common_cn_name
+MSFT,微软,common_cn_name
+AMZN,亚马逊,common_cn_name
+GOOGL,Alphabet / 谷歌,common_cn_name
+ORCL,甲骨文,common_cn_name
+CRWV,CoreWeave（暂无通用中文名）,english_retained
+NBIS,Nebius（暂无通用中文名）,english_retained
+META,Meta Platforms（Meta）,common_cn_name
+ANET,Arista Networks（暂无通用中文名）,english_retained
+CSCO,思科,common_cn_name
+ALAB,Astera Labs（暂无通用中文名）,english_retained
+CRDO,Credo Technology（暂无通用中文名）,english_retained
+COHR,Coherent（相干）,common_cn_name
+LITE,Lumentum（暂无通用中文名）,english_retained
+FN,Fabrinet（暂无通用中文名）,english_retained
+AAOI,应用光电,common_cn_name
+MTSI,MACOM（暂无通用中文名）,english_retained
+SMTC,Semtech（升特）,common_cn_name
+FORM,FormFactor（暂无通用中文名）,english_retained
+TER,泰瑞达,common_cn_name
+COHU,Cohu（暂无通用中文名）,english_retained
+ONTO,Onto Innovation（暂无通用中文名）,english_retained
+KLA,KLA / 科磊,common_cn_name
+MU,美光科技,common_cn_name
+WDC,西部数据 / SanDisk,common_cn_name
+STX,希捷科技,common_cn_name
+PSTG,Pure Storage（暂无通用中文名）,english_retained
+NTAP,NetApp（暂无通用中文名）,english_retained
+VRT,维谛技术,common_cn_name
+ETN,伊顿,common_cn_name
+GEV,GE Vernova（暂无通用中文名）,english_retained
+POWL,Powell Industries（暂无通用中文名）,english_retained
+MOD,摩丁制造,common_cn_name
+SPXC,SPX Technologies（暂无通用中文名）,english_retained
+BE,Bloom Energy（暂无通用中文名）,english_retained
+LEU,Centrus Energy（暂无通用中文名）,english_retained
+CCJ,Cameco（卡梅科）,common_cn_name
+IREN,IREN（暂无通用中文名）,english_retained
+APLD,Applied Digital（暂无通用中文名）,english_retained
+CORZ,Core Scientific（暂无通用中文名）,english_retained
+WULF,TeraWulf（暂无通用中文名）,english_retained
+DOCN,DigitalOcean（暂无通用中文名）,english_retained
+SNPS,新思科技,common_cn_name
+CDNS,楷登电子,common_cn_name
+RMBS,Rambus（暂无通用中文名）,english_retained
+INTC,英特尔,common_cn_name
+DELL,戴尔科技,common_cn_name
+HPE,慧与科技,common_cn_name
+AMAT,应用材料,common_cn_name
+AMCR,安姆科,common_cn_name
+CARR,开利全球,common_cn_name
+CAT,卡特彼勒,common_cn_name
+ENTG,Entegris（英特格）,common_cn_name
+CRWD,CrowdStrike（暂无通用中文名）,english_retained
+DTE,DTE Energy（暂无通用中文名）,english_retained
+EME,EMCOR Group（暂无通用中文名）,english_retained
+NRG,NRG Energy（暂无通用中文名）,english_retained
+VST,Vistra（暂无通用中文名）,english_retained
+RKLB,Rocket Lab（火箭实验室）,common_cn_name
+002594.SZ,比亚迪,common_cn_name
+300750.SZ,宁德时代,common_cn_name

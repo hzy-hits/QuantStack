@@ -1,0 +1,103 @@
+version: 2
+contract: >
+  Seed universe for the US AI-supercycle theme sleeve. Membership means
+  quant-screen eligibility only; supplier/customer claims must be confirmed by
+  cached news, filings, transcripts, or primary-source evidence before they are
+  stated in a final report.
+themes:
+  - theme_id: ai_labs_cloud_models
+    label: AI labs, cloud and model distribution
+    inception_date: 2026-03-01
+    benchmark: QQQ
+    aliases: [ai labs, hyperscalers, cloud, model platforms, app distribution]
+    supercycle_layer: ai_labs_cloud_models
+    supercycle_priority: 1
+    supply_chain_role: model owner, cloud distributor, enterprise AI platform
+    bottleneck_focus: compute capacity, model quality, enterprise distribution, inference margin
+    evidence_contract: confirm current AI product traction and capex exposure with filings/news before narrative use
+    research_index: top AI conference/lab-output index is a planned data requirement, not yet a score input
+    members: [GOOGL, MSFT, META, AMZN, ORCL, CRM, NOW, SNOW, PLTR, DDOG, NET]
+  - theme_id: ai_compute_accelerators
+    label: AI compute accelerators and servers
+    inception_date: 2026-03-01
+    benchmark: SMH
+    aliases: [gpu, tpu, accelerators, ai servers, compute]
+    supercycle_layer: ai_compute_accelerators
+    supercycle_priority: 1
+    supply_chain_role: accelerator, custom silicon, AI server, foundry interface
+    bottleneck_focus: accelerator supply, advanced packaging, memory bandwidth, server integration
+    evidence_contract: confirm product/customer exposure with filings/news; do not infer supplier status from theme membership
+    research_index: ai accelerator ecosystem exposure
+    members: [NVDA, AMD, AVGO, MRVL, TSM, ARM, MU, INTC, SMCI, DELL, HPE]
+  - theme_id: ai_networking_optical_cpo
+    label: AI networking, optical and CPO
+    inception_date: 2026-03-01
+    benchmark: QQQ
+    aliases: [cpo, optical, datacenter networking, fiber, ethernet]
+    supercycle_layer: ai_networking_optical_cpo
+    supercycle_priority: 1
+    supply_chain_role: optical module, switch silicon, coherent optics, datacenter fabric
+    bottleneck_focus: 800G/1.6T optics, CPO transition, switch bandwidth, fiber supply
+    evidence_contract: confirm AI/datacenter design-win or order evidence before supplier narrative
+    research_index: optical-networking bottleneck monitor
+    members: [AVGO, MRVL, ANET, COHR, LITE, CIEN, FN, POET, AAOI, SMCI]
+  - theme_id: ai_memory_storage
+    label: AI memory and storage
+    inception_date: 2026-03-01
+    benchmark: SMH
+    aliases: [hbm, dram, nand, storage, data lake]
+    supercycle_layer: ai_memory_storage
+    supercycle_priority: 1
+    supply_chain_role: HBM/DRAM, NAND, enterprise storage, data infrastructure
+    bottleneck_focus: HBM capacity, storage bandwidth, data-retention cost curve
+    evidence_contract: confirm AI memory/storage demand through filings/news before final narrative
+    research_index: memory bandwidth and storage-capex exposure
+    members: [MU, WDC, STX, PSTG, NTAP, MRVL, NVDA, AVGO]
+  - theme_id: ai_chip_equipment_materials_packaging
+    label: AI chip equipment, materials and packaging
+    inception_date: 2026-03-01
+    benchmark: SMH
+    aliases: [semicap, packaging, testing, substrates, materials]
+    supercycle_layer: ai_chip_equipment_materials_packaging
+    supercycle_priority: 2
+    supply_chain_role: fab equipment, test, advanced packaging, compound substrate, specialty material
+    bottleneck_focus: CoWoS/advanced packaging, test capacity, compound substrates, process-control tools
+    evidence_contract: confirm direct AI/advanced-node exposure before calling a company a supplier bottleneck
+    research_index: packaging/materials bottleneck monitor
+    members: [ASML, AMAT, LRCX, KLAC, TER, ONTO, AEHR, UCTT, ICHR, ENTG, COHU, AXTI, ACMR]
+  - theme_id: ai_datacenter_edge_infra
+    label: AI datacenter, edge and internet infrastructure
+    inception_date: 2026-03-01
+    benchmark: QQQ
+    aliases: [datacenter, edge, cooling, cloudflare, internet infra]
+    supercycle_layer: ai_datacenter_edge_infra
+    supercycle_priority: 2
+    supply_chain_role: datacenter power/cooling, edge network, internet delivery, physical infrastructure
+    bottleneck_focus: power density, thermal management, edge inference, interconnect utilization
+    evidence_contract: confirm AI-capex linkage and utilization evidence before final narrative
+    research_index: AI datacenter infrastructure exposure
+    members: [VRT, ETN, PWR, GEV, CARR, DLR, EQIX, NET, AKAM, SMCI, DELL]
+  - theme_id: ai_power_nuclear_grid
+    label: AI power, nuclear and grid capacity
+    inception_date: 2026-03-01
+    benchmark: XLU
+    aliases: [power, nuclear, grid, electrification, energy]
+    supercycle_layer: ai_power_nuclear_grid
+    supercycle_priority: 2
+    supply_chain_role: electricity generation, nuclear fuel/reactor, grid equipment, power services
+    bottleneck_focus: firm power supply, grid interconnect, nuclear restart/SMR optionality, transformer capacity
+    evidence_contract: confirm datacenter/power contract or policy catalyst before supplier narrative
+    research_index: power scarcity and grid bottleneck monitor
+    members: [CEG, VST, NRG, GEV, SMR, OKLO, LEU, BWXT, ETN, PWR, NEE]
+  - theme_id: space_connectivity_datacenter
+    label: Space connectivity and future orbital infrastructure
+    inception_date: 2026-03-01
+    benchmark: ITA
+    aliases: [space, satellite, orbital data, defense, communications]
+    supercycle_layer: space_connectivity_datacenter
+    supercycle_priority: 3
+    supply_chain_role: launch, satellite communications, defense aerospace, future space data infrastructure
+    bottleneck_focus: launch cadence, orbital connectivity, defense demand, long-duration power and thermal systems
+    evidence_contract: confirm contract backlog/news before treating space exposure as investable AI-infra adjacency
+    research_index: space connectivity and orbital compute adjacency
+    members: [RKLB, ASTS, LUNR, IRDM, GSAT, VSAT, LHX, LMT, NOC, TDG, HEI]

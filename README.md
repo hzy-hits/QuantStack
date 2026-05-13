@@ -6,6 +6,12 @@ research systems. The rule is deliberately narrow:
 **market producers compute facts, Quant Stack judges alpha maturity, reports
 narrate the result.**
 
+The active product direction is narrower than a general market research stack:
+Quant Stack is being reorganized into an AI-infra specialist fund pipeline.
+Broad market data is still allowed for benchmark, hedge, liquidity and macro
+context, but production stock candidates should come from the `ai_infra`
+universe or source-reviewed promotion path.
+
 The system is not a broker and does not place orders. `Execution Alpha` means a
 candidate passed historical stability and execution constraints for the daily
 research bulletin; position sizing and live trading remain outside this repo.
@@ -13,6 +19,9 @@ research bulletin; position sizing and live trading remain outside this repo.
 ## Current Shape
 
 ```text
+ai_infra source review / universe / relationship ledger
+                              |
+                              v
 US producer               CN producer
 quant-research-v1         quant-research-cn
      |                         |
@@ -187,8 +196,18 @@ quant-stack/
 
 ## Operating Docs
 
+- [Agent Operating Manual](AGENTS.md): the first entrypoint for future agents;
+  defines the AI-infra specialist fund objective, source-review promotion path,
+  universe boundary, report contract, and common commands.
+- [AI Infra Specialist Pipeline Reorg](docs/AI_INFRA_SPECIALIST_PIPELINE_REORG.md):
+  how the project should stop behaving like a broad-market screener and become
+  an AI-infra-only research, ranking, allocation, and benchmark-attribution
+  pipeline.
 - [Module Boundaries](docs/MODULE_BOUNDARIES.md): what each market, shared
   crate, Factor Lab, options, and reporting module owns.
+- [AI Supercycle Pipeline Contract](docs/AI_SUPERCYCLE_PIPELINE_CONTRACT.md):
+  production-candidate, source-evidence, and report constraints for the
+  AI-supercycle workflow.
 - [Report Quality Audit](docs/REPORT_QUALITY_AUDIT.md): concrete criteria for a
   report that can guide trading decisions without inventing tickets.
 - [Simplification Audit](docs/SIMPLIFICATION_AUDIT.md): overdesign risks,

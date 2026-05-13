@@ -1,0 +1,102 @@
+version: 1
+contract: >
+  Only relationships backed by a source_url and source_type may be used as
+  source-linked AI supercycle evidence. This file is a research ledger, not a
+  trade instruction.
+relationships:
+  - relationship_id: us_dell_nvidia_ai_factory_2024
+    as_of: 2024-03-18
+    market: US
+    primary_symbol: DELL
+    counterparty_symbol: NVDA
+    symbols: [DELL, NVDA]
+    layer: ai_compute_accelerators
+    relationship_type: ai_factory_infrastructure_partner
+    supply_chain_role: Dell integrates NVIDIA accelerated infrastructure and software into enterprise AI Factory systems.
+    bottleneck_focus: rack-scale AI servers, accelerated compute, enterprise AI deployment
+    source_name: Dell Technologies press release
+    source_type: official_press_release
+    source_url: https://investors.delltechnologies.com/news-releases/news-release-details/dell-offers-complete-nvidia-powered-ai-factory-solutions-help
+    source_date: 2024-03-18
+    confidence: high
+    notes: Dell described Dell AI Factory with NVIDIA and PowerEdge support for NVIDIA GB200 NVL72 configurations.
+  - relationship_id: us_micron_nvidia_h200_hbm3e_2024
+    as_of: 2024-02-26
+    market: US
+    primary_symbol: MU
+    counterparty_symbol: NVDA
+    symbols: [MU, NVDA]
+    layer: ai_memory_storage
+    relationship_type: memory_component_in_gpu_platform
+    supply_chain_role: Micron HBM3E is part of NVIDIA H200 Tensor Core GPU supply chain.
+    bottleneck_focus: HBM memory capacity and power efficiency for AI accelerators
+    source_name: Micron press release
+    source_type: official_press_release
+    source_url: https://investors.micron.com/news-releases/news-release-details/micron-commences-volume-production-industry-leading-hbm3e
+    source_date: 2024-02-26
+    confidence: high
+    notes: Micron stated its 24GB 8H HBM3E would be part of NVIDIA H200 Tensor Core GPUs.
+  - relationship_id: us_dell_nvidia_totalenergies_pangea5_2026
+    as_of: 2026-05-06
+    market: US
+    primary_symbol: DELL
+    counterparty_symbol: NVDA
+    customer_symbol: TTE
+    symbols: [DELL, NVDA, TTE]
+    layer: ai_datacenter_edge_infra
+    relationship_type: customer_hpc_ai_supercomputer_contract
+    supply_chain_role: Dell Technologies and NVIDIA collaborate on TotalEnergies Pangea 5 supercomputer design and installation.
+    bottleneck_focus: AI/HPC supercomputer deployment, accelerated compute, datacenter infrastructure
+    source_name: TotalEnergies press release
+    source_type: official_press_release
+    source_url: https://totalenergies.com/newsroom/totalenergies-develops-pangea-5-a-next-generation-supercomputer-469512/?lang=eng
+    source_date: 2026-05-06
+    confidence: high
+    notes: TotalEnergies announced a contract for Pangea 5 in collaboration with Dell Technologies and NVIDIA.
+  - relationship_id: us_cloudflare_nvidia_edge_ai_inference_2023
+    as_of: 2023-09-27
+    market: US
+    primary_symbol: NET
+    counterparty_symbol: NVDA
+    symbols: [NET, NVDA]
+    layer: ai_datacenter_edge_infra
+    relationship_type: edge_ai_inference_accelerated_compute_partner
+    supply_chain_role: Cloudflare deploys NVIDIA GPUs, Ethernet switches, TensorRT-LLM and Triton inference software across its global edge network for Workers AI inference.
+    bottleneck_focus: distributed AI inference capacity, edge GPU footprint, low-latency model serving
+    source_name: Cloudflare press release
+    source_type: official_press_release
+    source_url: https://www.cloudflare.com/en-gb/press/press-releases/2023/cloudflare-powers-hyper-local-ai-inference-with-nvidia/
+    source_date: 2023-09-27
+    confidence: high
+    notes: Cloudflare described NVIDIA GPUs in over 100 cities by end-2023 and broader rollout by end-2024.
+  - relationship_id: us_constellation_microsoft_nuclear_ppa_2024
+    as_of: 2024-09-20
+    market: US
+    primary_symbol: CEG
+    customer_symbol: MSFT
+    symbols: [CEG, MSFT]
+    layer: ai_power_nuclear_grid
+    relationship_type: nuclear_power_purchase_agreement_for_datacenters
+    supply_chain_role: Constellation signed a 20-year power purchase agreement with Microsoft to restart Three Mile Island Unit 1 as the Crane Clean Energy Center and match Microsoft datacenter power use with carbon-free energy.
+    bottleneck_focus: firm carbon-free power for AI datacenters, nuclear restart, grid capacity
+    source_name: Constellation press release
+    source_type: official_press_release
+    source_url: https://investors.constellationenergy.com/news-releases/news-release-details/constellation-launch-crane-clean-energy-center-restoring-jobs/
+    source_date: 2024-09-20
+    confidence: high
+    notes: Constellation described the PPA as its largest-ever agreement and tied the plant restart to Microsoft datacenter electricity matching.
+  - relationship_id: us_axti_inp_datacenter_optical_substrates_2025
+    as_of: 2025-03-31
+    market: US
+    primary_symbol: AXTI
+    symbols: [AXTI]
+    layer: ai_chip_equipment_materials_packaging
+    relationship_type: compound_semiconductor_substrate_value_chain
+    supply_chain_role: AXT produces indium phosphide, gallium arsenide and germanium wafer substrates used in data center connectivity and high-speed optical transmission.
+    bottleneck_focus: InP substrates for optical transceivers, silicon photonics and AI datacenter data transfer
+    source_name: AXT SEC Form 10-Q
+    source_type: sec_filing
+    source_url: https://www.sec.gov/Archives/edgar/data/1051627/000155837025007751/axti-20250331x10q.htm
+    source_date: 2025-03-31
+    confidence: high
+    notes: AXT stated that AI applications may increase high-speed data-transfer needs and InP substrate demand from data centers.

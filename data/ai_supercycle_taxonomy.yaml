@@ -1,0 +1,78 @@
+version: 1
+contract: >
+  Cross-market taxonomy for AI-supercycle research and ranking. This file
+  defines priority, supply-chain role, and evidence requirements. It is not a
+  supplier-confirmation database.
+layers:
+  - layer_id: ai_labs_cloud_models
+    priority: 1
+    description: Large model labs, hyperscale cloud, and AI application distribution.
+    us_theme_ids: [ai_labs_cloud_models]
+    cn_industries: []
+    evidence_required:
+      - filings or transcripts for AI/cloud product traction
+      - top-conference/lab-output index before treating lab quality as a factor
+  - layer_id: ai_compute_accelerators
+    priority: 1
+    description: GPU/TPU/custom accelerator, AI server, foundry-interface and compute capacity.
+    us_theme_ids: [ai_compute_accelerators]
+    cn_industries: [半导体, IT设备]
+    evidence_required:
+      - current product/customer exposure from filings/news
+      - packaging/memory/server capacity confirmation before supplier narrative
+  - layer_id: ai_networking_optical_cpo
+    priority: 1
+    description: Datacenter fabric, switch silicon, optical modules, CPO, coherent optics and fiber.
+    us_theme_ids: [ai_networking_optical_cpo]
+    cn_industries: [通信设备, 元器件]
+    evidence_required:
+      - AI/datacenter design win, order, or capex linkage before supplier narrative
+  - layer_id: ai_memory_storage
+    priority: 1
+    description: HBM/DRAM/NAND, enterprise storage and data infrastructure.
+    us_theme_ids: [ai_memory_storage]
+    cn_industries: [半导体, 元器件, IT设备]
+    evidence_required:
+      - AI memory/storage demand evidence from filings/news
+  - layer_id: ai_chip_equipment_materials_packaging
+    priority: 2
+    description: Semiconductor equipment, process control, advanced packaging, testing and materials.
+    us_theme_ids: [ai_chip_equipment_materials_packaging]
+    cn_industries: [半导体, 专用机械, 化工机械, 机床制造, 小金属, 化工原料]
+    evidence_required:
+      - direct advanced-node, advanced-packaging, substrate, or test exposure before bottleneck claim
+  - layer_id: ai_datacenter_edge_infra
+    priority: 2
+    description: Datacenter power/cooling, edge inference, internet delivery and physical infrastructure.
+    us_theme_ids: [ai_datacenter_edge_infra]
+    cn_industries: [IT设备, 电气设备, 电器仪表, 建筑工程, 工程机械]
+    evidence_required:
+      - AI datacenter or edge-inference demand linkage before final report narrative
+  - layer_id: ai_power_nuclear_grid
+    priority: 2
+    description: Firm power, nuclear, grid, transformers and electrification bottlenecks.
+    us_theme_ids: [ai_power_nuclear_grid]
+    cn_industries: [电气设备, 电器仪表, 火力发电, 水力发电, 新型电力, 供气供热]
+    evidence_required:
+      - datacenter power contract, policy catalyst, or grid-capex evidence
+  - layer_id: space_connectivity_datacenter
+    priority: 3
+    description: Launch, satellite communications, defense aerospace and future orbital compute adjacency.
+    us_theme_ids: [space_connectivity_datacenter]
+    cn_industries: [航空, 船舶, 通信设备]
+    evidence_required:
+      - backlog, contract, launch cadence, or orbital connectivity evidence before AI-infra adjacency claim
+  - layer_id: hard_assets_energy_heavy
+    priority: 3
+    description: Minerals, energy, heavy industry and old-economy scarcity inputs.
+    us_theme_ids: []
+    cn_industries: [煤炭开采, 石油开采, 石油加工, 小金属, 铜, 铝, 普钢, 特种钢, 矿物制品, 化工原料]
+    evidence_required:
+      - price/volume/flow leadership plus commodity/capex linkage
+  - layer_id: excluded_consumer
+    priority: 9
+    description: Daily consumption is excluded from the current AI-infra/hard-asset mandate.
+    us_theme_ids: []
+    cn_industries: [食品, 白酒, 乳制品, 家用电器, 家居用品, 服饰, 旅游服务]
+    evidence_required:
+      - none; excluded unless explicitly re-promoted by a separate mandate
