@@ -71,11 +71,14 @@ class BenchmarkAttributionTests(unittest.TestCase):
             as_of = date(2026, 5, 13)
             _seed_us_prices(us_db, "SPY", 600.0, 120, as_of)
             _seed_us_prices(us_db, "QQQ", 500.0, 120, as_of)
+            _seed_us_prices(us_db, "^TWII", 40000.0, 120, as_of)
+            _seed_us_prices(us_db, "EWT", 90.0, 120, as_of)
             _seed_cn_prices(cn_db, "000300.SH", 4000.0, 120, as_of)
 
             data = self.module.build_benchmark_attribution(us_db, cn_db, as_of)
             us_rows = {row["symbol"]: row for row in data["us"]["rows"]}
             cn_rows = {row["symbol"]: row for row in data["cn"]["rows"]}
+            sat_rows = {row["symbol"]: row for row in data["satellite"]["rows"]}
 
             self.assertEqual(us_rows["SPY"]["status"], "ok")
             self.assertEqual(us_rows["QQQ"]["status"], "ok")
@@ -83,8 +86,40 @@ class BenchmarkAttributionTests(unittest.TestCase):
             self.assertIn("SMH", data["us"]["missing"])
             self.assertEqual(cn_rows["000300.SH"]["status"], "ok")
             self.assertEqual(cn_rows["399001.SZ"]["status"], "missing_data")
+            self.assertEqual(sat_rows["^TWII"]["status"], "ok")
+            self.assertEqual(sat_rows["EWT"]["status"], "ok")
+            self.assertEqual(sat_rows["^N225"]["status"], "missing_data")
             self.assertIsNotNone(us_rows["SPY"]["ret_5d_pct"])
             self.assertIsNotNone(us_rows["SPY"]["ret_ytd_pct"])
+
+    def test_satellite_renderer_uses_satellite_section(self) -> None:
+        payload = {
+            "benchmark_attribution": {
+                "us": {"rows": [], "missing": []},
+                "cn": {"rows": [], "missing": []},
+                "satellite": {
+                    "rows": [
+                        {
+                            "symbol": "^TWII",
+                            "label": "^TWII (TAIEX 台湾加权)",
+                            "status": "ok",
+                            "latest_close": 41000.0,
+                            "latest_date": "2026-05-13",
+                            "ret_1d_pct": -0.5,
+                            "ret_5d_pct": 1.2,
+                            "ret_20d_pct": 5.4,
+                            "ret_60d_pct": 12.3,
+                            "ret_ytd_pct": 40.0,
+                        }
+                    ],
+                    "missing": [],
+                },
+            }
+        }
+        rendered = "\n".join(self.module.render_benchmark_attribution_section(payload, "SATELLITE"))
+        self.assertIn("Satellite Benchmark Snapshot", rendered)
+        self.assertIn("^TWII (TAIEX 台湾加权)", rendered)
+        self.assertIn("+40.00%", rendered)
 
     def test_render_includes_label_and_pct(self) -> None:
         payload = {

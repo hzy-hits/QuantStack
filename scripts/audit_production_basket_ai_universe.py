@@ -49,6 +49,29 @@ def _check_payload(market: str, payload: dict) -> list[str]:
     return errors
 
 
+def _basket_coverage(payload: dict) -> dict[str, dict[str, int]]:
+    """Summarize the basket by asset_pool tag and BFS depth.
+
+    The methodology emphasises core/satellite/candidate buckets; this matrix
+    makes the mix observable to the operator without hand-reading the JSON.
+    """
+    basket = payload.get("production_basket") or []
+    all_rows = payload.get("all_rows") or []
+    by_pool: dict[str, int] = {}
+    by_depth: dict[str, int] = {}
+    for row in basket:
+        pool = row.get("ai_infra_current_pool") or row.get("ai_infra_asset_pool") or "unknown"
+        by_pool[pool] = by_pool.get(pool, 0) + 1
+        depth = row.get("ai_infra_bfs_depth") or "unknown"
+        by_depth[depth] = by_depth.get(depth, 0) + 1
+    return {
+        "basket_count": {"value": len(basket)},
+        "all_rows_count": {"value": len(all_rows)},
+        "by_current_pool": by_pool,
+        "by_bfs_depth": by_depth,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--as-of", required=True, help="Report date, e.g. 2026-05-13")
@@ -67,6 +90,7 @@ def main() -> int:
 
     errors: list[str] = []
     found_any = False
+    coverage: dict[str, dict[str, dict[str, int]]] = {}
     for market, filename in (("US", "us_opportunity_ranker.json"), ("CN", "cn_opportunity_ranker.json")):
         payload = _load(date_dir / filename)
         if payload is None:
@@ -74,6 +98,7 @@ def main() -> int:
             continue
         found_any = True
         errors.extend(_check_payload(market, payload))
+        coverage[market] = _basket_coverage(payload)
 
     if not found_any:
         print("audit: no ranker payloads found", file=sys.stderr)
@@ -86,6 +111,16 @@ def main() -> int:
         return 1
 
     print(f"Production basket AI-universe audit OK for {args.as_of}")
+    for market, matrix in coverage.items():
+        basket = matrix["basket_count"]["value"]
+        all_rows = matrix["all_rows_count"]["value"]
+        pools = ", ".join(f"{name}={count}" for name, count in sorted(matrix["by_current_pool"].items()))
+        depths = ", ".join(f"{name}={count}" for name, count in sorted(matrix["by_bfs_depth"].items()))
+        print(f"  {market}: basket={basket} / all_rows={all_rows}")
+        if pools:
+            print(f"    pools: {pools}")
+        if depths:
+            print(f"    depths: {depths}")
     return 0
 
 

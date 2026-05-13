@@ -91,7 +91,10 @@ ai_infra 原文研究 / BFS 发现
 | `scripts/sleeves/` | US/CN/Factor Lab/promotions/portfolio hedge sleeve 逻辑。 |
 | `scripts/run_main_strategy_v2_backtest.py` | Main Strategy V2 report 和 AI specialist report rendering。 |
 | `scripts/send_production_decision_report.py` | 报告发送和 market/report heading 防串线。 |
-| `scripts/audit_production_basket_ai_universe.py` | 对最新 main_strategy_v2 报告做 AI universe 合规审计 (`production_basket` 必须 100% `ai_infra_universe=True`)。 |
+| `scripts/audit_production_basket_ai_universe.py` | 对最新 main_strategy_v2 报告做 AI universe 合规审计 (`production_basket` 必须 100% `ai_infra_universe=True`)；输出 basket / pool / depth 覆盖矩阵。 |
+| `scripts/score_source_review_readiness.py` | 读 `source_verification_queue_v1.csv`，按 G0-G4 gate 打分 → `reports/review_dashboard/ai_infra_source_review_readiness/<date>/source_review_readiness.{csv,md}`，tier ∈ {ready_for_promotion, evidence_partial, pending_human_review, blocked_by_counterevidence, g0_blocked, unscored}。 |
+| `scripts/ingest_cn_index_prices.py` | 用 AKShare 把 `000001.SH`/`399001.SZ`/`399006.SZ`/`000300.SH` 补到 `quant-research-cn/data/quant_cn_report.duckdb` `prices` 表。 |
+| `scripts/ingest_satellite_index_prices.py` | 用 yfinance 把 `^TWII`/`^N225`/`^KS11`/`^AEX` 和 `EWT/EWJ/EWY/EWN` ETF 补到 `quant-research-v1/data/quant.duckdb` `prices_daily` 表。 |
 | `ops/` | root task registry、cron 渲染、task runner、review packet。 |
 | `crates/` | Rust shared control plane 和 CLI。 |
 
@@ -141,10 +144,15 @@ new ticker / company lead
 生成的 artifact 文件 (在 `reports/review_dashboard/main_strategy_v2/<date>/`)：
 
 - `earnings_calendar.md` / `.json`
-- `source_review_calendar.md` / `.json`
-- `benchmark_attribution.md` / `.json`
-- `us_daily_report.md`、`cn_daily_report.md`
+- `source_review_calendar.md` / `.json`：US/CN AI Infra source review queue (含 readiness tier 列)。
+- `satellite_pool_report.md` / `.json`：卫星资产池 (TW/JP/KR/EU/IL) 50+ 名字按 region + BFS depth 拆分，含 readiness tier。
+- `benchmark_attribution.md` / `.json`：US (SPY/QQQ/SMH/IWM/DIA)、CN (000300.SH/399006.SZ/399001.SZ/000001.SH)、Satellite (^TWII/^N225/^KS11/^AEX + EWT/EWJ/EWY/EWN) 三张表。
+- `us_daily_report.md`、`cn_daily_report.md`、`main_strategy_v2_backtest.md` (combined，含 satellite + 卫星 benchmark)。
 - `us_opportunity_ranker.json` / `cn_opportunity_ranker.json`（含 `ai_infra_gate.contract = ai_infra_universe_only` 和 `production_basket` 数组）
+
+另外的 review-dashboard 输出：
+
+- `reports/review_dashboard/ai_infra_source_review_readiness/<date>/source_review_readiness.{csv,md}`：G0-G4 readiness ledger，由 `scripts/score_source_review_readiness.py` 维护。
 
 ## 常用命令
 
@@ -184,6 +192,8 @@ python3 -m unittest \
   tests.test_phase_0_6_guardrails \
   tests.test_cn_tape_supercycle_layers \
   tests.test_source_review_calendar \
+  tests.test_satellite_pool_report \
+  tests.test_score_source_review_readiness \
   tests.test_benchmark_attribution \
   tests.test_audit_production_basket_ai_universe \
   quant-research-v1.tests.test_ai_infra_universe \
@@ -216,18 +226,27 @@ cargo check -p quant-stack-cli
 
 ## 最近验证结果
 
-最近一次整理 (2026-05-13 接续 handoff) 已经跑过：
+最近一次整理 (2026-05-13 第二批) 已经跑过：
 
 ```text
-Python smoke tests (50 tests): pass — includes new
+Python smoke tests (60 tests): pass — includes
   tests.test_source_review_calendar (4)
-  tests.test_benchmark_attribution (2)
+  tests.test_benchmark_attribution (3)
   tests.test_audit_production_basket_ai_universe (4)
+  tests.test_satellite_pool_report (3)
+  tests.test_score_source_review_readiness (6)
 Factor Lab tests (from factor-lab/): pass (12)
 cargo check -p quant-stack-cli: pass
 verify_ai_supercycle_readiness.py --as-of 2026-05-13 --strict:
   ready_with_warnings pass/warn/fail=10/1/0
 audit_production_basket_ai_universe.py --as-of 2026-05-13: pass
+  US basket=10, pools=核心池/候选/雷达池 mix
+  CN basket=0 (no current AI A股 in production)
+ingest_cn_index_prices.py: 4 indices × 658 rows ingested
+ingest_satellite_index_prices.py: 8 satellite benchmarks × ~250 rows ingested
+score_source_review_readiness.py: 146 rows scored,
+  ready_for_promotion=5, evidence_partial=3, pending_human_review=126,
+  blocked_by_counterevidence=1, unscored=11
 ```
 
 ## 已完成的下一步 (2026-05-13)
@@ -239,14 +258,24 @@ audit_production_basket_ai_universe.py --as-of 2026-05-13: pass
 3. `ops/tasks.yaml` 新增 `research.main_strategy_v2_report` (12:10 CST) 和 `research.production_basket_audit` (12:15 CST)。
 4. `ops/review_packet.sh` 调用审计脚本，输出 `production_basket_audit.md` 到 review packet。
 
+## 第二批已完成 (2026-05-13 续)
+
+1. `scripts/score_source_review_readiness.py` 落地 G0-G4 gate，按方法论给 source-verification queue 打 readiness tier；同一逻辑内联进 `build_source_review_calendar`，daily report 的 Source Review 表多了一列 Readiness。
+2. `scripts/run_main_strategy_v2_backtest.py` 新增 `build_satellite_pool_report` / `render_satellite_pool_report_section`：卫星资产池 50 个名字按 Taiwan/Japan/Korea/Europe/Israel 拆分、按 BFS depth 汇总、按 readiness tier 分类。落 `satellite_pool_report.{md,json}` 并进入 combined report。
+3. `scripts/ingest_cn_index_prices.py` 用 AKShare 把 `000001.SH`/`399001.SZ`/`399006.SZ`/`000300.SH` 共 658 行 / 指数 补进 CN db；benchmark snapshot 不再有 missing rows。
+4. `scripts/ingest_satellite_index_prices.py` 用 yfinance 把 `^TWII`/`^N225`/`^KS11`/`^AEX` 与 `EWT/EWJ/EWY/EWN` ETF 镜像补进 US db；benchmark 章节新增 “Satellite Benchmark Snapshot” 表。
+5. `audit_production_basket_ai_universe.py` 输出 `by_current_pool` / `by_bfs_depth` 覆盖矩阵，供 ops cron 和 review packet 追踪 satellite vs core 的混合比例。
+6. `ops/tasks.yaml` 新增 `research.cn_index_ingest` (06:00 CST)、`research.satellite_index_ingest` (06:05 CST)、`research.source_review_readiness` (12:08 CST)。
+
 ## 建议的下一步
 
-1. 继续自动化 source-review 晋级：从 filings/transcripts/source-linked news 自动生成 evidence card 和 `expansion_candidates_promoted_v1.csv` 行。
-2. 把 Factor Lab 的 `DATA_REQUIREMENTS` 和 `ai_infra/reports/source_verification_queue_v1.csv` 做更明确的 artifact contract（schema、字段必填、tier 字典）。
-3. CN 缺数据的指数 (`399001.SZ`、`000001.SH`) 应在 cn producer 中补 ingestion，让 benchmark snapshot 不再有 missing 行。
-4. Benchmark attribution 当前只是 snapshot；下一步计算 production_basket 的 daily return 和 SPY/QQQ/SMH 的相对 alpha（lookback 20/60 天）。
-5. Add SMH 等 AI 专属 benchmark 到 hedge selector 的 `US_HEDGE_BENCHMARKS`，让 hedge 路径也能拣 AI semi beta。
-6. 给 `audit_production_basket_ai_universe.py` 加 `--strict` 选项，把 watch 列表里的 non-AI 名字也一并审计。
+1. Evidence card 自动化：把 `expansion_candidates_v1.csv` 和 readiness ledger 联动；`ready_for_promotion` tier 自动生成 evidence card 模板草稿落到 `ai_infra/evidence/`。
+2. Factor Lab `DATA_REQUIREMENTS` ↔ source_verification_queue 的明确 schema 合同（必填字段、tier 字典、向量化校验）。
+3. Benchmark attribution 升级：从单纯 snapshot 升级到 AI book 的 daily return 和相对 benchmark 的 alpha/beta/IR（lookback 20/60 天，per market）。
+4. 卫星名字 (TSM/ASML/ASX/IBM/Samsung 等可用 ADR 的) 加入 US opportunity ranker 的 AI universe gate；当前 production basket 还局限在美股本地名字。
+5. 给 `audit_production_basket_ai_universe.py` 加 `--strict` 选项，把 watch 列表里的 non-AI 名字也一并审计。
+6. CN 指数也覆盖 `000016.SH`（上证50）、`399905.SZ`（中证500），让 hedge selector 能匹配 size-style hedge。
+7. 把 readiness ledger 喂回 `expansion_candidates` 晋级脚本：`ready_for_promotion` 自动进入 promotion 候选；`blocked_by_counterevidence` 自动落到 watch-only。
 
 ## 接手时不要做的事
 

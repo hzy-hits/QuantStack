@@ -117,7 +117,9 @@ class SourceReviewCalendarTests(unittest.TestCase):
         rendered = "\n".join(lines)
         self.assertIn("AI Infra Source Review Calendar (US)", rendered)
         self.assertIn("| NVDA |", rendered)
-        self.assertIn("pending_original_source_verification", rendered)
+        # Renderer surfaces readiness_tier instead of verification_status; the
+        # raw verification field still ships through the JSON artifact.
+        self.assertIn("Readiness", rendered)
 
 
 if __name__ == "__main__":

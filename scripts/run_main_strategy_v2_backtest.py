@@ -1240,6 +1240,59 @@ _SOURCE_REVIEW_TIER_ORDER = {
 }
 
 
+def _readiness_tier(row: dict[str, str]) -> tuple[str, float]:
+    """Inline the AI Infra source-review readiness gates.
+
+    Mirrors `scripts/score_source_review_readiness.py` so the daily report can
+    annotate each calendar row without spawning a subprocess. Keep the two in
+    sync; the standalone scorer remains authoritative for the dashboard ledger.
+    """
+
+    def _filled(text: str | None) -> bool:
+        if not text:
+            return False
+        stripped = text.strip()
+        return bool(stripped) and stripped not in {"-", "—", "待核验", "TBD", "tbd", "TODO", "todo", "?"}
+
+    primary = _filled(row.get("primary_sources_to_find"))
+    metrics = _filled(row.get("metrics_to_verify"))
+    upgrade = _filled(row.get("upgrade_conditions"))
+    downgrade = _filled(row.get("downgrade_conditions"))
+    counter = _filled(row.get("counterevidence"))
+    evidence_state = (row.get("evidence_state") or "").strip()
+    proved = "原文已证明" in evidence_state
+    partial = "合理推论" in evidence_state
+    pending = "待原文核验" in evidence_state or "待核验" in evidence_state
+
+    score = 0.0
+    score += 0.30 if primary else 0.0
+    score += 0.15 if metrics else 0.0
+    score += 0.15 if upgrade else 0.0
+    score += 0.10 if downgrade else 0.0
+    score += 0.10 if counter else 0.0
+    if proved:
+        score += 0.20
+    elif partial:
+        score += 0.10
+    elif pending:
+        score += 0.05
+
+    raw_counter = (row.get("counterevidence") or "").replace("，", ",").replace("；", ",").replace(";", ",")
+    counter_items = [piece.strip() for piece in raw_counter.split(",") if piece.strip() and piece.strip() not in {"-", "—"}]
+
+    if not primary:
+        return "g0_blocked", round(score, 3)
+    if proved and metrics and upgrade and counter:
+        return "ready_for_promotion", round(score, 3)
+    if len(counter_items) >= 3 and not proved:
+        return "blocked_by_counterevidence", round(score, 3)
+    if partial or proved:
+        return "evidence_partial", round(score, 3)
+    if pending and metrics and upgrade:
+        return "pending_human_review", round(score, 3)
+    return "unscored", round(score, 3)
+
+
 def _source_review_market_matches(row: dict[str, str], market: str) -> bool:
     asset_pool = row.get("asset_pool") or ""
     country = (row.get("market_country") or "").strip()
@@ -1289,9 +1342,12 @@ def build_source_review_calendar(
         except ValueError:
             score_float = None
         ticker_aliases = [piece.strip() for piece in (row.get("ticker") or "").split("/") if piece.strip()]
+        readiness_tier, readiness_score = _readiness_tier(row)
         return {
             "rank": rank_int,
             "priority_tier": row.get("priority_tier") or "",
+            "readiness_tier": readiness_tier,
+            "readiness_score": readiness_score,
             "ticker": row.get("ticker") or "",
             "primary_ticker": ticker_aliases[0] if ticker_aliases else row.get("ticker") or "",
             "company": row.get("company") or "",
@@ -1337,6 +1393,190 @@ def build_source_review_calendar(
             "queue_path": _safe_relative_path(path),
         }
     return buckets
+
+
+SATELLITE_REGION_LABELS = {
+    "台湾": "Taiwan",
+    "日本": "Japan",
+    "韩国": "Korea",
+    "欧洲": "Europe",
+    "以色列/US": "Israel/US",
+    "以色列": "Israel",
+    "新加坡": "Singapore",
+    "香港": "Hong Kong",
+}
+
+
+def build_satellite_pool_report(
+    *,
+    queue_path: Path | None = None,
+) -> dict[str, Any]:
+    """Surface 卫星资产池 (TW/JP/KR/EU/IL) AI-infra source-review entries.
+
+    AGENTS.md and ai_infra docs treat the satellite asset pool as a distinct
+    research bucket — same BFS framework, different geography and regulatory
+    risk. The main daily report previously folded these names into the US side;
+    this function gives them an explicit ledger for the operator.
+    """
+    path = queue_path or SOURCE_REVIEW_QUEUE_PATH
+    if not path.exists():
+        return {"status": "missing_queue", "rows": []}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            raw_rows = list(reader)
+    except Exception as exc:
+        return {"status": f"error: {exc}", "rows": []}
+
+    satellite_rows: list[dict[str, Any]] = []
+    for row in raw_rows:
+        if "卫星" not in (row.get("asset_pool") or ""):
+            continue
+        tier, score = _readiness_tier(row)
+        ticker_aliases = [piece.strip() for piece in (row.get("ticker") or "").split("/") if piece.strip()]
+        primary_ticker = ticker_aliases[0] if ticker_aliases else (row.get("ticker") or "")
+        region_raw = (row.get("market_country") or "").strip()
+        try:
+            rank_int = int(row.get("rank") or "") if row.get("rank") else None
+        except ValueError:
+            rank_int = None
+        satellite_rows.append(
+            {
+                "rank": rank_int,
+                "priority_tier": row.get("priority_tier") or "",
+                "ticker": row.get("ticker") or "",
+                "primary_ticker": primary_ticker,
+                "aliases": ticker_aliases,
+                "company": row.get("company") or "",
+                "region_raw": region_raw,
+                "region": SATELLITE_REGION_LABELS.get(region_raw, region_raw or "Unknown"),
+                "bfs_depth": row.get("bfs_depth") or "",
+                "module": row.get("module") or "",
+                "current_pool": row.get("current_pool") or "",
+                "verification_status": row.get("verification_status") or "",
+                "evidence_state": row.get("evidence_state") or "",
+                "counterevidence": row.get("counterevidence") or "",
+                "primary_sources_to_find": row.get("primary_sources_to_find") or "",
+                "metrics_to_verify": row.get("metrics_to_verify") or "",
+                "upgrade_conditions": row.get("upgrade_conditions") or "",
+                "downgrade_conditions": row.get("downgrade_conditions") or "",
+                "dependency_path": row.get("dependency_path") or "",
+                "dependency_edge": row.get("dependency_edge") or "",
+                "readiness_tier": tier,
+                "readiness_score": score,
+            }
+        )
+
+    satellite_rows.sort(
+        key=lambda r: (
+            r.get("region") or "",
+            _SOURCE_REVIEW_TIER_ORDER.get(r.get("priority_tier") or "", 9),
+            r.get("rank") or 9_999,
+        )
+    )
+
+    region_counts: Counter[str] = Counter()
+    depth_counts: Counter[str] = Counter()
+    readiness_counts: Counter[str] = Counter()
+    for entry in satellite_rows:
+        region_counts[entry["region"]] += 1
+        depth_counts[entry.get("bfs_depth") or "-"] += 1
+        readiness_counts[entry.get("readiness_tier") or "unscored"] += 1
+
+    return {
+        "status": "ok",
+        "queue_path": _safe_relative_path(path),
+        "total_rows": len(satellite_rows),
+        "region_counts": dict(region_counts),
+        "depth_counts": dict(depth_counts),
+        "readiness_counts": dict(readiness_counts),
+        "rows": satellite_rows,
+    }
+
+
+def render_satellite_pool_report_section(payload: dict[str, Any], *, limit_per_region: int = 12) -> list[str]:
+    report = payload.get("satellite_pool_report") or {}
+    rows = report.get("rows") or []
+    queue_path = report.get("queue_path") or "ai_infra/reports/source_verification_queue_v1.csv"
+    lines = [
+        "## AI Infra Satellite Pool (TW/JP/KR/EU/IL)",
+        "",
+        f"- 数据源: `{queue_path}`；状态: `{report.get('status') or 'unknown'}`；总数: {report.get('total_rows') or 0}",
+        "- 范畴: 卫星资产池映射到 D1-D5 全球 AI infra 供应链；研究权重高，但需通过 IBKR/ADR 才能交易。",
+        "- 用法: 此表只回答“哪些卫星名字进入 source review 队列、当前 evidence 完整度”，不代表买入许可。",
+        "",
+    ]
+
+    region_counts = report.get("region_counts") or {}
+    if region_counts:
+        lines += [
+            "### Region Coverage",
+            "",
+            "| Region | Count |",
+            "|---|---:|",
+        ]
+        for region in sorted(region_counts, key=lambda r: (-region_counts[r], r)):
+            lines.append(f"| {region or '-'} | {region_counts[region]} |")
+        lines.append("")
+
+    depth_counts = report.get("depth_counts") or {}
+    if depth_counts:
+        lines += [
+            "### BFS Depth Coverage",
+            "",
+            "| Depth | Count |",
+            "|---|---:|",
+        ]
+        for depth in sorted(depth_counts):
+            lines.append(f"| {depth or '-'} | {depth_counts[depth]} |")
+        lines.append("")
+
+    readiness_counts = report.get("readiness_counts") or {}
+    if readiness_counts:
+        chunks = [
+            f"{tier}={readiness_counts.get(tier, 0)}"
+            for tier in _READINESS_TIER_ORDER
+            if readiness_counts.get(tier, 0)
+        ]
+        lines += [
+            "### Readiness Distribution",
+            "",
+            f"- {'; '.join(chunks) or 'all rows unscored'}",
+            "",
+        ]
+
+    by_region: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_region.setdefault(row.get("region") or "Unknown", []).append(row)
+    for region in sorted(by_region, key=lambda r: (-len(by_region[r]), r)):
+        region_rows = by_region[region]
+        lines += [
+            f"### {region} ({len(region_rows)})",
+            "",
+            "| Rank | Ticker | Company | Depth | Module | Readiness | Priority |",
+            "|---:|---|---|---|---|---|---|",
+        ]
+        for entry in region_rows[:limit_per_region]:
+            readiness = entry.get("readiness_tier") or "unscored"
+            score = entry.get("readiness_score")
+            score_text = f" ({score:.2f})" if isinstance(score, (int, float)) else ""
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(entry.get("rank") if entry.get("rank") is not None else "-"),
+                        entry.get("primary_ticker") or entry.get("ticker") or "-",
+                        clean_table_text(entry.get("company") or "-", 26),
+                        entry.get("bfs_depth") or "-",
+                        clean_table_text(entry.get("module") or "-", 32),
+                        f"{readiness}{score_text}",
+                        entry.get("priority_tier") or "-",
+                    ]
+                )
+                + " |"
+            )
+        lines.append("")
+    return lines
 
 
 def cn_price_plan(row: dict[str, Any]) -> dict[str, Any]:
@@ -3707,6 +3947,7 @@ def load_return_series(db_path: Path, market: str, symbols: list[str], as_of: da
 
 US_REPORT_BENCHMARKS = ("SPY", "QQQ", "SMH", "IWM", "DIA")
 CN_REPORT_BENCHMARKS = ("000300.SH", "399006.SZ", "399001.SZ", "000001.SH")
+SATELLITE_REPORT_BENCHMARKS = ("^TWII", "^N225", "^KS11", "^AEX", "EWT", "EWJ", "EWY", "EWN")
 BENCHMARK_LABELS = {
     "SPY": "SPY (S&P 500)",
     "QQQ": "QQQ (Nasdaq 100)",
@@ -3717,6 +3958,14 @@ BENCHMARK_LABELS = {
     "399006.SZ": "399006.SZ (创业板指)",
     "399001.SZ": "399001.SZ (深成指)",
     "000001.SH": "000001.SH (上证指数)",
+    "^TWII": "^TWII (TAIEX 台湾加权)",
+    "^N225": "^N225 (Nikkei 225 日经)",
+    "^KS11": "^KS11 (KOSPI 韩国综指)",
+    "^AEX": "^AEX (荷兰 AEX)",
+    "EWT": "EWT (Taiwan ETF)",
+    "EWJ": "EWJ (Japan ETF)",
+    "EWY": "EWY (Korea ETF)",
+    "EWN": "EWN (Netherlands ETF)",
 }
 
 
@@ -3800,11 +4049,13 @@ def build_benchmark_attribution(
     trailing returns for the indices themselves; production-basket relative
     return is intentionally deferred to keep this read-only and cheap.
     """
-    out: dict[str, Any] = {"as_of": as_of.isoformat(), "us": {}, "cn": {}}
+    out: dict[str, Any] = {"as_of": as_of.isoformat(), "us": {}, "cn": {}, "satellite": {}}
 
     for market, db_path, symbols, key in (
         ("us", us_db, US_REPORT_BENCHMARKS, "us"),
         ("cn", cn_db, CN_REPORT_BENCHMARKS, "cn"),
+        # Satellite indices live in the US DuckDB (yfinance-sourced just like SPY/QQQ).
+        ("us", us_db, SATELLITE_REPORT_BENCHMARKS, "satellite"),
     ):
         series = _load_benchmark_closes(db_path, market, symbols, as_of)
         rows: list[dict[str, Any]] = []
@@ -6085,17 +6336,28 @@ def render_earnings_calendar_section(payload: dict[str, Any], market: str, *, li
     return lines
 
 
-def render_benchmark_attribution_section(payload: dict[str, Any], market: str, *, limit: int = 8) -> list[str]:
+def render_benchmark_attribution_section(payload: dict[str, Any], market: str, *, limit: int = 10) -> list[str]:
     data = (payload.get("benchmark_attribution") or {}).get(market.lower()) or {}
     rows = data.get("rows") or []
-    title = "US Benchmark Snapshot" if market.upper() == "US" else "A股 Benchmark Snapshot"
-    note = (
-        "用法: benchmark 是 macro/beta context 和归因基线，不能成为 production candidate。"
-        " 主要看 AI book 相对 SPY/QQQ/SMH 或对应指数的方向。"
-        if market.upper() == "US"
-        else "用法: benchmark 仅作 macro/beta context 和归因基线，不能成为 production candidate。"
-        " A股 attribution 主要看 AI book 相对 沪深300/创业板指/深成指/上证指数 的方向。"
-    )
+    if market.upper() == "US":
+        title = "US Benchmark Snapshot"
+        note = (
+            "用法: benchmark 是 macro/beta context 和归因基线，不能成为 production candidate。"
+            " 主要看 AI book 相对 SPY/QQQ/SMH 或对应指数的方向。"
+        )
+    elif market.upper() == "CN":
+        title = "A股 Benchmark Snapshot"
+        note = (
+            "用法: benchmark 仅作 macro/beta context 和归因基线，不能成为 production candidate。"
+            " A股 attribution 主要看 AI book 相对 沪深300/创业板指/深成指/上证指数 的方向。"
+        )
+    else:
+        title = "Satellite Benchmark Snapshot (TW/JP/KR/EU)"
+        note = (
+            "用法: 卫星 benchmark 用于卫星资产池 (TSMC/HBM/CoWoS/ABF/AEX 设备) 的 macro context。"
+            " ^TWII/^N225/^KS11/^AEX 是本地指数；EWT/EWJ/EWY/EWN 是 US-listed ETF 镜像。"
+            " 不能作为 production candidate。"
+        )
     missing = data.get("missing") or []
     lines = [
         f"## {title}",
@@ -6129,6 +6391,16 @@ def render_benchmark_attribution_section(payload: dict[str, Any], market: str, *
     return lines
 
 
+_READINESS_TIER_ORDER = (
+    "ready_for_promotion",
+    "evidence_partial",
+    "pending_human_review",
+    "blocked_by_counterevidence",
+    "g0_blocked",
+    "unscored",
+)
+
+
 def render_source_review_calendar_section(
     payload: dict[str, Any],
     market: str,
@@ -6139,19 +6411,28 @@ def render_source_review_calendar_section(
     rows = calendar.get("rows") or []
     title = "AI Infra Source Review Calendar (US)" if market.upper() == "US" else "AI Infra Source Review Calendar (A股)"
     queue_path = calendar.get("queue_path") or "ai_infra/reports/source_verification_queue_v1.csv"
+    tier_counts: Counter[str] = Counter()
+    for row in rows:
+        tier_counts[row.get("readiness_tier") or "unscored"] += 1
+    summary_chunks = [f"{tier}={tier_counts.get(tier, 0)}" for tier in _READINESS_TIER_ORDER if tier_counts.get(tier, 0)]
+    summary_text = "; ".join(summary_chunks) if summary_chunks else "all rows unscored"
     lines = [
         f"## {title}",
         "",
         f"- 数据源: `{queue_path}`；状态: `{calendar.get('status') or 'unknown'}`；"
         f"范围: `{calendar.get('scope') or 'unknown'}` (focus 命中 {calendar.get('focus_match_count') or 0} / {calendar.get('focus_symbol_count') or 0})。",
-        "- 用法: source-review 队列只用来跟踪原文核验进度；没有 evidence card 不能晋级为 production candidate。",
+        f"- Readiness 分布: {summary_text}",
+        "- 用法: `ready_for_promotion` 表示 evidence card 模板写齐且 evidence_state 含「原文已证明」；其他 tier 仍需人工核验。没有 evidence card 不能晋级为 production candidate。",
         "",
-        "| Tier | Ticker | Company | Depth | Module | Verification | Upgrade Conditions |",
+        "| Tier | Ticker | Company | Depth | Module | Readiness | Upgrade Conditions |",
         "|---|---|---|---|---|---|---|",
     ]
     if rows:
         for row in rows[:limit]:
             ticker = row.get("primary_ticker") or row.get("ticker") or "-"
+            readiness = row.get("readiness_tier") or "unscored"
+            readiness_score = row.get("readiness_score")
+            score_text = f" ({readiness_score:.2f})" if isinstance(readiness_score, (int, float)) else ""
             lines.append(
                 "| "
                 + " | ".join(
@@ -6160,9 +6441,9 @@ def render_source_review_calendar_section(
                         ticker,
                         clean_table_text(row.get("company") or "-", 26),
                         row.get("bfs_depth") or "-",
-                        clean_table_text(row.get("module") or "-", 36),
-                        clean_table_text(row.get("verification_status") or "-", 36),
-                        clean_table_text(row.get("upgrade_conditions") or "-", 60),
+                        clean_table_text(row.get("module") or "-", 32),
+                        f"{readiness}{score_text}",
+                        clean_table_text(row.get("upgrade_conditions") or "-", 56),
                     ]
                 )
                 + " |"
@@ -6319,6 +6600,8 @@ def render_report(payload: dict[str, Any]) -> str:
     lines += render_earnings_calendar_section(payload, "CN", limit=18)
     lines += render_source_review_calendar_section(payload, "US", limit=12)
     lines += render_source_review_calendar_section(payload, "CN", limit=12)
+    lines += render_satellite_pool_report_section(payload, limit_per_region=10)
+    lines += render_benchmark_attribution_section(payload, "SATELLITE")
     lines += [
         "## 一句话结论",
         "",
@@ -7419,6 +7702,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         focus_symbols=sorted({*us_calendar_focus, *cn_calendar_focus}),
     )
     benchmark_attribution = build_benchmark_attribution(args.us_db, args.cn_db, as_of)
+    satellite_pool_report = build_satellite_pool_report()
     payload = {
         "as_of": as_of.isoformat(),
         "start": start.isoformat(),
@@ -7435,6 +7719,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "earnings_calendar": earnings_calendar,
         "source_review_calendar": source_review_calendar,
         "benchmark_attribution": benchmark_attribution,
+        "satellite_pool_report": satellite_pool_report,
         "promotion_contract": promotion_contract,
     }
     assert_promoted_execution_rows(payload)
@@ -7519,6 +7804,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     (output_dir / "benchmark_attribution.json").write_text(
         json.dumps(payload.get("benchmark_attribution") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    (output_dir / "satellite_pool_report.md").write_text(
+        "\n".join(render_satellite_pool_report_section(payload, limit_per_region=40)),
+        encoding="utf-8",
+    )
+    (output_dir / "satellite_pool_report.json").write_text(
+        json.dumps(payload.get("satellite_pool_report") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
         encoding="utf-8",
     )
     (output_dir / "ai_supercycle_evidence.md").write_text(render_ai_supercycle_evidence(payload), encoding="utf-8")

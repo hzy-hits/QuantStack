@@ -429,6 +429,67 @@ tasks:
     outputs:
       - reports/review_dashboard/ai_supercycle_readiness
 
+  research.cn_index_ingest:
+    group: research
+    schedule: "0 6 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/ingest_cn_index_prices.py
+      - --as-of
+      - "{cst_date}"
+      - --lookback-days
+      - "365"
+    log: ops/logs/research.cn_index_ingest.log
+    lock: ops/state/research.cn_index_ingest.lock
+    timeout_minutes: 15
+    sends_email: false
+    market: cn
+    session: research
+    owner: research_pipeline
+    outputs:
+      - quant-research-cn/data/quant_cn_report.duckdb
+
+  research.satellite_index_ingest:
+    group: research
+    schedule: "5 6 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/ingest_satellite_index_prices.py
+      - --as-of
+      - "{cst_date}"
+      - --lookback-days
+      - "365"
+    log: ops/logs/research.satellite_index_ingest.log
+    lock: ops/state/research.satellite_index_ingest.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - quant-research-v1/data/quant.duckdb
+
+  research.source_review_readiness:
+    group: research
+    schedule: "8 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/score_source_review_readiness.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.source_review_readiness.log
+    lock: ops/state/research.source_review_readiness.lock
+    timeout_minutes: 10
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/ai_infra_source_review_readiness
+
   research.main_strategy_v2_report:
     group: research
     schedule: "10 12 * * 1-5"
