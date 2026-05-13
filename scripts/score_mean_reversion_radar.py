@@ -64,6 +64,15 @@ class RadarRow:
     in_ai_universe: bool
     is_mean_reversion_candidate: bool
     reasons: list[str]
+    next_earnings_date: str | None
+    days_to_earnings: int | None
+    earnings_block: bool
+    pe_ttm: float | None
+    ps_ratio: float | None
+    ev_ebitda: float | None
+    sector_pe_median: float | None
+    sector_ps_median: float | None
+    valuation_signal: str  # cheap_vs_sector / fair / rich / unknown
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -87,19 +96,33 @@ class RadarRow:
             "in_ai_universe": "yes" if self.in_ai_universe else "no",
             "is_mean_reversion_candidate": "yes" if self.is_mean_reversion_candidate else "no",
             "reasons": ";".join(self.reasons),
+            "next_earnings_date": self.next_earnings_date or "",
+            "days_to_earnings": self.days_to_earnings if self.days_to_earnings is not None else "",
+            "earnings_block": "yes" if self.earnings_block else "no",
+            "pe_ttm": f"{self.pe_ttm:.2f}" if self.pe_ttm is not None else "",
+            "ps_ratio": f"{self.ps_ratio:.2f}" if self.ps_ratio is not None else "",
+            "ev_ebitda": f"{self.ev_ebitda:.2f}" if self.ev_ebitda is not None else "",
+            "sector_pe_median": f"{self.sector_pe_median:.2f}" if self.sector_pe_median is not None else "",
+            "sector_ps_median": f"{self.sector_ps_median:.2f}" if self.sector_ps_median is not None else "",
+            "valuation_signal": self.valuation_signal,
         }
 
 
-def _load_top_n_universe(con: duckdb.DuckDBPyConnection, top_n: int) -> list[tuple[str, str, str, float]]:
+def _load_top_n_universe(
+    con: duckdb.DuckDBPyConnection,
+    top_n: int,
+) -> list[dict[str, Any]]:
     rows = con.execute(
         """
         WITH latest AS (
             SELECT symbol, company_name, sector, market_cap,
+                   pe_ttm, ps_ratio, ev_ebitda,
                    ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY as_of DESC) AS rn
             FROM company_profile
             WHERE market_cap IS NOT NULL AND market_cap > 0
         )
-        SELECT symbol, COALESCE(company_name, ''), COALESCE(sector, ''), market_cap
+        SELECT symbol, COALESCE(company_name, ''), COALESCE(sector, ''),
+               market_cap, pe_ttm, ps_ratio, ev_ebitda
         FROM latest
         WHERE rn = 1
         ORDER BY market_cap DESC NULLS LAST
@@ -107,7 +130,104 @@ def _load_top_n_universe(con: duckdb.DuckDBPyConnection, top_n: int) -> list[tup
         """,
         [top_n],
     ).fetchall()
-    return [(r[0], r[1], r[2], float(r[3])) for r in rows]
+    return [
+        {
+            "symbol": r[0],
+            "company_name": r[1],
+            "sector": r[2],
+            "market_cap": float(r[3]),
+            "pe_ttm": float(r[4]) if r[4] is not None else None,
+            "ps_ratio": float(r[5]) if r[5] is not None else None,
+            "ev_ebitda": float(r[6]) if r[6] is not None else None,
+        }
+        for r in rows
+    ]
+
+
+def _load_next_earnings(
+    con: duckdb.DuckDBPyConnection,
+    symbols: list[str],
+    as_of: date,
+    window_days: int = 90,
+) -> dict[str, date]:
+    if not symbols:
+        return {}
+    placeholders = ",".join("?" for _ in symbols)
+    rows = con.execute(
+        f"""
+        SELECT symbol, MIN(report_date) AS next_date
+        FROM earnings_calendar
+        WHERE symbol IN ({placeholders})
+          AND report_date IS NOT NULL
+          AND CAST(report_date AS DATE) >= CAST(? AS DATE)
+          AND CAST(report_date AS DATE) <= CAST(? AS DATE)
+        GROUP BY symbol
+        """,
+        [*symbols, as_of.isoformat(), (as_of + timedelta(days=window_days)).isoformat()],
+    ).fetchall()
+    out: dict[str, date] = {}
+    for sym, dt in rows:
+        if dt is None:
+            continue
+        if isinstance(dt, str):
+            try:
+                dt = date.fromisoformat(dt)
+            except ValueError:
+                continue
+        out[sym] = dt
+    return out
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    n = len(ordered)
+    mid = n // 2
+    if n % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _sector_medians(profiles: list[dict[str, Any]]) -> dict[str, dict[str, float | None]]:
+    by_sector: dict[str, list[dict[str, Any]]] = {}
+    for entry in profiles:
+        sector = entry.get("sector") or ""
+        by_sector.setdefault(sector, []).append(entry)
+    out: dict[str, dict[str, float | None]] = {}
+    for sector, members in by_sector.items():
+        pe_values = [m["pe_ttm"] for m in members if m.get("pe_ttm") and m["pe_ttm"] > 0]
+        ps_values = [m["ps_ratio"] for m in members if m.get("ps_ratio") and m["ps_ratio"] > 0]
+        out[sector] = {
+            "pe_median": _median(pe_values),
+            "ps_median": _median(ps_values),
+        }
+    return out
+
+
+def _valuation_signal(
+    pe_ttm: float | None,
+    ps_ratio: float | None,
+    sector_pe_median: float | None,
+    sector_ps_median: float | None,
+) -> str:
+    if pe_ttm is None and ps_ratio is None:
+        return "unknown"
+    discount_pe: float | None = None
+    discount_ps: float | None = None
+    if pe_ttm is not None and sector_pe_median and sector_pe_median > 0:
+        discount_pe = pe_ttm / sector_pe_median - 1.0
+    if ps_ratio is not None and sector_ps_median and sector_ps_median > 0:
+        discount_ps = ps_ratio / sector_ps_median - 1.0
+    samples = [d for d in (discount_pe, discount_ps) if d is not None]
+    if not samples:
+        return "unknown"
+    avg = sum(samples) / len(samples)
+    if avg <= -0.15:
+        return "cheap_vs_sector"
+    if avg >= 0.30:
+        return "rich_vs_sector"
+    return "fair_vs_sector"
 
 
 def _load_prices(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date, lookback_days: int = 120) -> dict[str, list[tuple[date, float]]]:
@@ -183,14 +303,16 @@ def build_radar(
     ai_universe_path: Path,
     as_of: date,
     top_n: int = 100,
+    earnings_block_days: int = 7,
 ) -> list[RadarRow]:
     if not us_db.exists():
         raise FileNotFoundError(f"US DuckDB missing: {us_db}")
     con = duckdb.connect(str(us_db), read_only=True)
     try:
-        top = _load_top_n_universe(con, top_n)
-        symbols = [s for s, *_ in top]
+        profiles = _load_top_n_universe(con, top_n)
+        symbols = [entry["symbol"] for entry in profiles]
         prices = _load_prices(con, symbols + list(BENCHMARKS), as_of)
+        next_earnings = _load_next_earnings(con, symbols, as_of)
     finally:
         con.close()
 
@@ -200,11 +322,16 @@ def build_radar(
         benchmark_5d[bench] = _trailing_return_pct(closes, 5)
 
     ai_universe = _load_ai_universe(ai_universe_path)
+    sector_medians = _sector_medians(profiles)
 
     rows: list[RadarRow] = []
     cohort_20d: list[tuple[str, float]] = []
     cohort_metrics: dict[str, dict[str, Any]] = {}
-    for rank, (symbol, company_name, sector, market_cap) in enumerate(top, start=1):
+    for rank, entry in enumerate(profiles, start=1):
+        symbol = entry["symbol"]
+        company_name = entry["company_name"]
+        sector = entry["sector"]
+        market_cap = entry["market_cap"]
         series = prices.get(symbol) or []
         closes = [c for _, c in series]
         latest_close = closes[-1] if closes else None
@@ -225,6 +352,7 @@ def build_radar(
             dist50 = (latest_close / ema50_last - 1.0) * 100.0
         if ret_20d is not None:
             cohort_20d.append((symbol, ret_20d))
+        sector_stats = sector_medians.get(sector or "", {})
         cohort_metrics[symbol] = {
             "rank": rank,
             "company_name": company_name,
@@ -238,6 +366,18 @@ def build_radar(
             "slope": slope,
             "dist21": dist21,
             "dist50": dist50,
+            "pe_ttm": entry.get("pe_ttm"),
+            "ps_ratio": entry.get("ps_ratio"),
+            "ev_ebitda": entry.get("ev_ebitda"),
+            "sector_pe_median": sector_stats.get("pe_median"),
+            "sector_ps_median": sector_stats.get("ps_median"),
+            "valuation_signal": _valuation_signal(
+                entry.get("pe_ttm"),
+                entry.get("ps_ratio"),
+                sector_stats.get("pe_median"),
+                sector_stats.get("ps_median"),
+            ),
+            "next_earnings": next_earnings.get(symbol),
         }
 
     cohort_20d.sort(key=lambda pair: pair[1])
@@ -268,13 +408,25 @@ def build_radar(
             reasons.append(f"bottom_half_20d:{ret_20d:.1f}%")
         # Slope must still be down — momentum hasn't turned yet.
         slope_negative = slope is not None and slope < 0
-        is_candidate = (
-            "lagging_market_5d" in ",".join(reasons)
-            and "below_ema21" in ",".join(reasons)
-            and slope_negative
-        )
         if slope_negative:
             reasons.append(f"ema21_slope:{slope:.2f}%")
+        # Earnings avoidance: skip names reporting within the next N trading
+        # days because gap risk dwarfs any tape-driven mean-reversion edge.
+        next_earnings = info.get("next_earnings")
+        days_to_earnings = None
+        earnings_block = False
+        if isinstance(next_earnings, date):
+            days_to_earnings = (next_earnings - as_of).days
+            if 0 <= days_to_earnings <= earnings_block_days:
+                earnings_block = True
+                reasons.append(f"earnings_in_{days_to_earnings}d_block")
+
+        is_candidate = (
+            any(r.startswith("lagging_market_5d") for r in reasons)
+            and any(r.startswith("below_ema21") for r in reasons)
+            and slope_negative
+            and not earnings_block
+        )
 
         rows.append(
             RadarRow(
@@ -294,6 +446,15 @@ def build_radar(
                 in_ai_universe=symbol in ai_universe,
                 is_mean_reversion_candidate=is_candidate,
                 reasons=reasons,
+                next_earnings_date=next_earnings.isoformat() if isinstance(next_earnings, date) else None,
+                days_to_earnings=days_to_earnings,
+                earnings_block=earnings_block,
+                pe_ttm=info.get("pe_ttm"),
+                ps_ratio=info.get("ps_ratio"),
+                ev_ebitda=info.get("ev_ebitda"),
+                sector_pe_median=info.get("sector_pe_median"),
+                sector_ps_median=info.get("sector_ps_median"),
+                valuation_signal=info.get("valuation_signal") or "unknown",
             )
         )
 
@@ -301,54 +462,90 @@ def build_radar(
     return rows
 
 
+def _render_candidate_table(rows: list[RadarRow], heading: str) -> list[str]:
+    lines = [
+        f"## {heading} ({len(rows)})",
+        "",
+        "| Rank | Symbol | Company | Sector | Mcap | 5d | 20d | px vs EMA21 | EMA21 slope | Next ER | Valuation | Reasons |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---|---|---|",
+    ]
+    if not rows:
+        lines.append("| - | - | _无符合条件的名字_ | - | - | - | - | - | - | - | - | - |")
+    for row in rows[:40]:
+        er = row.next_earnings_date or "-"
+        if row.days_to_earnings is not None and 0 <= row.days_to_earnings <= 30:
+            er = f"{row.next_earnings_date} ({row.days_to_earnings}d)"
+        valuation_chunks = []
+        if row.pe_ttm is not None:
+            valuation_chunks.append(f"PE {row.pe_ttm:.1f}")
+        if row.sector_pe_median:
+            valuation_chunks.append(f"sec {row.sector_pe_median:.1f}")
+        valuation_chunks.append(row.valuation_signal)
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row.rank),
+                    row.symbol,
+                    (row.company_name or "-")[:24],
+                    (row.sector or "-")[:16],
+                    f"${row.market_cap_b:.1f}B",
+                    f"{row.ret_5d_pct:+.2f}%" if row.ret_5d_pct is not None else "-",
+                    f"{row.ret_20d_pct:+.2f}%" if row.ret_20d_pct is not None else "-",
+                    f"{row.dist_close_ema21_pct:+.2f}%" if row.dist_close_ema21_pct is not None else "-",
+                    f"{row.slope_ema21_5d_pct:+.2f}%" if row.slope_ema21_5d_pct is not None else "-",
+                    er,
+                    " / ".join(valuation_chunks),
+                    ";".join(row.reasons),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    return lines
+
+
 def render_markdown(rows: list[RadarRow], as_of: str) -> str:
     candidates = [r for r in rows if r.is_mean_reversion_candidate]
+    ai_candidates = [r for r in candidates if r.in_ai_universe]
+    non_ai_candidates = [r for r in candidates if not r.in_ai_universe]
+    earnings_blocked = [r for r in rows if r.earnings_block]
     lines: list[str] = [
         f"# US Top-100 Mean-Reversion Radar - {as_of}",
         "",
-        "- 数据源: `company_profile` (latest market_cap) + `prices_daily` + AI Infra universe。",
-        "- 触发: 大盘 5d ≥ +1% 且 个股 5d ≤ -2% 且 收盘价低于 EMA21 ≥ 2% 且 EMA21 5d slope < 0。",
-        "- 用法: *radar*，不是买入许可。是「市场涨而股票跑输」的均值回归潜在线索；需要叠加基本面 / 行业 / 事件再做决定。",
+        "- 数据源: `company_profile` (latest market_cap + PE/PS/EV) + `prices_daily` + `earnings_calendar` + AI Infra universe。",
+        "- 触发: 大盘 5d ≥ +1% 且 个股 5d ≤ -2% 且 收盘价低于 EMA21 ≥ 2% 且 EMA21 5d slope < 0；近 7 天有财报的名字直接被屏蔽。",
+        "- 用法: *radar*，不是买入许可。AI book 仍是绝对主力；这里只是 macro 滞后线索叠加 valuation gap。",
         "",
-        f"- 总数: {len(rows)} 名；候选: {len(candidates)}；AI universe 重合: {sum(1 for r in candidates if r.in_ai_universe)}。",
+        f"- 总数: {len(rows)} 名；候选: {len(candidates)}（{len(ai_candidates)} AI / {len(non_ai_candidates)} 非 AI）；财报屏蔽: {len(earnings_blocked)}。",
         "",
     ]
-    if candidates:
+    # AI book first — operator should pivot weight within the AI sleeve before
+    # opportunistically looking at non-AI laggards.
+    lines += _render_candidate_table(ai_candidates, "AI Universe Mean-Reversion (LEAD)")
+    if non_ai_candidates:
+        lines += _render_candidate_table(non_ai_candidates, "Non-AI Mean-Reversion (Context)")
+
+    if earnings_blocked:
         lines += [
-            "## Mean-Reversion Candidates",
+            "## Earnings-Blocked (skip until report)",
             "",
-            "| Rank | Symbol | Company | Sector | Mcap | 5d | 20d | px vs EMA21 | EMA21 slope | AI universe | Reasons |",
-            "|---:|---|---|---|---:|---:|---:|---:|---:|---|---|",
+            "| Symbol | Company | Sector | Next Earnings | Days to ER | AI |",
+            "|---|---|---|---|---:|---|",
         ]
-        for row in candidates[:40]:
+        for row in earnings_blocked[:30]:
             lines.append(
-                "| "
-                + " | ".join(
-                    [
-                        str(row.rank),
-                        row.symbol,
-                        (row.company_name or "-")[:24],
-                        (row.sector or "-")[:18],
-                        f"${row.market_cap_b:.1f}B",
-                        f"{row.ret_5d_pct:+.2f}%" if row.ret_5d_pct is not None else "-",
-                        f"{row.ret_20d_pct:+.2f}%" if row.ret_20d_pct is not None else "-",
-                        f"{row.dist_close_ema21_pct:+.2f}%" if row.dist_close_ema21_pct is not None else "-",
-                        f"{row.slope_ema21_5d_pct:+.2f}%" if row.slope_ema21_5d_pct is not None else "-",
-                        "yes" if row.in_ai_universe else "no",
-                        ";".join(row.reasons),
-                    ]
-                )
-                + " |"
+                f"| {row.symbol} | {(row.company_name or '-')[:24]} | {(row.sector or '-')[:16]} | "
+                f"{row.next_earnings_date or '-'} | {row.days_to_earnings if row.days_to_earnings is not None else '-'} | "
+                f"{'y' if row.in_ai_universe else 'n'} |"
             )
         lines.append("")
-    else:
-        lines += ["## Mean-Reversion Candidates", "", "_当日无名字满足全部触发条件。_", ""]
 
     lines += [
         "## Top-100 Reference Snapshot",
         "",
-        "| Rank | Symbol | Company | Mcap | 5d | 20d | px vs EMA21 | EMA21 slope | AI |",
-        "|---:|---|---|---:|---:|---:|---:|---:|---|",
+        "| Rank | Symbol | Company | Mcap | 5d | 20d | px vs EMA21 | EMA21 slope | Valuation | AI |",
+        "|---:|---|---|---:|---:|---:|---:|---:|---|---|",
     ]
     for row in rows[:100]:
         lines.append(
@@ -363,6 +560,7 @@ def render_markdown(rows: list[RadarRow], as_of: str) -> str:
                     f"{row.ret_20d_pct:+.2f}%" if row.ret_20d_pct is not None else "-",
                     f"{row.dist_close_ema21_pct:+.2f}%" if row.dist_close_ema21_pct is not None else "-",
                     f"{row.slope_ema21_5d_pct:+.2f}%" if row.slope_ema21_5d_pct is not None else "-",
+                    row.valuation_signal,
                     "y" if row.in_ai_universe else "n",
                 ]
             )
@@ -393,6 +591,15 @@ def write_outputs(rows: list[RadarRow], out_dir: Path, as_of: str) -> None:
         "in_ai_universe",
         "is_mean_reversion_candidate",
         "reasons",
+        "next_earnings_date",
+        "days_to_earnings",
+        "earnings_block",
+        "pe_ttm",
+        "ps_ratio",
+        "ev_ebitda",
+        "sector_pe_median",
+        "sector_ps_median",
+        "valuation_signal",
     ]
     with (out_dir / "mean_reversion_radar.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)

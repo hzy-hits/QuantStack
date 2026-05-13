@@ -34,19 +34,24 @@ def _seed_db(path: Path, profiles: list[tuple[str, float]], price_series: dict[s
             """
             CREATE TABLE company_profile (
                 symbol VARCHAR, as_of DATE, company_name VARCHAR, sector VARCHAR,
-                market_cap DOUBLE
+                market_cap DOUBLE, pe_ttm DOUBLE, ps_ratio DOUBLE, ev_ebitda DOUBLE
             )
             """
         )
         for symbol, mcap in profiles:
             con.execute(
-                "INSERT INTO company_profile VALUES (?, ?, ?, ?, ?)",
-                [symbol, "2026-05-13", f"{symbol} Corp", "Sector", mcap],
+                "INSERT INTO company_profile VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                [symbol, "2026-05-13", f"{symbol} Corp", "Sector", mcap, 15.0, 3.0, 10.0],
             )
         con.execute("CREATE TABLE prices_daily (symbol VARCHAR, date DATE, close DOUBLE)")
         for symbol, series in price_series.items():
             for d, close in series:
                 con.execute("INSERT INTO prices_daily VALUES (?, ?, ?)", [symbol, d.isoformat(), close])
+        # The radar reads from earnings_calendar even if empty.
+        con.execute(
+            "CREATE TABLE earnings_calendar (symbol VARCHAR, report_date DATE, fiscal_period VARCHAR, "
+            "estimate_eps DOUBLE, actual_eps DOUBLE, surprise_pct DOUBLE, fiscal_year INTEGER, fiscal_quarter INTEGER)"
+        )
     finally:
         con.close()
 
@@ -108,11 +113,21 @@ class MeanReversionRadarTests(unittest.TestCase):
             in_ai_universe=True,
             is_mean_reversion_candidate=True,
             reasons=["lagging_market_5d:-3.5%", "below_ema21:-5.9%"],
+            next_earnings_date=None,
+            days_to_earnings=None,
+            earnings_block=False,
+            pe_ttm=12.0,
+            ps_ratio=2.5,
+            ev_ebitda=8.0,
+            sector_pe_median=14.0,
+            sector_ps_median=2.0,
+            valuation_signal="cheap_vs_sector",
         )
         md = self.module.render_markdown([sample], "2026-05-13")
         self.assertIn("US Top-100 Mean-Reversion Radar", md)
         self.assertIn("LAG", md)
         self.assertIn("lagging_market_5d", md)
+        self.assertIn("LEAD", md)  # AI universe block highlighted
 
 
 if __name__ == "__main__":

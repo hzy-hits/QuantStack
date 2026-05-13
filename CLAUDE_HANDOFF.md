@@ -100,7 +100,9 @@ ai_infra 原文研究 / BFS 发现
 | `scripts/derive_promotion_plan_from_readiness.py` | 把 readiness ledger 翻成 promote_now / watch_with_review / research_only / reject_until_resolved 推荐表，落到 `reports/review_dashboard/ai_infra_promotion_plan/<date>/promotion_plan.{csv,md}`。 |
 | `scripts/apply_promotion_plan.py` | 人工确认后，把 `promote_now` 行追加到 `ai_infra/reports/expansion_candidates_promoted_v1.csv`。默认 dry-run，需 `--confirm`；append-only，写前自动备份 `.bak`。 |
 | `scripts/maintain_promotion_history.py` | 把 daily `promotion_plan.csv` 累积到 `ai_infra/reports/promotion_history.csv`；按 `(as_of, primary_ticker)` 幂等更新。长期追踪 promote/reject 决策。 |
-| `scripts/score_mean_reversion_radar.py` | 美股 top-100 市值股票均值回归 radar：大盘涨但个股跌、跌破 EMA21、EMA21 slope 朝下 → 候选。叠加 AI universe 标记。落 `reports/review_dashboard/us_mean_reversion_radar/<date>/mean_reversion_radar.{csv,md}`。 |
+| `scripts/score_mean_reversion_radar.py` | 美股 top-100 均值回归 radar；近 7 日财报屏蔽 + PE/PS vs 行业中位估值层；输出 AI universe LEAD 段 + 非 AI Context 段；落 `reports/review_dashboard/us_mean_reversion_radar/<date>/mean_reversion_radar.{csv,md}`。 |
+| `scripts/build_ai_tape_cross_compare.py` | 把 ten-x leaders (bull; rising) 和 MR AI universe 滞后并到一页，让操作员在 AI 池子内部决定 lean leaders 还是 rotate laggards。落 `reports/review_dashboard/ai_tape_cross_compare/<date>/ai_tape_cross_compare.md`。 |
+| `scripts/backtest_promotion_history.py` | 对 `promote_now` 历史行查 prices_daily + SPY，算 5/20/60d 绝对收益和相对 alpha + IR + hit rate。落 `reports/review_dashboard/ai_infra_promotion_alpha/<date>/promotion_alpha_ledger.{csv,md}`。 |
 | `ops/` | root task registry、cron 渲染、task runner、review packet。 |
 | `crates/` | Rust shared control plane 和 CLI。 |
 
@@ -232,6 +234,27 @@ cargo check -p quant-stack-cli
 
 ## 最近验证结果
 
+最近一次整理 (2026-05-13 第六批) 已经跑过：
+
+```text
+Python smoke tests (100 tests): pass — adds vs 93:
+  tests.test_ai_tape_cross_compare (3)
+  tests.test_backtest_promotion_history (4)
+  tests.test_score_mean_reversion_radar +0 (extended schema in fixture)
+Factor Lab tests: pass (12)
+cargo check -p quant-stack-cli: pass
+verify_ai_supercycle_readiness.py --strict: 10/1/0
+audit --strict: US 5/5, CN 1/1
+mean_reversion_radar.md (with new layers):
+  total=100; candidates=13 (1 AI / 12 non-AI); earnings_blocked=7;
+  AI LEAD: ANET (-16.3%/5d, rich_vs_sector PE 47.3 vs sec 41.3);
+  earnings-blocked includes NVDA (5/20), CSCO (5/13), AMAT (5/14).
+ai_tape_cross_compare.md: 8 AI bull-rising leaders / 1 AI laggard (ANET).
+promotion_alpha_ledger.md: 5 promote_now rows; forward data not yet available.
+```
+
+旧批次结果保留：
+
 最近一次整理 (2026-05-13 第五批) 已经跑过：
 
 ```text
@@ -317,6 +340,15 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 3. `ops/tasks.yaml` 新增 `research.main_strategy_v2_report` (12:10 CST) 和 `research.production_basket_audit` (12:15 CST)。
 4. `ops/review_packet.sh` 调用审计脚本，输出 `production_basket_audit.md` 到 review packet。
 
+## 第六批已完成 (2026-05-13 续 5)
+
+主线: 报告内容确保 AI book 仍是绝对主力，新增 radar 都明确把 AI 命中拉到 lead 段。
+
+1. **MR radar + earnings 避开 + 估值层** — `score_mean_reversion_radar.py` 加 `_load_next_earnings` (7 天内财报屏蔽)、`_sector_medians`、`_valuation_signal` (cheap/fair/rich vs sector median PE+PS)；输出拆 **AI Universe Mean-Reversion (LEAD)** 段（1 行 ANET）+ **Non-AI Mean-Reversion (Context)** 段（12 行 BAC/WFC/IBM/MCD/T/APH/ISRG/PFE/CRM/AEM/ABT/COP）+ **Earnings-Blocked** 段（7 行：NVDA 5/20、CSCO 5/13、AMAT 5/14、TJX 5/20 等）。`tests/test_score_mean_reversion_radar.py` 加财报+估值 schema。
+2. **AI Tape Cross-Compare** — `scripts/build_ai_tape_cross_compare.py` 读 ten-x + MR 两份 CSV，输出 `ai_tape_cross_compare.md`：左边 AI bull-rising leaders (8: 澜起科技/生益科技/长电科技/AAOI/MOD/工业富联/NTAP/CAMT)，右边 AI laggards (1: ANET)。`tests/test_ai_tape_cross_compare.py` 覆盖 3 case。
+3. **Promotion alpha backtest** — `scripts/backtest_promotion_history.py` 对 `promote_now` 历史查 prices_daily + SPY，算 5/20/60d 绝对收益 + 相对 alpha + 聚合 mean alpha/hit rate/IR。当前 5 promote_now，forward windows 还未到所以 N=0；持续累积后才出真数字。`tests/test_backtest_promotion_history.py` 覆盖 4 case (含 forward data 存在/缺失/recommendation filter/aggregator)。
+4. **新 cron** — `research.ai_tape_cross_compare` (12:22 CST) + `research.promotion_alpha_backtest` (12:24 CST)。
+
 ## 第五批已完成 (2026-05-13 续 4)
 
 1. **Per-symbol EMA artifact** — `render_ema_tape_overlay_markdown` 把 `payload["ema_tape_overlay"]` 单独落 `ema_tape_overlay.{md,json}`，按 cross_state (bull/tangled/bear) → 5d slope 排序。当前 US head: MU/688008.SH/AMD/DDOG/AKAM 全部 `bull` + slope >+13%/5d。
@@ -358,11 +390,10 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 2. **Factor Lab `DATA_REQUIREMENTS` schema 合同**。
 3. **海外指数 ingestion 扩展** — `^HSI`/`^STI`/`^FTSE`/`^IBEX`。
 4. **AKShare bridge 完整集成** — `cn_index_ingest` 直接走 producer 的 FastAPI 桥。
-5. **Mean-reversion radar follow-up** — 给每个候选添加 `next_earnings_date` (避开财报前)，并在 EMA50 之上 / 估值合理 (PE < 行业中位数) 加额外筛选。
-6. **Tape leader vs mean-reversion 交叉** — 把 ten-x bull-rising leaders 和 mean-reversion 候选并入同一对比页，方便操作员同时看「领头」和「滞后」两个池。
-7. **Promotion history 回测** — `promotion_history.csv` 配合 prices_daily，回算 promote_now 之后 5/20/60 日的相对 SPY 收益，做 alpha tracking。
-8. **mean-reversion radar 加价值/估值层** — 当前只看 tape，加 PE/PS/FCF 比较增加 conviction。
-9. **A 股 mean-reversion 镜像** — 仿照 US radar 给 A 股 top 100 (沪深300 + 中证500) 也做同样的均值回归 radar。
+5. **promotion_alpha 持续累积** — 等几周后 backtest 才有真数字；可加 rolling 4-week / 12-week aggregate。
+6. **Cross-compare 加 rebalance suggestion** — leaders vs laggards 那两段加自动 weight tilt 建议（如「增 5% leaders / 减 5% rich laggards」），但仍需操作员复核。
+7. **MR radar add 5d ADV / news sentiment** — 当前只 tape + valuation；加换手 + 24h 新闻数量帮助辨别 fundamental shock vs purely tape weakness。
+8. **AI Tape leader 价格回撤监控** — leader 段持续运行：当 `bull; rising` 滑成 `tangled` 或 `bear` 时立即通知（cron 监控）。
 
 ## 接手时不要做的事
 

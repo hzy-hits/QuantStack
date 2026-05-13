@@ -645,6 +645,44 @@ tasks:
     outputs:
       - ai_infra/reports/promotion_history.csv
 
+  research.ai_tape_cross_compare:
+    group: research
+    schedule: "22 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/build_ai_tape_cross_compare.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.ai_tape_cross_compare.log
+    lock: ops/state/research.ai_tape_cross_compare.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/ai_tape_cross_compare
+
+  research.promotion_alpha_backtest:
+    group: research
+    schedule: "24 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/backtest_promotion_history.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.promotion_alpha_backtest.log
+    lock: ops/state/research.promotion_alpha_backtest.lock
+    timeout_minutes: 10
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/ai_infra_promotion_alpha
+
   us.watchdog.reboot:
     group: watchdog
     schedule: "@reboot"
