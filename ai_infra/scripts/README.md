@@ -8,6 +8,7 @@
 | [generate_source_verification_queue.py](generate_source_verification_queue.py) | 从 SQLite 生成原文核验队列和 Batch 1 |
 | [scaffold_evidence_cards.py](scaffold_evidence_cards.py) | 从 Batch 1 CSV 生成 evidence card 草稿 |
 | [generate_us_alpha_mining_queue.py](generate_us_alpha_mining_queue.py) | 从 SQLite 生成美股 alpha mining 队列和 evidence card 草稿 |
+| [generate_bfs_supply_chain_discovery_queue.py](generate_bfs_supply_chain_discovery_queue.py) | 从 seed universe 生成 BFS 供应链扩展任务、agent queue 和 ChatGPT Pro prompt |
 
 ## 常用命令
 
@@ -16,6 +17,7 @@ python3 scripts/build_universe_system.py
 python3 scripts/generate_source_verification_queue.py
 python3 scripts/scaffold_evidence_cards.py
 python3 scripts/generate_us_alpha_mining_queue.py
+python3 scripts/generate_bfs_supply_chain_discovery_queue.py
 ```
 
 ## 原则

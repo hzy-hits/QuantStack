@@ -149,6 +149,16 @@ Fund Philosophy / GitHub Repo Review 结果接收时间：2026-05-12
 
 未执行“添加至项目源”，原因：这些是未核验的 ChatGPT Pro 输出草稿，直接加入项目源会污染后续会话。
 
+BFS Supply-Chain Discovery / Agent Pipeline 提交时间：2026-05-13
+
+- 主题：从现有 seed universe 按 D0-D5 BFS 扩展美国、日本、韩国、台湾、欧洲、以色列供应链候选，并设计“读财报挖供应链公司”的 agent pipeline。
+- ChatGPT URL：https://chatgpt.com/g/g-p-6a0288a9fb1881919a965d3f9364be88-ai-super-cycle/c/6a03dc28-9170-83ea-b33e-e571171f681b
+- Prompt 已落盘：`notes/2026-05-13-chatgpt-pro-bfs-supply-chain-discovery-prompt.md`。
+- 本地已生成：`reports/bfs_supply_chain_discovery_queue_v1.md`、`reports/bfs_supply_chain_discovery_queue_v1.csv`。
+- 本地已新增脚本：`scripts/generate_bfs_supply_chain_discovery_queue.py`。
+- 状态：已提交到项目 `ai super cycle`，页面显示正在生成。
+- 约束：不切模型，不停止生成；输出只作为供应链扩展和 agent pipeline 设计线索，不做买卖建议或目标价。
+
 ## 运行原则
 
 - 不切换 ChatGPT 模型，保持项目当前的 Pro / 进阶专业模式。
