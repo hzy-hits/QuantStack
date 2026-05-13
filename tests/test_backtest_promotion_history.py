@@ -139,6 +139,77 @@ class PromotionBacktestTests(unittest.TestCase):
             rows = self.module.backtest(history, us_db)
             self.assertEqual({r.primary_ticker for r in rows}, {"AIINC"})
 
+    def test_weekly_aggregate_groups_by_iso_week(self) -> None:
+        # Three rows: two in week 19 (May 4-10) and one in week 20.
+        sample = [
+            self.module.BacktestRow(
+                as_of="2026-05-04",
+                primary_ticker="AAA",
+                company="",
+                asset_pool="",
+                readiness_tier="",
+                base_close=None,
+                spy_base_close=None,
+                returns={"5d": {"active_ret_pct": 1.0}},
+            ),
+            self.module.BacktestRow(
+                as_of="2026-05-08",
+                primary_ticker="BBB",
+                company="",
+                asset_pool="",
+                readiness_tier="",
+                base_close=None,
+                spy_base_close=None,
+                returns={"5d": {"active_ret_pct": 3.0}},
+            ),
+            self.module.BacktestRow(
+                as_of="2026-05-13",
+                primary_ticker="CCC",
+                company="",
+                asset_pool="",
+                readiness_tier="",
+                base_close=None,
+                spy_base_close=None,
+                returns={"5d": {"active_ret_pct": -2.0}},
+            ),
+        ]
+        weekly = self.module._aggregate_by_week(sample, 5)
+        as_dict = {wk: agg for wk, agg in weekly}
+        self.assertIn("2026-W19", as_dict)
+        self.assertIn("2026-W20", as_dict)
+        self.assertEqual(as_dict["2026-W19"]["n"], 2)
+        self.assertAlmostEqual(as_dict["2026-W19"]["mean_active_pct"], 2.0, places=2)
+        self.assertEqual(as_dict["2026-W20"]["n"], 1)
+        self.assertAlmostEqual(as_dict["2026-W20"]["mean_active_pct"], -2.0, places=2)
+
+    def test_trailing_window_accumulates_prior_weeks(self) -> None:
+        # Four weeks of one promotion each, returns 1, 2, 3, 4.
+        sample = [
+            self.module.BacktestRow(
+                as_of=as_of,
+                primary_ticker=ticker,
+                company="",
+                asset_pool="",
+                readiness_tier="",
+                base_close=None,
+                spy_base_close=None,
+                returns={"5d": {"active_ret_pct": value}},
+            )
+            for as_of, ticker, value in [
+                ("2026-04-13", "A", 1.0),  # W16
+                ("2026-04-20", "B", 2.0),  # W17
+                ("2026-04-27", "C", 3.0),  # W18
+                ("2026-05-04", "D", 4.0),  # W19
+            ]
+        ]
+        trailing = self.module._aggregate_trailing(sample, 5, weeks=4)
+        as_dict = {wk: agg for wk, agg in trailing}
+        # Trailing window at W19 spans W16-W19 → average of 1,2,3,4 = 2.5
+        self.assertAlmostEqual(as_dict["2026-W19"]["mean_active_pct"], 2.5, places=2)
+        self.assertEqual(as_dict["2026-W19"]["n"], 4)
+        # At W16 only one row is in the window.
+        self.assertEqual(as_dict["2026-W16"]["n"], 1)
+
     def test_aggregate_summary_computes_hit_rate_and_ir(self) -> None:
         sample_returns = [
             {"5d": {"active_ret_pct": 1.0}},

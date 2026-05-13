@@ -194,19 +194,75 @@ def _aggregate(rows: list[BacktestRow], horizon: int) -> dict[str, float | int |
         for row in rows
         if row.returns.get(key, {}).get("active_ret_pct") is not None
     ]
-    if not actives:
+    return _summarise_actives(actives)
+
+
+def _summarise_actives(actives: list[float | None]) -> dict[str, float | int | None]:
+    clean = [a for a in actives if a is not None]
+    if not clean:
         return {"n": 0, "mean_active_pct": None, "hit_rate_pct": None, "ir": None}
-    mean = sum(actives) / len(actives)
-    hits = sum(1 for a in actives if a > 0)
-    var = sum((a - mean) ** 2 for a in actives) / len(actives)
+    mean = sum(clean) / len(clean)
+    hits = sum(1 for a in clean if a > 0)
+    var = sum((a - mean) ** 2 for a in clean) / len(clean)
     stdev = var ** 0.5 if var > 0 else 0.0
     ir = mean / stdev if stdev > 0 else None
     return {
-        "n": len(actives),
+        "n": len(clean),
         "mean_active_pct": round(mean, 3),
-        "hit_rate_pct": round(hits / len(actives) * 100.0, 1),
+        "hit_rate_pct": round(hits / len(clean) * 100.0, 1),
         "ir": round(ir, 3) if ir is not None else None,
     }
+
+
+def _iso_week_key(as_of_text: str) -> str | None:
+    """ISO year-week label like '2026-W19'. Returns None on parse failure."""
+    try:
+        anchor = date.fromisoformat(as_of_text)
+    except ValueError:
+        return None
+    year, week, _ = anchor.isocalendar()
+    return f"{year:04d}-W{week:02d}"
+
+
+def _aggregate_by_week(rows: list[BacktestRow], horizon: int) -> list[tuple[str, dict[str, float | int | None]]]:
+    key = f"{horizon}d"
+    buckets: dict[str, list[float | None]] = {}
+    for row in rows:
+        wk = _iso_week_key(row.as_of)
+        if wk is None:
+            continue
+        active = row.returns.get(key, {}).get("active_ret_pct")
+        buckets.setdefault(wk, []).append(active)
+    return [(wk, _summarise_actives(buckets[wk])) for wk in sorted(buckets)]
+
+
+def _aggregate_trailing(rows: list[BacktestRow], horizon: int, weeks: int = 4) -> list[tuple[str, dict[str, float | int | None]]]:
+    """Trailing N-week aggregate ending at each unique week.
+
+    For week W, the trailing window includes rows whose `as_of` is in any of
+    weeks {W-weeks+1 ... W}. This makes a noisy weekly series readable.
+    """
+    weekly = _aggregate_by_week(rows, horizon)
+    if not weekly:
+        return []
+    # Build per-row active list keyed by week to compute true trailing aggregation.
+    key = f"{horizon}d"
+    rows_by_week: dict[str, list[float | None]] = {}
+    for row in rows:
+        wk = _iso_week_key(row.as_of)
+        if wk is None:
+            continue
+        rows_by_week.setdefault(wk, []).append(row.returns.get(key, {}).get("active_ret_pct"))
+
+    week_order = [wk for wk, _ in weekly]
+    out: list[tuple[str, dict[str, float | int | None]]] = []
+    for idx, wk in enumerate(week_order):
+        window_start = max(0, idx - weeks + 1)
+        actives: list[float | None] = []
+        for inner in week_order[window_start : idx + 1]:
+            actives.extend(rows_by_week.get(inner, []))
+        out.append((wk, _summarise_actives(actives)))
+    return out
 
 
 def render_markdown(rows: list[BacktestRow], as_of: str) -> str:
@@ -226,21 +282,6 @@ def render_markdown(rows: list[BacktestRow], as_of: str) -> str:
     ]
     for horizon in HORIZONS:
         agg = _aggregate(rows, horizon)
-        n = agg["n"]
-        mean_active = agg["mean_active_pct"]
-        hit_rate = agg["hit_rate_pct"]
-        ir = agg["ir"]
-        lines.append(
-            f"| {horizon}d | {n} | "
-            f"{mean_active:+.2f}% | "
-            if mean_active is not None
-            else f"| {horizon}d | {n} | - | "
-        )
-        # rebuild row cleanly
-    # the streaming above is awkward; rebuild table:
-    lines = lines[:-len(HORIZONS)]
-    for horizon in HORIZONS:
-        agg = _aggregate(rows, horizon)
         n = agg["n"] or 0
         mean_active = agg["mean_active_pct"]
         hit_rate = agg["hit_rate_pct"]
@@ -250,6 +291,49 @@ def render_markdown(rows: list[BacktestRow], as_of: str) -> str:
         ir_text = f"{ir:+.2f}" if ir is not None else "-"
         lines.append(f"| {horizon}d | {n} | {active_text} | {hit_text} | {ir_text} |")
     lines.append("")
+
+    # Rolling weekly aggregates make the noisy raw series readable. We emit
+    # both a per-ISO-week view (one row per promotion week) and a trailing
+    # 4-week view so the operator can see whether the signal is drifting.
+    weekly = {horizon: _aggregate_by_week(rows, horizon) for horizon in HORIZONS}
+    has_weekly = any(weekly[h] for h in HORIZONS)
+    if has_weekly:
+        lines += [
+            "## Weekly Rolling Alpha (per ISO week)",
+            "",
+            "| Week | 5d N | 5d Active % | 5d Hit | 5d IR | 20d N | 20d Active % | 20d Hit | 20d IR | 60d N | 60d Active % | 60d Hit | 60d IR |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        week_keys = sorted({wk for h in HORIZONS for wk, _ in weekly[h]})
+        for wk in week_keys:
+            row_cells = [wk]
+            for horizon in HORIZONS:
+                agg = next((a for w, a in weekly[horizon] if w == wk), {"n": 0, "mean_active_pct": None, "hit_rate_pct": None, "ir": None})
+                row_cells.append(str(agg["n"] or 0))
+                row_cells.append(f"{agg['mean_active_pct']:+.2f}%" if agg["mean_active_pct"] is not None else "-")
+                row_cells.append(f"{agg['hit_rate_pct']:.1f}%" if agg["hit_rate_pct"] is not None else "-")
+                row_cells.append(f"{agg['ir']:+.2f}" if agg["ir"] is not None else "-")
+            lines.append("| " + " | ".join(row_cells) + " |")
+        lines.append("")
+
+        trailing = {horizon: _aggregate_trailing(rows, horizon, weeks=4) for horizon in HORIZONS}
+        lines += [
+            "## Trailing 4-Week Rolling Alpha",
+            "",
+            "| Week (end) | 5d N | 5d Active % | 5d Hit | 5d IR | 20d N | 20d Active % | 20d Hit | 20d IR | 60d N | 60d Active % | 60d Hit | 60d IR |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+        all_weeks = sorted({wk for h in HORIZONS for wk, _ in trailing[h]})
+        for wk in all_weeks:
+            row_cells = [wk]
+            for horizon in HORIZONS:
+                agg = next((a for w, a in trailing[horizon] if w == wk), {"n": 0, "mean_active_pct": None, "hit_rate_pct": None, "ir": None})
+                row_cells.append(str(agg["n"] or 0))
+                row_cells.append(f"{agg['mean_active_pct']:+.2f}%" if agg["mean_active_pct"] is not None else "-")
+                row_cells.append(f"{agg['hit_rate_pct']:.1f}%" if agg["hit_rate_pct"] is not None else "-")
+                row_cells.append(f"{agg['ir']:+.2f}" if agg["ir"] is not None else "-")
+            lines.append("| " + " | ".join(row_cells) + " |")
+        lines.append("")
 
     lines += [
         "## Per-Row Detail",

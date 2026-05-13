@@ -365,6 +365,17 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 3. `ops/tasks.yaml` 新增 `research.main_strategy_v2_report` (12:10 CST) 和 `research.production_basket_audit` (12:15 CST)。
 4. `ops/review_packet.sh` 调用审计脚本，输出 `production_basket_audit.md` 到 review packet。
 
+## 第八批已完成 (2026-05-13 续 7)
+
+1. **Promotion alpha rolling weekly aggregate** — `backtest_promotion_history.py`：
+   - 重构 `_aggregate` → 拆出 `_summarise_actives(actives)` 复用
+   - 新增 `_iso_week_key(as_of)` → `YYYY-Www` 标签
+   - 新增 `_aggregate_by_week(rows, horizon)` → 每周聚合 (n / mean active / hit rate / IR)
+   - 新增 `_aggregate_trailing(rows, horizon, weeks=4)` → 滚动 4 周窗口聚合
+   - 报告新增两段：**Weekly Rolling Alpha (per ISO week)** 和 **Trailing 4-Week Rolling Alpha**，每段都按 5d/20d/60d 列出 n/Active/Hit/IR
+   - 当前历史只有 2026-W20 单周 (5 promote_now 行)，forward windows 还没到所以全 `-`；累积后开始填数
+   - `tests/test_backtest_promotion_history.py` 加 2 cases (weekly grouping + trailing 4-week)
+
 ## 第七批已完成 (2026-05-13 续 6)
 
 主线: AI book 仍绝对主力；fear & greed 仅作 macro context、不能促进任何 ticker 进 production；rebalance suggestion 仅 提示不执行。
