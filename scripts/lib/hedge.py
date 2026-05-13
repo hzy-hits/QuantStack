@@ -10,7 +10,18 @@ US_BETA_HEDGE_RATIO = 0.50
 CN_MARKET_BETA_FLOOR = 0.35
 US_MARKET_BETA_FLOOR = 0.30
 CN_HEDGE_BENCHMARKS = ("IM.CFX", "IC.CFX", "IF.CFX", "IH.CFX")
-US_HEDGE_BENCHMARKS = ("SPY", "IWM", "QQQ", "DIA", "SMH")
+US_HEDGE_BENCHMARKS = (
+    "SPY",
+    "IWM",
+    "QQQ",
+    "DIA",
+    "SMH",
+    # Regional satellite ETFs — only picked when an AI book leans heavy on
+    # Taiwan/Japan/Korea via ADRs (TSM, ASML, ASX, satellite ADR map).
+    "EWT",
+    "EWJ",
+    "EWY",
+)
 
 
 def corr(a: list[float], b: list[float], *, min_periods: int = 20) -> float | None:

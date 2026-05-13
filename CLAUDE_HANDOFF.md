@@ -98,6 +98,7 @@ ai_infra 原文研究 / BFS 发现
 | `scripts/score_ten_x_candidates.py` | 用 source-verification queue + readiness gates + yfinance 市值，筛 sub-$50B D2-D3 弹性候选，输出 `reports/review_dashboard/ai_infra_ten_x_radar/<date>/ten_x_candidates.{csv,md}`。 |
 | `scripts/scaffold_evidence_cards_from_readiness.py` | 对 `ready_for_promotion` / `evidence_partial` 行，按 source-evidence-template 生成 evidence card 草稿，落到 `reports/review_dashboard/ai_infra_evidence_card_drafts/<date>/<ticker>.md` 并写 INDEX。 |
 | `scripts/derive_promotion_plan_from_readiness.py` | 把 readiness ledger 翻成 promote_now / watch_with_review / research_only / reject_until_resolved 推荐表，落到 `reports/review_dashboard/ai_infra_promotion_plan/<date>/promotion_plan.{csv,md}`。 |
+| `scripts/apply_promotion_plan.py` | 人工确认后，把 `promote_now` 行追加到 `ai_infra/reports/expansion_candidates_promoted_v1.csv`。默认 dry-run，需 `--confirm`；append-only，写前自动备份 `.bak`。 |
 | `ops/` | root task registry、cron 渲染、task runner、review packet。 |
 | `crates/` | Rust shared control plane 和 CLI。 |
 
@@ -229,6 +230,28 @@ cargo check -p quant-stack-cli
 
 ## 最近验证结果
 
+最近一次整理 (2026-05-13 第四批) 已经跑过：
+
+```text
+Python smoke tests (87 tests): pass — adds vs 75:
+  tests.test_ema_tape_overlay (6)
+  tests.test_apply_promotion_plan (5)
+  tests.test_benchmark_attribution +1 (risk block)
+Factor Lab tests: pass (12)
+cargo check -p quant-stack-cli: pass
+verify_ai_supercycle_readiness.py --strict: 10/1/0
+audit --strict: US basket=5/all_rows=5, CN basket=1/all_rows=1
+ema overlay (US universe): COHR/LITE/AAOI/MU/CSCO all `bull; rising;`,
+  MU +31.3% vs EMA21 (stretched), CSCO +9.3%.
+AI Book risk block (US 5-name basket):
+  max drawdown 20d=-7.25%, 60d=-17.31%; ATR20 avg 4.38%;
+  pairwise corr 20d mean 0.50/max 0.81; 60d mean 0.46/max 0.84.
+apply_promotion_plan.py: dry-run + --confirm path validated, append-only
+  with .bak backup; existing-symbol skip works.
+```
+
+旧批次结果保留：
+
 最近一次整理 (2026-05-13 第三批) 已经跑过：
 
 ```text
@@ -272,6 +295,13 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 3. `ops/tasks.yaml` 新增 `research.main_strategy_v2_report` (12:10 CST) 和 `research.production_basket_audit` (12:15 CST)。
 4. `ops/review_packet.sh` 调用审计脚本，输出 `production_basket_audit.md` 到 review packet。
 
+## 第四批已完成 (2026-05-13 续 3)
+
+1. **EMA 21/50 tape overlay** — `build_ema_tape_overlay` 计算 EMA21/EMA50/cross_state/recent_cross/5d slope/距 EMA21/EMA50 pct。路由 `*.SH/*.SZ` → CN db，其他 → US db。Source-review calendar 和 satellite pool 表多 Tape 列 (例：`bull; rising; px +13.8% vs EMA21`)。方法论允许 K-line 做 tape/crowding/risk，不证基本面。`payload["ema_tape_overlay"]` 保留完整 metrics。`tests/test_ema_tape_overlay.py` 覆盖 6 case。
+2. **EWT/EWJ/EWY 进 US_HEDGE_BENCHMARKS** — `scripts/lib/hedge.py` 加 3 个 region ETF；hedge selector 可在 satellite-heavy book 上挑区域 ETF。当前 basket 还是按 SPY/QQQ/SMH 选，区域 ETF 已加入候选。
+3. **AI Book risk block** — `_max_drawdown_pct` / `_atr_proxy` / `_pairwise_corr` 三个 helper，在 `build_benchmark_attribution.ai_book[market]` 加 `risk` 子段 (max_drawdown 20d/60d, avg_atr20_pct, pairwise_corr 20d/60d 含 mean/max/min/n_pairs)。Render 在 AI Book vs Benchmark 表下面加 `### Risk block`。当前 US 5-name basket: drawdown 20d/60d = -7.25%/-17.31%, ATR20=4.38%, 20d corr mean 0.50/max 0.81。
+4. **promotion plan → expansion_candidates_promoted 闭环** — `scripts/apply_promotion_plan.py`：读 `promotion_plan.csv`，只对 `recommendation=promote_now` 行操作；默认 dry-run；`--confirm` + 可选 `--tickers` 子集才 append；写前 backup `.bak`；按 symbol skip 已存在行。`tests/test_apply_promotion_plan.py` 覆盖 5 case (dry-run/confirm/tickers/skip-existing/missing-plan)。
+
 ## 第三批已完成 (2026-05-13 续 2)
 
 1. **10x 候选 radar** — `scripts/score_ten_x_candidates.py` + `tests/test_score_ten_x_candidates.py`。从 readiness ledger 起步，叠加 yfinance 市值，按 `mcap < $50B AND BFS depth ∈ {D2,D2-D3,D3,D3-D4} AND counter≤3 项` 过滤，按 elasticity score 排序。当前 top: COHU $2.3B/D3 (91.5), CAMT $8.1B/D3 (84.5), SPXC $10B/D3-D4 (77.5), FORM/ONTO/RMBS/NVMI/BESI.AS $10-25B (74.5)。Market cap 结果带 7 天 cache (`reports/review_dashboard/ai_infra_ten_x_radar/market_cap_cache.json`)，避免重复打 yfinance。
@@ -294,13 +324,13 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 
 ## 建议的下一步
 
-1. **EMA 21/50 tape overlay**：给 AI universe 每个名字算 EMA21/EMA50/距 EMA pct/slope/cross 信号，放到 source-review calendar 和 satellite pool 表的 Tape 列。方法论允许 K-line 做 tape/crowding/risk，不证基本面。
-2. **财报抽取**：SEC EDGAR companyfacts API 抽 US 公司 revenue / margin / CapEx / inventory / FCF / customer 段落计数，自动填充 evidence card 草稿的「原文证据」表（取代手工 quote）。
-3. **Factor Lab `DATA_REQUIREMENTS` schema 合同**：把 source_verification_queue 字段 schema 暴露成 JSON Schema，Factor Lab 写 hypothesis 时按合同生成。
-4. **promotion_plan 喂回 `expansion_candidates_promoted_v1.csv`**：在人工 review 通过的 `promote_now` 行上自动追加，闭环 source-review → universe。
-5. **satellite hedge**：把 `EWT/EWJ/EWY` 加入 `US_HEDGE_BENCHMARKS`，让 hedge selector 给 satellite-heavy AI book 选区域 ETF 对冲。
-6. **AKShare bridge 完整集成**：CN index ingest 直接走 producer 已有的 AKShare FastAPI 桥（`localhost:8321`），统一 ingestion path。
-7. **AI Book attribution 加 ATR / drawdown / max corr**：当前只有 alpha/beta/IR，缺组合风险口径；下一步加 rolling drawdown、跨 basket 相关性、ATR 倍数。
+1. **SEC EDGAR 财报抽取** — 留给 Factor Lab 自己探索（用户决定）；本仓库不直接拉接口。可选：未来用 `scripts/extract_company_financials.py` 包装 companyfacts API 做证据卡的「原文证据」预填。
+2. **Factor Lab `DATA_REQUIREMENTS` schema 合同** — 把 `source_verification_queue` 暴露 JSON schema；让 Factor Lab hypothesis 生成时按合同填字段。
+3. **海外指数 ingestion 扩展** — 当前 `ingest_satellite_index_prices.py` 只拉 ^TWII/^N225/^KS11/^AEX 和 4 个 ETF；可加 ^HSI/^STI/^FTSE/^IBEX 等覆盖港股、欧洲更多市场。
+4. **AKShare bridge 完整集成** — `cn_index_ingest` 直接走 producer 的 FastAPI 桥（`localhost:8321`），统一 ingestion path。
+5. **Per-symbol EMA artifact** — 把 `payload["ema_tape_overlay"]` 单独落 `ema_tape_overlay.{json,md}`，供 review packet 直接看价格状态而不必读 us/cn_daily_report。
+6. **Ten-x radar + AI book 整合** — 给 `ten_x_candidates.csv` 自动叠加 EMA21/50 tape，过滤「bull; rising」的 10x 候选作为头部观察。
+7. **promotion_plan + readiness 历史 ledger** — 维护一份累积的 `promotion_history.csv`，记录何时 promote_now / 哪个 ticker / 之后表现如何，提供回测信号。
 
 ## 接手时不要做的事
 

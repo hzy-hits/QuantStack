@@ -123,6 +123,29 @@ class BenchmarkAttributionTests(unittest.TestCase):
             cn_book = (data.get("ai_book") or {}).get("cn") or {}
             self.assertEqual(cn_book["status"], "no_basket")
 
+    def test_ai_book_risk_block_includes_drawdown_atr_corr(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            us_db = root / "us.duckdb"
+            cn_db = root / "cn.duckdb"
+            as_of = date(2026, 5, 13)
+            _seed_us_prices(us_db, "SPY", 600.0, 120, as_of)
+            _seed_us_prices(us_db, "AI1", 100.0, 120, as_of)
+            _seed_us_prices(us_db, "AI2", 120.0, 120, as_of)
+
+            data = self.module.build_benchmark_attribution(
+                us_db,
+                cn_db,
+                as_of,
+                us_basket=["AI1", "AI2"],
+                cn_basket=[],
+            )
+            risk = ((data.get("ai_book") or {}).get("us") or {}).get("risk") or {}
+            self.assertIn("max_drawdown_20d_pct", risk)
+            self.assertIn("avg_atr20_pct", risk)
+            self.assertIn("pairwise_corr_20d", risk)
+            self.assertGreaterEqual(risk["pairwise_corr_20d"].get("n_pairs") or 0, 1)
+
     def test_renderer_handles_empty_ai_book(self) -> None:
         payload = {
             "benchmark_attribution": {

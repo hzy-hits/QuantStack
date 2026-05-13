@@ -1240,6 +1240,141 @@ _SOURCE_REVIEW_TIER_ORDER = {
 }
 
 
+def _compute_ema(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    alpha = 2.0 / (period + 1)
+    out: list[float] = [values[0]]
+    for v in values[1:]:
+        out.append(alpha * v + (1 - alpha) * out[-1])
+    return out
+
+
+def _ema_tape_metrics(closes_with_dates: list[tuple[date, float]]) -> dict[str, Any] | None:
+    """Return EMA21/50 / cross / slope / distance metrics for a price series."""
+    if len(closes_with_dates) < 55:
+        return None
+    closes = [c[1] for c in closes_with_dates]
+    ema21 = _compute_ema(closes, 21)
+    ema50 = _compute_ema(closes, 50)
+    last_close = closes[-1]
+    last_ema21 = ema21[-1]
+    last_ema50 = ema50[-1]
+
+    # Cross state
+    if abs(last_ema21 - last_ema50) / last_ema50 < 0.005:
+        cross_state = "tangled"
+    elif last_ema21 > last_ema50:
+        cross_state = "bull"
+    else:
+        cross_state = "bear"
+
+    # Recent cross (within last 5 sessions)
+    recent_cross: str | None = None
+    for i in range(max(1, len(ema21) - 5), len(ema21)):
+        prev_diff = ema21[i - 1] - ema50[i - 1]
+        curr_diff = ema21[i] - ema50[i]
+        if prev_diff < 0 < curr_diff:
+            recent_cross = "bull_cross"
+            break
+        if prev_diff > 0 > curr_diff:
+            recent_cross = "bear_cross"
+            break
+
+    # 5d slope on EMA21 expressed as percent
+    slope_5d_pct: float | None = None
+    if len(ema21) >= 6 and ema21[-6] > 0:
+        slope_5d_pct = (last_ema21 - ema21[-6]) / ema21[-6] * 100.0
+
+    return {
+        "as_of": closes_with_dates[-1][0].isoformat(),
+        "close": round(last_close, 4),
+        "ema21": round(last_ema21, 4),
+        "ema50": round(last_ema50, 4),
+        "cross_state": cross_state,
+        "recent_cross": recent_cross,
+        "slope_21d_5d_pct": round(slope_5d_pct, 3) if slope_5d_pct is not None else None,
+        "dist_close_ema21_pct": round((last_close / last_ema21 - 1.0) * 100.0, 3) if last_ema21 else None,
+        "dist_close_ema50_pct": round((last_close / last_ema50 - 1.0) * 100.0, 3) if last_ema50 else None,
+    }
+
+
+def _ema_summary_label(metrics: dict[str, Any] | None) -> str:
+    if metrics is None:
+        return "no_data"
+    parts: list[str] = [metrics.get("cross_state") or "?"]
+    if metrics.get("recent_cross"):
+        parts.append(metrics["recent_cross"])
+    slope = metrics.get("slope_21d_5d_pct")
+    if slope is not None:
+        if slope > 0.5:
+            parts.append("rising")
+        elif slope < -0.5:
+            parts.append("falling")
+        else:
+            parts.append("flat")
+    dist = metrics.get("dist_close_ema21_pct")
+    if dist is not None:
+        parts.append(f"px {dist:+.1f}% vs EMA21")
+    return "; ".join(parts)
+
+
+def build_ema_tape_overlay(
+    us_db: Path,
+    cn_db: Path,
+    symbols: Iterable[str],
+    as_of: date,
+) -> dict[str, dict[str, Any]]:
+    """Compute EMA21/50 tape metrics for a set of AI-universe symbols.
+
+    The methodology allows K-line / EMA signals as tape/crowding/risk
+    context only — never as basic-fundamental evidence. The overlay routes
+    symbols to the right DuckDB by suffix: `*.SH`/`*.SZ` → CN db, everything
+    else → US db (which also holds yfinance-sourced satellite ADRs/indices).
+    """
+    out: dict[str, dict[str, Any]] = {}
+    us_symbols: list[str] = []
+    cn_symbols: list[str] = []
+    for symbol in symbols:
+        if not symbol:
+            continue
+        text = str(symbol).upper().strip()
+        if text.endswith((".SH", ".SZ")):
+            cn_symbols.append(text)
+        else:
+            us_symbols.append(text)
+
+    if us_symbols:
+        series = _load_benchmark_closes(us_db, "us", us_symbols, as_of, lookback_days=160)
+        for symbol in us_symbols:
+            metrics = _ema_tape_metrics(series.get(symbol) or [])
+            out[symbol] = {
+                "market": "US",
+                "metrics": metrics,
+                "summary": _ema_summary_label(metrics),
+            }
+    if cn_symbols:
+        series = _load_benchmark_closes(cn_db, "cn", cn_symbols, as_of, lookback_days=160)
+        for symbol in cn_symbols:
+            metrics = _ema_tape_metrics(series.get(symbol) or [])
+            out[symbol] = {
+                "market": "CN",
+                "metrics": metrics,
+                "summary": _ema_summary_label(metrics),
+            }
+    return out
+
+
+def _ema_lookup(overlay: dict[str, dict[str, Any]] | None, ticker_field: str) -> dict[str, Any] | None:
+    if not overlay:
+        return None
+    for alias in (ticker_field or "").split("/"):
+        key = alias.strip().upper()
+        if key in overlay:
+            return overlay[key]
+    return None
+
+
 def _readiness_tier(row: dict[str, str]) -> tuple[str, float]:
     """Inline the AI Infra source-review readiness gates.
 
@@ -1308,6 +1443,7 @@ def build_source_review_calendar(
     focus_symbols: Iterable[str] | None = None,
     queue_path: Path | None = None,
     limit: int = 60,
+    ema_overlay: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Read the curated AI-infra source-verification queue and bucket rows by market.
 
@@ -1343,11 +1479,14 @@ def build_source_review_calendar(
             score_float = None
         ticker_aliases = [piece.strip() for piece in (row.get("ticker") or "").split("/") if piece.strip()]
         readiness_tier, readiness_score = _readiness_tier(row)
+        ema_entry = _ema_lookup(ema_overlay, row.get("ticker") or "")
         return {
             "rank": rank_int,
             "priority_tier": row.get("priority_tier") or "",
             "readiness_tier": readiness_tier,
             "readiness_score": readiness_score,
+            "ema_summary": ema_entry.get("summary") if ema_entry else "no_data",
+            "ema_metrics": ema_entry.get("metrics") if ema_entry else None,
             "ticker": row.get("ticker") or "",
             "primary_ticker": ticker_aliases[0] if ticker_aliases else row.get("ticker") or "",
             "company": row.get("company") or "",
@@ -1410,6 +1549,7 @@ SATELLITE_REGION_LABELS = {
 def build_satellite_pool_report(
     *,
     queue_path: Path | None = None,
+    ema_overlay: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Surface 卫星资产池 (TW/JP/KR/EU/IL) AI-infra source-review entries.
 
@@ -1440,12 +1580,15 @@ def build_satellite_pool_report(
             rank_int = int(row.get("rank") or "") if row.get("rank") else None
         except ValueError:
             rank_int = None
+        ema_entry = _ema_lookup(ema_overlay, row.get("ticker") or "")
         satellite_rows.append(
             {
                 "rank": rank_int,
                 "priority_tier": row.get("priority_tier") or "",
                 "ticker": row.get("ticker") or "",
                 "primary_ticker": primary_ticker,
+                "ema_summary": ema_entry.get("summary") if ema_entry else "no_data",
+                "ema_metrics": ema_entry.get("metrics") if ema_entry else None,
                 "aliases": ticker_aliases,
                 "company": row.get("company") or "",
                 "region_raw": region_raw,
@@ -1553,8 +1696,8 @@ def render_satellite_pool_report_section(payload: dict[str, Any], *, limit_per_r
         lines += [
             f"### {region} ({len(region_rows)})",
             "",
-            "| Rank | Ticker | Company | Depth | Module | Readiness | Priority |",
-            "|---:|---|---|---|---|---|---|",
+            "| Rank | Ticker | Company | Depth | Module | Readiness | Tape | Priority |",
+            "|---:|---|---|---|---|---|---|---|",
         ]
         for entry in region_rows[:limit_per_region]:
             readiness = entry.get("readiness_tier") or "unscored"
@@ -1566,10 +1709,11 @@ def render_satellite_pool_report_section(payload: dict[str, Any], *, limit_per_r
                     [
                         str(entry.get("rank") if entry.get("rank") is not None else "-"),
                         entry.get("primary_ticker") or entry.get("ticker") or "-",
-                        clean_table_text(entry.get("company") or "-", 26),
+                        clean_table_text(entry.get("company") or "-", 24),
                         entry.get("bfs_depth") or "-",
-                        clean_table_text(entry.get("module") or "-", 32),
+                        clean_table_text(entry.get("module") or "-", 28),
                         f"{readiness}{score_text}",
+                        clean_table_text(entry.get("ema_summary") or "no_data", 42),
                         entry.get("priority_tier") or "-",
                     ]
                 )
@@ -4105,6 +4249,71 @@ def _compute_alpha_beta(
     }
 
 
+def _max_drawdown_pct(returns: list[float]) -> float | None:
+    if not returns:
+        return None
+    equity = 1.0
+    peak = 1.0
+    worst = 0.0
+    for r in returns:
+        equity *= 1.0 + r
+        peak = max(peak, equity)
+        if peak > 0:
+            worst = min(worst, equity / peak - 1.0)
+    return round(worst * 100.0, 3)
+
+
+def _atr_proxy(closes: list[tuple[date, float]], window: int) -> float | None:
+    if len(closes) < window + 1:
+        return None
+    ranges: list[float] = []
+    for prev, cur in zip(closes[-window - 1:], closes[-window:], strict=False):
+        prev_close = prev[1]
+        cur_close = cur[1]
+        if not prev_close:
+            continue
+        ranges.append(abs(cur_close - prev_close) / prev_close * 100.0)
+    if not ranges:
+        return None
+    return round(sum(ranges) / len(ranges), 3)
+
+
+def _pairwise_corr(series_by_symbol: dict[str, dict[date, float]], window: int) -> dict[str, float | None]:
+    symbols = list(series_by_symbol)
+    if len(symbols) < 2:
+        return {"mean": None, "max": None, "min": None, "n_pairs": 0}
+    import math
+
+    values: list[float] = []
+    for i in range(len(symbols)):
+        for j in range(i + 1, len(symbols)):
+            a = series_by_symbol[symbols[i]]
+            b = series_by_symbol[symbols[j]]
+            common = sorted(set(a) & set(b))
+            common = common[-window:]
+            n = len(common)
+            if n < max(10, window // 4):
+                continue
+            xs = [a[d] for d in common]
+            ys = [b[d] for d in common]
+            mx = sum(xs) / n
+            my = sum(ys) / n
+            vx = sum((x - mx) ** 2 for x in xs)
+            vy = sum((y - my) ** 2 for y in ys)
+            if vx <= 0 or vy <= 0:
+                continue
+            cov = sum((xs[k] - mx) * (ys[k] - my) for k in range(n))
+            values.append(max(-1.0, min(1.0, cov / math.sqrt(vx * vy))))
+    if not values:
+        return {"mean": None, "max": None, "min": None, "n_pairs": 0}
+    return {
+        "mean": round(sum(values) / len(values), 3),
+        "max": round(max(values), 3),
+        "min": round(min(values), 3),
+        "n_pairs": len(values),
+    }
+
+
 def _ai_book_return_series(
     db_path: Path,
     market: str,
@@ -4245,11 +4454,32 @@ def build_benchmark_attribution(
                         "information_ratio": metrics["information_ratio"],
                     }
                 )
+        # Risk block: max drawdown / ATR / pairwise correlation across basket.
+        sorted_dates = sorted(book_returns)
+        book_returns_20 = [book_returns[d] for d in sorted_dates[-20:]]
+        book_returns_60 = [book_returns[d] for d in sorted_dates[-60:]]
+        per_symbol_series_full = _load_benchmark_closes(db_path, market_key, basket, as_of, lookback_days=120)
+        per_symbol_returns: dict[str, dict[date, float]] = {}
+        atr_inputs: list[tuple[str, float | None]] = []
+        for symbol in basket:
+            closes = per_symbol_series_full.get(symbol) or []
+            if closes:
+                per_symbol_returns[symbol] = _daily_returns(closes)
+                atr_inputs.append((symbol, _atr_proxy(closes, window=20)))
+        atr_values = [val for _, val in atr_inputs if val is not None]
+        risk = {
+            "max_drawdown_20d_pct": _max_drawdown_pct(book_returns_20),
+            "max_drawdown_60d_pct": _max_drawdown_pct(book_returns_60),
+            "avg_atr20_pct": round(sum(atr_values) / len(atr_values), 3) if atr_values else None,
+            "pairwise_corr_20d": _pairwise_corr(per_symbol_returns, window=20),
+            "pairwise_corr_60d": _pairwise_corr(per_symbol_returns, window=60),
+        }
         out["ai_book"][market_key] = {
             "status": "ok" if rows else "missing_benchmark",
             "rows": rows,
             "basket_size": len(basket),
             "basket_symbols": basket,
+            "risk": risk,
         }
     return out
 
@@ -6525,6 +6755,23 @@ def render_ai_book_attribution_section(payload: dict[str, Any], market: str) -> 
             f"{fmt_num(info) if info is not None else '-'} |"
         )
     lines.append("")
+
+    risk = book.get("risk") or {}
+    if risk:
+        dd20 = risk.get("max_drawdown_20d_pct")
+        dd60 = risk.get("max_drawdown_60d_pct")
+        atr = risk.get("avg_atr20_pct")
+        corr20 = risk.get("pairwise_corr_20d") or {}
+        corr60 = risk.get("pairwise_corr_60d") or {}
+        lines += [
+            "### Risk block",
+            "",
+            f"- Max drawdown 20d / 60d: {fmt_pct(dd20) if dd20 is not None else '-'} / {fmt_pct(dd60) if dd60 is not None else '-'}",
+            f"- 篮子成员 ATR20 (close-to-close) 均值: {fmt_pct(atr) if atr is not None else '-'}",
+            f"- 篮子内 20d 配对相关: mean {fmt_num(corr20.get('mean'))}, max {fmt_num(corr20.get('max'))}, min {fmt_num(corr20.get('min'))}, n_pairs {corr20.get('n_pairs') or 0}",
+            f"- 篮子内 60d 配对相关: mean {fmt_num(corr60.get('mean'))}, max {fmt_num(corr60.get('max'))}, min {fmt_num(corr60.get('min'))}, n_pairs {corr60.get('n_pairs') or 0}",
+            "",
+        ]
     return lines
 
 
@@ -6616,7 +6863,7 @@ def render_source_review_calendar_section(
         f"- Readiness 分布: {summary_text}",
         "- 用法: `ready_for_promotion` 表示 evidence card 模板写齐且 evidence_state 含「原文已证明」；其他 tier 仍需人工核验。没有 evidence card 不能晋级为 production candidate。",
         "",
-        "| Tier | Ticker | Company | Depth | Module | Readiness | Upgrade Conditions |",
+        "| Tier | Ticker | Company | Depth | Module | Readiness | Tape (EMA21/50) |",
         "|---|---|---|---|---|---|---|",
     ]
     if rows:
@@ -6633,9 +6880,9 @@ def render_source_review_calendar_section(
                         ticker,
                         clean_table_text(row.get("company") or "-", 26),
                         row.get("bfs_depth") or "-",
-                        clean_table_text(row.get("module") or "-", 32),
+                        clean_table_text(row.get("module") or "-", 28),
                         f"{readiness}{score_text}",
-                        clean_table_text(row.get("upgrade_conditions") or "-", 56),
+                        clean_table_text(row.get("ema_summary") or "no_data", 48),
                     ]
                 )
                 + " |"
@@ -7892,8 +8139,25 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "us": build_us_earnings_calendar(args.us_db, as_of, focus_symbols=us_calendar_focus),
         "cn": build_cn_earnings_calendar(args.cn_db, as_of, focus_symbols=cn_calendar_focus),
     }
+    # EMA21/50 tape overlay covering production basket + source-review focus tickers.
+    ema_overlay_symbols: set[str] = set()
+    for ticker in {*us_calendar_focus, *cn_calendar_focus}:
+        if ticker:
+            ema_overlay_symbols.add(str(ticker).upper())
+    try:
+        with SOURCE_REVIEW_QUEUE_PATH.open("r", encoding="utf-8") as queue_handle:
+            for row in csv.DictReader(queue_handle):
+                for alias in (row.get("ticker") or "").split("/"):
+                    token = alias.strip().upper()
+                    if token:
+                        ema_overlay_symbols.add(token)
+    except FileNotFoundError:
+        pass
+    ema_overlay = build_ema_tape_overlay(args.us_db, args.cn_db, ema_overlay_symbols, as_of)
+
     source_review_calendar = build_source_review_calendar(
         focus_symbols=sorted({*us_calendar_focus, *cn_calendar_focus}),
+        ema_overlay=ema_overlay,
     )
     us_basket_symbols = [
         str(row.get("symbol") or "").upper()
@@ -7912,7 +8176,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         us_basket=us_basket_symbols,
         cn_basket=cn_basket_symbols,
     )
-    satellite_pool_report = build_satellite_pool_report()
+    satellite_pool_report = build_satellite_pool_report(ema_overlay=ema_overlay)
     payload = {
         "as_of": as_of.isoformat(),
         "start": start.isoformat(),
@@ -7930,6 +8194,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "source_review_calendar": source_review_calendar,
         "benchmark_attribution": benchmark_attribution,
         "satellite_pool_report": satellite_pool_report,
+        "ema_tape_overlay": ema_overlay,
         "promotion_contract": promotion_contract,
     }
     assert_promoted_execution_rows(payload)
