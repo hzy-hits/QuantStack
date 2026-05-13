@@ -87,6 +87,12 @@
 | ChatGPT Pro BFS supply-chain discovery prompt | 已提交 Pro；等待输出完成后抓取落盘 | [2026-05-13-chatgpt-pro-bfs-supply-chain-discovery-prompt.md](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/notes/2026-05-13-chatgpt-pro-bfs-supply-chain-discovery-prompt.md) |
 | HBM BFS source-backed discovery v2 | 已抓取，待原文核验；约 43k 字符，包含 source checklist、HBM bottleneck chain、候选/radar 表、agent pipeline 和搜索 query 模板 | [2026-05-13-chatgpt-pro-hbm-bfs-source-backed-v2.md](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/notes/2026-05-13-chatgpt-pro-hbm-bfs-source-backed-v2.md), [prompt](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/notes/2026-05-13-chatgpt-pro-hbm-bfs-source-backed-v2-prompt.md) |
 
+## 公司财报 / K线 / 期权研究方法已提交
+
+| 模块 | 状态 | 本地文件 |
+| --- | --- | --- |
+| Company financials + K-line + options methodology | 已提交 Pro；等待输出完成后抓取落盘 | [2026-05-13-chatgpt-pro-company-financials-market-options-methodology-prompt.md](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/notes/2026-05-13-chatgpt-pro-company-financials-market-options-methodology-prompt.md) |
+
 ## D5 反证雷达已补充
 
 | 模块 | 状态 | 本地文件 |

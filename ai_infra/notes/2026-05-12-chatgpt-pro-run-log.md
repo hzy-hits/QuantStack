@@ -185,6 +185,14 @@ HBM BFS Source-Backed Discovery v2 抓取时间：2026-05-13
 - 内容有效性：围绕 HBM source-backed discovery，包含 source checklist、HBM bottleneck chain、候选/radar 公司表、agent pipeline 和搜索 query 模板。
 - 证据状态：`ChatGPT Pro output, pending original-source verification`；仍需回到公司原文逐项核验。
 
+Company Financials / K-line / Options Methodology 提交时间：2026-05-13
+
+- 主题：如何系统研究公司财报、K线和期权数据，并整合成 AI Infra research OS / fund research engine pipeline。
+- ChatGPT URL：https://chatgpt.com/g/g-p-6a0288a9fb1881919a965d3f9364be88-ai-super-cycle/c/6a03edfe-dc28-83ea-b124-643a3345163e
+- Prompt 已落盘：`notes/2026-05-13-chatgpt-pro-company-financials-market-options-methodology-prompt.md`。
+- 状态：已提交到项目 `ai super cycle`，页面显示正在生成。
+- 约束：不做买卖建议，不给目标价，不给实际仓位；输出只作为研究方法和本地工程 pipeline 设计。
+
 ## 运行原则
 
 - 不切换 ChatGPT 模型，保持项目当前的 Pro / 进阶专业模式。
