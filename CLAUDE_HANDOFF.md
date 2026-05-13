@@ -104,6 +104,7 @@ ai_infra 原文研究 / BFS 发现
 | `scripts/build_ai_tape_cross_compare.py` | 把 ten-x leaders (bull; rising) 和 MR AI universe 滞后并到一页，让操作员在 AI 池子内部决定 lean leaders 还是 rotate laggards。落 `reports/review_dashboard/ai_tape_cross_compare/<date>/ai_tape_cross_compare.md`。 |
 | `scripts/backtest_promotion_history.py` | 对 `promote_now` 历史行查 prices_daily + SPY，算 5/20/60d 绝对收益和相对 alpha + IR + hit rate。落 `reports/review_dashboard/ai_infra_promotion_alpha/<date>/promotion_alpha_ledger.{csv,md}`。 |
 | `scripts/ingest_fear_greed_index.py` | CNN F&G API 优先，VIX+SPY EMA50+SPY 5d 三因子代理 fallback。1h cache。落 `reports/review_dashboard/fear_greed/<date>/fear_greed.json`，由 daily report 渲染段引用。 |
+| `scripts/maintain_rebalance_history.py` | 把 `ai_tape_cross_compare/<date>/rebalance_suggestion.json` append 进 `ai_infra/reports/rebalance_history.csv`（幂等于 `as_of, ticker, action`）；保留操作员手填的 `executed_tilt_pct`/`executed_at`/`notes`；写 `rebalance_history_summary.md` 显示 last 30 / per-ticker cumulative / drift ≥ 1%。 |
 | `ops/` | root task registry、cron 渲染、task runner、review packet。 |
 | `crates/` | Rust shared control plane 和 CLI。 |
 
@@ -364,6 +365,15 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
    - 新增 `build_benchmark_attribution` / `render_benchmark_attribution_section`，对 US (SPY/QQQ/SMH/IWM/DIA) 和 CN (000300.SH/399006.SZ/399001.SZ/000001.SH) 输出 1D/5D/20D/60D/YTD 表，写入 `benchmark_attribution.md`/`.json`。
 3. `ops/tasks.yaml` 新增 `research.main_strategy_v2_report` (12:10 CST) 和 `research.production_basket_audit` (12:15 CST)。
 4. `ops/review_packet.sh` 调用审计脚本，输出 `production_basket_audit.md` 到 review packet。
+
+## 第九批已完成 (2026-05-13 续 8)
+
+1. **Rebalance suggestion vs execution ledger**:
+   - `build_ai_tape_cross_compare.py` 现在还落 `rebalance_suggestion.json`（结构化 leaders / rotate_in / trim 行 + 汇总）。
+   - 新 `scripts/maintain_rebalance_history.py`：读 daily `rebalance_suggestion.json`，append 到 `ai_infra/reports/rebalance_history.csv` (key: `as_of, ticker, action`，幂等)，并写 `rebalance_history_summary.md`（最近 30 条 + per-ticker cumulative + 显著漂移段 |diff| ≥ 1%）。
+   - **保留操作员手填字段**: `executed_tilt_pct` / `executed_at` / `notes` 在 maintainer 重跑时不被覆盖。验证：手填 AAOI `+1.50%` 后 maintainer 再跑 → 行内仍是 `+1.50%`，summary drift section 显示 AAOI 建议 +2.50% / 实际 +1.50% / drift +1.00%。
+   - cron 接入: `research.rebalance_history` (12:23 CST)。
+   - `tests/test_maintain_rebalance_history.py` 覆盖 4 case（首次写入 / 操作员保留 / 漂移阈值 / 缺失 suggestion 不 crash）。
 
 ## 第八批已完成 (2026-05-13 续 7)
 

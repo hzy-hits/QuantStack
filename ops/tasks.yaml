@@ -683,6 +683,26 @@ tasks:
     outputs:
       - reports/review_dashboard/ai_tape_cross_compare
 
+  research.rebalance_history:
+    group: research
+    schedule: "23 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/maintain_rebalance_history.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.rebalance_history.log
+    lock: ops/state/research.rebalance_history.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ai_infra/reports/rebalance_history.csv
+      - ai_infra/reports/rebalance_history_summary.md
+
   research.promotion_alpha_backtest:
     group: research
     schedule: "24 12 * * 1-5"

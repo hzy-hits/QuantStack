@@ -377,6 +377,25 @@ def write_outputs(
     (out_dir / "ai_tape_cross_compare.md").write_text(
         render_markdown(leaders, laggards, as_of), encoding="utf-8"
     )
+    # Emit a structured rebalance suggestion so downstream tooling can append
+    # it to the historical ledger without re-running the join.
+    suggestion = build_rebalance_suggestion(leaders, laggards)
+    suggestion_payload = {
+        "as_of": as_of,
+        "summary": {
+            "total_add_pct": suggestion["total_add_pct"],
+            "total_rotate_in_pct": suggestion["total_rotate_in_pct"],
+            "total_trim_pct": suggestion["total_trim_pct"],
+        },
+        "leaders": suggestion["leaders"],
+        "rotate_in": suggestion["rotate_in"],
+        "trim": suggestion["trim"],
+    }
+    import json as _json
+    (out_dir / "rebalance_suggestion.json").write_text(
+        _json.dumps(suggestion_payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def main() -> int:
