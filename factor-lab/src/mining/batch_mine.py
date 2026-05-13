@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.dsl.parser import parse, DSLParseError
 from src.dsl.compute import compute_factor
+from src.autoresearch.ai_infra_context import ai_infra_enabled, apply_ai_infra_filter, market_symbols
 from src.evaluate.forward_returns import compute_forward_returns
 from src.evaluate.ic import compute_ic_series, ic_summary
 from src.evaluate.quintile import compute_quintile_returns
@@ -225,19 +226,24 @@ def run_batch(market: str, max_factors: int = 500, output_path: str | None = Non
     prices = con.execute(cfg["sql"]).fetchdf()
     con.close()
 
-    # Universe filter: keep only top N stocks by market_cap each day
-    top_n = cfg.get("universe_top_n")
-    if top_n and "market_cap" in prices.columns:
-        prices["_mcap_rank"] = prices.groupby("trade_date")["market_cap"].rank(
-            ascending=False, method="first", na_option="bottom"
-        )
-        prices = prices[prices["_mcap_rank"] <= top_n].drop(columns=["_mcap_rank"]).reset_index(drop=True)
-        print(f"  Universe filter: top {top_n} by market_cap")
+    if ai_infra_enabled() and market_symbols(market):
+        prices = apply_ai_infra_filter(prices, market=market, symbol_col="ts_code")
+        print(f"  AI infra universe filter: {prices['ts_code'].nunique()} symbols")
+    else:
+        # Universe filter: keep only top N stocks by market_cap each day
+        top_n = cfg.get("universe_top_n")
+        if top_n and "market_cap" in prices.columns:
+            prices["_mcap_rank"] = prices.groupby("trade_date")["market_cap"].rank(
+                ascending=False, method="first", na_option="bottom"
+            )
+            prices = prices[prices["_mcap_rank"] <= top_n].drop(columns=["_mcap_rank"]).reset_index(drop=True)
+            print(f"  Universe filter: top {top_n} by market_cap")
 
     fwd = compute_forward_returns(cfg["db_path"], cfg["table"], cfg["date_col"], cfg["close_col"],
                                   cfg["sym_col"] if market == "cn" else "symbol")
     if market == "us":
         fwd = fwd.rename(columns={"symbol": "ts_code", "date": "trade_date"})
+    fwd = apply_ai_infra_filter(fwd, market=market, symbol_col="ts_code")
 
     print(f"Data: {len(prices)} rows, {prices['ts_code'].nunique()} symbols\n")
 

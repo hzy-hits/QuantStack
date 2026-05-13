@@ -44,6 +44,12 @@ from src.agent.prompts import (
     ParsedResponse,
 )
 from src.autoresearch.session_state import load_session_context
+from src.autoresearch.ai_infra_context import (
+    ai_infra_enabled,
+    apply_ai_infra_filter,
+    build_ai_infra_session_context,
+    market_symbols,
+)
 from src.agent.backends import call_agent
 from src.paths import FACTOR_LAB_DB, QUANT_CN_DB, QUANT_US_DB
 from src.mining.contracts import record_experiment_ledger
@@ -130,9 +136,19 @@ def _load_prices(cfg: dict) -> pd.DataFrame:
     finally:
         con.close()
 
-    # Universe filter for CN
+    ai_infra_symbols: set[str] = set()
+    if ai_infra_enabled():
+        try:
+            ai_infra_symbols = market_symbols(market)
+            if ai_infra_symbols:
+                df = apply_ai_infra_filter(df, market=market, symbol_col=sym)
+        except Exception as exc:
+            logger.warning("Could not apply AI infra universe filter: %s", exc)
+
+    # Broad-cap filter for legacy CN sessions. AI-infra sessions use the
+    # upstream research universe instead of deleting smaller bottleneck names.
     top_n = cfg.get("universe_top_n")
-    if top_n and "market_cap" in df.columns:
+    if top_n and "market_cap" in df.columns and not ai_infra_symbols:
         df["_r"] = df.groupby(dt)["market_cap"].rank(ascending=False, method="first", na_option="bottom")
         df = df[df["_r"] <= top_n].drop(columns=["_r"]).reset_index(drop=True)
 
@@ -156,6 +172,10 @@ def _compute_forward_returns(cfg: dict) -> pd.DataFrame:
         df = con.execute(sql).fetchdf()
     finally:
         con.close()
+    try:
+        df = apply_ai_infra_filter(df, market=cfg.get("market", ""), symbol_col=cfg["sym_col"])
+    except Exception as exc:
+        logger.warning("Could not apply AI infra universe filter to forward returns: %s", exc)
     return df
 
 
@@ -278,6 +298,9 @@ def _append_experiment_rows(
             "data_requirements",
             "failure_mode",
             "report_contract",
+            "ai_supercycle_layer",
+            "supply_chain_hypothesis",
+            "relationship_evidence_required",
             "money_readiness",
         ):
             if exp.get(field):
@@ -819,6 +842,9 @@ class FactorSession:
                     "data_requirements": exp.get("data_requirements"),
                     "failure_mode": exp.get("failure_mode"),
                     "report_contract": exp.get("report_contract"),
+                    "ai_supercycle_layer": exp.get("ai_supercycle_layer"),
+                    "supply_chain_hypothesis": exp.get("supply_chain_hypothesis"),
+                    "relationship_evidence_required": exp.get("relationship_evidence_required"),
                     "money_readiness": exp.get("money_readiness"),
                 },
                 source="agent_loop",
@@ -836,6 +862,13 @@ class FactorSession:
             print(f"Time budget: {self.time_budget_minutes} minutes")
         if self.branch_context.get("session_branch"):
             print(f"Branch: {self.branch_context['session_branch']}")
+        if ai_infra_enabled():
+            try:
+                symbols = market_symbols(self.market)
+                if symbols:
+                    print(f"AI infra universe: {len(symbols)} symbols")
+            except Exception as exc:
+                logger.warning("Could not summarize AI infra universe: %s", exc)
         print()
 
         started_at = time.time()
@@ -856,13 +889,23 @@ class FactorSession:
 
         # Load existing promoted factors so agent avoids rediscovery
         existing_factors = self._load_existing_factors()
+        session_context_parts = []
+        try:
+            ai_context = build_ai_infra_session_context(self.market)
+            if ai_context:
+                session_context_parts.append(ai_context)
+        except Exception as exc:
+            logger.warning("Could not build AI infra session context: %s", exc)
+        saved_context = load_session_context(self.session_context_path)
+        if saved_context:
+            session_context_parts.append(saved_context)
 
         # Build system prompt
         system_prompt = build_system_prompt(
             market=self.market,
             regime_dist=None,  # TODO: compute from data
             existing_factors=existing_factors,
-            session_context=load_session_context(self.session_context_path),
+            session_context="\n\n".join(session_context_parts),
         )
 
         # Main experiment loop
@@ -904,6 +947,9 @@ class FactorSession:
                     "data_requirements": "",
                     "failure_mode": "",
                     "report_contract": "research_only",
+                    "ai_supercycle_layer": "none",
+                    "supply_chain_hypothesis": "",
+                    "relationship_evidence_required": "true",
                     "money_readiness": "research_only",
                     "is_ic": 0.0,
                     "is_ic_ir": 0.0,
@@ -953,6 +999,9 @@ class FactorSession:
                     "data_requirements": parsed.data_requirements,
                     "failure_mode": parsed.failure_mode,
                     "report_contract": parsed.report_contract,
+                    "ai_supercycle_layer": parsed.ai_supercycle_layer,
+                    "supply_chain_hypothesis": parsed.supply_chain_hypothesis,
+                    "relationship_evidence_required": parsed.relationship_evidence_required,
                     "money_readiness": "money_candidate" if parsed.report_contract == "fresh_buy_gate" else "research_only",
                     "is_ic": 0.0,
                     "is_ic_ir": 0.0,
@@ -1007,6 +1056,9 @@ class FactorSession:
                 "data_requirements": parsed.data_requirements,
                 "failure_mode": parsed.failure_mode,
                 "report_contract": parsed.report_contract,
+                "ai_supercycle_layer": parsed.ai_supercycle_layer,
+                "supply_chain_hypothesis": parsed.supply_chain_hypothesis,
+                "relationship_evidence_required": parsed.relationship_evidence_required,
                 "money_readiness": "money_candidate" if parsed.report_contract == "fresh_buy_gate" else "research_only",
                 "is_ic": bt_result.avg_ic,
                 "is_ic_ir": bt_result.avg_ic_ir,
@@ -1101,6 +1153,9 @@ class FactorSession:
                 "data_requirements": exp.get("data_requirements", ""),
                 "failure_mode": exp.get("failure_mode", ""),
                 "report_contract": exp.get("report_contract", "research_only"),
+                "ai_supercycle_layer": exp.get("ai_supercycle_layer", "none"),
+                "supply_chain_hypothesis": exp.get("supply_chain_hypothesis", ""),
+                "relationship_evidence_required": exp.get("relationship_evidence_required", "true"),
                 "money_readiness": exp.get("money_readiness", "research_only"),
                 "is_ic": exp["is_ic"],
                 "is_ic_ir": exp["is_ic_ir"],

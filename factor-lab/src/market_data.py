@@ -8,6 +8,7 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
+from src.autoresearch.ai_infra_context import ai_infra_enabled, apply_ai_infra_filter
 from src.paths import FACTOR_LAB_ROOT, QUANT_CN_DB, QUANT_US_DB
 
 CACHE_DIR = FACTOR_LAB_ROOT / "data" / ".cache"
@@ -81,20 +82,28 @@ def _write_pickle_safely(path: Path, payload: object) -> None:
         pass
 
 
+def _cache_path_for_mode(path: Path) -> Path:
+    if not ai_infra_enabled():
+        return path
+    return path.with_name(f"{path.stem}.ai_infra{path.suffix}")
+
+
 def load_market_prices(
     market: str,
     *,
     refresh_if_stale: bool = True,
 ) -> pd.DataFrame:
     cfg = MARKET_CONFIGS[market]
-    cache_path = cfg["cache_path"]
+    cache_path = _cache_path_for_mode(cfg["cache_path"])
     db_path = cfg["db_path"]
+    sym_col = cfg["sym_col"]
 
     if cache_path.exists() and (not refresh_if_stale or not _is_stale(db_path, cache_path)):
         with cache_path.open("rb") as fh:
             return pickle.load(fh)
 
     prices = _load_prices_from_db(db_path, cfg["price_sql"])
+    prices = apply_ai_infra_filter(prices, market=market, symbol_col=sym_col)
     _write_pickle_safely(cache_path, prices)
     return prices
 
@@ -106,7 +115,7 @@ def load_forward_returns(
     refresh_if_stale: bool = True,
 ) -> pd.DataFrame:
     cfg = MARKET_CONFIGS[market]
-    fwd_path = cfg["fwd_path"]
+    fwd_path = _cache_path_for_mode(cfg["fwd_path"])
     db_path = cfg["db_path"]
     sym_col = cfg["sym_col"]
     date_col = cfg["date_col"]
@@ -116,6 +125,7 @@ def load_forward_returns(
             return pickle.load(fh)
 
     prices = prices if prices is not None else load_market_prices(market, refresh_if_stale=refresh_if_stale)
+    prices = apply_ai_infra_filter(prices, market=market, symbol_col=sym_col)
     prices_sorted = prices.sort_values([sym_col, date_col]).copy()
     prices_sorted["fwd_5d"] = (
         prices_sorted.groupby(sym_col)["close"].shift(-5) / prices_sorted["close"] - 1

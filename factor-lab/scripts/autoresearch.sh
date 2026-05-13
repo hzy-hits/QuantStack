@@ -21,6 +21,8 @@ PYTHON="${PYTHON_BIN:-python3}"
 export FACTOR_LAB_AGENT_BACKEND="${FACTOR_LAB_AGENT_BACKEND:-codex}"
 export FACTOR_LAB_CODEX_MODEL="${FACTOR_LAB_CODEX_MODEL:-gpt-5.4}"
 export FACTOR_LAB_CODEX_REASONING_EFFORT="${FACTOR_LAB_CODEX_REASONING_EFFORT:-xhigh}"
+export FACTOR_LAB_AI_INFRA_ONLY="${FACTOR_LAB_AI_INFRA_ONLY:-1}"
+export FACTOR_LAB_AI_INFRA_ROOT="${FACTOR_LAB_AI_INFRA_ROOT:-$PROJ_DIR/../ai_infra}"
 US_EXPECTED_DATE_ENV="${FACTOR_LAB_US_EXPECTED_DATE:-}"
 US_EXPECTED_DATE="${US_EXPECTED_DATE_ENV:-$(TZ=America/New_York date +%Y-%m-%d)}"
 US_READY_DATE="$US_EXPECTED_DATE"
@@ -80,6 +82,8 @@ echo "  Agent backend: $FACTOR_LAB_AGENT_BACKEND"
 echo "  Codex model:   $FACTOR_LAB_CODEX_MODEL"
 echo "  Reasoning:     $FACTOR_LAB_CODEX_REASONING_EFFORT"
 echo "  Market scope:  $MARKET"
+echo "  AI infra only: $FACTOR_LAB_AI_INFRA_ONLY"
+echo "  AI infra root: $FACTOR_LAB_AI_INFRA_ROOT"
 
 US_READY=false
 if [[ "$RUN_US" == true ]]; then
@@ -177,6 +181,7 @@ else
     if [[ "$RUN_US" == true && "$US_READY" == true ]]; then
         $PYTHON -m src.mining.export_to_pipeline --market us || echo "US export failed"
     fi
+    $PYTHON scripts/export_ai_supply_chain_discovery.py || echo "AI supply-chain discovery export failed"
 fi
 
 echo ""

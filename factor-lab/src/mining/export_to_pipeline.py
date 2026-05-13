@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.dsl.parser import parse
 from src.dsl.compute import compute_factor
+from src.autoresearch.ai_infra_context import ai_infra_enabled, apply_ai_infra_filter, market_symbols
 from src.mining.contracts import ensure_contract_tables
 from src.paths import FACTOR_LAB_DB, QUANT_CN_REPORT_DB, QUANT_US_DB
 
@@ -247,6 +248,25 @@ def _load_prices_with_fallback(db_path: str, price_sql: str) -> pd.DataFrame:
                 con.close()
 
 
+def _apply_export_universe(market: str, prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    if ai_infra_enabled():
+        symbols = market_symbols(market)
+        if symbols:
+            filtered = apply_ai_infra_filter(prices, market=market, symbol_col=cfg["sym_col"])
+            print(f"  AI infra universe filter: {len(symbols)} symbols, {len(filtered)} price rows")
+            return filtered
+
+    top_n = cfg.get("universe_top_n")
+    if top_n and "market_cap" in prices.columns:
+        prices = prices.copy()
+        prices["_r"] = prices.groupby("trade_date")["market_cap"].rank(
+            ascending=False, method="first", na_option="bottom"
+        )
+        prices = prices[prices["_r"] <= top_n].drop(columns=["_r"]).reset_index(drop=True)
+        print(f"  Legacy universe filter: top {top_n} by market_cap")
+    return prices
+
+
 def _connect_for_write(db_path: str, retries: int = 12, delay_seconds: float = 5.0) -> duckdb.DuckDBPyConnection:
     """Open the target DB for writing, retrying briefly if another process holds the lock."""
     last_exc = None
@@ -371,15 +391,7 @@ def export(market: str, as_of: str | None = None):
 
     # 2. Load prices (with lock-safe fallback)
     prices = _load_prices_with_fallback(cfg["db_path"], cfg["price_sql"])
-
-    # Universe filter (CN only)
-    top_n = cfg.get("universe_top_n")
-    if top_n and "market_cap" in prices.columns:
-        prices["_r"] = prices.groupby("trade_date")["market_cap"].rank(
-            ascending=False, method="first", na_option="bottom"
-        )
-        prices = prices[prices["_r"] <= top_n].drop(columns=["_r"]).reset_index(drop=True)
-        print(f"  Universe filter: top {top_n} by market_cap")
+    prices = _apply_export_universe(market, prices, cfg)
 
     effective_trade_date = _resolve_effective_trade_date(prices, as_of)
     if effective_trade_date is None:

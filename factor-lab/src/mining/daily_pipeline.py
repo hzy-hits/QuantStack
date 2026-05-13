@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.dsl.parser import parse, DSLParseError
 from src.dsl.compute import compute_factor
+from src.autoresearch.ai_infra_context import ai_infra_enabled, apply_ai_infra_filter, market_symbols
 from src.evaluate.forward_returns import compute_forward_returns
 from src.evaluate.ic import compute_ic_series, ic_summary
 from src.evaluate.quintile import compute_quintile_returns
@@ -77,6 +78,30 @@ LCB80_Z = 1.2816
 MONEY_GATE_RETIRE_MARKETS = {"cn"}
 MONEY_GATE_RETIRE_CORR = 0.90
 MONEY_GATE_RETIRE_TOP5_SHARE = 0.30
+
+
+def _apply_factor_lab_universe(market: str, prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """Apply the AI-infra mandate first; legacy broad-cap filters are fallback only."""
+    if ai_infra_enabled():
+        symbols = market_symbols(market)
+        if symbols:
+            filtered = apply_ai_infra_filter(prices, market=market, symbol_col="ts_code")
+            print(f"  AI infra universe filter: {len(symbols)} symbols, {len(filtered)} price rows")
+            return filtered
+
+    top_n = cfg.get("universe_top_n")
+    if top_n and "market_cap" in prices.columns:
+        prices = prices.copy()
+        prices["_mcap_rank"] = prices.groupby("trade_date")["market_cap"].rank(
+            ascending=False, method="first", na_option="bottom"
+        )
+        prices = prices[prices["_mcap_rank"] <= top_n].drop(columns=["_mcap_rank"]).reset_index(drop=True)
+        print(f"  Legacy universe filter: top {top_n} by market_cap")
+    return prices
+
+
+def _apply_factor_lab_fwd_universe(market: str, fwd: pd.DataFrame) -> pd.DataFrame:
+    return apply_ai_infra_filter(fwd, market=market, symbol_col="ts_code")
 
 HORIZON_WEIGHTS = {7: 0.5, 14: 0.3, 30: 0.2}
 SIGREG_REDUNDANCY_SOFT = 0.55
@@ -893,14 +918,7 @@ def step1_mine(market: str, max_factors: int = 500) -> list[dict]:
     con = duckdb.connect(cfg["db_path"], read_only=True)
     prices = con.execute(cfg["sql"]).fetchdf()
     con.close()
-
-    # Universe filter: keep only top N stocks by market_cap each day
-    top_n = cfg.get("universe_top_n")
-    if top_n and "market_cap" in prices.columns:
-        prices["_mcap_rank"] = prices.groupby("trade_date")["market_cap"].rank(
-            ascending=False, method="first", na_option="bottom"
-        )
-        prices = prices[prices["_mcap_rank"] <= top_n].drop(columns=["_mcap_rank"]).reset_index(drop=True)
+    prices = _apply_factor_lab_universe(market, prices, cfg)
 
     fwd = compute_forward_returns(
         cfg["db_path"], cfg["table"], cfg["date_col"],
@@ -908,6 +926,7 @@ def step1_mine(market: str, max_factors: int = 500) -> list[dict]:
     )
     if market == "us":
         fwd = fwd.rename(columns={"symbol": "ts_code", "date": "trade_date"})
+    fwd = _apply_factor_lab_fwd_universe(market, fwd)
 
     formulas = generate_factor_formulas(max_factors)
     print(f"  Generated {len(formulas)} unique formulas")
@@ -1046,14 +1065,7 @@ def step2_multi_horizon_backtest(candidates: list[dict], market: str) -> list[di
     con = duckdb.connect(cfg["db_path"], read_only=True)
     prices = con.execute(cfg["sql"]).fetchdf()
     con.close()
-
-    # Universe filter
-    top_n = cfg.get("universe_top_n")
-    if top_n and "market_cap" in prices.columns:
-        prices["_mcap_rank"] = prices.groupby("trade_date")["market_cap"].rank(
-            ascending=False, method="first", na_option="bottom"
-        )
-        prices = prices[prices["_mcap_rank"] <= top_n].drop(columns=["_mcap_rank"]).reset_index(drop=True)
+    prices = _apply_factor_lab_universe(market, prices, cfg)
 
     # Compute forward returns for all horizons
     fwd_all = {}
@@ -1065,6 +1077,7 @@ def step2_multi_horizon_backtest(candidates: list[dict], market: str) -> list[di
         )
         if market == "us":
             fwd_h = fwd_h.rename(columns={"symbol": "ts_code", "date": "trade_date"})
+        fwd_h = _apply_factor_lab_fwd_universe(market, fwd_h)
         fwd_all[h] = fwd_h
 
     enriched = []
@@ -1297,14 +1310,7 @@ def step4_health_check(market: str):
     db_con = duckdb.connect(cfg["db_path"], read_only=True)
     prices = db_con.execute(cfg["sql"]).fetchdf()
     db_con.close()
-
-    # Universe filter
-    top_n = cfg.get("universe_top_n")
-    if top_n and "market_cap" in prices.columns:
-        prices["_mcap_rank"] = prices.groupby("trade_date")["market_cap"].rank(
-            ascending=False, method="first", na_option="bottom"
-        )
-        prices = prices[prices["_mcap_rank"] <= top_n].drop(columns=["_mcap_rank"]).reset_index(drop=True)
+    prices = _apply_factor_lab_universe(market, prices, cfg)
 
     fwd = compute_forward_returns(
         cfg["db_path"], cfg["table"], cfg["date_col"],
@@ -1313,6 +1319,7 @@ def step4_health_check(market: str):
     )
     if market == "us":
         fwd = fwd.rename(columns={"symbol": "ts_code", "date": "trade_date"})
+    fwd = _apply_factor_lab_fwd_universe(market, fwd)
 
     for factor_id, formula, direction, status, watch_count in active:
         try:

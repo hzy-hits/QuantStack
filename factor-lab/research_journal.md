@@ -319,3 +319,51 @@ Legend: . = tested weak, + = decent IC, ++ = strong IC, +++ = promoted, ! = stro
 - Experiments run: 17
 - OOS passed: 2/3
 - Passing factors: anti_autocorr_weekly_amount_change_stability_20, weekly_turnchg_body_stability_20
+
+## Session 20260508_140002_cb715f — CN
+- Timestamp: 2026-05-08 14:57
+- Experiments run: 18
+- OOS passed: 3/3
+- Passing factors: weekly_floatchg_body_stability_20, anti_autocorr_weekly_amount_change_stability_20, low_lottery_weekly_amount_change_stability_20
+
+## Session 20260508_145815_b6fcf2 — US
+- Timestamp: 2026-05-08 15:55
+- Experiments run: 18
+- OOS passed: 2/3
+- Passing factors: relvol_floor_20, gap_relvol_absorb_20
+
+## Session 20260511_060043_a5d430 — CN
+- Timestamp: 2026-05-11 06:56
+- Experiments run: 19
+- OOS passed: 3/3
+- Passing factors: log_amountchg_body_bias_20, weekly_floatchg_body_stability_20, relvol_even_body_stability_20
+
+## Session 20260511_140003_5e5559 — CN
+- Timestamp: 2026-05-11 14:56
+- Experiments run: 19
+- OOS passed: 3/3
+- Passing factors: weekly_floatchg_body_bias_20, low_lottery_relvol_evenness_20, log_amount_change_stability_20_5
+
+## Session 20260511_145612_a2ab23 — US
+- Timestamp: 2026-05-11 15:51
+- Experiments run: 19
+- OOS passed: 2/3
+- Passing factors: relvol_uniformity_20, gap_relvol_absorb_20
+
+## Session 20260512_060001_b3afec — CN
+- Timestamp: 2026-05-12 06:57
+- Experiments run: 17
+- OOS passed: 3/3
+- Passing factors: float_even_body_absorption_20, low_lottery_turnover_drift_smooth_20, anti_autocorr_weekly_logamt_stability_20
+
+## Session 20260512_140046_7f9cc0 — CN
+- Timestamp: 2026-05-12 14:58
+- Experiments run: 17
+- OOS passed: 3/3
+- Passing factors: weekly_floatchg_lowlottery_20, float_absorb_anti_autocorr_20, weekly_amount_floor_stability_20
+
+## Session 20260512_145803_f6a24d — US
+- Timestamp: 2026-05-12 15:53
+- Experiments run: 14
+- OOS passed: 2/3
+- Passing factors: relvol_uniformity_40, relvol_floor_20

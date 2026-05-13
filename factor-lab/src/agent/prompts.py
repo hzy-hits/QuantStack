@@ -117,9 +117,9 @@ def build_system_prompt(
     """
     market_label = "A-Share (China)" if market == "cn" else "US Equity"
     cost_note = (
-        "Transaction cost: ~0.3% round-trip (stamp duty + commission). Turnover matters."
+        "Transaction cost: ~0.3% round-trip (stamp duty + commission). Turnover matters. CN alpha must start from price/volume/flow; news is a lagging label, not a factor input."
         if market == "cn"
-        else "Transaction cost: ~0.1% round-trip. Turnover still matters but less punishing."
+        else "Transaction cost: ~0.1% round-trip. Turnover still matters but less punishing. US stock alpha can combine price, news/event, and options/flow evidence."
     )
 
     if market == "cn":
@@ -182,6 +182,19 @@ and iterate based on IS backtest feedback. You have a limited experiment budget 
 8. Consider regime context: momentum works in trending markets, reversal in mean-reverting.
 9. Treat every new factor as a potential alpha sleeve: state who is the forced/uneconomic counterparty or structural constraint, and why this return stream is not just a high-correlation variant of an existing price factor.
 10. If the idea is mainly event/VRP/microstructure, do not fake it with daily prices; say what non-daily data or payoff ledger is required before it can be money-ready.
+11. Think in portfolio terms: the output must be usable as long alpha with beta hedge and residual risk attribution, not just a naked ranked stock list.
+
+## AI Supercycle Research Mandate
+- Canonical upstream universe is `ai_infra/data/global_universe_v2.jsonl`; review queues live in `ai_infra/reports/source_verification_queue_v1.csv`, `ai_infra/reports/us_alpha_mining_queue_v1.csv`, and evidence cards under `ai_infra/evidence_cards/`. Prefer mining inside this universe before looking at the broad market.
+- Treat `ai_infra/` BFS depth, module, dependency path, source-review status, counterevidence, and current pool as research metadata. A ticker can be ranked only after price/volume data agrees; a supplier or customer claim needs source review before it becomes evidence.
+- First preference is factors that can discover AI-infra supercycle exposure: model/cloud/application distribution, AI labs, accelerators, memory/storage, CPO/optical/fiber, datacenter/edge infrastructure, semiconductor equipment/materials/packaging/testing, power/grid/nuclear, and space-connectivity adjacencies.
+- Do not hard-code a ticker as alpha. Use the DSL to detect price/volume/flow behavior that would surface supply-chain bottlenecks, accumulation, leadership continuation, or value pullbacks inside these universes.
+- Do not invent supplier/customer relationships. If a thesis depends on a supplier link, customer order, AI lab quality, or top-conference paper index, put the missing evidence in DATA_REQUIREMENTS and keep REPORT_CONTRACT as research_only unless the current data can verify it.
+- CN: news is a lagging evidence/risk label; the factor must start from tape, flow, sector breadth, and relative leadership. US: price, news/event, and options/flow can be joint evidence, but options remain decision evidence for stock trades.
+- If a thesis needs financial statements, backlog, capex, gross margin, free cash flow, debt leases, CDS/credit spreads, filings/transcripts, verified news, options IV/skew/VRP/flow, or option-leg PnL ledgers, put those exact datasets in DATA_REQUIREMENTS instead of faking them with price-only formulas.
+- Good AI-infra factors should be usable in a fund book: long alpha return, beta hedge return, residual return, sleeve drawdown, correlation to existing sleeves, and portfolio risk attribution all need to be measurable before promotion.
+- Expansion candidates outside the current universe are allowed only as source-review candidates: name the dependency path and required original sources, but do not treat them as validated facts.
+- If the idea is AI-supercycle related, fill AI_SUPERCYCLE_LAYER and SUPPLY_CHAIN_HYPOTHESIS. These are discovery fields only. If a supplier/customer claim needs filings, official press releases, transcripts, or news confirmation, set RELATIONSHIP_EVIDENCE_REQUIRED to true.
 
 {DSL_REFERENCE}
 
@@ -202,6 +215,9 @@ FORCED_COUNTERPARTY: <who is structurally forced/uneconomic, or none>
 DATA_REQUIREMENTS: <json-ish list or sentence of required data>
 FAILURE_MODE: <how this factor stops working>
 REPORT_CONTRACT: <fresh_buy_gate|action_overlay|setup_overlay|risk_warning|hold_overlay|research_only>
+AI_SUPERCYCLE_LAYER: <model_cloud_distribution|ai_labs_cloud_models|ai_compute_accelerators|ai_memory_storage|ai_networking_optical_cpo|ai_datacenter_edge_infra|ai_chip_equipment_materials_packaging|ai_power_nuclear_grid|space_connectivity_datacenter|hard_assets_energy_heavy|none>
+SUPPLY_CHAIN_HYPOTHESIS: <candidate upstream/downstream relationship, bottleneck, or none>
+RELATIONSHIP_EVIDENCE_REQUIRED: <true|false, true unless the current data already verifies the relationship>
 """
 
 
@@ -271,6 +287,9 @@ class ParsedResponse:
     data_requirements: str
     failure_mode: str
     report_contract: str
+    ai_supercycle_layer: str
+    supply_chain_hypothesis: str
+    relationship_evidence_required: str
     raw: str  # original response text
 
 
@@ -301,6 +320,9 @@ def parse_agent_response(response_text: str) -> ParsedResponse | None:
     data_requirements = _extract_field(text, "DATA_REQUIREMENTS")
     failure_mode = _extract_field(text, "FAILURE_MODE")
     report_contract = _extract_field(text, "REPORT_CONTRACT")
+    ai_supercycle_layer = _extract_field(text, "AI_SUPERCYCLE_LAYER")
+    supply_chain_hypothesis = _extract_field(text, "SUPPLY_CHAIN_HYPOTHESIS")
+    relationship_evidence_required = _extract_field(text, "RELATIONSHIP_EVIDENCE_REQUIRED")
 
     if not formula:
         return None
@@ -345,6 +367,9 @@ def parse_agent_response(response_text: str) -> ParsedResponse | None:
         data_requirements=data_requirements or "",
         failure_mode=failure_mode or "",
         report_contract=report_contract,
+        ai_supercycle_layer=(ai_supercycle_layer or "none").strip().lower(),
+        supply_chain_hypothesis=supply_chain_hypothesis or "",
+        relationship_evidence_required=(relationship_evidence_required or "true").strip().lower(),
         raw=text,
     )
 

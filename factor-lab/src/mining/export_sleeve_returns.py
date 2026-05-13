@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.dsl.compute import compute_factor
 from src.dsl.parser import parse
+from src.autoresearch.ai_infra_context import ai_infra_enabled, apply_ai_infra_filter, market_symbols
 from src.mining.batch_mine import CONFIGS
 from src.mining.contracts import ensure_contract_tables
 from src.mining.daily_pipeline import init_db
@@ -37,12 +38,16 @@ def _orient_for_direction(factor_df: pd.DataFrame, direction: str | None) -> pd.
 def _normalize_prices(prices: pd.DataFrame, market: str) -> pd.DataFrame:
     cfg = CONFIGS[market]
     out = prices.copy()
-    top_n = cfg.get("universe_top_n")
-    if top_n and "market_cap" in out.columns:
-        out["_mcap_rank"] = out.groupby("trade_date")["market_cap"].rank(
-            ascending=False, method="first", na_option="bottom"
-        )
-        out = out[out["_mcap_rank"] <= top_n].drop(columns=["_mcap_rank"]).reset_index(drop=True)
+    if ai_infra_enabled() and market_symbols(market):
+        out = apply_ai_infra_filter(out, market=market, symbol_col="ts_code")
+    else:
+        top_n = cfg.get("universe_top_n")
+        if top_n and "market_cap" in out.columns:
+            out = out.copy()
+            out["_mcap_rank"] = out.groupby("trade_date")["market_cap"].rank(
+                ascending=False, method="first", na_option="bottom"
+            )
+            out = out[out["_mcap_rank"] <= top_n].drop(columns=["_mcap_rank"]).reset_index(drop=True)
     out["trade_date"] = pd.to_datetime(out["trade_date"], errors="coerce")
     return out.dropna(subset=["trade_date"])
 

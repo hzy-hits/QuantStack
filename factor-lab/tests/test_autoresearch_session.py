@@ -37,6 +37,15 @@ class AutoresearchSessionTests(unittest.TestCase):
         self.assertIn("Resumable Session Context", prompt)
         self.assertIn("Try volume-stability families first.", prompt)
 
+    def test_system_prompt_requires_ai_infra_quant_fund_inputs(self) -> None:
+        prompt = build_system_prompt(market="us")
+
+        self.assertIn("ai_infra/data/global_universe_v2.jsonl", prompt)
+        self.assertIn("CDS/credit spreads", prompt)
+        self.assertIn("options IV/skew/VRP/flow", prompt)
+        self.assertIn("beta hedge return", prompt)
+        self.assertIn("portfolio risk attribution", prompt)
+
     def test_agent_response_parser_accepts_new_contract_fields(self) -> None:
         parsed = parse_agent_response(
             """
