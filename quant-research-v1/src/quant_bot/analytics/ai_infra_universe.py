@@ -17,6 +17,15 @@ STACK_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_AI_INFRA_ROOT = STACK_ROOT / "ai_infra"
 UNIVERSE_PATH = Path("data/global_universe_v2.jsonl")
 
+# US ADRs for satellite-pool names that are NASDAQ/NYSE-listed and liquid.
+# The universe file curates the primary local tickers; this map augments the
+# US universe so the US ranker can also see the ADR forms without editing the
+# curated JSONL. Only include liquid main-board ADRs — never OTC pink sheets.
+# Sources: company IR pages, exchange listings.
+SATELLITE_US_ADRS: dict[str, str] = {
+    "ASML.AS": "ASML",   # ASML Holding NV, NASDAQ-listed (primary US listing).
+}
+
 
 @dataclass(frozen=True)
 class UniverseGateResult:
@@ -103,11 +112,18 @@ def market_symbols_for_record(record: dict[str, Any], market: str) -> list[str]:
             return [normalize_us_symbol(symbol) for symbol in raw_symbols]
         # Satellite rows sometimes include a US ADR alias, for example
         # `2330.TW / TSM`. Keep the plain ADR token, not the local exchange leg.
-        return [
+        adr_symbols = [
             normalize_us_symbol(symbol)
             for symbol in raw_symbols
             if symbol and not _is_exchange_suffixed(symbol) and re.fullmatch(r"[A-Z][A-Z0-9.-]{0,6}", symbol)
         ]
+        # Augment with curated ADR map for satellite rows that only carry the
+        # local listing in the universe JSONL (e.g. `ASML.AS` → US `ASML`).
+        for raw in raw_symbols:
+            adr = SATELLITE_US_ADRS.get(raw.upper())
+            if adr:
+                adr_symbols.append(normalize_us_symbol(adr))
+        return adr_symbols
     if market == "CN":
         out = []
         for symbol in raw_symbols:

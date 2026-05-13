@@ -28,7 +28,7 @@ def _load(path: Path) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _check_payload(market: str, payload: dict) -> list[str]:
+def _check_payload(market: str, payload: dict, *, strict: bool = False) -> list[str]:
     errors: list[str] = []
     gate = payload.get("ai_infra_gate") or {}
     contract = gate.get("contract")
@@ -46,6 +46,18 @@ def _check_payload(market: str, payload: dict) -> list[str]:
             errors.append(f"{market}: {symbol} in production_basket but ai_infra_universe is not True")
         if not row.get("ai_infra_current_pool"):
             errors.append(f"{market}: {symbol} has no ai_infra_current_pool tag")
+
+    if strict:
+        all_rows = payload.get("all_rows") or []
+        if not isinstance(all_rows, list):
+            errors.append(f"{market}: all_rows is not a list ({type(all_rows).__name__})")
+        else:
+            for row in all_rows:
+                symbol = row.get("symbol") or "<unknown>"
+                if not row.get("ai_infra_universe"):
+                    errors.append(
+                        f"{market}: {symbol} in all_rows (watch/research-only) bypassed the AI universe gate"
+                    )
     return errors
 
 
@@ -81,6 +93,11 @@ def main() -> int:
         default=DEFAULT_DASHBOARD,
         help="Root of main_strategy_v2 review dashboard outputs.",
     )
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Also require every all_rows entry (watch/research-only) to be ai_infra_universe=True.",
+    )
     args = parser.parse_args()
 
     date_dir = args.dashboard_root / args.as_of
@@ -97,7 +114,7 @@ def main() -> int:
             errors.append(f"{market}: missing {filename}")
             continue
         found_any = True
-        errors.extend(_check_payload(market, payload))
+        errors.extend(_check_payload(market, payload, strict=args.strict))
         coverage[market] = _basket_coverage(payload)
 
     if not found_any:

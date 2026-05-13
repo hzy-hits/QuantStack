@@ -92,6 +92,49 @@ class BenchmarkAttributionTests(unittest.TestCase):
             self.assertIsNotNone(us_rows["SPY"]["ret_5d_pct"])
             self.assertIsNotNone(us_rows["SPY"]["ret_ytd_pct"])
 
+    def test_ai_book_attribution_computes_alpha_beta_ir(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            us_db = root / "us.duckdb"
+            cn_db = root / "cn.duckdb"
+            as_of = date(2026, 5, 13)
+            _seed_us_prices(us_db, "SPY", 600.0, 120, as_of)
+            _seed_us_prices(us_db, "QQQ", 500.0, 120, as_of)
+            _seed_us_prices(us_db, "SMH", 540.0, 120, as_of)
+            _seed_us_prices(us_db, "IWM", 280.0, 120, as_of)
+            _seed_us_prices(us_db, "DIA", 480.0, 120, as_of)
+            _seed_us_prices(us_db, "AIONE", 100.0, 120, as_of)
+
+            data = self.module.build_benchmark_attribution(
+                us_db,
+                cn_db,
+                as_of,
+                us_basket=["AIONE"],
+                cn_basket=[],
+            )
+            us_book = (data.get("ai_book") or {}).get("us") or {}
+            self.assertEqual(us_book["status"], "ok")
+            rows = {(row["benchmark"], row["window"]): row for row in us_book["rows"]}
+            self.assertIn(("SPY", "20d"), rows)
+            spy20 = rows[("SPY", "20d")]
+            self.assertGreater(spy20["n"], 10)
+            self.assertIsNotNone(spy20["beta"])
+            self.assertIsNotNone(spy20["information_ratio"])
+            cn_book = (data.get("ai_book") or {}).get("cn") or {}
+            self.assertEqual(cn_book["status"], "no_basket")
+
+    def test_renderer_handles_empty_ai_book(self) -> None:
+        payload = {
+            "benchmark_attribution": {
+                "ai_book": {
+                    "us": {"status": "no_basket", "rows": [], "basket_size": 0},
+                }
+            }
+        }
+        rendered = "\n".join(self.module.render_ai_book_attribution_section(payload, "US"))
+        self.assertIn("US AI Book vs Benchmark", rendered)
+        self.assertIn("production basket 为空", rendered)
+
     def test_satellite_renderer_uses_satellite_section(self) -> None:
         payload = {
             "benchmark_attribution": {

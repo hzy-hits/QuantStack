@@ -17,13 +17,11 @@ def _write_payload(date_dir: Path, filename: str, payload: dict) -> None:
     (date_dir / filename).write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
-def _run(as_of: str, root: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(SCRIPT), "--as-of", as_of, "--dashboard-root", str(root)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+def _run(as_of: str, root: Path, *, strict: bool = False) -> subprocess.CompletedProcess[str]:
+    args = [sys.executable, str(SCRIPT), "--as-of", as_of, "--dashboard-root", str(root)]
+    if strict:
+        args.append("--strict")
+    return subprocess.run(args, capture_output=True, text=True, check=False)
 
 
 class AuditProductionBasketTests(unittest.TestCase):
@@ -84,6 +82,34 @@ class AuditProductionBasketTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             result = _run("2026-05-13", Path(tmp))
             self.assertEqual(result.returncode, 2)
+
+    def test_strict_flags_non_ai_universe_row_in_all_rows(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            date_dir = root / "2026-05-13"
+            payload = {
+                "ai_infra_gate": {"contract": "ai_infra_universe_only"},
+                "production_basket": [
+                    {"symbol": "NVDA", "ai_infra_universe": True, "ai_infra_current_pool": "核心池"},
+                ],
+                "all_rows": [
+                    {"symbol": "NVDA", "ai_infra_universe": True, "ai_infra_current_pool": "核心池"},
+                    {"symbol": "DGXX", "ai_infra_universe": False},  # watch-only escaping gate
+                ],
+            }
+            _write_payload(date_dir, "us_opportunity_ranker.json", payload)
+            _write_payload(date_dir, "cn_opportunity_ranker.json", {
+                "ai_infra_gate": {"contract": "ai_infra_universe_only"},
+                "production_basket": [],
+                "all_rows": [],
+            })
+
+            non_strict = _run("2026-05-13", root)
+            self.assertEqual(non_strict.returncode, 0)
+            strict = _run("2026-05-13", root, strict=True)
+            self.assertEqual(strict.returncode, 1)
+            self.assertIn("DGXX", strict.stdout)
+            self.assertIn("watch/research-only", strict.stdout)
 
 
 if __name__ == "__main__":

@@ -3946,7 +3946,7 @@ def load_return_series(db_path: Path, market: str, symbols: list[str], as_of: da
 
 
 US_REPORT_BENCHMARKS = ("SPY", "QQQ", "SMH", "IWM", "DIA")
-CN_REPORT_BENCHMARKS = ("000300.SH", "399006.SZ", "399001.SZ", "000001.SH")
+CN_REPORT_BENCHMARKS = ("000300.SH", "399006.SZ", "399001.SZ", "000001.SH", "000016.SH", "399905.SZ")
 SATELLITE_REPORT_BENCHMARKS = ("^TWII", "^N225", "^KS11", "^AEX", "EWT", "EWJ", "EWY", "EWN")
 BENCHMARK_LABELS = {
     "SPY": "SPY (S&P 500)",
@@ -3958,6 +3958,8 @@ BENCHMARK_LABELS = {
     "399006.SZ": "399006.SZ (创业板指)",
     "399001.SZ": "399001.SZ (深成指)",
     "000001.SH": "000001.SH (上证指数)",
+    "000016.SH": "000016.SH (上证50)",
+    "399905.SZ": "399905.SZ (中证500)",
     "^TWII": "^TWII (TAIEX 台湾加权)",
     "^N225": "^N225 (Nikkei 225 日经)",
     "^KS11": "^KS11 (KOSPI 韩国综指)",
@@ -4037,17 +4039,122 @@ def _ytd_return_pct(closes: list[tuple[date, float]], as_of: date) -> float | No
     return (latest / base - 1.0) * 100.0
 
 
+def _daily_returns(closes: list[tuple[date, float]]) -> dict[date, float]:
+    """Convert ordered (date, close) tuples to date -> simple daily return."""
+    out: dict[date, float] = {}
+    for prev, cur in zip(closes, closes[1:], strict=False):
+        if not prev[1] or prev[1] <= 0:
+            continue
+        out[cur[0]] = cur[1] / prev[1] - 1.0
+    return out
+
+
+def _aligned_pairs(
+    series_a: dict[date, float],
+    series_b: dict[date, float],
+    *,
+    window: int,
+) -> tuple[list[float], list[float]]:
+    common = sorted(set(series_a) & set(series_b))
+    if not common:
+        return [], []
+    common = common[-window:]
+    xs = [series_a[d] for d in common]
+    ys = [series_b[d] for d in common]
+    return xs, ys
+
+
+def _compute_alpha_beta(
+    book_returns: dict[date, float],
+    benchmark_returns: dict[date, float],
+    *,
+    window: int,
+) -> dict[str, float | None]:
+    xs, ys = _aligned_pairs(book_returns, benchmark_returns, window=window)
+    n = len(xs)
+    if n < max(10, window // 4):
+        return {
+            "n": n,
+            "alpha_daily_pct": None,
+            "beta": None,
+            "active_return_pct": None,
+            "information_ratio": None,
+        }
+    mean_book = sum(xs) / n
+    mean_bench = sum(ys) / n
+    var_bench = sum((y - mean_bench) ** 2 for y in ys)
+    cov = sum((xs[i] - mean_book) * (ys[i] - mean_bench) for i in range(n))
+    beta_value: float | None = None
+    alpha_daily: float | None = None
+    if var_bench > 0:
+        beta_value = max(-5.0, min(5.0, cov / var_bench))
+        alpha_daily = mean_book - beta_value * mean_bench
+    active_returns = [xs[i] - ys[i] for i in range(n)]
+    mean_active = sum(active_returns) / n
+    var_active = sum((r - mean_active) ** 2 for r in active_returns)
+    tracking_error = (var_active / n) ** 0.5 if n > 0 else 0.0
+    info_ratio: float | None = None
+    if tracking_error > 0:
+        info_ratio = mean_active / tracking_error
+    return {
+        "n": n,
+        "alpha_daily_pct": round(alpha_daily * 100, 4) if alpha_daily is not None else None,
+        "beta": round(beta_value, 3) if beta_value is not None else None,
+        "active_return_pct": round(mean_active * 100, 4),
+        "information_ratio": round(info_ratio, 3) if info_ratio is not None else None,
+    }
+
+
+def _ai_book_return_series(
+    db_path: Path,
+    market: str,
+    basket_symbols: list[str],
+    as_of: date,
+) -> dict[date, float]:
+    """Equal-weight average of daily simple returns across basket symbols."""
+    series = _load_benchmark_closes(db_path, market, basket_symbols, as_of, lookback_days=180)
+    per_symbol_returns: list[dict[date, float]] = []
+    for symbol, closes in series.items():
+        if not closes:
+            continue
+        per_symbol_returns.append(_daily_returns(closes))
+    if not per_symbol_returns:
+        return {}
+    common_dates: set[date] = set()
+    for returns in per_symbol_returns:
+        if not common_dates:
+            common_dates = set(returns)
+        else:
+            common_dates &= set(returns)
+    if not common_dates:
+        # Fallback: union with NaN handling — average over symbols that have a quote.
+        union_dates = set().union(*[set(r) for r in per_symbol_returns])
+        averaged: dict[date, float] = {}
+        for d in sorted(union_dates):
+            values = [r[d] for r in per_symbol_returns if d in r]
+            if values:
+                averaged[d] = sum(values) / len(values)
+        return averaged
+    averaged: dict[date, float] = {}
+    for d in sorted(common_dates):
+        values = [returns[d] for returns in per_symbol_returns]
+        averaged[d] = sum(values) / len(values)
+    return averaged
+
+
 def build_benchmark_attribution(
     us_db: Path,
     cn_db: Path,
     as_of: date,
+    *,
+    us_basket: list[str] | None = None,
+    cn_basket: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Snapshot trailing returns for canonical US/CN benchmarks.
+    """Snapshot trailing returns for canonical US/CN benchmarks plus AI book attribution.
 
-    The contract here is narrow: the daily report needs SPY/QQQ/SMH-style and
-    CN index context to attribute AI book returns. This function only computes
-    trailing returns for the indices themselves; production-basket relative
-    return is intentionally deferred to keep this read-only and cheap.
+    When `us_basket` / `cn_basket` are provided, also compute the equal-weight
+    AI book daily-return series and report rolling alpha/beta/IR vs each
+    benchmark over 20- and 60-day windows.
     """
     out: dict[str, Any] = {"as_of": as_of.isoformat(), "us": {}, "cn": {}, "satellite": {}}
 
@@ -4097,6 +4204,52 @@ def build_benchmark_attribution(
             "status": "ok" if rows else "missing_db",
             "rows": rows,
             "missing": missing,
+        }
+
+    # AI book attribution: alpha/beta/IR vs each US/CN benchmark.
+    out["ai_book"] = {}
+    for market_key, db_path, basket, benchmark_symbols in (
+        ("us", us_db, us_basket or [], US_REPORT_BENCHMARKS),
+        ("cn", cn_db, cn_basket or [], CN_REPORT_BENCHMARKS),
+    ):
+        if not basket:
+            out["ai_book"][market_key] = {"status": "no_basket", "rows": [], "basket_size": 0}
+            continue
+        book_returns = _ai_book_return_series(db_path, market_key, basket, as_of)
+        if not book_returns:
+            out["ai_book"][market_key] = {
+                "status": "missing_data",
+                "rows": [],
+                "basket_size": len(basket),
+                "basket_symbols": basket,
+            }
+            continue
+        bench_series = _load_benchmark_closes(db_path, market_key, list(benchmark_symbols), as_of, lookback_days=180)
+        rows: list[dict[str, Any]] = []
+        for symbol in benchmark_symbols:
+            closes = bench_series.get(symbol)
+            if not closes:
+                continue
+            bench_returns = _daily_returns(closes)
+            for window_label, window_days in (("20d", 20), ("60d", 60)):
+                metrics = _compute_alpha_beta(book_returns, bench_returns, window=window_days)
+                rows.append(
+                    {
+                        "benchmark": symbol,
+                        "benchmark_label": BENCHMARK_LABELS.get(symbol, symbol),
+                        "window": window_label,
+                        "n": metrics["n"],
+                        "active_return_pct": metrics["active_return_pct"],
+                        "alpha_daily_pct": metrics["alpha_daily_pct"],
+                        "beta": metrics["beta"],
+                        "information_ratio": metrics["information_ratio"],
+                    }
+                )
+        out["ai_book"][market_key] = {
+            "status": "ok" if rows else "missing_benchmark",
+            "rows": rows,
+            "basket_size": len(basket),
+            "basket_symbols": basket,
         }
     return out
 
@@ -6336,6 +6489,45 @@ def render_earnings_calendar_section(payload: dict[str, Any], market: str, *, li
     return lines
 
 
+def render_ai_book_attribution_section(payload: dict[str, Any], market: str) -> list[str]:
+    book = ((payload.get("benchmark_attribution") or {}).get("ai_book") or {}).get(market.lower()) or {}
+    title = "US AI Book vs Benchmark" if market.upper() == "US" else "A股 AI Book vs Benchmark"
+    rows = book.get("rows") or []
+    basket_size = book.get("basket_size") or 0
+    lines = [
+        f"## {title}",
+        "",
+        f"- 状态: `{book.get('status') or 'unknown'}`；equal-weight 篮子规模 {basket_size}；window 取 20d / 60d 滚动。",
+        "- 用法: 这只是日度收益对 benchmark 的回归 (alpha/beta/IR)，不代表风险归因；样本期短，仅作快速 sanity check。",
+        "",
+    ]
+    if not rows:
+        if basket_size == 0:
+            lines += ["- 当前 production basket 为空，无 AI book attribution 行。", ""]
+        else:
+            lines += ["- 缺少 benchmark / book 价格数据，无法计算。", ""]
+        return lines
+    lines += [
+        "| Benchmark | Window | N | Active Return | Daily Alpha | Beta | IR |",
+        "|---|---|---:|---:|---:|---:|---:|",
+    ]
+    for row in rows:
+        active = row.get("active_return_pct")
+        alpha = row.get("alpha_daily_pct")
+        beta_val = row.get("beta")
+        info = row.get("information_ratio")
+        lines.append(
+            f"| {row.get('benchmark_label') or row.get('benchmark')} | "
+            f"{row.get('window')} | {row.get('n') or 0} | "
+            f"{fmt_pct(active) if active is not None else '-'} | "
+            f"{fmt_pct(alpha) if alpha is not None else '-'} | "
+            f"{fmt_num(beta_val) if beta_val is not None else '-'} | "
+            f"{fmt_num(info) if info is not None else '-'} |"
+        )
+    lines.append("")
+    return lines
+
+
 def render_benchmark_attribution_section(payload: dict[str, Any], market: str, *, limit: int = 10) -> list[str]:
     data = (payload.get("benchmark_attribution") or {}).get(market.lower()) or {}
     rows = data.get("rows") or []
@@ -6502,6 +6694,7 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     lines += render_earnings_calendar_section(payload, "CN")
     lines += render_source_review_calendar_section(payload, "CN")
     lines += render_benchmark_attribution_section(payload, "CN")
+    lines += render_ai_book_attribution_section(payload, "CN")
     lines += [
         "## 风险口径",
         "",
@@ -6551,6 +6744,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     lines += render_earnings_calendar_section(payload, "US")
     lines += render_source_review_calendar_section(payload, "US")
     lines += render_benchmark_attribution_section(payload, "US")
+    lines += render_ai_book_attribution_section(payload, "US")
     lines += [
         "## 风险口径",
         "",
@@ -7701,7 +7895,23 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     source_review_calendar = build_source_review_calendar(
         focus_symbols=sorted({*us_calendar_focus, *cn_calendar_focus}),
     )
-    benchmark_attribution = build_benchmark_attribution(args.us_db, args.cn_db, as_of)
+    us_basket_symbols = [
+        str(row.get("symbol") or "").upper()
+        for row in ((us_ranker or {}).get("production_basket") or [])
+        if row.get("symbol")
+    ]
+    cn_basket_symbols = [
+        str(row.get("symbol") or "").upper()
+        for row in ((cn_ranker or {}).get("production_basket") or [])
+        if row.get("symbol")
+    ]
+    benchmark_attribution = build_benchmark_attribution(
+        args.us_db,
+        args.cn_db,
+        as_of,
+        us_basket=us_basket_symbols,
+        cn_basket=cn_basket_symbols,
+    )
     satellite_pool_report = build_satellite_pool_report()
     payload = {
         "as_of": as_of.isoformat(),

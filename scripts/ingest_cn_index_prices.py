@@ -44,6 +44,8 @@ CANONICAL_INDICES: tuple[IndexSpec, ...] = (
     IndexSpec("399001.SZ", "sz399001", "深证成指"),
     IndexSpec("399006.SZ", "sz399006", "创业板指"),
     IndexSpec("000300.SH", "sh000300", "沪深300"),
+    IndexSpec("000016.SH", "sh000016", "上证50"),
+    IndexSpec("399905.SZ", "sz399905", "中证500"),
 )
 
 
