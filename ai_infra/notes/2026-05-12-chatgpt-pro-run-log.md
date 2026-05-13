@@ -176,6 +176,15 @@ HBM BFS Source-Backed Discovery v2 提交时间：2026-05-13
 - 状态：页面显示正在生成。
 - 验收标准：第一条有效 assistant 回复必须围绕 HBM source-backed discovery；否则不落盘为正式结果。
 
+HBM BFS Source-Backed Discovery v2 抓取时间：2026-05-13
+
+- 会话 URL：https://chatgpt.com/g/g-p-6a0288a9fb1881919a965d3f9364be88-ai-super-cycle/c/6a03e57e-b87c-83ea-8f35-a9e9f85c5bd7
+- 状态：已完成；页面无 stop button，无继续生成按钮。
+- 已落盘：`notes/2026-05-13-chatgpt-pro-hbm-bfs-source-backed-v2.md`。
+- 输出规模：约 43k 字符。
+- 内容有效性：围绕 HBM source-backed discovery，包含 source checklist、HBM bottleneck chain、候选/radar 公司表、agent pipeline 和搜索 query 模板。
+- 证据状态：`ChatGPT Pro output, pending original-source verification`；仍需回到公司原文逐项核验。
+
 ## 运行原则
 
 - 不切换 ChatGPT 模型，保持项目当前的 Pro / 进阶专业模式。
