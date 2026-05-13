@@ -85,6 +85,7 @@
 | BFS supply-chain discovery queue v1 | 已生成；146 条 seed task；用于从现有公司向上游/下游/peer supplier 扩展美国、日韩台欧以色列候选 | [bfs_supply_chain_discovery_queue_v1.md](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/reports/bfs_supply_chain_discovery_queue_v1.md), [bfs_supply_chain_discovery_queue_v1.csv](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/reports/bfs_supply_chain_discovery_queue_v1.csv) |
 | BFS supply-chain discovery script | 已新增；从 `data/global_universe_v2.jsonl` 生成 discovery queue 和 ChatGPT Pro prompt | [generate_bfs_supply_chain_discovery_queue.py](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/scripts/generate_bfs_supply_chain_discovery_queue.py) |
 | ChatGPT Pro BFS supply-chain discovery prompt | 已提交 Pro；等待输出完成后抓取落盘 | [2026-05-13-chatgpt-pro-bfs-supply-chain-discovery-prompt.md](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/notes/2026-05-13-chatgpt-pro-bfs-supply-chain-discovery-prompt.md) |
+| HBM BFS source-backed discovery v2 | 已重新开干净 Pro 会话提交；等待输出完成后抓取落盘 | [2026-05-13-chatgpt-pro-hbm-bfs-source-backed-v2-prompt.md](/Users/huangzhenyu/Desktop/05_学习项目/ai_infra/ai_infra/notes/2026-05-13-chatgpt-pro-hbm-bfs-source-backed-v2-prompt.md) |
 
 ## D5 反证雷达已补充
 

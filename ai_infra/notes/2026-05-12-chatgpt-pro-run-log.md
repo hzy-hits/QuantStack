@@ -159,6 +159,23 @@ BFS Supply-Chain Discovery / Agent Pipeline 提交时间：2026-05-13
 - 状态：已提交到项目 `ai super cycle`，页面显示正在生成。
 - 约束：不切模型，不停止生成；输出只作为供应链扩展和 agent pipeline 设计线索，不做买卖建议或目标价。
 
+BFS Supply-Chain Discovery / Agent Pipeline 心跳复核时间：2026-05-13
+
+- 通过专用 Chrome automation profile / CDP port `19826` 只读复核目标会话。
+- 会话已不在生成状态，但未产生原始大 prompt 对应的完整 BFS supply-chain discovery / agent pipeline 输出；第一条 assistant 内容为空。
+- 该会话随后被手动改成 HBM 试问和模型身份确认，当前最后输出不是目标任务结果。
+- 未落盘 `notes/2026-05-13-chatgpt-pro-bfs-supply-chain-discovery.md`，避免把不完整/跑偏结果误标成正式 Pro 输出。
+- 已删除心跳自动化 `check-chatgpt-pro-bfs-supply-chain-discovery`，避免重复检查一个已经被改写的会话。
+
+HBM BFS Source-Backed Discovery v2 提交时间：2026-05-13
+
+- 主题：HBM 当前瓶颈主线与供应链扩展，单主题短 prompt，避免复用跑偏会话。
+- Prompt 已落盘：`notes/2026-05-13-chatgpt-pro-hbm-bfs-source-backed-v2-prompt.md`。
+- 提交方式：在 `ai super cycle` 项目里开干净新聊天，通过专用 Chrome automation profile / CDP port `19826` 提交。
+- 当前页面 URL：https://chatgpt.com/g/g-p-6a0288a9fb1881919a965d3f9364be88-ai-super-cycle/project
+- 状态：页面显示正在生成。
+- 验收标准：第一条有效 assistant 回复必须围绕 HBM source-backed discovery；否则不落盘为正式结果。
+
 ## 运行原则
 
 - 不切换 ChatGPT 模型，保持项目当前的 Pro / 进阶专业模式。
