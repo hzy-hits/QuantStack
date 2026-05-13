@@ -607,6 +607,44 @@ tasks:
     outputs:
       - ops/logs/research.production_basket_audit.log
 
+  research.mean_reversion_radar:
+    group: research
+    schedule: "20 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/score_mean_reversion_radar.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.mean_reversion_radar.log
+    lock: ops/state/research.mean_reversion_radar.lock
+    timeout_minutes: 10
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/us_mean_reversion_radar
+
+  research.promotion_history:
+    group: research
+    schedule: "13 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/maintain_promotion_history.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.promotion_history.log
+    lock: ops/state/research.promotion_history.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ai_infra/reports/promotion_history.csv
+
   us.watchdog.reboot:
     group: watchdog
     schedule: "@reboot"

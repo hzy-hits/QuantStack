@@ -85,6 +85,9 @@ class TenXCandidate:
     primary_sources_to_find: str
     metrics_to_verify: str
     upgrade_conditions: str
+    ema_cross_state: str | None = None
+    ema_slope_5d_pct: float | None = None
+    ema_dist_close_ema21_pct: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -110,7 +113,18 @@ class TenXCandidate:
             "primary_sources_to_find": self.primary_sources_to_find,
             "metrics_to_verify": self.metrics_to_verify,
             "upgrade_conditions": self.upgrade_conditions,
+            "ema_cross_state": self.ema_cross_state or "",
+            "ema_slope_5d_pct": self.ema_slope_5d_pct if self.ema_slope_5d_pct is not None else "",
+            "ema_dist_close_ema21_pct": (
+                self.ema_dist_close_ema21_pct if self.ema_dist_close_ema21_pct is not None else ""
+            ),
         }
+
+    def is_bull_rising_leader(self) -> bool:
+        return (
+            self.ema_cross_state == "bull"
+            and (self.ema_slope_5d_pct or 0.0) > 0.5
+        )
 
 
 def _split_counter(value: str) -> int:
@@ -220,6 +234,34 @@ def _fetch_market_cap(ticker: str) -> float | None:
         return None
 
 
+def _load_ema_overlay(path: Path | None) -> dict[str, dict[str, Any]]:
+    if path is None or not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _ema_for_candidate(overlay: dict[str, dict[str, Any]], primary_ticker: str, ticker_field: str) -> dict[str, Any]:
+    """Match a candidate primary ticker (or any alias) against the EMA overlay."""
+    if not overlay:
+        return {}
+    candidates = [primary_ticker.upper()] + [
+        piece.strip().upper() for piece in (ticker_field or "").split("/") if piece.strip()
+    ]
+    for key in candidates:
+        entry = overlay.get(key)
+        if entry and isinstance(entry, dict):
+            metrics = entry.get("metrics") or {}
+            return {
+                "cross_state": metrics.get("cross_state"),
+                "slope_5d_pct": metrics.get("slope_21d_5d_pct"),
+                "dist_close_ema21_pct": metrics.get("dist_close_ema21_pct"),
+            }
+    return {}
+
+
 def collect_candidates(
     queue_path: Path,
     *,
@@ -227,6 +269,7 @@ def collect_candidates(
     fetch: bool,
     cap_ceiling: float,
     max_counter_items: int,
+    ema_overlay: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[TenXCandidate], dict[str, dict[str, Any]]]:
     readiness_rows = score_readiness_queue(queue_path)
     # Re-read raw queue for the full string fields not preserved on ReadinessRow.
@@ -294,12 +337,20 @@ def collect_candidates(
                     primary_sources_to_find=(raw or {}).get("primary_sources_to_find", ""),
                     metrics_to_verify=(raw or {}).get("metrics_to_verify", ""),
                     upgrade_conditions=(raw or {}).get("upgrade_conditions", ""),
+                    **{
+                        "ema_cross_state": _ema_for_candidate(ema_overlay or {}, primary_ticker, readiness.ticker).get("cross_state"),
+                        "ema_slope_5d_pct": _ema_for_candidate(ema_overlay or {}, primary_ticker, readiness.ticker).get("slope_5d_pct"),
+                        "ema_dist_close_ema21_pct": _ema_for_candidate(ema_overlay or {}, primary_ticker, readiness.ticker).get(
+                            "dist_close_ema21_pct"
+                        ),
+                    },
                 )
             )
             continue
         if market_cap >= cap_ceiling:
             continue
         elasticity, signals, bucket = _elasticity_score(depth, market_cap, readiness.evidence_score, counter_items)
+        ema_lookup = _ema_for_candidate(ema_overlay or {}, primary_ticker, readiness.ticker)
         candidates.append(
             TenXCandidate(
                 rank=readiness.rank,
@@ -324,28 +375,87 @@ def collect_candidates(
                 primary_sources_to_find=(raw or {}).get("primary_sources_to_find", ""),
                 metrics_to_verify=(raw or {}).get("metrics_to_verify", ""),
                 upgrade_conditions=(raw or {}).get("upgrade_conditions", ""),
+                ema_cross_state=ema_lookup.get("cross_state"),
+                ema_slope_5d_pct=ema_lookup.get("slope_5d_pct"),
+                ema_dist_close_ema21_pct=ema_lookup.get("dist_close_ema21_pct"),
             )
         )
     candidates.sort(key=lambda c: (c.market_cap is None, -c.elasticity_score, c.market_cap or 0.0))
     return candidates, next_cache
 
 
+def _tape_text(cand: TenXCandidate) -> str:
+    if cand.ema_cross_state is None:
+        return "no_data"
+    parts: list[str] = [cand.ema_cross_state]
+    slope = cand.ema_slope_5d_pct
+    if slope is not None:
+        if slope > 0.5:
+            parts.append("rising")
+        elif slope < -0.5:
+            parts.append("falling")
+        else:
+            parts.append("flat")
+    dist = cand.ema_dist_close_ema21_pct
+    if dist is not None:
+        parts.append(f"px {dist:+.1f}%")
+    return "; ".join(parts)
+
+
 def render_markdown(candidates: list[TenXCandidate], as_of: str, cap_ceiling: float) -> str:
     with_mcap = [c for c in candidates if c.market_cap is not None]
     without_mcap = [c for c in candidates if c.market_cap is None]
+    leaders = [c for c in with_mcap if c.is_bull_rising_leader()]
+    leaders.sort(key=lambda c: -(c.ema_slope_5d_pct or 0.0))
+
     lines: list[str] = [
         f"# AI Infra 10x Candidate Radar - {as_of}",
         "",
-        f"- 数据源: `ai_infra/reports/source_verification_queue_v1.csv` + readiness gates + yfinance market cap.",
+        f"- 数据源: `ai_infra/reports/source_verification_queue_v1.csv` + readiness gates + yfinance market cap + EMA21/50 overlay.",
         f"- 过滤口径: mcap < ${cap_ceiling / 1e9:.0f}B, BFS depth ∈ {{D2, D2-D3, D3, D3-D4}}, readiness ≠ g0_blocked, counter-evidence ≤ 3 项。",
         "- 用法: 这是 *research radar*，不是买入许可。每个名字仍需 evidence card 完成 + 原文证据通过 G0-G4。",
         "",
-        f"- 命中: {len(with_mcap)} 个有市值数据，{len(without_mcap)} 个市值缺失。",
+        f"- 命中: {len(with_mcap)} 个有市值数据，{len(without_mcap)} 个市值缺失，其中 {len(leaders)} 个为 `bull; rising` 头部。",
         "",
+    ]
+
+    if leaders:
+        lines += [
+            "## Top Leaders (bull; rising)",
+            "",
+            "EMA21 在 EMA50 上方且 5d slope > 0.5%，价格当下站在 EMA21 之上 — tape leadership 状态。",
+            "",
+            "| Ticker | Company | Pool | Depth | Mcap | Slope 5d | px vs EMA21 | Readiness | Elasticity |",
+            "|---|---|---|---|---:|---:|---:|---|---:|",
+        ]
+        for cand in leaders[:20]:
+            mcap_text = f"${cand.market_cap / 1e9:.1f}B" if cand.market_cap is not None else "-"
+            slope = cand.ema_slope_5d_pct
+            dist = cand.ema_dist_close_ema21_pct
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        cand.primary_ticker or "-",
+                        cand.company or "-",
+                        cand.asset_pool or "-",
+                        cand.bfs_depth or "-",
+                        mcap_text,
+                        f"{slope:+.2f}%" if slope is not None else "-",
+                        f"{dist:+.2f}%" if dist is not None else "-",
+                        f"{cand.readiness_tier} ({cand.readiness_score:.2f})",
+                        f"{cand.elasticity_score:.1f}",
+                    ]
+                )
+                + " |"
+            )
+        lines.append("")
+
+    lines += [
         "## Top Elasticity (mcap-bounded)",
         "",
-        "| Rank | Ticker | Company | Pool | Depth | Mcap | Bucket | Readiness | Counter | Elasticity | Module |",
-        "|---:|---|---|---|---|---:|---|---|---:|---:|---|",
+        "| Rank | Ticker | Company | Pool | Depth | Mcap | Bucket | Readiness | Counter | Elasticity | Tape | Module |",
+        "|---:|---|---|---|---|---:|---|---|---:|---:|---|---|",
     ]
     for cand in with_mcap[:40]:
         mcap_text = f"${cand.market_cap / 1e9:.1f}B" if cand.market_cap is not None else "-"
@@ -363,6 +473,7 @@ def render_markdown(candidates: list[TenXCandidate], as_of: str, cap_ceiling: fl
                     f"{cand.readiness_tier} ({cand.readiness_score:.2f})",
                     str(cand.counter_items),
                     f"{cand.elasticity_score:.1f}",
+                    _tape_text(cand),
                     cand.module or "-",
                 ]
             )
@@ -427,6 +538,9 @@ def write_outputs(
         "primary_sources_to_find",
         "metrics_to_verify",
         "upgrade_conditions",
+        "ema_cross_state",
+        "ema_slope_5d_pct",
+        "ema_dist_close_ema21_pct",
     ]
     with out_csv.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -446,6 +560,12 @@ def main() -> int:
     parser.add_argument("--cache-max-age-days", type=int, default=7)
     parser.add_argument("--cap-ceiling", type=float, default=50_000_000_000.0)
     parser.add_argument("--max-counter-items", type=int, default=3)
+    parser.add_argument(
+        "--ema-overlay",
+        type=Path,
+        default=None,
+        help="Path to ema_tape_overlay.json (defaults to main_strategy_v2/<as-of>/ema_tape_overlay.json).",
+    )
     args = parser.parse_args()
 
     if not args.queue.exists():
@@ -456,12 +576,17 @@ def main() -> int:
     as_of = args.as_of or cst.date().isoformat()
     out_dir = args.output_root / as_of
     cache = _read_cache(args.cache, args.cache_max_age_days)
+    ema_overlay_path = args.ema_overlay or (
+        STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2" / as_of / "ema_tape_overlay.json"
+    )
+    ema_overlay = _load_ema_overlay(ema_overlay_path)
     candidates, next_cache = collect_candidates(
         args.queue,
         cache=cache,
         fetch=not args.no_fetch,
         cap_ceiling=args.cap_ceiling,
         max_counter_items=args.max_counter_items,
+        ema_overlay=ema_overlay,
     )
     out_csv = out_dir / "ten_x_candidates.csv"
     out_md = out_dir / "ten_x_candidates.md"

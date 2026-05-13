@@ -99,6 +99,8 @@ ai_infra 原文研究 / BFS 发现
 | `scripts/scaffold_evidence_cards_from_readiness.py` | 对 `ready_for_promotion` / `evidence_partial` 行，按 source-evidence-template 生成 evidence card 草稿，落到 `reports/review_dashboard/ai_infra_evidence_card_drafts/<date>/<ticker>.md` 并写 INDEX。 |
 | `scripts/derive_promotion_plan_from_readiness.py` | 把 readiness ledger 翻成 promote_now / watch_with_review / research_only / reject_until_resolved 推荐表，落到 `reports/review_dashboard/ai_infra_promotion_plan/<date>/promotion_plan.{csv,md}`。 |
 | `scripts/apply_promotion_plan.py` | 人工确认后，把 `promote_now` 行追加到 `ai_infra/reports/expansion_candidates_promoted_v1.csv`。默认 dry-run，需 `--confirm`；append-only，写前自动备份 `.bak`。 |
+| `scripts/maintain_promotion_history.py` | 把 daily `promotion_plan.csv` 累积到 `ai_infra/reports/promotion_history.csv`；按 `(as_of, primary_ticker)` 幂等更新。长期追踪 promote/reject 决策。 |
+| `scripts/score_mean_reversion_radar.py` | 美股 top-100 市值股票均值回归 radar：大盘涨但个股跌、跌破 EMA21、EMA21 slope 朝下 → 候选。叠加 AI universe 标记。落 `reports/review_dashboard/us_mean_reversion_radar/<date>/mean_reversion_radar.{csv,md}`。 |
 | `ops/` | root task registry、cron 渲染、task runner、review packet。 |
 | `crates/` | Rust shared control plane 和 CLI。 |
 
@@ -230,6 +232,26 @@ cargo check -p quant-stack-cli
 
 ## 最近验证结果
 
+最近一次整理 (2026-05-13 第五批) 已经跑过：
+
+```text
+Python smoke tests (93 tests): pass — adds vs 87:
+  tests.test_maintain_promotion_history (4)
+  tests.test_score_mean_reversion_radar (2)
+Factor Lab tests: pass (12)
+cargo check -p quant-stack-cli: pass
+verify_ai_supercycle_readiness.py --strict: 10/1/0
+audit --strict: US 5/5, CN 1/1
+ema_tape_overlay.md: 222 symbols indexed, 85 with metrics;
+  Top US bull rising: MU/688008.SH/AMD/DDOG/AKAM slope>+13%/5d, MU px+31% vs EMA21.
+ten_x_candidates.md: 4 bull-rising leaders surfaced
+  (AAOI +5.81%/5d, MOD +4.67%, NTAP +2.92%, CAMT +2.63%).
+promotion_history.csv: 146 rows on 2026-05-13.
+us_mean_reversion_radar: 14 candidates / 100, 1 AI-universe overlap (ANET -16.3%/5d).
+```
+
+旧批次结果保留：
+
 最近一次整理 (2026-05-13 第四批) 已经跑过：
 
 ```text
@@ -295,6 +317,14 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 3. `ops/tasks.yaml` 新增 `research.main_strategy_v2_report` (12:10 CST) 和 `research.production_basket_audit` (12:15 CST)。
 4. `ops/review_packet.sh` 调用审计脚本，输出 `production_basket_audit.md` 到 review packet。
 
+## 第五批已完成 (2026-05-13 续 4)
+
+1. **Per-symbol EMA artifact** — `render_ema_tape_overlay_markdown` 把 `payload["ema_tape_overlay"]` 单独落 `ema_tape_overlay.{md,json}`，按 cross_state (bull/tangled/bear) → 5d slope 排序。当前 US head: MU/688008.SH/AMD/DDOG/AKAM 全部 `bull` + slope >+13%/5d。
+2. **Ten-x radar + EMA tape** — `score_ten_x_candidates.py` 自动读取同 as-of 的 `ema_tape_overlay.json`；候选行多 `ema_cross_state` / `ema_slope_5d_pct` / `ema_dist_close_ema21_pct` 三列；新增 **Top Leaders (bull; rising)** 段，只列 EMA21 > EMA50 + slope > 0.5% + close above EMA21 的名字。当前 4 个 leader: AAOI (+5.81%/5d, +18.9% vs EMA21), MOD, NTAP, CAMT。
+3. **Promotion history ledger** — `scripts/maintain_promotion_history.py` 把每日 promotion_plan 追加到 `ai_infra/reports/promotion_history.csv`，按 `(as_of, primary_ticker)` 幂等。当前已记录 146 行。`tests/test_maintain_promotion_history.py` 覆盖 4 case。
+4. **US top-100 mean-reversion radar** — `scripts/score_mean_reversion_radar.py`：从 `company_profile` 拿最新 market_cap 取 top 100，叠加 prices_daily 算 5d/20d return + EMA21/50 + slope；触发条件 SPY/QQQ 5d ≥+1% 且 个股 5d ≤-2% 且 px<EMA21 ≥2% 且 EMA21 5d slope <0。当前 14 个候选，1 个与 AI universe 重合 (`ANET` 阿瑞斯塔网络 -16.3%/5d)。`tests/test_score_mean_reversion_radar.py` 覆盖 2 case。
+5. **Ops cron 扩展** — 新增 `research.mean_reversion_radar` (12:20 CST) 和 `research.promotion_history` (12:13 CST)。
+
 ## 第四批已完成 (2026-05-13 续 3)
 
 1. **EMA 21/50 tape overlay** — `build_ema_tape_overlay` 计算 EMA21/EMA50/cross_state/recent_cross/5d slope/距 EMA21/EMA50 pct。路由 `*.SH/*.SZ` → CN db，其他 → US db。Source-review calendar 和 satellite pool 表多 Tape 列 (例：`bull; rising; px +13.8% vs EMA21`)。方法论允许 K-line 做 tape/crowding/risk，不证基本面。`payload["ema_tape_overlay"]` 保留完整 metrics。`tests/test_ema_tape_overlay.py` 覆盖 6 case。
@@ -324,13 +354,15 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 
 ## 建议的下一步
 
-1. **SEC EDGAR 财报抽取** — 留给 Factor Lab 自己探索（用户决定）；本仓库不直接拉接口。可选：未来用 `scripts/extract_company_financials.py` 包装 companyfacts API 做证据卡的「原文证据」预填。
-2. **Factor Lab `DATA_REQUIREMENTS` schema 合同** — 把 `source_verification_queue` 暴露 JSON schema；让 Factor Lab hypothesis 生成时按合同填字段。
-3. **海外指数 ingestion 扩展** — 当前 `ingest_satellite_index_prices.py` 只拉 ^TWII/^N225/^KS11/^AEX 和 4 个 ETF；可加 ^HSI/^STI/^FTSE/^IBEX 等覆盖港股、欧洲更多市场。
-4. **AKShare bridge 完整集成** — `cn_index_ingest` 直接走 producer 的 FastAPI 桥（`localhost:8321`），统一 ingestion path。
-5. **Per-symbol EMA artifact** — 把 `payload["ema_tape_overlay"]` 单独落 `ema_tape_overlay.{json,md}`，供 review packet 直接看价格状态而不必读 us/cn_daily_report。
-6. **Ten-x radar + AI book 整合** — 给 `ten_x_candidates.csv` 自动叠加 EMA21/50 tape，过滤「bull; rising」的 10x 候选作为头部观察。
-7. **promotion_plan + readiness 历史 ledger** — 维护一份累积的 `promotion_history.csv`，记录何时 promote_now / 哪个 ticker / 之后表现如何，提供回测信号。
+1. **SEC EDGAR 财报抽取** — 留给 Factor Lab 探索（用户已决定本仓库不直接拉接口）。
+2. **Factor Lab `DATA_REQUIREMENTS` schema 合同**。
+3. **海外指数 ingestion 扩展** — `^HSI`/`^STI`/`^FTSE`/`^IBEX`。
+4. **AKShare bridge 完整集成** — `cn_index_ingest` 直接走 producer 的 FastAPI 桥。
+5. **Mean-reversion radar follow-up** — 给每个候选添加 `next_earnings_date` (避开财报前)，并在 EMA50 之上 / 估值合理 (PE < 行业中位数) 加额外筛选。
+6. **Tape leader vs mean-reversion 交叉** — 把 ten-x bull-rising leaders 和 mean-reversion 候选并入同一对比页，方便操作员同时看「领头」和「滞后」两个池。
+7. **Promotion history 回测** — `promotion_history.csv` 配合 prices_daily，回算 promote_now 之后 5/20/60 日的相对 SPY 收益，做 alpha tracking。
+8. **mean-reversion radar 加价值/估值层** — 当前只看 tape，加 PE/PS/FCF 比较增加 conviction。
+9. **A 股 mean-reversion 镜像** — 仿照 US radar 给 A 股 top 100 (沪深300 + 中证500) 也做同样的均值回归 radar。
 
 ## 接手时不要做的事
 
