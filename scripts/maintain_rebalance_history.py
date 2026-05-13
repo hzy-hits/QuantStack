@@ -100,14 +100,29 @@ def _suggestion_rows(payload: dict[str, Any]) -> list[dict[str, str]]:
 def _merge_rows(
     history: dict[tuple[str, str, str], dict[str, str]],
     new_rows: list[dict[str, str]],
+    *,
+    auto_accept: bool = False,
+    auto_accept_timestamp: str | None = None,
 ) -> tuple[int, int]:
+    """Append new suggestion rows. Returns (added, refreshed).
+
+    When `auto_accept` is True, every newly added row is recorded as
+    executed at the suggested tilt (operator can override later). The
+    maintainer never touches executed columns on rows already in the ledger.
+    """
     added = 0
     refreshed = 0
     for row in new_rows:
         key = (row["as_of"], row["ticker"], row["action"])
         existing = history.get(key)
         if existing is None:
-            history[key] = row
+            merged = dict(row)
+            if auto_accept and not merged.get("executed_tilt_pct"):
+                merged["executed_tilt_pct"] = merged.get("suggested_tilt_pct") or ""
+                merged["executed_at"] = auto_accept_timestamp or ""
+                if not merged.get("notes"):
+                    merged["notes"] = "auto-accept"
+            history[key] = merged
             added += 1
             continue
         # Preserve operator-edited fields when the maintainer re-runs.
@@ -245,6 +260,11 @@ def main() -> int:
     parser.add_argument("--history-csv", type=Path, default=DEFAULT_HISTORY)
     parser.add_argument("--summary-md", type=Path, default=DEFAULT_SUMMARY)
     parser.add_argument("--no-backup", action="store_true")
+    parser.add_argument(
+        "--auto-accept",
+        action="store_true",
+        help="Auto-fill executed_tilt_pct = suggested_tilt_pct for newly appended rows; operator overrides later.",
+    )
     args = parser.parse_args()
 
     cst = datetime.now(timezone(timedelta(hours=8)))
@@ -265,7 +285,13 @@ def main() -> int:
         shutil.copy2(args.history_csv, args.history_csv.with_suffix(args.history_csv.suffix + ".bak"))
 
     new_rows = _suggestion_rows(payload)
-    added, refreshed = _merge_rows(history, new_rows)
+    auto_ts = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%dT%H:%M") if args.auto_accept else None
+    added, refreshed = _merge_rows(
+        history,
+        new_rows,
+        auto_accept=args.auto_accept,
+        auto_accept_timestamp=auto_ts,
+    )
     _write_history(args.history_csv, history)
     args.summary_md.parent.mkdir(parents=True, exist_ok=True)
     args.summary_md.write_text(render_summary(history, as_of), encoding="utf-8")

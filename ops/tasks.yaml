@@ -692,6 +692,7 @@ tasks:
       - scripts/maintain_rebalance_history.py
       - --as-of
       - "{cst_date}"
+      - --auto-accept
     log: ops/logs/research.rebalance_history.log
     lock: ops/state/research.rebalance_history.lock
     timeout_minutes: 5

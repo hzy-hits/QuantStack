@@ -104,7 +104,8 @@ ai_infra 原文研究 / BFS 发现
 | `scripts/build_ai_tape_cross_compare.py` | 把 ten-x leaders (bull; rising) 和 MR AI universe 滞后并到一页，让操作员在 AI 池子内部决定 lean leaders 还是 rotate laggards。落 `reports/review_dashboard/ai_tape_cross_compare/<date>/ai_tape_cross_compare.md`。 |
 | `scripts/backtest_promotion_history.py` | 对 `promote_now` 历史行查 prices_daily + SPY，算 5/20/60d 绝对收益和相对 alpha + IR + hit rate。落 `reports/review_dashboard/ai_infra_promotion_alpha/<date>/promotion_alpha_ledger.{csv,md}`。 |
 | `scripts/ingest_fear_greed_index.py` | CNN F&G API 优先，VIX+SPY EMA50+SPY 5d 三因子代理 fallback。1h cache。落 `reports/review_dashboard/fear_greed/<date>/fear_greed.json`，由 daily report 渲染段引用。 |
-| `scripts/maintain_rebalance_history.py` | 把 `ai_tape_cross_compare/<date>/rebalance_suggestion.json` append 进 `ai_infra/reports/rebalance_history.csv`（幂等于 `as_of, ticker, action`）；保留操作员手填的 `executed_tilt_pct`/`executed_at`/`notes`；写 `rebalance_history_summary.md` 显示 last 30 / per-ticker cumulative / drift ≥ 1%。 |
+| `scripts/maintain_rebalance_history.py` | 把 `ai_tape_cross_compare/<date>/rebalance_suggestion.json` append 进 `ai_infra/reports/rebalance_history.csv`（幂等于 `as_of, ticker, action`）。`--auto-accept` 时建议自动落为已执行 (`notes=auto-accept`)；保留操作员手填字段；写 `rebalance_history_summary.md` 显示 last 30 / per-ticker cumulative / drift ≥ 1%。cron 默认 `--auto-accept`。 |
+| `scripts/record_rebalance_execution.py` | 一条命令记录当天执行：`--accept-all` / `--accept NVDA AAOI` / `--override AAOI=+1.5` / `--reject ANET --notes "earnings risk"`。只覆写 `executed_tilt_pct`/`executed_at`/`notes`，不动 suggestion 列；写完重渲染 summary。 |
 | `ops/` | root task registry、cron 渲染、task runner、review packet。 |
 | `crates/` | Rust shared control plane 和 CLI。 |
 
@@ -365,6 +366,22 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
    - 新增 `build_benchmark_attribution` / `render_benchmark_attribution_section`，对 US (SPY/QQQ/SMH/IWM/DIA) 和 CN (000300.SH/399006.SZ/399001.SZ/000001.SH) 输出 1D/5D/20D/60D/YTD 表，写入 `benchmark_attribution.md`/`.json`。
 3. `ops/tasks.yaml` 新增 `research.main_strategy_v2_report` (12:10 CST) 和 `research.production_basket_audit` (12:15 CST)。
 4. `ops/review_packet.sh` 调用审计脚本，输出 `production_basket_audit.md` 到 review packet。
+
+## 第十批已完成 (2026-05-13 续 9)
+
+操作员不必每天手动记录 rebalance 执行了，两条路：
+
+1. **完全 hands-off (默认 cron)** — `maintain_rebalance_history.py --auto-accept`：suggestion 落 ledger 时自动把 `executed_tilt_pct = suggested_tilt_pct`，`notes` 标 `auto-accept`。`ops/tasks.yaml` 的 `research.rebalance_history` cron 已加这个 flag → 操作员什么都不做 = 系统按建议执行。
+2. **一条命令 hand override** — `scripts/record_rebalance_execution.py`：
+   - `--accept-all` 接受全部建议
+   - `--accept NVDA AAOI` 只接受这些
+   - `--override AAOI=+1.5` 设具体 tilt
+   - `--reject ANET --notes "earnings risk"` 显式不执行（写 `executed=0`，summary 不再追问）
+   - 未知 ticker 警告但不 crash
+   - 自动加 `executed_at` 时间戳和操作员 notes
+   - 写回 CSV + 重渲染 summary
+3. `maintain_rebalance_history.py` 重跑时**绝不覆盖**已有 executed 字段 — auto-accept 已存在的不动；recorder 写入的也不动。
+4. `tests/test_record_rebalance_execution.py` 加 5 case (auto-accept / accept-subset / override+reject / unknown-ticker / no-flag-fails)。
 
 ## 第九批已完成 (2026-05-13 续 8)
 
