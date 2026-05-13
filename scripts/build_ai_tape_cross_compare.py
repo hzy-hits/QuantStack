@@ -134,6 +134,99 @@ def _load_laggards(path: Path, ai_only: bool = True) -> list[LaggardRow]:
     return out
 
 
+def build_rebalance_suggestion(
+    leaders: list[LeaderRow],
+    laggards: list[LaggardRow],
+    *,
+    leader_per_name_pct: float = 2.5,
+    leader_total_cap_pct: float = 10.0,
+    laggard_per_name_pct: float = -3.0,
+    laggard_total_cap_pct: float = -10.0,
+    max_leader_names: int = 4,
+    max_laggard_names: int = 2,
+) -> dict[str, Any]:
+    """Conservative weight-tilt suggestion. Operator must confirm before action.
+
+    Rules:
+    - Each tape leader (bull; rising) gets +`leader_per_name_pct` until the
+      portfolio-level tilt hits `leader_total_cap_pct`.
+    - Each mean-reversion laggard with `cheap_vs_sector` or `fair_vs_sector`
+      valuation gets `laggard_per_name_pct` until `laggard_total_cap_pct`.
+    - `rich_vs_sector` laggards are flagged for **trim** not add — they're
+      laggards because they're priced for perfection and underperforming.
+    """
+    leader_names: list[dict[str, Any]] = []
+    leader_budget = leader_total_cap_pct
+    for leader in leaders[:max_leader_names]:
+        if leader_budget <= 0:
+            break
+        tilt = min(leader_per_name_pct, leader_budget)
+        leader_names.append(
+            {
+                "ticker": leader.ticker,
+                "company": leader.company,
+                "action": "add",
+                "tilt_pct": round(tilt, 2),
+                "rationale": (
+                    f"bull; rising; slope {leader.slope_5d_pct:+.2f}%/5d; "
+                    f"px {leader.dist_close_ema21_pct:+.1f}% vs EMA21"
+                    if leader.slope_5d_pct is not None and leader.dist_close_ema21_pct is not None
+                    else "bull; rising leader"
+                ),
+            }
+        )
+        leader_budget -= tilt
+
+    laggard_names: list[dict[str, Any]] = []
+    laggard_budget = laggard_total_cap_pct
+    trim_names: list[dict[str, Any]] = []
+    for laggard in laggards:
+        # `rich_vs_sector` mean-reversion laggards get flagged for TRIM, not buy-the-dip.
+        if laggard.valuation_signal == "rich_vs_sector":
+            trim_names.append(
+                {
+                    "ticker": laggard.symbol,
+                    "company": laggard.company,
+                    "action": "trim",
+                    "tilt_pct": -2.0,
+                    "rationale": (
+                        f"laggard but rich valuation ({laggard.valuation_signal}); "
+                        f"slope {laggard.slope_ema21_5d_pct:+.2f}%/5d"
+                        if laggard.slope_ema21_5d_pct is not None
+                        else "laggard with rich valuation"
+                    ),
+                }
+            )
+            continue
+        if len(laggard_names) >= max_laggard_names or laggard_budget >= 0:
+            continue
+        tilt = max(laggard_per_name_pct, laggard_budget)
+        laggard_names.append(
+            {
+                "ticker": laggard.symbol,
+                "company": laggard.company,
+                "action": "rotate_in",
+                "tilt_pct": round(tilt, 2),
+                "rationale": (
+                    f"mean-reversion + {laggard.valuation_signal}; "
+                    f"px {laggard.dist_close_ema21_pct:+.1f}% vs EMA21"
+                    if laggard.dist_close_ema21_pct is not None
+                    else f"mean-reversion + {laggard.valuation_signal}"
+                ),
+            }
+        )
+        laggard_budget -= tilt
+
+    return {
+        "leaders": leader_names,
+        "rotate_in": laggard_names,
+        "trim": trim_names,
+        "total_add_pct": round(sum(item["tilt_pct"] for item in leader_names), 2),
+        "total_rotate_in_pct": round(sum(item["tilt_pct"] for item in laggard_names), 2),
+        "total_trim_pct": round(sum(item["tilt_pct"] for item in trim_names), 2),
+    }
+
+
 def render_markdown(
     leaders: list[LeaderRow],
     laggards: list[LaggardRow],
@@ -209,12 +302,66 @@ def render_markdown(
             + " |"
         )
     lines.append("")
+
+    suggestion = build_rebalance_suggestion(leaders, laggards)
+    lines += [
+        "## Rebalance Suggestion (operator must confirm)",
+        "",
+        "AI book 维持绝对主力。下方是基于 tape + valuation 的保守建议，**不是自动执行**。"
+        " 操作员需要叠加 evidence card / 财报日历 / 风险约束再决定。",
+        "",
+        f"- 加仓 (leaders): 总 +{suggestion['total_add_pct']:.1f}%",
+        f"- 滚仓 (laggards rotate in): 总 {suggestion['total_rotate_in_pct']:.1f}%",
+        f"- 减仓 (rich laggards trim): 总 {suggestion['total_trim_pct']:.1f}%",
+        "",
+    ]
+    if suggestion["leaders"]:
+        lines += [
+            "### Add to leaders",
+            "",
+            "| Ticker | Company | Tilt | Rationale |",
+            "|---|---|---:|---|",
+        ]
+        for item in suggestion["leaders"]:
+            lines.append(
+                f"| {item['ticker']} | {(item['company'] or '-')[:24]} | "
+                f"{item['tilt_pct']:+.2f}% | {item['rationale']} |"
+            )
+        lines.append("")
+    if suggestion["rotate_in"]:
+        lines += [
+            "### Rotate weight into laggards (cheap/fair)",
+            "",
+            "| Ticker | Company | Tilt | Rationale |",
+            "|---|---|---:|---|",
+        ]
+        for item in suggestion["rotate_in"]:
+            lines.append(
+                f"| {item['ticker']} | {(item['company'] or '-')[:24]} | "
+                f"{item['tilt_pct']:+.2f}% | {item['rationale']} |"
+            )
+        lines.append("")
+    if suggestion["trim"]:
+        lines += [
+            "### Trim rich laggards (priced for perfection, missing the rally)",
+            "",
+            "| Ticker | Company | Tilt | Rationale |",
+            "|---|---|---:|---|",
+        ]
+        for item in suggestion["trim"]:
+            lines.append(
+                f"| {item['ticker']} | {(item['company'] or '-')[:24]} | "
+                f"{item['tilt_pct']:+.2f}% | {item['rationale']} |"
+            )
+        lines.append("")
+
     lines += [
         "## 用法提醒",
         "",
         "- 这两张表都是 *radar*。任何 promote 还是需要 evidence card + G0-G4。",
         "- 头部 (leaders) 适合做加仓 / 维持 size；滞后 (laggards) 适合做小仓位试错或观察。",
         "- 注意 Next ER 列：财报临近的名字不要直接进。",
+        "- Rebalance suggestion 是 *提示*，不是 *指令*；操作员评估 risk budget 后才能落地。",
         "",
     ]
     return "\n".join(lines) + "\n"

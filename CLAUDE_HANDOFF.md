@@ -103,6 +103,7 @@ ai_infra 原文研究 / BFS 发现
 | `scripts/score_mean_reversion_radar.py` | 美股 top-100 均值回归 radar；近 7 日财报屏蔽 + PE/PS vs 行业中位估值层；输出 AI universe LEAD 段 + 非 AI Context 段；落 `reports/review_dashboard/us_mean_reversion_radar/<date>/mean_reversion_radar.{csv,md}`。 |
 | `scripts/build_ai_tape_cross_compare.py` | 把 ten-x leaders (bull; rising) 和 MR AI universe 滞后并到一页，让操作员在 AI 池子内部决定 lean leaders 还是 rotate laggards。落 `reports/review_dashboard/ai_tape_cross_compare/<date>/ai_tape_cross_compare.md`。 |
 | `scripts/backtest_promotion_history.py` | 对 `promote_now` 历史行查 prices_daily + SPY，算 5/20/60d 绝对收益和相对 alpha + IR + hit rate。落 `reports/review_dashboard/ai_infra_promotion_alpha/<date>/promotion_alpha_ledger.{csv,md}`。 |
+| `scripts/ingest_fear_greed_index.py` | CNN F&G API 优先，VIX+SPY EMA50+SPY 5d 三因子代理 fallback。1h cache。落 `reports/review_dashboard/fear_greed/<date>/fear_greed.json`，由 daily report 渲染段引用。 |
 | `ops/` | root task registry、cron 渲染、task runner、review packet。 |
 | `crates/` | Rust shared control plane 和 CLI。 |
 
@@ -234,6 +235,30 @@ cargo check -p quant-stack-cli
 
 ## 最近验证结果
 
+最近一次整理 (2026-05-13 第七批，完整管线 dry-run) 已经跑过：
+
+```text
+Python smoke tests (103 tests): pass — adds vs 100:
+  tests.test_ingest_fear_greed_index (3)
+Fear & Greed proxy: score=73.57, rating=Greed
+  components: VIX 17.99 (60.7%ile → 39.3) + SPY EMA50 +5.68% (97.3) + SPY 5d +1.99% (84.1)
+CN index ingest: 6 indices × 243 rows refreshed
+Satellite index ingest: 8 symbols × ~250 rows refreshed
+Source-review readiness: 146 rows; ready_for_promotion=5
+Main strategy V2 backtest: written
+Ten-x radar: 35 candidates, 24 with mcap, 4 bull-rising leaders
+Mean-reversion radar: 100/13 candidates (1 AI=ANET / 12 non-AI), 7 earnings-blocked
+Evidence card drafts: 8 files
+Promotion plan: 5 promote_now / 3 watch / 126 research_only
+Promotion history: 146 rows (idempotent run; new=0)
+Promotion alpha ledger: 5 rows (forward windows pending)
+AI tape cross-compare: 8 leaders / 1 laggard; rebalance +10% leaders / -2% trim ANET
+audit --strict: US 5/5, CN 1/1
+verify_ai_supercycle_readiness.py --strict: 10/1/0
+```
+
+旧批次结果保留：
+
 最近一次整理 (2026-05-13 第六批) 已经跑过：
 
 ```text
@@ -339,6 +364,15 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
    - 新增 `build_benchmark_attribution` / `render_benchmark_attribution_section`，对 US (SPY/QQQ/SMH/IWM/DIA) 和 CN (000300.SH/399006.SZ/399001.SZ/000001.SH) 输出 1D/5D/20D/60D/YTD 表，写入 `benchmark_attribution.md`/`.json`。
 3. `ops/tasks.yaml` 新增 `research.main_strategy_v2_report` (12:10 CST) 和 `research.production_basket_audit` (12:15 CST)。
 4. `ops/review_packet.sh` 调用审计脚本，输出 `production_basket_audit.md` 到 review packet。
+
+## 第七批已完成 (2026-05-13 续 6)
+
+主线: AI book 仍绝对主力；fear & greed 仅作 macro context、不能促进任何 ticker 进 production；rebalance suggestion 仅 提示不执行。
+
+1. **Cross-compare rebalance suggestion** — `build_ai_tape_cross_compare.py` 加 `build_rebalance_suggestion`：每个 leader +2.5% (cap +10% basket)；`cheap_vs_sector`/`fair_vs_sector` laggard 滚 -3% (cap -10%)；`rich_vs_sector` laggard 单独 trim。 当前输出：4 个 leaders 总 +10%（澜起/生益/长电/AAOI）；ANET 因 rich_vs_sector 触发 trim -2%。明确 **operator must confirm — not auto-execute**。
+2. **Fear & Greed 指数** — `scripts/ingest_fear_greed_index.py` 先打 CNN API（当前我们网络 418，自动 fallback），再走 VIX 252d 反向 percentile + SPY vs EMA50 距离 + SPY 5d return percentile 三因子代理。当前 proxy=73.57 → Greed。落到 `fear_greed.{md,json}` 并在 combined report + us_daily_report 渲染段。`tests/test_ingest_fear_greed_index.py` 覆盖 3 case。
+3. **新 cron**: `research.fear_greed_ingest` (08:05 CST, US 市场)。
+4. **跑通整条管线** — 完整管线 8 步从 F&G ingest → MR / 10x / cross-compare 都正确生成；audit --strict 通过 (US basket=5/5, CN 1/1)，readiness 10/1/0。
 
 ## 第六批已完成 (2026-05-13 续 5)
 

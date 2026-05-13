@@ -3034,6 +3034,91 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
     }
 
 
+FEAR_GREED_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "fear_greed"
+
+
+def load_fear_greed_payload(as_of: str) -> dict[str, Any] | None:
+    path = FEAR_GREED_ROOT / as_of / "fear_greed.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def render_fear_greed_section(payload: dict[str, Any]) -> list[str]:
+    fg = payload.get("fear_greed") or {}
+    if not fg:
+        return []
+    score = fg.get("score")
+    rating = fg.get("rating") or "-"
+    source = fg.get("source") or "?"
+    components = fg.get("components") or {}
+    lines = [
+        "## 恐惧贪婪 (Fear & Greed) — 仅作 macro/crowding 上下文",
+        "",
+        f"- 数据源: `{source}` (CNN 优先；失败回落到 VIX + SPY EMA50 + SPY 5d 三因子代理)",
+        f"- 当前读数: **{score:.1f} / 100** → **{rating}**",
+        "- 用法: 这只是 *macro/crowding* 信号；不能促进任何 ticker 进 production candidate。AI book 仍是绝对主力。",
+        "",
+    ]
+    if source == "cnn":
+        history = []
+        for key, label in (
+            ("previous_close", "前一日"),
+            ("previous_1_week", "一周前"),
+            ("previous_1_month", "一月前"),
+            ("previous_1_year", "一年前"),
+        ):
+            value = fg.get(key)
+            if isinstance(value, dict):
+                value = value.get("score")
+            if value is not None:
+                try:
+                    history.append(f"{label}={float(value):.1f}")
+                except (TypeError, ValueError):
+                    continue
+        if history:
+            lines.append(f"- 历史读数: {'; '.join(history)}")
+            lines.append("")
+    if components:
+        lines += [
+            "| 分量 | 数值 | 解释 |",
+            "|---|---|---|",
+        ]
+        if "vix" in components:
+            entry = components["vix"]
+            lines.append(
+                f"| VIX | level {entry.get('level')} (percentile {entry.get('percentile_252d')}%) "
+                f"| score {entry.get('score')} (低 VIX = 贪婪) |"
+            )
+        if "spy_vs_ema50" in components:
+            entry = components["spy_vs_ema50"]
+            lines.append(
+                f"| SPY vs EMA50 | dist {entry.get('distance_pct')}% | "
+                f"score {entry.get('score')} (≥ EMA50 = 贪婪) |"
+            )
+        if "spy_5d_return" in components:
+            entry = components["spy_5d_return"]
+            lines.append(
+                f"| SPY 5d return | {entry.get('value_pct')}% (percentile {entry.get('percentile_252d')}%) | "
+                f"score {entry.get('score')} |"
+            )
+        # CNN-provided components (when CNN path succeeds).
+        for key in ("market_momentum_sp500", "stock_price_strength", "stock_price_breadth",
+                    "put_call_options", "market_volatility_vix", "safe_haven_demand", "junk_bond_demand"):
+            entry = components.get(key)
+            if not isinstance(entry, dict):
+                continue
+            current = entry.get("score") or entry.get("rating")
+            if current is None:
+                continue
+            lines.append(f"| {key} | {current} | CNN 子分量 |")
+        lines.append("")
+    return lines
+
+
 def render_production_decision_summary(payload: dict[str, Any]) -> list[str]:
     decision = payload.get("production_decision_summary") or build_production_decision_summary(payload)
     summary = decision.get("summary") or {}
@@ -7037,6 +7122,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     ]
     lines += render_market_action_table(actions)
     lines += render_market_selection_rationale(payload, actions, "US")
+    lines += render_fear_greed_section(payload)
     lines += [
         "## 主题和证据",
         "",
@@ -7105,6 +7191,7 @@ def render_report(payload: dict[str, Any]) -> str:
         "",
     ]
     lines += render_production_decision_summary(payload)
+    lines += render_fear_greed_section(payload)
     lines += render_earnings_calendar_section(payload, "US", limit=18)
     lines += render_earnings_calendar_section(payload, "CN", limit=18)
     lines += render_source_review_calendar_section(payload, "US", limit=12)
@@ -8263,6 +8350,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "benchmark_attribution": benchmark_attribution,
         "satellite_pool_report": satellite_pool_report,
         "ema_tape_overlay": ema_overlay,
+        "fear_greed": load_fear_greed_payload(as_of.isoformat()),
         "promotion_contract": promotion_contract,
     }
     assert_promoted_execution_rows(payload)
@@ -8363,6 +8451,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     (output_dir / "ema_tape_overlay.json").write_text(
         json.dumps(payload.get("ema_tape_overlay") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    (output_dir / "fear_greed.md").write_text(
+        "\n".join(render_fear_greed_section(payload)) if payload.get("fear_greed") else "_Fear & Greed unavailable._",
+        encoding="utf-8",
+    )
+    (output_dir / "fear_greed.json").write_text(
+        json.dumps(payload.get("fear_greed") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
         encoding="utf-8",
     )
     (output_dir / "ai_supercycle_evidence.md").write_text(render_ai_supercycle_evidence(payload), encoding="utf-8")

@@ -567,6 +567,25 @@ tasks:
     outputs:
       - ops/logs/research.ten_x_radar_strict.log
 
+  research.fear_greed_ingest:
+    group: research
+    schedule: "5 8 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/ingest_fear_greed_index.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.fear_greed_ingest.log
+    lock: ops/state/research.fear_greed_ingest.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/fear_greed
+
   research.main_strategy_v2_report:
     group: research
     schedule: "10 12 * * 1-5"
