@@ -28,12 +28,25 @@ Payload分为四层：
 
 `Shared Report Model Status` 若存在，必须服从其中的 section_counts 和 probation_symbols。`execution=0` 时不得写“正式可执行”；`probation>0` 只能提取为“小仓试错观察”，不得放入主候选池或 Fresh Entry。
 
+## Hedge Fund Signal Contract（A股必须执行）
+
+- A股把新闻当滞后标签：新闻、公告、社媒热度只能解释“为什么已经动了/为什么有事件风险”，不能单独升级为 Fresh Entry、主候选或试错。
+- A股第一信号是价格/成交/资金/联动：必须优先提取 1D/5D/20D 涨跌、成交额/量比/换手、information_score/大单/融资、行业资金流和行业涨跌。
+- 只有“强趋势延续 + 成交/资金确认 + 非温吞动量 + 非 late/chase”能进入可交易候选解释；主题叙事和新闻新鲜度不能覆盖价格质量。
+- 组合层口径从选股升级为 long alpha + beta hedge + 风险归因：若 payload 有 portfolio overlay，必须保留 long alpha R、beta hedge、net beta、VaR/行业/相关簇信息。
+
 ## A股动量质量门（必须执行）
 
 - `cn_lukewarm_momentum_3_8d` 是硬阻断：5D涨幅落在 3%-8% 的半强不强票只能写“温吞动量/弱反弹风险”，不得写成试错或正式执行。
 - `cn_not_strong_trend_continuation` 表示没有进入强趋势延续层：只能写观察/回避，不得包装成主题机会。
 - A股 `probation_alpha` 只允许强趋势延续试错：优先 `ret_20d>=25%` 且避开 5D 3%-8% 温吞区间，或系统已明确放行的高分强势票。
 - `RADAR`、低分、rank>10、缺 5D/20D 动量质量字段的名字不得进入试错层。
+
+## A股退役层禁令（必须执行）
+
+- `CN legacy structural_core/high_mod`、`legacy_structural_core`、`structural_core/high_mod` 已彻底退役；它不是 baseline、不是观察层、不是候选来源，不得在提取结果中出现。
+- 任何来自 `structural_core` / `high_mod` 的 A股行只能视为旧数据噪音；不得计入主候选池、Probation、Setup、Theme Rotation、Radar 或 Factor Lab 交叉确认。
+- 不得用“历史对比”“旧结构层”“高置信结构票”等措辞给它保留解释空间；A股可讨论的主线只来自系统放行的 `execution_alpha`、`probation_alpha`、`cn_oversold_ev_positive`、`cn_observed_lifecycle_prob` 或明确研究附录。
 
 ---
 
@@ -48,10 +61,12 @@ Payload分为四层：
 - 输出语言：中文
 - 格式：固定标题 + 表格
 - 先读 `Headline Gate` section；它只作为市场叙事上下文，不是个股执行门禁。mode 不是 `trend` 时，不要把结构信号写成单边市场主线；区间候选/战术延续只能代表区间或战术 alpha，不代表市场已转多
+- 新闻/事件只作为滞后标签和风险标签；不得把观察/复核候选因为新闻措辞升级为 Fresh Entry
 - 数据缺失写 `[缺失]`
 - 不给交易建议，不做叙事，不判断方向
 - 追高约束必须显式提取：若 5D/20D 涨幅极端、涨停、trend_prob <= 0.50、execution_mode=do_not_chase/wait_pullback、或 main gate blocked，只能标为观察/回踩复核/耗竭风险，不得写成可执行趋势多头
 - 温吞动量必须显式提取：若 blocker 出现 `cn_lukewarm_momentum_3_8d`，或 5D 在 3%-8% 且 20D 未达到强趋势延续，必须写成“半强不强/弱反弹/次日兑现风险”，不得放进主候选池或小仓试错
+- A股退役层必须丢弃：遇到 `structural_core`、`legacy_structural_core`、`structural_core/high_mod` 或旧 `cn:core:long:high_mod` 口径，不提取、不复述、不作为 baseline；若必须解释，只写“退役层，已从当前候选体系移除”
 - 必须单独读取 `Setup Alpha / Anti-Chase`：`Breakout Acceptance` 是“已涨但趋势/承接/事件确认仍支持延续”，不得机械当成追高；`Blocked Chase / Priced-In` 才能写成追价风险
 - 必须读取稳定门禁的 `ev_status`：`pending` 表示历史EV/稳定门禁尚未完成评估，不得写成稳定门禁失败；`failed` 写成“历史EV未放行”；`cn_direct` 表示 A股30日稳定门禁已绕开，按当前执行门禁放行；`passed` 时也只有 Execution Alpha 可以写成可执行 alpha
 - 必须读取 `probation_alpha`：它只代表小仓试错层，最大 0.25R/0.5R；不得写成正式执行、不得计入主候选池、不得覆盖 `execution_alpha=0`
@@ -78,6 +93,7 @@ Payload分为四层：
 - Factor Lab: [fresh/stale/unavailable；研究层]
 - blocked_alpha: [数量或主要阻断原因]
 - 动量质量门: [温吞动量阻断数量/代码；强趋势延续候选数量/代码；缺5D/20D质量字段数量]
+- 退役层: [若 payload 出现 structural_core/high_mod，只写“已移除，不进入任何候选层”；否则写“无”]
 
 ## 主候选池
 | 代码 | 名称 | 方向 | composite | regime | 5D% | 20D% | trend_prob | info_score | 资金方向 | 冲突 |

@@ -1,0 +1,57 @@
+version: 1
+
+rules:
+  - pattern: "^ops/(tasks\\.yaml|render_cron\\.py|run_task\\.|crontab\\.)"
+    tags: ["cron", "scheduler", "production-runtime"]
+  - pattern: "^ops/(README\\.md|task_inventory\\.md|tasklib\\.py)$"
+    tags: ["ops", "production-runtime", "scheduler"]
+  - pattern: "^ops/review_packet\\.sh$"
+    tags: ["ops", "review-classification"]
+  - pattern: "^ops/risk_path_map\\.yaml"
+    tags: ["ops", "review-classification"]
+  - pattern: "^ops/"
+    tags: ["ops", "production-runtime"]
+  - pattern: "^scripts/sleeves/"
+    tags: ["alpha-sleeve", "research-layer"]
+  - pattern: "^scripts/sleeves/portfolio_hedge\\.py"
+    tags: ["alpha-sleeve", "hedge-ledger", "risk-model"]
+  - pattern: "^scripts/lib/hedge\\.py"
+    tags: ["hedge-math", "risk-model", "shared-library"]
+  - pattern: "^scripts/lib/"
+    tags: ["shared-library"]
+  - pattern: "^scripts/run_alpha_sleeve_backtest\\.py"
+    tags: ["alpha-factory", "backtest-report", "duckdb-output"]
+  - pattern: "^scripts/run_main_strategy_v2_backtest\\.py"
+    tags: ["production-ranker", "portfolio-overlay", "fresh-entry-gate"]
+  - pattern: "^scripts/run_strategy_backtest_report\\.py"
+    tags: ["backtest-report", "research-layer"]
+  - pattern: "^quant-research-v1/src/quant_bot/analytics/.*ranker"
+    tags: ["us-ranker", "production-ranker"]
+  - pattern: "^quant-research-v1/src/quant_bot/analytics/cn_"
+    tags: ["cn-analytics", "production-ranker"]
+  - pattern: "^quant-research-v1/docs/"
+    tags: ["docs"]
+  - pattern: "^quant-research-v1/tests/"
+    tags: ["tests"]
+  - pattern: "^quant-research-cn/src/"
+    tags: ["cn-producer", "rust-producer"]
+  - pattern: "^quant-research-cn/prompts/"
+    tags: ["prompt", "cn-agent"]
+  - pattern: "^factor-lab/src/"
+    tags: ["factor-lab", "research-layer"]
+  - pattern: "^factor-lab/scripts/"
+    tags: ["factor-lab", "scheduler-adjacent"]
+  - pattern: "^factor-lab/runtime/"
+    tags: ["factor-lab", "generated-output", "research-layer"]
+  - pattern: "^factor-lab/research_journal\\.md"
+    tags: ["docs", "factor-lab", "research-layer"]
+  - pattern: "^.*prompts?.*"
+    tags: ["prompt"]
+  - pattern: "^docs/"
+    tags: ["docs"]
+  - pattern: "^data/us_theme_seed_map\\.yaml$"
+    tags: ["alpha-sleeve", "research-layer"]
+  - pattern: "^tests/"
+    tags: ["tests"]
+  - pattern: "^\\.gitignore$"
+    tags: ["repo-metadata"]

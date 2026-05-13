@@ -128,11 +128,10 @@ enum StrategyFamily {
     ContinuationBreakout,
     ShadowOptionEdge,
     ThemeRotation,
-    StructuralCore,
 }
 
 impl StrategyFamily {
-    fn classify(decision: &Decision) -> Self {
+    fn classify(decision: &Decision) -> Option<Self> {
         let exploration_family = decision.detail_str("exploration_strategy_family", "");
         let rsi_14 = decision.detail_f64("rsi_14", 50.0);
         let p_upside = decision.detail_f64("p_upside", 0.50);
@@ -142,10 +141,10 @@ impl StrategyFamily {
         if decision.selection_status == SelectionStatus::Exploration
             && (exploration_family == "oversold_contrarian" || rsi_14 < 35.0)
         {
-            return Self::OversoldContrarian;
+            return Some(Self::OversoldContrarian);
         }
 
-        match (
+        let family = match (
             p_upside >= 0.70,
             decision.setup_score >= 0.62 && decision.fade_risk <= 0.35,
             decision.continuation_score >= 0.62 && ret_20d >= 12.0,
@@ -157,8 +156,9 @@ impl StrategyFamily {
             (_, _, true, _, _) => Self::ContinuationBreakout,
             (_, _, _, true, _) => Self::ShadowOptionEdge,
             (_, _, _, _, ReportLane::ThemeRotation) => Self::ThemeRotation,
-            _ => Self::StructuralCore,
-        }
+            _ => return None,
+        };
+        Some(family)
     }
 
     fn as_str(self) -> &'static str {
@@ -169,7 +169,6 @@ impl StrategyFamily {
             Self::ContinuationBreakout => "continuation_breakout",
             Self::ShadowOptionEdge => "shadow_option_edge",
             Self::ThemeRotation => "theme_rotation",
-            Self::StructuralCore => "structural_core",
         }
     }
 }
@@ -580,7 +579,9 @@ pub fn compute(db: &Connection, as_of: NaiveDate) -> Result<usize> {
 
     let mut trades = Vec::new();
     for decision in decisions {
-        trades.push(build_trade(decision, &future_bars, &params)?);
+        if let Some(trade) = build_trade(decision, &future_bars, &params)? {
+            trades.push(trade);
+        }
     }
     store_paper_trades(db, &trades, as_of)?;
     let ev_rows = store_strategy_ev(db, &trades, as_of, &params)?;
@@ -604,8 +605,10 @@ fn build_trade(
     decision: Decision,
     future_bars: &HashMap<String, Vec<FutureBar>>,
     params: &PaperTradeEvParams,
-) -> Result<PaperTrade> {
-    let strategy_family = StrategyFamily::classify(&decision);
+) -> Result<Option<PaperTrade>> {
+    let Some(strategy_family) = StrategyFamily::classify(&decision) else {
+        return Ok(None);
+    };
     let intent = TradeIntent::from_decision(&decision);
     let execution_rule = ExecutionRule::from_intent(intent);
     let strategy_key = strategy_key(&decision, strategy_family, execution_rule);
@@ -650,7 +653,7 @@ fn build_trade(
         "data_scope": "paper_trade_ev_walk_forward",
     });
 
-    Ok(PaperTrade {
+    Ok(Some(PaperTrade {
         decision,
         strategy_family,
         strategy_key,
@@ -664,7 +667,7 @@ fn build_trade(
         stale_chase_risk,
         label,
         detail,
-    })
+    }))
 }
 
 fn load_decisions(db: &Connection, cutoff: NaiveDate, as_of: NaiveDate) -> Result<Vec<Decision>> {
@@ -1669,10 +1672,25 @@ mod tests {
     #[test]
     fn earnings_setup_family_wins_over_plain_momentum() {
         let d = decision();
-        let family = StrategyFamily::classify(&d);
+        let family = StrategyFamily::classify(&d).expect("classified family");
         assert_eq!(family, StrategyFamily::EarningsSetup);
         assert!(strategy_key(&d, family, ExecutionRule::NextOpenOrPullback)
             .contains("earnings_setup|core_book"));
+    }
+
+    #[test]
+    fn plain_core_high_mod_has_no_retired_structural_family() {
+        let mut d = decision();
+        d.details = Some(json!({
+            "p_upside": 0.55,
+            "shadow_option_alpha_prob": 0.40,
+            "ret_20d": 5.0
+        }));
+        d.setup_score = 0.40;
+        d.continuation_score = 0.40;
+        d.fade_risk = 0.70;
+
+        assert_eq!(StrategyFamily::classify(&d), None);
     }
 
     #[test]
@@ -1714,7 +1732,7 @@ mod tests {
             "downside_stress": 0.25
         }));
 
-        let family = StrategyFamily::classify(&d);
+        let family = StrategyFamily::classify(&d).expect("classified family");
         let intent = TradeIntent::from_decision(&d);
 
         assert_eq!(family, StrategyFamily::OversoldContrarian);

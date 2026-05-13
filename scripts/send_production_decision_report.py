@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Generate and send the Main Strategy V2 production decision report.
+"""Generate and send the Main Strategy V2 final market report.
 
-This is the cron-facing delivery hook for the cross-market production decision
-report under reports/review_dashboard/main_strategy_v2/{date}/.
+This is the cron-facing delivery hook for market-specific final reports under
+reports/review_dashboard/main_strategy_v2/{date}/. The combined backtest report
+is an internal review artifact and is not deliverable in production.
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import subprocess
@@ -27,10 +29,11 @@ from quant_bot.delivery.gmail import send_report_email  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Send Main Strategy V2 production decision report.")
+    parser = argparse.ArgumentParser(description="Send Main Strategy V2 final market report.")
     parser.add_argument("--date", required=True, help="Report date, YYYY-MM-DD.")
     parser.add_argument("--start", default="2026-03-01", help="Backtest start date.")
     parser.add_argument("--session", default="morning", help="Session label for subject, e.g. morning/evening/pre/post.")
+    parser.add_argument("--market", choices=["all", "cn", "us"], default="all", help="Audience/legacy path to replace.")
     parser.add_argument("--delivery-mode", choices=["test", "prod"], default=os.environ.get("QUANT_DELIVERY_MODE", "test"))
     parser.add_argument("--test-recipient", default=os.environ.get("QUANT_TEST_RECIPIENT"))
     parser.add_argument("--skip-generate", action="store_true", help="Send an already-generated report.")
@@ -83,12 +86,46 @@ def _prod_recipient_count() -> int:
     return len(_list_config_recipients(_reporting_config().get("recipients")))
 
 
-def report_path(as_of: str) -> Path:
-    return STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2" / as_of / "main_strategy_v2_backtest.md"
+def report_path(as_of: str, market: str = "all") -> Path:
+    base = STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2" / as_of
+    if market == "cn":
+        return base / "cn_daily_report.md"
+    if market == "us":
+        return base / "us_daily_report.md"
+    return base / "main_strategy_v2_backtest.md"
 
 
 def report_json_path(as_of: str) -> Path:
     return STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2" / as_of / "main_strategy_v2_backtest.json"
+
+
+def _renderer_module() -> Any:
+    path = STACK_ROOT / "scripts" / "run_main_strategy_v2_backtest.py"
+    spec = importlib.util.spec_from_file_location("main_strategy_v2_renderer", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load report renderer: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def render_standalone_from_json(as_of: str, market: str) -> Path:
+    if market not in {"cn", "us"}:
+        raise ValueError(f"standalone rendering only supports cn/us, got {market!r}")
+    payload_path = report_json_path(as_of)
+    if not payload_path.exists():
+        raise FileNotFoundError(f"main strategy payload not found: {payload_path}")
+    payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    renderer = _renderer_module()
+    if market == "cn":
+        text = renderer.render_cn_standalone_report(payload)
+    else:
+        text = renderer.render_us_standalone_report(payload)
+    path = report_path(as_of, market)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
 
 
 def generate_report(as_of: str, start: str) -> None:
@@ -106,18 +143,107 @@ def generate_report(as_of: str, start: str) -> None:
     )
 
 
-def subject_for(as_of: str, session: str) -> str:
+def session_label(session: str) -> str:
     normalized = session.lower()
     if normalized in {"pre", "morning"}:
-        label = "盘前"
+        return "盘前"
     elif normalized in {"post", "evening"}:
-        label = "盘后"
+        return "盘后"
+    return session
+
+
+def subject_for(as_of: str, session: str, market: str) -> str:
+    label = session_label(session)
+    if market == "cn":
+        return f"A股量化研究{label}日报 — {as_of}"
+    if market == "us":
+        return f"美股量化研究{label}日报 — {as_of}"
+    return f"量化{label}日报 — {as_of}"
+
+
+def legacy_report_path(as_of: str, session: str, market: str) -> Path | None:
+    normalized = session.lower()
+    if market == "cn":
+        if normalized in {"pre", "morning"}:
+            slot = "morning"
+        elif normalized in {"post", "evening"}:
+            slot = "evening"
+        elif normalized == "daily":
+            return STACK_ROOT / "quant-research-cn" / "reports" / f"{as_of}_report_zh.md"
+        else:
+            slot = normalized
+        return STACK_ROOT / "quant-research-cn" / "reports" / f"{as_of}_report_zh_{slot}.md"
+    if market == "us":
+        if normalized in {"pre", "morning"}:
+            slot = "pre"
+        elif normalized in {"post", "evening", "daily"}:
+            slot = "post"
+        else:
+            slot = normalized
+        return STACK_ROOT / "quant-research-v1" / "reports" / f"{as_of}_report_zh_{slot}.md"
+    return None
+
+
+def replacement_report_text(text: str, as_of: str, session: str, market: str) -> str:
+    if market not in {"cn", "us"}:
+        return text
+    if text.startswith("# A股量化日报") or text.startswith("# 美股量化日报"):
+        return text
+    title_market = "A股" if market == "cn" else "美股"
+    title = f"# {title_market}量化研究{session_label(session)}日报 - {as_of}"
+    body = text
+    if body.startswith("# Main Strategy V2 Backtest"):
+        body = "\n".join(body.splitlines()[2:]).lstrip()
+    body = body.replace("## 今日交易决策 / Production Decision", "## 今日交易清单")
+    note = "> 新日报已替代旧 agent 报告；可交易名单、观察名单和风险说明分开读。"
+    return f"{title}\n\n{note}\n\n{body}"
+
+
+def validate_market_report_scope(path: Path, market: str) -> None:
+    if market not in {"cn", "us"}:
+        return
+    text = path.read_text(encoding="utf-8")
+    if market == "us":
+        required_prefix = "# 美股量化日报"
+        banned = [
+            "# A股",
+            "A股执行",
+            "A 股",
+            "| CN |",
+            "CN stock basket",
+            "cn_tape_",
+            "cn_oversold",
+            "cn_observed",
+        ]
     else:
-        label = session
-    return f"量化{label}生产决策 — {as_of}"
+        required_prefix = "# A股量化日报"
+        banned = [
+            "# 美股",
+            "| US |",
+            "US stock trades",
+            "us_theme_",
+            "US options",
+        ]
+    if not text.startswith(required_prefix):
+        raise RuntimeError(f"refusing to send {market} report with wrong title: {path}")
+    found = [marker for marker in banned if marker in text]
+    if found:
+        raise RuntimeError(
+            f"refusing to send {market} report with cross-market content: {path}; markers={found[:5]}"
+        )
 
 
-def load_headline(as_of: str) -> str:
+def materialize_legacy_report(as_of: str, session: str, market: str, source: Path) -> Path:
+    target = legacy_report_path(as_of, session, market)
+    if target is None:
+        return source
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = source.read_text(encoding="utf-8")
+    target.write_text(replacement_report_text(text, as_of, session, market), encoding="utf-8")
+    return target
+
+
+def load_headline(as_of: str, market: str) -> str:
     path = report_json_path(as_of)
     if not path.exists():
         return "-"
@@ -125,13 +251,23 @@ def load_headline(as_of: str) -> str:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return "-"
-    return (((payload.get("production_decision_summary") or {}).get("summary") or {}).get("headline")) or "-"
+    summary = ((payload.get("production_decision_summary") or {}).get("summary") or {})
+    if market == "us":
+        return f"US-only report: US stock R={summary.get('us_r', '-')}; CN omitted from this email."
+    if market == "cn":
+        return f"CN-only report: CN stock R={summary.get('cn_r', '-')}; US omitted from this email."
+    return summary.get("headline") or "-"
 
 
 def main() -> None:
     args = parse_args()
-    path = report_path(args.date)
-    subject = subject_for(args.date, args.session)
+    if args.delivery_mode == "prod" and args.market == "all" and not args.dry_run:
+        raise SystemExit(
+            "prod delivery requires --market cn or --market us; "
+            "main_strategy_v2_backtest.md is an internal kitchen ticket, not an email report."
+        )
+    path = report_path(args.date, args.market)
+    subject = subject_for(args.date, args.session, args.market)
 
     if args.dry_run:
         print(f"Dry run: would generate {path}")
@@ -139,7 +275,16 @@ def main() -> None:
         generate_report(args.date, args.start)
 
     if not args.dry_run and not path.exists():
-        raise FileNotFoundError(f"production decision report not found: {path}")
+        if args.market in {"cn", "us"}:
+            path = render_standalone_from_json(args.date, args.market)
+        else:
+            raise FileNotFoundError(f"production decision report not found: {path}")
+    if not args.dry_run:
+        validate_market_report_scope(path, args.market)
+    effective_path = path
+    if not args.dry_run:
+        effective_path = materialize_legacy_report(args.date, args.session, args.market, path)
+        validate_market_report_scope(effective_path, args.market)
 
     if args.delivery_mode == "test":
         recipients, source = _resolve_test_recipients(args.test_recipient)
@@ -153,17 +298,19 @@ def main() -> None:
         effective_subject = subject
         delivery_note = f"prod recipients from config.reporting.recipients: {_prod_recipient_count()}"
 
-    print(f"Report: {path}")
+    print(f"Report: {effective_path}")
+    if effective_path != path:
+        print(f"Source: {path}")
     print(f"Subject: {effective_subject}")
     print(f"Delivery: {args.delivery_mode} ({delivery_note})")
-    print(f"Headline: {load_headline(args.date)}")
+    print(f"Headline: {load_headline(args.date, args.market)}")
 
     if args.dry_run or args.delivery_dry_run:
         print("Gmail send skipped")
         return
 
     msg_ids = send_report_email(
-        report_path=path,
+        report_path=effective_path,
         chart_paths=[],
         to=send_to,
         bcc=send_bcc,

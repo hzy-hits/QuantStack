@@ -33,11 +33,23 @@
 
 若 `Shared Report Model Status` 中 `execution=0`，风险提取不得把任何票写成正式可执行；若 `probation>0`，必须把它作为小仓试错风险单独列出。
 
+## Hedge Fund Risk Contract（必须提取）
+
+- A股新闻只做滞后风险标签：可以提高事件/财务/监管风险等级，但不能降低价格、成交、资金流和联动风险。
+- 最大未对冲风险必须拆成 long alpha、beta hedge、net beta、行业集中、相关簇和单名风险；若 payload 有 portfolio overlay，必须照抄其中的 hedge instrument、hedge R、net beta R 和 VaR proxy。
+- 可以提取指数/期货/ETF 层面的 beta hedge 需求和剩余 beta；不得把单名偏空写成做空交易建议。
+
 ## A股坏票过滤风险（必须提取）
 
 - `cn_lukewarm_momentum_3_8d`：5D涨幅 3%-8% 的半强不强区间，历史样本容易次日兑现；只能写阻断风险。
 - `cn_not_strong_trend_continuation`：不属于强趋势延续层；不能因为主题热度或 HIGH 置信度解除风险。
 - `cn_radar_not_tradeable`、`cn_rank_outside_top10`、`cn_score_below_0_50`、`cn_missing_momentum_quality` 都是试错禁令，不得写成“风险可控”。
+
+## A股退役层风险（必须丢弃）
+
+- `CN legacy structural_core/high_mod`、`legacy_structural_core`、`structural_core/high_mod` 已从当前体系移除；风险提取不得把它写成 baseline、观察池、候选池或“风险可控的旧结构层”。
+- 如果 payload 里仍残留 `structural_core` / `high_mod` A股行，只能归为“退役层残留/旧数据噪音”，不得进入 Trial Risk、Invalidation、Bad-Ticket Filters 的候选解释。
+- 不得用 HIGH/MODERATE 置信度降低其风险等级；退役层的风险动作永远是 0R / 不进入报告交易地图。
 
 ## 规则
 
@@ -45,7 +57,7 @@
 - 格式：固定标题 + 表格 + 列表
 - 先读 `Headline Gate` section；它只作为市场叙事上下文，不是个股执行门禁。mode 不是 `trend` 时，优先强调集中度、失效条件和不确定性，不要强化单边叙事；若出现区间候选或战术延续候选，都要把它们解读为区间/战术 alpha，而非主趋势
 - 数据缺失写 `[缺失]`
-- 不给仓位建议，不给对冲操作建议
+- 不给未在 payload 出现的新仓位建议；可以提取 payload 中已有的组合 beta hedge、剩余 beta 和风险归因
 - A股 T+1 与涨跌停是一级执行风险：不得写“硬止损”；失效条件只能写风控线/次日处理线，并标注跳空、跌停或涨停不可成交风险
 - 涨停票必须单列为“涨停次日盘口风险”，关注集合竞价溢价、封单强度、换手、开板回封质量；不得和普通回踩票使用同一套静态止损表达
 - 影子期权/涨停可选性必须作为单独风险层提取：failed-board、开板回落、T+1 不可退出、成交拥挤、流动性断层，不得把它写成 Meme 或主做多风险已消除。
@@ -53,6 +65,7 @@
 - 必须读取稳定门禁的 `ev_status`：pending 是流程未完成，failed 才是稳定门禁失败；不得把 pending 写成门禁失败
 - 必须读取 `probation_alpha`：这不是正式执行，只提取最大试错风险、加仓禁令和失败条件
 - 必须读取温吞动量 blocker：5D 3%-8% 或 `cn_lukewarm_momentum_3_8d` 必须进入坏票过滤风险，不得进入 Trial Risk
+- 必须丢弃 A股退役层：`structural_core`、`legacy_structural_core`、旧 `cn:core:long:high_mod` 不再是风险可管理对象，只能写“退役层，0R，已移除”
 - 禁用词：综合考量、谨慎乐观、值得关注、密切跟踪、不确定性较大
 - 失效条件必须具体、可观察、可量化（不接受"如果宏观恶化"）
 - 情景触发条件是观测事实，不是概率
@@ -62,6 +75,7 @@
 
 ## Concentration
 - 方向: [N多/N空] ([百分比]多头, [>70%则标注警戒])
+- 组合: long alpha=[R], beta hedge=[R], net beta=[R], VaR proxy=[值]
 - 行业: [cluster描述], ≈[M]独立赌注
 - 因子: [主要暴露]
 
@@ -78,6 +92,11 @@
 | 代码 | blocker | 5D% | 20D% | 风险含义 |
 |------|---------|-----|------|----------|
 （列出温吞动量、非强趋势延续、RADAR不可交易、rank/score/动量字段不合格的标的；没有就写“无坏票过滤命中”）
+
+## Retired CN Layer
+| 代码 | 残留来源 | 处理 |
+|------|----------|------|
+（只列 payload 中残留的 structural_core/high_mod A股行；处理统一写“退役层，0R，已移除”；没有就写“无退役层残留”）
 
 ## Invalidation (每个CORE HIGH)
 | 代码 | 失效条件 |

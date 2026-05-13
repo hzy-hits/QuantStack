@@ -1,0 +1,41 @@
+HOME=/home/ivena
+# Quant Research Pipeline — Auto Schedule
+# System timezone: Asia/Shanghai (CST = UTC+8). All cron times are CST.
+PATH=/home/ivena/miniconda3/bin:/home/ivena/.local/bin:/home/ivena/.nvm/versions/node/v20.19.5/bin:/home/ivena/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+PROJ=/home/ivena/coding/quant-stack/quant-research-v1
+PROJ_CN=/home/ivena/coding/quant-stack/quant-research-cn
+FL=/home/ivena/coding/quant-stack/factor-lab
+QUANT_STACK_ROOT=/home/ivena/coding/quant-stack
+
+# ── US Pipeline (pre/post-market) ───────────────────────────────────────
+0 20 * * 1-5 cd $PROJ && ./scripts/run_full.sh --prod --premarket >> logs/cron_premarket.log 2>&1
+0 5 * * 2-6 cd $PROJ && ./scripts/run_full.sh --prod >> logs/cron_postmarket.log 2>&1
+
+# ── CN Pipeline (pre/post-market) ───────────────────────────────────────
+20 7 * * 1-5 cd $PROJ_CN && QUANT_CN_REVIEW_BACKFILL_DAYS=7 bash scripts/precompute_alpha.sh >> reports/logs/cron_precompute_alpha.log 2>&1
+30 8 * * 1-5 cd $QUANT_STACK_ROOT && ./target/release/quant-stack daily --date $(TZ=Asia/Shanghai date +\%F) --markets cn --session morning --run-producers --with-narrative --send-reports --delivery-mode prod --stack-root $QUANT_STACK_ROOT >> $PROJ_CN/reports/logs/cron_morning.log 2>&1
+0 18 * * 1-5 cd $QUANT_STACK_ROOT && ./target/release/quant-stack daily --date $(TZ=Asia/Shanghai date +\%F) --markets cn --session evening --run-producers --with-narrative --send-reports --delivery-mode prod --stack-root $QUANT_STACK_ROOT >> $PROJ_CN/reports/logs/cron_evening.log 2>&1
+
+# ── Weekly Reports ────────────────────────────────────────────────────────────
+30 9 * * 6 cd $PROJ && ./scripts/run_weekly.sh >> logs/cron_weekly.log 2>&1
+0 10 * * 6 cd $PROJ_CN && bash scripts/weekly_pipeline.sh >> reports/logs/cron_weekly.log 2>&1
+
+# ── Factor Lab Daily ─────────────────────────────────────────────────────────
+0 4 * * 1-5 cd $FL && bash scripts/daily_factors.sh --market cn >> logs/daily_$(date +\%Y\%m\%d).log 2>&1
+0 9 * * 2-6 cd $FL && bash scripts/daily_factors.sh --market us >> logs/daily_$(date +\%Y\%m\%d).log 2>&1
+
+# ── Paper Trading ─────────────────────────────────────────────────────────────
+33 4 * * 2-6 cd $FL && python3 scripts/paper_trade.py record >> logs/paper_$(date +\%Y\%m\%d).log 2>&1
+47 7 * * 2-6 cd $FL && python3 scripts/paper_trade.py evaluate >> logs/paper_$(date +\%Y\%m\%d).log 2>&1
+53 7 * * 2-6 cd $FL && python3 scripts/paper_trade.py report >> logs/paper_$(date +\%Y\%m\%d).log 2>&1
+
+# ── Autoresearch (3 sessions) ────────────────────────────────────────────────
+0 6 * * 1-5 cd $FL && bash scripts/autoresearch.sh --market cn >> logs/autoresearch_$(date +\%Y\%m\%d).log 2>&1
+0 10 * * 1-5 cd $FL && bash scripts/autoresearch.sh >> logs/autoresearch_$(date +\%Y\%m\%d).log 2>&1
+0 14 * * 1-5 cd $FL && bash scripts/autoresearch.sh >> logs/autoresearch_$(date +\%Y\%m\%d).log 2>&1
+
+# ── Weekly Maintenance ────────────────────────────────────────────────────────
+17 8 * * 6 cd $FL && python3 scripts/weekly_maintenance.py --days 250 >> logs/maintenance_$(date +\%Y\%m\%d).log 2>&1
+# ── Quant Watchdog (catch missed US reports after reboot / cron miss) ──────
+@reboot /bin/sleep 180 && cd $PROJ && uv run python scripts/cron_watchdog.py >> logs/cron_watchdog.log 2>&1
+12,27,42,57 * * * * cd $PROJ && uv run python scripts/cron_watchdog.py >> logs/cron_watchdog.log 2>&1

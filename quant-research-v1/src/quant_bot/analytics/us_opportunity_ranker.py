@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -17,10 +18,13 @@ from typing import Any
 
 import duckdb
 
+from quant_bot.analytics import ai_infra_universe
+
 
 STACK_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_opportunity_ranker"
 US_ALPHA_FACTORY_EXECUTION_SLEEVE = "us_v2_stock_probe"
+US_ALPHA_FACTORY_EXECUTION_SLEEVES = {US_ALPHA_FACTORY_EXECUTION_SLEEVE, "us_theme_cluster_momentum"}
 
 
 @dataclass(frozen=True)
@@ -56,10 +60,12 @@ class NewsRiskConfig:
 class RankerConfig:
     score_weights: dict[str, float] = field(
         default_factory=lambda: {
-            "alpha_factory": 0.30,
-            "setup_quality": 0.22,
+            "alpha_factory": 0.26,
+            "setup_quality": 0.18,
             "flow_options_quality": 0.22,
-            "price_quality": 0.12,
+            "price_quality": 0.18,
+            "supercycle_priority": 0.08,
+            "ai_evidence": 0.06,
             "risk_penalty": -0.14,
             "headline_risk": -0.20,
         }
@@ -71,6 +77,104 @@ class RankerConfig:
 
 
 DEFAULT_CONFIG = RankerConfig()
+AI_EVIDENCE_TERMS = {
+    "ai",
+    "artificial intelligence",
+    "datacenter",
+    "data center",
+    "accelerator",
+    "gpu",
+    "hbm",
+    "memory",
+    "optical",
+    "cpo",
+    "networking",
+    "cloud",
+    "inference",
+    "nuclear",
+    "power",
+    "grid",
+    "space",
+    "satellite",
+}
+SUPPLY_LINK_TERMS = {
+    "supplier",
+    "supply",
+    "customer",
+    "contract",
+    "order",
+    "backlog",
+    "design win",
+    "capacity",
+    "partnership",
+    "deal",
+}
+NEGATIVE_SUPPLY_TERMS = {
+    "cancelled purchase order",
+    "canceled purchase order",
+    "cancelled",
+    "canceled",
+    "cancel",
+    "terminated",
+    "termination",
+    "lost",
+    "losing",
+    "risk losing",
+    "cut",
+    "cuts",
+    "reduced",
+    "reduction",
+    "delay",
+    "delayed",
+    "breach",
+    "breaches",
+    "dispute",
+    "sours",
+    "soured",
+    "delayed disclosure",
+    "short seller",
+    "lawsuit",
+    "investigation",
+    "downgrade",
+    "withdrawn",
+    "suspended",
+    "halted",
+}
+US_COMPANY_ALIASES = {
+    "AAOI": {"aaoi", "applied optoelectronics"},
+    "AMD": {"amd", "advanced micro"},
+    "AMZN": {"amazon", "aws", "amzn"},
+    "ANET": {"arista", "anet"},
+    "AVGO": {"broadcom", "avgo"},
+    "CIEN": {"ciena", "cien"},
+    "COHR": {"coherent", "cohr"},
+    "DELL": {"dell"},
+    "GOOGL": {"google", "alphabet", "googl"},
+    "HPE": {"hewlett packard enterprise", "hpe"},
+    "INTC": {"intel", "intc"},
+    "LITE": {"lumentum", "lite"},
+    "MRVL": {"marvell", "mrvl"},
+    "MSFT": {"microsoft", "azure", "msft"},
+    "MU": {"micron", "mu"},
+    "NET": {"cloudflare", "net"},
+    "NTAP": {"netapp", "ntap"},
+    "NVDA": {"nvidia", "nvda"},
+    "ORCL": {"oracle", "orcl"},
+    "POET": {"poet"},
+    "STX": {"seagate", "stx"},
+    "WDC": {"western digital", "wdc"},
+}
+
+
+def term_in_text(term: str, text: str) -> bool:
+    if not term:
+        return False
+    return re.search(rf"(?<![a-z0-9]){re.escape(term.lower())}(?![a-z0-9])", text) is not None
+
+
+def symbol_alias_in_text(symbol: str, text: str) -> bool:
+    aliases = {symbol.lower()} | US_COMPANY_ALIASES.get(symbol.upper(), set())
+    return any(alias and term_in_text(alias, text) for alias in aliases)
 
 
 def as_iso(value: Any) -> str | None:
@@ -216,15 +320,17 @@ def recent_news(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date,
     published_col = "published_at" if "published_at" in cols else "date" if "date" in cols else ""
     summary_col = "summary" if "summary" in cols else ""
     source_col = "source" if "source" in cols else ""
+    url_col = "url" if "url" in cols else ""
     if not symbol_col or not headline_col or not published_col:
         return {}
     summary_select = f"{summary_col} AS summary" if summary_col else "NULL AS summary"
     source_select = f"{source_col} AS source" if source_col else "NULL AS source"
+    url_select = f"{url_col} AS url" if url_col else "NULL AS url"
     rows = rows_as_dicts(
         con,
         f"""
         SELECT {symbol_col} AS symbol, {headline_col} AS headline,
-               {summary_select}, {source_select}, {published_col} AS published_at
+               {summary_select}, {source_select}, {url_select}, {published_col} AS published_at
         FROM news_items
         WHERE {published_col} >= CAST(? AS TIMESTAMP)
           AND {published_col} < CAST(? AS TIMESTAMP)
@@ -243,19 +349,21 @@ def recent_news(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date,
     return out
 
 
-def headline_risk(items: list[dict[str, Any]], config: NewsRiskConfig) -> dict[str, Any]:
+def headline_risk(items: list[dict[str, Any]], config: NewsRiskConfig, symbol: str = "") -> dict[str, Any]:
     risk = 0.0
     flags: list[str] = []
     latest_headline = ""
     latest_date = None
     for item in items:
         headline = str(item.get("headline") or "")
-        if not latest_headline:
+        text = f"{headline} {item.get('summary') or ''}".lower()
+        if symbol and not symbol_alias_in_text(symbol, text):
+            continue
+        if not latest_headline and (not symbol or symbol_alias_in_text(symbol, headline.lower())):
             latest_headline = headline
             latest_date = as_iso(item.get("published_at"))
-        text = f"{headline} {item.get('summary') or ''}".lower()
-        severe_hits = [term for term in config.severe_terms if term in text]
-        negative_hits = [term for term in config.negative_terms if term in text]
+        severe_hits = [term for term in config.severe_terms if term_in_text(term, text)]
+        negative_hits = [term for term in config.negative_terms if term_in_text(term, text)]
         if severe_hits:
             risk = max(risk, 0.82)
             flags.extend(severe_hits)
@@ -267,6 +375,75 @@ def headline_risk(items: list[dict[str, Any]], config: NewsRiskConfig) -> dict[s
         "headline_flags": sorted(set(flags)),
         "latest_headline": latest_headline,
         "latest_headline_date": latest_date,
+    }
+
+
+def ai_news_evidence(items: list[dict[str, Any]], layer: str, symbol: str) -> dict[str, Any]:
+    if not items:
+        return {
+            "ai_evidence_score": 0.0,
+            "supplier_evidence_state": "missing_recent_news",
+        }
+    layer_terms = {term for term in str(layer or "").replace("_", " ").split() if len(term) >= 3}
+    terms = AI_EVIDENCE_TERMS | layer_terms
+    aliases = {symbol.lower()} | US_COMPANY_ALIASES.get(symbol.upper(), set())
+    best: dict[str, Any] | None = None
+    best_score = 0.0
+    best_hits: list[str] = []
+    negative_best: dict[str, Any] | None = None
+    negative_score = 0.0
+    negative_best_hits: list[str] = []
+    for item in items:
+        text = f"{item.get('headline') or ''} {item.get('summary') or ''}".lower()
+        if not any(alias and term_in_text(alias, text) for alias in aliases):
+            continue
+        ai_hits = sorted(term for term in terms if term_in_text(term, text))
+        supply_hits = sorted(term for term in SUPPLY_LINK_TERMS if term_in_text(term, text))
+        negative_hits = sorted(term for term in NEGATIVE_SUPPLY_TERMS if term_in_text(term, text))
+        if negative_hits and supply_hits:
+            score = min(0.18, 0.08 + 0.02 * len(ai_hits) + 0.03 * len(supply_hits))
+            if negative_best is None or score > negative_score:
+                negative_best = item
+                negative_score = score
+                negative_best_hits = ai_hits[:6] + [f"supply:{term}" for term in supply_hits[:4]]
+                negative_best_hits += [f"negative:{term}" for term in negative_hits[:6]]
+            continue
+        if not ai_hits and not supply_hits:
+            continue
+        score = min(1.0, 0.45 + 0.08 * len(ai_hits) + 0.14 * len(supply_hits))
+        if score > best_score:
+            best = item
+            best_score = score
+            best_hits = ai_hits[:6] + [f"supply:{term}" for term in supply_hits[:4]]
+    if negative_best:
+        best = negative_best
+        best_score = negative_score
+        best_hits = negative_best_hits
+    if not best:
+        return {
+            "ai_evidence_score": 0.0,
+            "supplier_evidence_state": "needs_primary_confirmation",
+        }
+    if any(hit.startswith("negative:") for hit in best_hits):
+        state = "negative_supply_evidence"
+    elif any(hit.startswith("supply:") for hit in best_hits):
+        state = "source_linked_supply_evidence"
+    else:
+        state = "theme_news_only"
+    headline = str(best.get("headline") or "")
+    summary = str(best.get("summary") or "")
+    headline_hit_count = sum(1 for hit in best_hits if hit.replace("supply:", "") in headline.lower())
+    summary_hit_count = sum(1 for hit in best_hits if hit.replace("supply:", "") in summary.lower())
+    display_text = summary if summary and summary_hit_count > headline_hit_count else headline
+    return {
+        "ai_evidence_score": round(best_score, 4),
+        "supplier_evidence_state": state,
+        "ai_evidence_headline": best.get("headline"),
+        "ai_evidence_text": display_text[:240],
+        "ai_evidence_source": best.get("source"),
+        "ai_evidence_url": best.get("url"),
+        "ai_evidence_date": as_iso(best.get("published_at")),
+        "ai_evidence_hits": best_hits,
     }
 
 
@@ -305,6 +482,22 @@ def price_quality(row: dict[str, Any]) -> float:
     ret20_score = 0.5 if ret_20d is None else clamp((ret_20d + 8.0) / 24.0)
     extension_penalty = 0.15 if (ret_5d is not None and ret_5d > 10.0) or (ret_20d is not None and ret_20d > 25.0) else 0.0
     return clamp(0.55 * ret5_score + 0.45 * ret20_score - extension_penalty)
+
+
+def supercycle_priority_score(row: dict[str, Any]) -> float:
+    layer = str(row.get("supercycle_layer") or "").strip()
+    priority_raw = row.get("supercycle_priority")
+    try:
+        priority = int(priority_raw)
+    except (TypeError, ValueError):
+        priority = 9 if not layer else 3
+    if priority <= 1:
+        return 1.0
+    if priority == 2:
+        return 0.85
+    if priority == 3:
+        return 0.65
+    return 0.25 if not layer else 0.45
 
 
 def risk_penalty(row: dict[str, Any]) -> float:
@@ -346,7 +539,8 @@ def enrich_rows(
             "options_quality_reason": option_reason,
             "option_expression": (option_row or {}).get("expression") or candidate.get("option_expression"),
         }
-        combined.update(headline_risk(news.get(symbol) or [], config.headline))
+        combined.update(headline_risk(news.get(symbol) or [], config.headline, symbol))
+        combined.update(ai_news_evidence(news.get(symbol) or [], str(combined.get("supercycle_layer") or ""), symbol))
         rows.append(combined)
     return rows
 
@@ -355,38 +549,49 @@ def production_tier(rank: int, row: dict[str, Any], config: RankerConfig) -> tup
     headline = round_or_none(row.get("headline_risk")) or 0.0
     if headline >= config.event_risk_zero_r:
         return "event_risk_watch", "negative_headline_no_probe", "0R until event/news risk clears"
-    if row.get("alpha_sleeve_id") != US_ALPHA_FACTORY_EXECUTION_SLEEVE:
+    if row.get("supplier_evidence_state") == "negative_supply_evidence":
+        return "event_risk_watch", "negative_supply_no_trade", "0R until supply/order risk is resolved"
+    if row.get("alpha_sleeve_id") not in US_ALPHA_FACTORY_EXECUTION_SLEEVES:
         return "ranked_watch", "rank_only_no_new_trade", "0R until Alpha Factory sleeve promotion"
     options_q = round_or_none(row.get("options_quality")) or 0.0
-    action = "option_or_stock_probe" if options_q >= 65.0 else "stock_probe"
+    action = "buy_stock_with_options_confirmation" if options_q >= 65.0 else "buy_stock_position"
     if rank <= config.top_probe_count:
-        return "top_probe", action, "0.25R/name; basket cap set by portfolio overlay"
+        return "top_stock_trade", action, "0.50R/name; basket cap set by portfolio overlay"
     if rank <= config.secondary_probe_count:
-        return "secondary_probe", action, "0.10R/name after pullback/retest confirmation"
+        return "secondary_stock_trade", action, "0.25R/name after pullback/retest confirmation"
     return "active_watch", "prepare_order_but_wait_for_price", "0R default unless price confirms"
 
 
 def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG) -> list[dict[str, Any]]:
     for row in rows:
-        alpha_score = 1.0 if row.get("alpha_sleeve_id") == US_ALPHA_FACTORY_EXECUTION_SLEEVE else 0.15
+        alpha_score = 1.0 if row.get("alpha_sleeve_id") in US_ALPHA_FACTORY_EXECUTION_SLEEVES else 0.15
         setup = setup_quality(row)
         options_q = clamp((round_or_none(row.get("flow_options_quality")) or 50.0) / 100.0)
         price = price_quality(row)
+        supercycle = supercycle_priority_score(row)
+        ai_evidence = clamp(round_or_none(row.get("ai_evidence_score")) or 0.0)
         penalty = risk_penalty(row)
         headline = clamp(round_or_none(row.get("headline_risk")) or 0.0)
+        joint_signal = clamp(0.38 * price + 0.34 * options_q + 0.28 * setup)
         raw = (
-            config.score_weights["alpha_factory"] * alpha_score
-            + config.score_weights["setup_quality"] * setup
-            + config.score_weights["flow_options_quality"] * options_q
-            + config.score_weights["price_quality"] * price
-            + config.score_weights["risk_penalty"] * penalty
-            + config.score_weights["headline_risk"] * headline
+            config.score_weights.get("alpha_factory", 0.0) * alpha_score
+            + config.score_weights.get("setup_quality", 0.0) * setup
+            + config.score_weights.get("flow_options_quality", 0.0) * options_q
+            + config.score_weights.get("price_quality", 0.0) * price
+            + config.score_weights.get("supercycle_priority", 0.0) * supercycle
+            + config.score_weights.get("ai_evidence", 0.0) * ai_evidence
+            + config.score_weights.get("risk_penalty", 0.0) * penalty
+            + config.score_weights.get("headline_risk", 0.0) * headline
         )
+        row["joint_signal_score"] = round(joint_signal * 100.0, 2)
         row["score_components"] = {
             "alpha_factory": round(alpha_score * 100.0, 2),
             "setup_quality": round(setup * 100.0, 2),
             "flow_options_quality": round(options_q * 100.0, 2),
             "price_quality": round(price * 100.0, 2),
+            "supercycle_priority": round(supercycle * 100.0, 2),
+            "ai_evidence": round(ai_evidence * 100.0, 2),
+            "joint_price_options_news": round(joint_signal * 100.0, 2),
             "risk_penalty": round(penalty * 100.0, 2),
             "headline_risk": round(headline * 100.0, 2),
         }
@@ -422,9 +627,41 @@ def public_row(row: dict[str, Any]) -> dict[str, Any]:
         "options_quality",
         "flow_options_quality",
         "options_quality_reason",
+        "joint_signal_score",
         "trend_regime",
         "signal_confidence",
         "execution_mode",
+        "theme_id",
+        "theme_label",
+        "theme_score",
+        "member_rank",
+        "ai_infra_universe",
+        "ai_infra_asset_pool",
+        "ai_infra_market_country",
+        "ai_infra_bfs_depth",
+        "ai_infra_module",
+        "ai_infra_current_pool",
+        "ai_infra_total_score",
+        "ai_infra_score_bucket",
+        "ai_infra_evidence_state",
+        "ai_infra_counterevidence",
+        "ai_infra_dependency_path",
+        "ai_infra_dependency_edge",
+        "ai_infra_verification_status",
+        "supercycle_layer",
+        "supercycle_priority",
+        "supply_chain_role",
+        "bottleneck_focus",
+        "evidence_contract",
+        "research_index",
+        "ai_evidence_score",
+        "supplier_evidence_state",
+        "ai_evidence_headline",
+        "ai_evidence_text",
+        "ai_evidence_source",
+        "ai_evidence_url",
+        "ai_evidence_date",
+        "ai_evidence_hits",
         "headline_risk",
         "headline_flags",
         "latest_headline_date",
@@ -449,23 +686,26 @@ def render_markdown(payload: dict[str, Any]) -> str:
     lines = [
         f"# US Opportunity Ranker - {payload['as_of']}",
         "",
-        "Production contract: only `us_v2_stock_probe` can emit Execution Alpha. Legacy HIGH/MOD rows remain ranked watch until Alpha Factory promotes them.",
+        "Production contract: `us_theme_cluster_momentum` and `us_v2_stock_probe` can emit stock-trade Execution Alpha. Price, news, and options/flow are scored together; options are decision evidence, not the traded instrument.",
         "",
-        "| Rank | Symbol | Sleeve | Tier | Action | Score | Headline | Options/Flow | R:R | Trend | Why |",
-        "|---:|---|---|---|---|---:|---:|---:|---:|---|---|",
+        "| Rank | Symbol | Sleeve | Layer | Evidence | Tier | Action | Score | Joint | Headline | Options/Flow | R:R | Trend | Why |",
+        "|---:|---|---|---|---|---|---|---:|---:|---:|---:|---:|---|---|",
     ]
     for row in rows:
         why = str(row.get("reason") or row.get("options_quality_reason") or "").replace("|", "/")
         if len(why) > 70:
             why = why[:67] + "..."
         lines.append(
-            "| {rank} | {symbol} | {sleeve} | {tier} | {action} | {score} | {headline} | {options} | {rr} | {trend} | {why} |".format(
+            "| {rank} | {symbol} | {sleeve} | {layer} | {evidence} | {tier} | {action} | {score} | {joint} | {headline} | {options} | {rr} | {trend} | {why} |".format(
                 rank=row.get("rank"),
                 symbol=row.get("symbol") or "",
                 sleeve=row.get("alpha_sleeve_id") or "rank_only",
+                layer=row.get("supercycle_layer") or "-",
+                evidence=row.get("supplier_evidence_state") or "-",
                 tier=row.get("production_tier") or "",
                 action=row.get("production_action") or "",
                 score=fmt_num(row.get("rank_score")),
+                joint=fmt_num(row.get("joint_signal_score"), 0),
                 headline=fmt_num((round_or_none(row.get("headline_risk")) or 0.0) * 100.0, 0),
                 options=fmt_num(row.get("flow_options_quality"), 0),
                 rr=fmt_num(row.get("rr_ratio"), 2),
@@ -477,8 +717,10 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Operating Rule",
         "",
-        "- Top sleeve rows can be probed as stock or option/stock expression depending on options quality.",
-        "- Legacy rows and non-sleeve rows are ranked watch with 0R default size.",
+        "- Top sleeve rows become stock trades; options/flow quality only changes ranking and confirmation.",
+        "- AI supercycle layer/priority is a ranking input; it does not by itself prove a supplier relationship.",
+        "- News is used jointly with price and options/flow because US events can reprice immediately; options remain auxiliary evidence.",
+        "- Strong theme-basket sleeve rows can become stock trades; legacy single-name rows remain ranked watch with 0R default size.",
         "- Event/news risk forces 0R even when the sleeve is otherwise valid.",
     ]
     return "\n".join(lines) + "\n"
@@ -500,32 +742,34 @@ def write_duckdb(path: Path, rows: list[dict[str, Any]], as_of: date) -> None:
             """
         )
         con.execute("DELETE FROM us_opportunity_ranker WHERE as_of = CAST(? AS DATE)", [as_of.isoformat()])
-        con.executemany(
-            """
-            INSERT INTO us_opportunity_ranker VALUES (
-                CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )
-            """,
+        records = [
             [
-                [
-                    as_of.isoformat(),
-                    row.get("rank"),
-                    row.get("symbol"),
-                    row.get("rank_score"),
-                    row.get("alpha_sleeve_id"),
-                    row.get("alpha_factory_role"),
-                    row.get("production_tier"),
-                    row.get("production_action"),
-                    row.get("size_hint"),
-                    row.get("headline_risk"),
-                    row.get("options_quality"),
-                    row.get("rr_ratio"),
-                    row.get("trend_regime"),
-                    json.dumps(row, ensure_ascii=False, sort_keys=True, default=str),
-                ]
-                for row in rows
-            ],
-        )
+                as_of.isoformat(),
+                row.get("rank"),
+                row.get("symbol"),
+                row.get("rank_score"),
+                row.get("alpha_sleeve_id"),
+                row.get("alpha_factory_role"),
+                row.get("production_tier"),
+                row.get("production_action"),
+                row.get("size_hint"),
+                row.get("headline_risk"),
+                row.get("options_quality"),
+                row.get("rr_ratio"),
+                row.get("trend_regime"),
+                json.dumps(row, ensure_ascii=False, sort_keys=True, default=str),
+            ]
+            for row in rows
+        ]
+        if records:
+            con.executemany(
+                """
+                INSERT INTO us_opportunity_ranker VALUES (
+                    CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                records,
+            )
     finally:
         con.close()
 
@@ -539,7 +783,22 @@ def build_ranker_payload(
     source_report: str | None = None,
     top: int = 30,
     config: RankerConfig = DEFAULT_CONFIG,
+    ai_infra_root: Path | None = None,
+    ai_infra_mode: str = "off",
 ) -> dict[str, Any]:
+    input_candidate_count = len(candidates)
+    ai_infra_gate = None
+    if ai_infra_mode != "off":
+        include_all = ai_infra_mode in {"expand", "enforce_expand"}
+        candidates, gate = ai_infra_universe.merge_with_universe_candidates(
+            candidates,
+            market="US",
+            ai_infra_root=ai_infra_root,
+            include_all_universe=include_all,
+        )
+        ai_infra_gate = gate.as_dict()
+        candidate_status = f"{candidate_status}+ai_infra_{ai_infra_mode}"
+
     symbols = sorted({normalize_symbol(row.get("symbol")) for row in candidates if normalize_symbol(row.get("symbol"))})
     options: dict[str, dict[str, Any]] = {}
     prices: dict[str, dict[str, Any]] = {}
@@ -560,13 +819,18 @@ def build_ranker_payload(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "mode": "production_opportunity_ranker",
         "candidate_status": candidate_status,
+        "input_candidate_count": input_candidate_count,
         "candidate_count": len(candidates),
         "ranked_count": len(public_rows),
         "source_report": source_report,
         "us_db": str(us_db),
+        "ai_infra_mode": ai_infra_mode,
+        "ai_infra_root": str(ai_infra_root or ai_infra_universe.DEFAULT_AI_INFRA_ROOT),
+        "ai_infra_gate": ai_infra_gate,
         "score_config": asdict(config),
         "score_weights": config.score_weights,
         "notes": [
+            "Candidate universe is the ai_infra BFS workbench when ai_infra_mode is active.",
             "Alpha Factory sleeve membership is the execution contract.",
             "Options/flow quality controls expression choice, not legacy promotion.",
             "Headline/event risk forces 0R watch.",

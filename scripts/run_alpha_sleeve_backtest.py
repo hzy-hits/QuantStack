@@ -10,11 +10,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import statistics
 import sys
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -27,55 +25,16 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 import run_main_strategy_v2_backtest as v2  # noqa: E402
-
-try:
-    import pandas as pd
-except ImportError:  # pragma: no cover - the repo already depends on pandas for factor-lab.
-    pd = None  # type: ignore[assignment]
+from sleeves import build_sleeves  # noqa: E402
+from sleeves.base import Sleeve, daily_series, fmt_num, fmt_pct, pearson_corr  # noqa: E402
+from sleeves.factor_lab import FACTOR_LAB_CORR_BLOCK_THRESHOLD  # noqa: E402
+from sleeves.portfolio_hedge import build_portfolio_hedged_backtest  # noqa: E402
 
 
 DEFAULT_START = "2026-03-01"
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "alpha_factory"
 DEFAULT_FACTOR_LAB_DB = STACK_ROOT / "factor-lab" / "data" / "factor_lab.duckdb"
-FACTOR_LAB_CORR_BLOCK_THRESHOLD = 0.85
-FACTOR_LAB_MIN_PROB_POSITIVE = 0.80
-FACTOR_LAB_GATE_MODE = "opportunity"
-FACTOR_LAB_AUTO_PROD_CONTRACTS = {
-    "daily_price_overlay": "action_overlay",
-}
-
-
-@dataclass
-class Sleeve:
-    sleeve_id: str
-    market: str
-    label: str
-    signal_rule: str
-    horizon: str
-    data_status: str
-    money_status: str
-    notes: str
-    rows: list[dict[str, Any]]
-    source_factor_id: str | None = None
-
-    def metrics_dict(self) -> dict[str, Any]:
-        metrics = v2.compute_metrics(self.label, self.rows).to_dict()
-        metrics.update(
-            {
-                "sleeve_id": self.sleeve_id,
-                "market": self.market,
-                "signal_rule": self.signal_rule,
-                "horizon": self.horizon,
-                "data_status": self.data_status,
-                "money_status": self.money_status,
-                "top5_pnl_share": v2.round_or_none(top5_pnl_share(self.rows)),
-                "mean_daily_breadth": v2.round_or_none(mean_daily_breadth(self.rows)),
-                "notes": self.notes,
-            }
-        )
-        if self.source_factor_id:
-            metrics["factor_id"] = self.source_factor_id
-        return metrics
+PROMOTION_GATE_VERSION = "calibrated_window_v1"
 
 
 def parse_args() -> argparse.Namespace:
@@ -94,852 +53,8 @@ def parse_date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
 
 
-def fmt_pct(value: Any, digits: int = 2) -> str:
-    return v2.fmt_pct(value, digits)
-
-
-def fmt_num(value: Any, digits: int = 2) -> str:
-    return v2.fmt_num(value, digits)
-
-
-def table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
-    return v2.table_exists(con, table)
-
-
-def rows_as_dicts(con: duckdb.DuckDBPyConnection, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-    return v2.rows_as_dicts(con, sql, params)
-
-
 def latest_report_date(us_db: Path, cn_db: Path) -> date:
     return v2.infer_report_date(us_db, cn_db)
-
-
-def top5_pnl_share(rows: list[dict[str, Any]]) -> float | None:
-    returns = [float(ret) for row in rows if (ret := v2.round_or_none(row.get("return_pct"))) is not None]
-    positives = [ret for ret in returns if ret > 0]
-    if not positives:
-        return None
-    denom = sum(positives)
-    if denom <= 1e-12:
-        return None
-    return sum(sorted(positives, reverse=True)[:5]) / denom
-
-
-def mean_daily_breadth(rows: list[dict[str, Any]]) -> float | None:
-    by_date: dict[str, set[str]] = {}
-    for row in rows:
-        report_date = v2.as_iso(row.get("report_date"))
-        symbol = str(row.get("symbol") or "")
-        if report_date and symbol and v2.round_or_none(row.get("return_pct")) is not None:
-            by_date.setdefault(report_date, set()).add(symbol)
-    if not by_date:
-        return None
-    return statistics.fmean(len(symbols) for symbols in by_date.values())
-
-
-def daily_series(rows: list[dict[str, Any]]) -> dict[str, float]:
-    grouped: dict[str, list[float]] = {}
-    for row in rows:
-        report_date = v2.as_iso(row.get("report_date"))
-        ret = v2.round_or_none(row.get("return_pct"))
-        if report_date and ret is not None:
-            grouped.setdefault(report_date, []).append(float(ret))
-    return {key: statistics.fmean(values) for key, values in sorted(grouped.items()) if values}
-
-
-def lcb80_pct(values: list[float]) -> float | None:
-    if not values:
-        return None
-    if len(values) == 1:
-        return values[0]
-    std = statistics.stdev(values)
-    return statistics.fmean(values) - v2.LCB80_Z * std / math.sqrt(len(values))
-
-
-def normal_cdf(value: float) -> float:
-    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
-
-
-def probabilistic_positive_mean(metrics: dict[str, Any]) -> float | None:
-    n = int(metrics.get("n") or 0)
-    avg = v2.round_or_none(metrics.get("avg_pct"))
-    std = v2.round_or_none(metrics.get("std_pct"))
-    if n < 2 or avg is None or std is None or std <= 1e-12:
-        return None
-    return normal_cdf(float(avg) / (float(std) / math.sqrt(n)))
-
-
-def deflated_lcb80_pct(metrics: dict[str, Any], n_trials: int) -> float | None:
-    n = int(metrics.get("n") or 0)
-    avg = v2.round_or_none(metrics.get("avg_pct"))
-    std = v2.round_or_none(metrics.get("std_pct"))
-    if n < 2 or avg is None or std is None or std <= 1e-12:
-        return v2.round_or_none(metrics.get("lcb80_pct"))
-    trial_z = math.sqrt(2.0 * math.log(max(int(n_trials or 1), 1)))
-    return float(avg) - (v2.LCB80_Z + trial_z) * float(std) / math.sqrt(n)
-
-
-def rolling_oos_min_lcb80_pct(rows: list[dict[str, Any]], windows: int = 3) -> float | None:
-    series = daily_series(rows)
-    if len(series) < windows * 5:
-        return None
-    ordered = [series[key] for key in sorted(series)]
-    chunk_size = math.ceil(len(ordered) / windows)
-    lcbs = [
-        lcb80_pct(ordered[idx : idx + chunk_size])
-        for idx in range(0, len(ordered), chunk_size)
-    ]
-    clean = [value for value in lcbs if value is not None]
-    return min(clean) if len(clean) == windows else None
-
-
-def pearson_corr(a: dict[str, float], b: dict[str, float]) -> float | None:
-    keys = sorted(set(a) & set(b))
-    if len(keys) < 3:
-        return None
-    xs = [a[key] for key in keys]
-    ys = [b[key] for key in keys]
-    mx = statistics.fmean(xs)
-    my = statistics.fmean(ys)
-    num = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=False))
-    den_x = math.sqrt(sum((x - mx) ** 2 for x in xs))
-    den_y = math.sqrt(sum((y - my) ** 2 for y in ys))
-    if den_x <= 1e-12 or den_y <= 1e-12:
-        return None
-    return num / (den_x * den_y)
-
-
-def money_status_for(
-    *,
-    metrics: dict[str, Any],
-    role: str,
-    data_status: str,
-    min_n: int,
-) -> str:
-    n = int(metrics.get("n") or 0)
-    if data_status.startswith("missing") or data_status.startswith("no_"):
-        return "no_data"
-    if role == "baseline":
-        return "baseline_only"
-    if role == "shadow":
-        return "shadow_only"
-    if role == "radar":
-        return "radar_only"
-    if role == "research":
-        return "research_only"
-    if role == "overlay":
-        return "report_overlay"
-    if role == "probe":
-        return "stock_probe_only"
-    if n <= 0:
-        return "no_data"
-    return "money_candidate"
-
-
-def make_sleeve(
-    *,
-    sleeve_id: str,
-    market: str,
-    label: str,
-    signal_rule: str,
-    horizon: str,
-    data_status: str,
-    role: str,
-    notes: str,
-    rows: list[dict[str, Any]],
-    min_money_n: int,
-) -> Sleeve:
-    metrics = v2.compute_metrics(label, rows).to_dict()
-    return Sleeve(
-        sleeve_id=sleeve_id,
-        market=market,
-        label=label,
-        signal_rule=signal_rule,
-        horizon=horizon,
-        data_status=data_status,
-        money_status=money_status_for(metrics=metrics, role=role, data_status=data_status, min_n=min_money_n),
-        notes=notes,
-        rows=rows,
-    )
-
-
-def factor_lab_role(report_contract: str, money_readiness: str) -> str:
-    contract = str(report_contract or "research_only")
-    readiness = str(money_readiness or "research_only")
-    if contract == "fresh_buy_gate" and readiness in {"money_ready", "money_candidate"}:
-        return "money"
-    if contract in {"action_overlay", "setup_overlay", "risk_warning", "hold_overlay"}:
-        return "overlay"
-    return "research"
-
-
-def resolve_factor_lab_production_contract(
-    report_contract: str,
-    money_readiness: str,
-    sleeve_id: str,
-) -> tuple[str, str, str | None]:
-    """Promoted daily-price factors are production overlays unless explicitly downgraded.
-
-    Older Factor Lab rows defaulted to `research_only` for parser compatibility.
-    Once such a factor has promoted sleeve returns, treat the daily-price sleeve
-    as an executable overlay input; Alpha Factory records weak evidence as
-    opportunity flags instead of blocking the sleeve.
-    """
-    contract = str(report_contract or "research_only").strip().lower()
-    readiness = str(money_readiness or "research_only").strip().lower()
-    sleeve = str(sleeve_id or "").strip().lower()
-    if contract == "research_only" and sleeve in FACTOR_LAB_AUTO_PROD_CONTRACTS:
-        promoted_contract = FACTOR_LAB_AUTO_PROD_CONTRACTS[sleeve]
-        return promoted_contract, "money_candidate", f"auto_prod_contract={promoted_contract}"
-    return contract, readiness, None
-
-
-def factor_lab_money_status(
-    *,
-    label: str,
-    rows: list[dict[str, Any]],
-    report_contract: str,
-    money_readiness: str,
-    n_trials: int,
-    min_money_n: int,
-) -> tuple[str, str]:
-    role = factor_lab_role(report_contract, money_readiness)
-    metrics = v2.compute_metrics(label, rows).to_dict()
-    double_cost = v2.compute_metrics(label + " double-cost", rows, return_key="double_cost_return_pct").to_dict()
-    top_share = top5_pnl_share(rows)
-    prob_positive = probabilistic_positive_mean(metrics)
-    deflated_lcb = deflated_lcb80_pct(metrics, n_trials)
-    rolling_lcb = rolling_oos_min_lcb80_pct(rows)
-    opportunity_flags: list[str] = []
-    if int(metrics.get("n") or 0) < min_money_n:
-        opportunity_flags.append("sample_thin")
-    if (metrics.get("lcb80_pct") or 0.0) <= 0.0:
-        opportunity_flags.append("lcb80<=0")
-    if top_share is not None and top_share > 0.30:
-        opportunity_flags.append("top5_pnl_share>30%")
-    if (double_cost.get("lcb80_pct") or 0.0) <= 0.0:
-        opportunity_flags.append("double_cost_lcb80<=0")
-    if prob_positive is not None and prob_positive < FACTOR_LAB_MIN_PROB_POSITIVE:
-        opportunity_flags.append("prob_positive<80%")
-    if deflated_lcb is not None and deflated_lcb <= 0.0:
-        opportunity_flags.append("deflated_lcb80<=0")
-    if rolling_lcb is not None and rolling_lcb <= 0.0:
-        opportunity_flags.append("rolling_oos_min_lcb80<=0")
-    note = (
-        f"contract={report_contract}; readiness={money_readiness}; mode={FACTOR_LAB_GATE_MODE}; "
-        f"double_cost_lcb80={fmt_pct(double_cost.get('lcb80_pct'))}; "
-        f"top5_pnl_share={fmt_pct((top_share or 0.0) * 100.0) if top_share is not None else '-'}; "
-        f"n_trials={max(int(n_trials or 1), 1)}; "
-        f"prob_positive={fmt_pct(prob_positive * 100.0) if prob_positive is not None else '-'}; "
-        f"deflated_lcb80={fmt_pct(deflated_lcb)}; "
-        f"rolling_oos_min_lcb80={fmt_pct(rolling_lcb)}"
-    )
-    if opportunity_flags:
-        note = f"{note}; opportunity_flags={','.join(opportunity_flags)}"
-    if role == "research":
-        return "research_only", note
-    if role == "overlay":
-        return "report_overlay", note
-    return "money_candidate", note
-
-
-def factor_lab_trial_counts_by_market(
-    con: duckdb.DuckDBPyConnection,
-    as_of: date,
-) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    if table_exists(con, "factor_experiment_ledger"):
-        rows = rows_as_dicts(
-            con,
-            """
-            SELECT market, COUNT(DISTINCT experiment_id) AS n_trials
-            FROM factor_experiment_ledger
-            WHERE market IS NOT NULL
-              AND CAST(ts AS DATE) <= CAST(? AS DATE)
-            GROUP BY market
-            """,
-            [as_of.isoformat()],
-        )
-        counts.update(
-            {
-                str(row.get("market") or ""): max(int(row.get("n_trials") or 0), 1)
-                for row in rows
-                if row.get("market")
-            }
-        )
-
-    if table_exists(con, "factor_registry"):
-        rows = rows_as_dicts(
-            con,
-            """
-            SELECT market, COUNT(*) AS n_trials
-            FROM factor_registry
-            WHERE market IS NOT NULL
-            GROUP BY market
-            """,
-            [],
-        )
-        for row in rows:
-            market = str(row.get("market") or "")
-            if not market:
-                continue
-            counts[market] = max(counts.get(market, 1), int(row.get("n_trials") or 1))
-
-    return counts
-
-
-def load_factor_lab_sleeves(
-    factor_lab_db: Path,
-    start: date,
-    as_of: date,
-    min_money_n: int,
-) -> list[Sleeve]:
-    if not factor_lab_db.exists():
-        return []
-    con = duckdb.connect(str(factor_lab_db), read_only=True)
-    try:
-        if not table_exists(con, "factor_sleeve_returns"):
-            return []
-        trial_counts = factor_lab_trial_counts_by_market(con, as_of)
-        rows = rows_as_dicts(
-            con,
-            """
-            SELECT return_date, market, factor_id, sleeve_id, factor_name,
-                   report_contract, money_readiness, direction, bucket,
-                   gross_return_pct, daily_return_pct, cost_adjusted_return_pct,
-                   cost_pct, n_names
-            FROM factor_sleeve_returns
-            WHERE return_date >= CAST(? AS DATE)
-              AND return_date <= CAST(? AS DATE)
-              AND bucket = 'top_quintile_long'
-            ORDER BY market, factor_id, return_date
-            """,
-            [start.isoformat(), as_of.isoformat()],
-        )
-    finally:
-        con.close()
-
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    meta: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        factor_id = str(row.get("factor_id") or "")
-        if not factor_id:
-            continue
-        grouped.setdefault(factor_id, []).append(
-            {
-                "report_date": v2.as_iso(row.get("return_date")),
-                "symbol": factor_id,
-                "return_pct": v2.round_or_none(row.get("cost_adjusted_return_pct")),
-                "gross_return_pct": v2.round_or_none(row.get("gross_return_pct")),
-                "double_cost_return_pct": (
-                    v2.round_or_none(row.get("daily_return_pct"))
-                    - 2.0 * v2.round_or_none(row.get("cost_pct"))
-                    if v2.round_or_none(row.get("daily_return_pct")) is not None
-                    and v2.round_or_none(row.get("cost_pct")) is not None
-                    else None
-                ),
-                "n_names": row.get("n_names"),
-            }
-        )
-        meta[factor_id] = row
-
-    sleeves: list[Sleeve] = []
-    for factor_id, factor_rows in grouped.items():
-        info = meta[factor_id]
-        name = str(info.get("factor_name") or factor_id)
-        market = str(info.get("market") or "")
-        registry_contract = str(info.get("report_contract") or "research_only")
-        registry_readiness = str(info.get("money_readiness") or "research_only")
-        sleeve_contract = str(info.get("sleeve_id") or "")
-        contract, readiness, auto_prod_note = resolve_factor_lab_production_contract(
-            registry_contract,
-            registry_readiness,
-            sleeve_contract,
-        )
-        n_trials = trial_counts.get(market, 1)
-        money_status, note = factor_lab_money_status(
-            label=f"Factor Lab {name} top-quintile sleeve",
-            rows=factor_rows,
-            report_contract=contract,
-            money_readiness=readiness,
-            n_trials=n_trials,
-            min_money_n=min_money_n,
-        )
-        if auto_prod_note:
-            note = f"{note}; legacy_contract={registry_contract}; {auto_prod_note}"
-        sleeves.append(
-            Sleeve(
-                sleeve_id=(
-                    f"factor_lab_{factor_id}"
-                    if factor_id.startswith(f"{market}_")
-                    else f"factor_lab_{market}_{factor_id}"
-                ),
-                market=market,
-                label=f"Factor Lab {name}",
-                signal_rule=(
-                    f"promoted factor {info.get('sleeve_id')}; contract={contract}; "
-                    "oriented long-only top quintile, 5D forward return averaged to daily"
-                ),
-                horizon="5D forward, daily averaged",
-                data_status="factor_sleeve_returns",
-                money_status=money_status,
-                notes=note,
-                rows=factor_rows,
-                source_factor_id=factor_id,
-            )
-        )
-    return sleeves
-
-
-def query_us_sec_filing_returns(us_db: Path, start: date, as_of: date) -> list[dict[str, Any]]:
-    if not us_db.exists():
-        return []
-    con = duckdb.connect(str(us_db), read_only=True)
-    try:
-        if not table_exists(con, "sec_filings") or not table_exists(con, "prices_daily"):
-            return []
-        return rows_as_dicts(
-            con,
-            """
-            WITH events AS (
-                SELECT symbol, accession_number, filed_date,
-                       LOWER(COALESCE(description, '') || ' ' || COALESCE(items, '')) AS event_text
-                FROM sec_filings
-                WHERE filed_date >= CAST(? AS DATE)
-                  AND filed_date <= CAST(? AS DATE)
-                  AND form_type = '8-K'
-            ),
-            joined AS (
-                SELECT e.symbol, e.accession_number, e.filed_date, e.event_text,
-                       p.date AS price_date, p.adj_close AS close,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY e.symbol, e.accession_number
-                           ORDER BY p.date
-                       ) AS rn
-                FROM events e
-                JOIN prices_daily p
-                  ON p.symbol = e.symbol
-                 AND p.date > e.filed_date
-                 AND p.adj_close > 0
-            ),
-            entry AS (
-                SELECT symbol, accession_number, filed_date, event_text, price_date AS entry_date, close AS entry_close
-                FROM joined
-                WHERE rn = 1
-            ),
-            exit AS (
-                SELECT symbol, accession_number, price_date AS exit_date, close AS exit_close
-                FROM joined
-                WHERE rn = 4
-            )
-            SELECT e.filed_date AS report_date,
-                   e.symbol,
-                   e.accession_number,
-                   e.event_text,
-                   e.entry_date,
-                   x.exit_date,
-                   (x.exit_close / e.entry_close - 1.0) * 100.0 AS return_pct
-            FROM entry e
-            JOIN exit x
-              ON x.symbol = e.symbol
-             AND x.accession_number = e.accession_number
-            """,
-            [start.isoformat(), as_of.isoformat()],
-        )
-    finally:
-        con.close()
-
-
-def query_cn_forecast_returns(cn_db: Path, start: date, as_of: date) -> list[dict[str, Any]]:
-    if not cn_db.exists():
-        return []
-    con = duckdb.connect(str(cn_db), read_only=True)
-    try:
-        if not table_exists(con, "forecast") or not table_exists(con, "prices"):
-            return []
-        return rows_as_dicts(
-            con,
-            """
-            WITH events AS (
-                SELECT ts_code, ann_date, forecast_type, p_change_min, p_change_max
-                FROM forecast
-                WHERE ann_date >= CAST(? AS DATE)
-                  AND ann_date <= CAST(? AS DATE)
-            ),
-            joined AS (
-                SELECT e.ts_code, e.ann_date, e.forecast_type, e.p_change_min, e.p_change_max,
-                       p.trade_date AS price_date, p.close,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY e.ts_code, e.ann_date, e.forecast_type
-                           ORDER BY p.trade_date
-                       ) AS rn
-                FROM events e
-                JOIN prices p
-                  ON p.ts_code = e.ts_code
-                 AND p.trade_date > e.ann_date
-                 AND p.close > 0
-            ),
-            entry AS (
-                SELECT ts_code, ann_date, forecast_type, p_change_min, p_change_max,
-                       price_date AS entry_date, close AS entry_close
-                FROM joined
-                WHERE rn = 1
-            ),
-            exit AS (
-                SELECT ts_code, ann_date, forecast_type, price_date AS exit_date, close AS exit_close
-                FROM joined
-                WHERE rn = 6
-            )
-            SELECT e.ann_date AS report_date,
-                   e.ts_code AS symbol,
-                   e.forecast_type,
-                   e.p_change_min,
-                   e.p_change_max,
-                   e.entry_date,
-                   x.exit_date,
-                   (x.exit_close / e.entry_close - 1.0) * 100.0 AS return_pct
-            FROM entry e
-            JOIN exit x
-              ON x.ts_code = e.ts_code
-             AND x.ann_date = e.ann_date
-             AND x.forecast_type = e.forecast_type
-            """,
-            [start.isoformat(), as_of.isoformat()],
-        )
-    finally:
-        con.close()
-
-
-def query_cn_cb_returns(cn_db: Path, start: date, as_of: date) -> list[dict[str, Any]]:
-    if not cn_db.exists():
-        return []
-    con = duckdb.connect(str(cn_db), read_only=True)
-    try:
-        if not table_exists(con, "cb_daily"):
-            return []
-        return rows_as_dicts(
-            con,
-            """
-            WITH signals AS (
-                SELECT ts_code, trade_date, close AS signal_close, cb_value, cb_over_rate
-                FROM cb_daily
-                WHERE trade_date >= CAST(? AS DATE)
-                  AND trade_date <= CAST(? AS DATE)
-                  AND close > 0
-                  AND cb_over_rate IS NOT NULL
-            ),
-            joined AS (
-                SELECT s.ts_code, s.trade_date, s.cb_value, s.cb_over_rate,
-                       p.trade_date AS price_date, p.close,
-                       ROW_NUMBER() OVER (
-                           PARTITION BY s.ts_code, s.trade_date
-                           ORDER BY p.trade_date
-                       ) AS rn
-                FROM signals s
-                JOIN cb_daily p
-                  ON p.ts_code = s.ts_code
-                 AND p.trade_date > s.trade_date
-                 AND p.close > 0
-            ),
-            entry AS (
-                SELECT ts_code, trade_date, cb_value, cb_over_rate,
-                       price_date AS entry_date, close AS entry_close
-                FROM joined
-                WHERE rn = 1
-            ),
-            exit AS (
-                SELECT ts_code, trade_date, price_date AS exit_date, close AS exit_close
-                FROM joined
-                WHERE rn = 6
-            )
-            SELECT e.trade_date AS report_date,
-                   e.ts_code AS symbol,
-                   e.cb_value,
-                   e.cb_over_rate,
-                   e.entry_date,
-                   x.exit_date,
-                   (x.exit_close / e.entry_close - 1.0) * 100.0 AS return_pct
-            FROM entry e
-            JOIN exit x
-              ON x.ts_code = e.ts_code
-             AND x.trade_date = e.trade_date
-            """,
-            [start.isoformat(), as_of.isoformat()],
-        )
-    finally:
-        con.close()
-
-
-def load_cn_log_overlay_rows(cn_db: Path, start: date, as_of: date) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
-    if pd is None:
-        return [], [], "missing pandas"
-    try:
-        from quant_bot.analytics import cn_log_denoise_backtest as cn_log
-    except ImportError as exc:
-        return [], [], f"missing cn log module: {exc}"
-
-    strategy = cn_log.load_strategy_rows(cn_db, start, as_of)
-    if strategy.empty:
-        return [], [], "no strategy rows"
-    symbols = sorted(strategy["symbol"].dropna().astype(str).unique())
-    prices = cn_log.load_prices(cn_db, symbols, start - timedelta(days=140), as_of)
-    features = cn_log.compute_log_features(prices)
-    merged = cn_log.merge_strategy_with_features(strategy, features)
-    if "feature_lag_days" in merged.columns:
-        merged = merged[pd.to_numeric(merged["feature_lag_days"], errors="coerce") <= 7]
-    merged = cn_log.add_holding_days(cn_log.dedupe_strategy_rows(merged))
-    all_oversold = merged[merged["strategy_family"] == "oversold_contrarian"].copy()
-    ev_positive = all_oversold[
-        (all_oversold["alpha_state"] == "positive_ev_setup")
-        | (pd.to_numeric(all_oversold["ev_lcb_80_pct"], errors="coerce") > 0)
-    ].copy()
-    residual = ev_positive[pd.to_numeric(ev_positive["denoise_residual_zscore"], errors="coerce") <= -1.5].copy()
-    deep_log = all_oversold[pd.to_numeric(all_oversold["log_return_20d_pct"], errors="coerce") <= -20.0].copy()
-    return records_from_df(residual), records_from_df(deep_log), "ok"
-
-
-def records_from_df(frame: Any) -> list[dict[str, Any]]:
-    if pd is None or frame is None or frame.empty:
-        return []
-    out = frame.copy()
-    for col in out.columns:
-        if pd.api.types.is_datetime64_any_dtype(out[col]):
-            out[col] = out[col].dt.strftime("%Y-%m-%d")
-    out = out.replace({float("nan"): None})
-    records: list[dict[str, Any]] = []
-    for row in out.to_dict(orient="records"):
-        records.append(
-            {
-                "report_date": v2.as_iso(row.get("report_date")),
-                "symbol": row.get("symbol"),
-                "return_pct": v2.round_or_none(row.get("return_pct")),
-            }
-        )
-    return records
-
-
-def build_sleeves(
-    us_db: Path,
-    cn_db: Path,
-    factor_lab_db: Path,
-    start: date,
-    as_of: date,
-    min_money_n: int,
-) -> list[Sleeve]:
-    sleeves: list[Sleeve] = []
-
-    us_rows, us_status = v2.load_us_rows(us_db, start, as_of)
-    us_v2 = v2.rows_with_return_cost([row for row in us_rows if v2.is_us_v2_policy(row)], v2.US_STOCK_ROUNDTRIP_COST_PCT)
-    us_legacy = [row for row in us_rows if v2.is_us_legacy_policy(row)]
-    option_ledger = v2.build_option_shadow_ledger(us_db, start, as_of) if us_db.exists() else {"rows": []}
-    option_rows = [
-        {"report_date": row.get("report_date"), "symbol": row.get("symbol"), "return_pct": row.get("return_pct")}
-        for row in option_ledger.get("rows", [])
-        if row.get("resolved") and row.get("long_expression") and row.get("return_pct") is not None
-    ]
-    filing_rows = query_us_sec_filing_returns(us_db, start, as_of)
-    material_filing_rows = [
-        row
-        for row in filing_rows
-        if "item 1.01" in str(row.get("event_text") or "")
-        or "material definitive agreement" in str(row.get("event_text") or "")
-    ]
-
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="us_v2_stock_probe",
-            market="us",
-            label="US V2 stock-only probe net",
-            signal_rule="LOW/core/executable_now/trending, underlying 3-session return minus stock cost",
-            horizon="3 sessions",
-            data_status=us_status,
-            role="probe",
-            notes="Bridge sleeve while options expression ledger is still thin.",
-            rows=us_v2,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="us_legacy_high_mod",
-            market="us",
-            label="US legacy HIGH/MOD baseline",
-            signal_rule="legacy core long HIGH/MODERATE executable_now",
-            horizon="3 sessions",
-            data_status=us_status,
-            role="baseline",
-            notes="Baseline only; not a fresh-entry policy.",
-            rows=us_legacy,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="us_option_shadow_long",
-            market="us",
-            label="US option shadow long expressions",
-            signal_rule="V2 rows with stock_long/call_spread expression marked by bid/ask or proxy",
-            horizon="3 sessions",
-            data_status=f"resolved={option_ledger.get('resolved_count', 0)} unresolved={option_ledger.get('unresolved_count', 0)}",
-            role="shadow",
-            notes="Shadow-only until resolved sample, LCB80, liquidity, and live slippage pass.",
-            rows=option_rows,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="us_sec_8k_material_agreement",
-            market="us",
-            label="US SEC 8-K material-agreement diagnostic",
-            signal_rule="8-K Item 1.01 / material definitive agreement, next tradable close to 3-session exit",
-            horizon="3 sessions",
-            data_status="diagnostic_only_sec_summary",
-            role="research",
-            notes="Needs document parser/payoff table before becoming event alpha.",
-            rows=material_filing_rows,
-            min_money_n=min_money_n,
-        )
-    )
-
-    cn_rows, cn_status = v2.load_cn_strategy_rows(cn_db, start, as_of)
-    cn_oversold_all = [row for row in cn_rows if row.get("strategy_family") == "oversold_contrarian"]
-    cn_oversold_ev = [
-        row
-        for row in cn_oversold_all
-        if row.get("alpha_state") == "positive_ev_setup" or (v2.round_or_none(row.get("ev_lcb_80_pct")) or 0.0) > 0.0
-    ]
-    cn_legacy = [row for row in cn_rows if row.get("strategy_family") == "structural_core"]
-    residual_rows, deep_log_rows, log_status = load_cn_log_overlay_rows(cn_db, start, as_of)
-    forecast_rows = query_cn_forecast_returns(cn_db, start, as_of)
-    positive_forecast = [
-        row
-        for row in forecast_rows
-        if str(row.get("forecast_type") or "") in {"预增", "扭亏", "略增", "续盈"}
-    ]
-    negative_forecast = [
-        row
-        for row in forecast_rows
-        if str(row.get("forecast_type") or "") in {"预减", "首亏", "略减", "续亏"}
-    ]
-    cb_rows = query_cn_cb_returns(cn_db, start, as_of)
-    cb_low_premium = [row for row in cb_rows if (v2.round_or_none(row.get("cb_over_rate")) or 999.0) <= 5.0]
-    cb_high_premium = [row for row in cb_rows if (v2.round_or_none(row.get("cb_over_rate")) or -999.0) >= 30.0]
-
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="cn_oversold_ev_positive",
-            market="cn",
-            label="CN oversold_contrarian EV-positive",
-            signal_rule="oversold_contrarian with positive EV LCB80 / positive_ev_setup",
-            horizon="T+1 to T+5 lifecycle",
-            data_status=cn_status,
-            role="money",
-            notes="Current CN mainline; still clipped by T+1, high-vol, no-chase, and book overlay.",
-            rows=cn_oversold_ev,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="cn_oversold_residual_z_action",
-            market="cn",
-            label="CN EV+ residual_z <= -1.5 action overlay",
-            signal_rule="EV-positive oversold plus causal log residual stretch <= -1.5",
-            horizon="T+1 to T+5 lifecycle",
-            data_status=log_status,
-            role="overlay",
-            notes="Report action overlay in opportunity mode; EV fields are context, not a hard gate.",
-            rows=residual_rows,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="cn_oversold_deep_log20_setup",
-            market="cn",
-            label="CN all oversold log20 <= -20 setup overlay",
-            signal_rule="all oversold_contrarian with causal 20D log return <= -20%",
-            horizon="T+1 to T+5 lifecycle",
-            data_status=log_status,
-            role="overlay",
-            notes="Setup overlay in opportunity mode; use for pullback/retest priority.",
-            rows=deep_log_rows,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="cn_legacy_structural_core",
-            market="cn",
-            label="CN legacy structural_core baseline",
-            signal_rule="legacy structural_core/high_mod baseline",
-            horizon="T+1/T+2 report outcome",
-            data_status=cn_status,
-            role="baseline",
-            notes="Baseline only; not the default main strategy.",
-            rows=cn_legacy,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="cn_forecast_positive_event",
-            market="cn",
-            label="CN positive earnings forecast event diagnostic",
-            signal_rule="预增/扭亏/略增/续盈, next tradable close to T+5 exit",
-            horizon="T+5",
-            data_status="diagnostic_only_forecast_table",
-            role="research",
-            notes="Needs announcement timestamp, eligibility, and event payoff table before money use.",
-            rows=positive_forecast,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="cn_forecast_negative_raw_long",
-            market="cn",
-            label="CN negative forecast raw-long avoid diagnostic",
-            signal_rule="预减/首亏/略减/续亏, raw long return for avoid/risk study",
-            horizon="T+5",
-            data_status="diagnostic_only_forecast_table",
-            role="research",
-            notes="Risk/avoid diagnostic; A-share long-only report should not short from this.",
-            rows=negative_forecast,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="cn_cb_low_premium_rv",
-            market="cn",
-            label="CN convertible low-premium RV diagnostic",
-            signal_rule="cb_daily cb_over_rate <= 5%, next tradable close to T+5 exit",
-            horizon="T+5",
-            data_status="diagnostic_only_cb_daily",
-            role="research",
-            notes="Needs terms, forced redemption, putback, conversion window, and liquidity fields before money use.",
-            rows=cb_low_premium,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.append(
-        make_sleeve(
-            sleeve_id="cn_cb_high_premium_raw_long",
-            market="cn",
-            label="CN convertible high-premium raw-long risk diagnostic",
-            signal_rule="cb_daily cb_over_rate >= 30%, raw long return for risk study",
-            horizon="T+5",
-            data_status="diagnostic_only_cb_daily",
-            role="research",
-            notes="Risk/avoid diagnostic; high premium can be sentiment exposure, not alpha proof.",
-            rows=cb_high_premium,
-            min_money_n=min_money_n,
-        )
-    )
-    sleeves.extend(load_factor_lab_sleeves(factor_lab_db, start, as_of, min_money_n))
-    return sleeves
 
 
 def build_correlation_payload(sleeves: list[Sleeve]) -> dict[str, Any]:
@@ -999,7 +114,7 @@ def enrich_relationship_metrics(metrics: list[dict[str, Any]], sleeves: list[Sle
     eligible_ids = [
         row["sleeve_id"]
         for row in metrics
-        if row["money_status"] in {"money_candidate", "stock_probe_only"}
+        if row["money_status"] in {"money_candidate", "stock_trade"}
     ]
 
     for row in metrics:
@@ -1048,11 +163,148 @@ def sync_sleeve_statuses_from_metrics(sleeves: list[Sleeve], metrics: list[dict[
         sleeve.notes = str(row.get("notes") or sleeve.notes)
 
 
+def build_calibration_payload(metrics: list[dict[str, Any]], sleeves: list[Sleeve]) -> dict[str, Any]:
+    by_id = {sleeve.sleeve_id: sleeve for sleeve in sleeves}
+    rows: list[dict[str, Any]] = []
+    for row in metrics:
+        sleeve = by_id.get(str(row.get("sleeve_id") or ""))
+        sleeve_rows = sleeve.rows if sleeve else []
+        full_confirm = sum(1 for item in sleeve_rows if item.get("confirm_quality") == "full_confirm")
+        proxy_confirm = sum(1 for item in sleeve_rows if item.get("confirm_quality") in {"proxy_confirm", "price_volume_proxy"})
+        has_confirm_dimension = full_confirm > 0 or proxy_confirm > 0
+        n = int(row.get("n") or 0)
+        active_dates = int(row.get("active_dates") or 0)
+        min_n = min(100, max(20, active_dates))
+        min_active_dates = min(20, max(8, active_dates // 2 if active_dates else 8))
+        min_full_confirm = min(20, max(8, full_confirm // 2)) if has_confirm_dimension else 0
+        rows.append(
+            {
+                "sleeve_id": row.get("sleeve_id"),
+                "market": row.get("market"),
+                "n": n,
+                "active_dates": active_dates,
+                "n_with_full_confirm": full_confirm,
+                "n_with_proxy_confirm": proxy_confirm,
+                "has_confirm_dimension": has_confirm_dimension,
+                "calibrated_min_n": min_n,
+                "calibrated_min_active_dates": min_active_dates,
+                "calibrated_min_full_confirm": min_full_confirm,
+                "lcb80_pct": row.get("lcb80_pct"),
+                "daily_sharpe": row.get("daily_sharpe"),
+                "win_rate": row.get("win_rate"),
+                "top5_pnl_share": row.get("top5_pnl_share"),
+                "max_abs_corr": row.get("max_abs_corr"),
+                "marginal_daily_sharpe_delta": row.get("marginal_daily_sharpe_delta"),
+            }
+        )
+    return {
+        "gate_version": PROMOTION_GATE_VERSION,
+        "description": "Coverage-aware calibration from the current historical window; gates use full-confirm counts where the sleeve has a confirm dimension.",
+        "rows": rows,
+    }
+
+
+def _promotion_blockers(row: dict[str, Any], calibration: dict[str, Any]) -> list[str]:
+    if row.get("money_status") not in {"money_candidate", "stock_trade"}:
+        return [f"money_status={row.get('money_status') or 'missing'}"]
+    blockers: list[str] = []
+    n = int(row.get("n") or 0)
+    active = int(row.get("active_dates") or 0)
+    min_n = int(calibration.get("calibrated_min_n") or 20)
+    min_active = int(calibration.get("calibrated_min_active_dates") or 8)
+    if n < min_n:
+        blockers.append(f"n<{min_n}")
+    if active < min_active:
+        blockers.append(f"active_dates<{min_active}")
+    lcb80 = v2.round_or_none(row.get("lcb80_pct"))
+    if lcb80 is None or lcb80 <= 0:
+        blockers.append("lcb80<=0")
+    win_rate = v2.round_or_none(row.get("win_rate"))
+    if win_rate is None or win_rate < 0.52:
+        blockers.append("win_rate<52%")
+    daily_sharpe = v2.round_or_none(row.get("daily_sharpe"))
+    if daily_sharpe is None or daily_sharpe <= 0:
+        blockers.append("daily_sharpe<=0")
+    top_share = v2.round_or_none(row.get("top5_pnl_share"))
+    if top_share is not None and top_share > 0.60:
+        blockers.append("top5_pnl_share>60%")
+    # Correlation is reported as a portfolio diagnostic. It should not block a
+    # sleeve by itself because overlays and explanatory diagnostics can be
+    # highly correlated with the production sleeve they explain.
+    marginal = v2.round_or_none(row.get("marginal_daily_sharpe_delta"))
+    if marginal is not None and marginal < -0.10:
+        blockers.append("marginal_sharpe_delta<-0.10")
+    if calibration.get("has_confirm_dimension"):
+        full_confirm = int(calibration.get("n_with_full_confirm") or 0)
+        min_full = int(calibration.get("calibrated_min_full_confirm") or 0)
+        if min_full and full_confirm < min_full:
+            blockers.append(f"full_confirm<{min_full}")
+    return blockers
+
+
+def build_promotion_contract(metrics: list[dict[str, Any]], calibration: dict[str, Any], payload_as_of: str, start: str) -> list[dict[str, Any]]:
+    calibration_by_id = {row.get("sleeve_id"): row for row in calibration.get("rows") or []}
+    rows: list[dict[str, Any]] = []
+    for row in metrics:
+        sleeve_id = str(row.get("sleeve_id") or "")
+        cal = calibration_by_id.get(sleeve_id) or {}
+        blockers = _promotion_blockers(row, cal)
+        status = "promoted" if not blockers else "rejected"
+        snapshot = {
+            "gate_version": PROMOTION_GATE_VERSION,
+            "blockers": blockers,
+            "metrics": {
+                key: row.get(key)
+                for key in [
+                    "n",
+                    "active_dates",
+                    "lcb80_pct",
+                    "win_rate",
+                    "daily_sharpe",
+                    "top5_pnl_share",
+                    "max_abs_corr",
+                    "marginal_daily_sharpe_delta",
+                ]
+            },
+            "calibration": cal,
+        }
+        rows.append(
+            {
+                "as_of": payload_as_of,
+                "start_date": start,
+                "market": row.get("market"),
+                "sleeve_id": sleeve_id,
+                "status": status,
+                "gate_version": PROMOTION_GATE_VERSION,
+                "created_by": "alpha_sleeve_backtest",
+                "promoted_at": datetime.now().isoformat(timespec="seconds") if status == "promoted" else None,
+                "gates_snapshot_json": json.dumps(snapshot, ensure_ascii=True, sort_keys=True, default=str),
+                "blockers": blockers,
+            }
+        )
+    return rows
+
+
+def apply_promotion_contract_to_metrics(metrics: list[dict[str, Any]], promotions: list[dict[str, Any]]) -> None:
+    by_id = {row.get("sleeve_id"): row for row in promotions}
+    for row in metrics:
+        if row.get("money_status") not in {"money_candidate", "stock_trade"}:
+            continue
+        promotion = by_id.get(row.get("sleeve_id")) or {}
+        if promotion.get("status") == "promoted":
+            row["promotion_status"] = "promoted"
+            continue
+        blockers = promotion.get("blockers") or ["missing_promotion_contract"]
+        row["promotion_status"] = "rejected"
+        row["money_status"] = "blocked_promotion_gate"
+        row["notes"] = f"{row.get('notes') or ''}; promotion_blockers={','.join(blockers)}".strip("; ")
+
+
 def build_combo_payload(sleeves: list[Sleeve]) -> dict[str, Any]:
     eligible = [
         sleeve
         for sleeve in sleeves
-        if sleeve.money_status in {"money_candidate", "stock_probe_only"}
+        if sleeve.money_status in {"money_candidate", "stock_trade"}
     ]
     per_sleeve = {s.sleeve_id: daily_series(s.rows) for s in eligible}
     all_dates = sorted(set().union(*(set(values) for values in per_sleeve.values()))) if per_sleeve else []
@@ -1107,6 +359,32 @@ def render_factor_lab_table(rows: list[dict[str, Any]], correlations: dict[str, 
     return lines + [""]
 
 
+def render_calibration_table(calibration: dict[str, Any]) -> list[str]:
+    rows = calibration.get("rows") or []
+    if not rows:
+        return []
+    lines = [
+        "## Calibration And Promotion Contract",
+        "",
+        "Calibration is reported before promotion. Sleeves with full-confirm/proxy-confirm dimensions are evaluated separately so short data coverage does not masquerade as proof.",
+        "",
+        "| Sleeve | n | Active days | Full confirm | Proxy confirm | Min n | Min days | Min full | LCB80 | Daily Sharpe | Promotion | Blockers |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
+    ]
+    promotions = {row.get("sleeve_id"): row for row in calibration.get("promotions") or []}
+    for row in rows:
+        promo = promotions.get(row.get("sleeve_id")) or {}
+        blockers = ", ".join(promo.get("blockers") or [])
+        lines.append(
+            f"| {row.get('sleeve_id')} | {row.get('n')} | {row.get('active_dates')} | "
+            f"{row.get('n_with_full_confirm')} | {row.get('n_with_proxy_confirm')} | "
+            f"{row.get('calibrated_min_n')} | {row.get('calibrated_min_active_dates')} | "
+            f"{row.get('calibrated_min_full_confirm')} | {fmt_pct(row.get('lcb80_pct'))} | "
+            f"{fmt_num(row.get('daily_sharpe'), 2)} | {promo.get('status') or '-'} | {blockers or '-'} |"
+        )
+    return lines + [""]
+
+
 def render_corr_matrix(sleeves: list[dict[str, Any]], correlations: dict[str, Any]) -> list[str]:
     ids = [row["sleeve_id"] for row in sleeves]
     labels = {row["sleeve_id"]: row["sleeve_id"] for row in sleeves}
@@ -1125,7 +403,7 @@ def render_corr_matrix(sleeves: list[dict[str, Any]], correlations: dict[str, An
 
 def render_report(payload: dict[str, Any]) -> str:
     metrics = payload["sleeves"]
-    money = [row for row in metrics if row["money_status"] in {"money_candidate", "stock_probe_only", "report_overlay"}]
+    money = [row for row in metrics if row["money_status"] in {"money_candidate", "stock_trade", "report_overlay"}]
     blocked = [
         row
         for row in metrics
@@ -1137,6 +415,7 @@ def render_report(payload: dict[str, Any]) -> str:
             "blocked_deflated_sharpe",
             "blocked_rolling_oos",
             "blocked_factor_lab_portfolio_gate",
+            "blocked_promotion_gate",
             "no_data",
         }
     ]
@@ -1159,12 +438,13 @@ def render_report(payload: dict[str, Any]) -> str:
         f"- Sleeves evaluated: `{len(metrics)}`.",
         f"- Average absolute sleeve correlation: `{fmt_num(payload['correlations'].get('avg_abs_corr'), 2)}`.",
         f"- Effective independent sleeve count N_eff: `{fmt_num(payload['correlations'].get('n_eff_all'), 2)}`.",
-        f"- Viable money/probe blend sleeves: `{', '.join(payload['combo'].get('eligible_sleeves') or []) or '-'}`.",
+        f"- Viable money/trade blend sleeves: `{', '.join(payload['combo'].get('eligible_sleeves') or []) or '-'}`.",
         "",
         "## Sleeve Scorecard",
         "",
     ]
     lines += render_metrics_table(metrics)
+    lines += render_calibration_table(payload.get("calibration") or {})
     lines += render_factor_lab_table(metrics, payload["correlations"])
     lines += [
         "## Correlation Budget",
@@ -1186,6 +466,37 @@ def render_report(payload: dict[str, Any]) -> str:
         f"{fmt_pct((combo.get('win_rate') or 0.0) * 100.0) if combo.get('win_rate') is not None else '-'} | "
         f"{fmt_num(combo.get('trade_sharpe'), 2)} | {fmt_num(combo.get('daily_sharpe'), 2)} | "
         f"{fmt_pct(combo.get('max_drawdown_pct'))} |",
+        "",
+    ]
+    hedge = payload.get("portfolio_hedge") or {}
+    hedge_summary = hedge.get("summary") or {}
+    hedge_net = hedge_summary.get("net") or {}
+    hedge_unhedged = hedge_summary.get("unhedged") or {}
+    hedge_leg = hedge_summary.get("hedge_leg") or {}
+    lines += [
+        "## Historical Beta-Hedged Portfolio",
+        "",
+        "Historical hedge ledger uses existing money/stock-trade sleeves and the same beta hedge selector as the current-day portfolio overlay.",
+        "Returns are R PnL proxies: `long_return_r - beta_hedge_return_r - hedge_cost_r`.",
+        "",
+        "| Book | n | Avg R | LCB80 R | Win | Total R | Max DD R |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+        f"| Unhedged long | {hedge_unhedged.get('n', 0)} | {fmt_num(hedge_unhedged.get('avg_r'), 5)} | "
+        f"{fmt_num(hedge_unhedged.get('lcb80_r'), 5)} | "
+        f"{fmt_pct((hedge_unhedged.get('win_rate') or 0.0) * 100.0) if hedge_unhedged.get('win_rate') is not None else '-'} | "
+        f"{fmt_num(hedge_unhedged.get('total_r'), 4)} | {fmt_num(hedge_unhedged.get('max_drawdown_r'), 4)} |",
+        f"| Beta hedge leg | {hedge_leg.get('n', 0)} | {fmt_num(hedge_leg.get('avg_r'), 5)} | "
+        f"{fmt_num(hedge_leg.get('lcb80_r'), 5)} | "
+        f"{fmt_pct((hedge_leg.get('win_rate') or 0.0) * 100.0) if hedge_leg.get('win_rate') is not None else '-'} | "
+        f"{fmt_num(hedge_leg.get('total_r'), 4)} | {fmt_num(hedge_leg.get('max_drawdown_r'), 4)} |",
+        f"| Hedged net | {hedge_net.get('n', 0)} | {fmt_num(hedge_net.get('avg_r'), 5)} | "
+        f"{fmt_num(hedge_net.get('lcb80_r'), 5)} | "
+        f"{fmt_pct((hedge_net.get('win_rate') or 0.0) * 100.0) if hedge_net.get('win_rate') is not None else '-'} | "
+        f"{fmt_num(hedge_net.get('total_r'), 4)} | {fmt_num(hedge_net.get('max_drawdown_r'), 4)} |",
+        "",
+        f"- Ledger rows: `{len(hedge.get('ledger') or [])}`.",
+        f"- Daily aggregate rows: `{len(hedge.get('daily') or [])}`.",
+        f"- Eligible sleeves: `{', '.join(hedge_summary.get('eligible_sleeves') or []) or '-'}`.",
         "",
         "## Money Readiness",
         "",
@@ -1211,7 +522,7 @@ def render_report(payload: dict[str, Any]) -> str:
         "- CN events: `forecast` exists, but cash-choice/tender/absorption-merger terms are not yet normalized into event payoff rows.",
         "- CN convertibles: `cb_daily` has price/value/premium, but lacks forced-redemption, putback, conversion-window, rating, and remaining-size fields.",
         "- Microstructure: no auction/order-book replay is present here, so 1-5D residual stat-arb and limit-up execution stay research/radar.",
-        "- Options: US option ledger must move from proxy to true bid/ask leg PnL with enough resolved rows before money use.",
+        "- Options: US options/flow quality is auxiliary evidence for stock trades; option leg PnL is diagnostic, not a stock blocker.",
         "",
         "## Commands",
         "",
@@ -1303,6 +614,156 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
             for dt, ret in series.items():
                 daily_rows.append([payload["as_of"], sleeve_id, dt, ret])
         con.executemany("INSERT INTO alpha_sleeve_daily_returns VALUES (?, ?, ?, ?)", daily_rows)
+        con.execute(
+            """
+            CREATE TABLE alpha_sleeve_calibration (
+                as_of DATE, sleeve_id VARCHAR, market VARCHAR, n INTEGER,
+                active_dates INTEGER, n_with_full_confirm INTEGER,
+                n_with_proxy_confirm INTEGER, has_confirm_dimension BOOLEAN,
+                calibrated_min_n INTEGER, calibrated_min_active_dates INTEGER,
+                calibrated_min_full_confirm INTEGER, lcb80_pct DOUBLE,
+                daily_sharpe DOUBLE, win_rate DOUBLE, top5_pnl_share DOUBLE,
+                max_abs_corr DOUBLE, marginal_daily_sharpe_delta DOUBLE
+            )
+            """
+        )
+        calibration_rows = []
+        for row in (payload.get("calibration") or {}).get("rows") or []:
+            calibration_rows.append(
+                [
+                    payload["as_of"],
+                    row.get("sleeve_id"),
+                    row.get("market"),
+                    row.get("n"),
+                    row.get("active_dates"),
+                    row.get("n_with_full_confirm"),
+                    row.get("n_with_proxy_confirm"),
+                    row.get("has_confirm_dimension"),
+                    row.get("calibrated_min_n"),
+                    row.get("calibrated_min_active_dates"),
+                    row.get("calibrated_min_full_confirm"),
+                    row.get("lcb80_pct"),
+                    row.get("daily_sharpe"),
+                    row.get("win_rate"),
+                    row.get("top5_pnl_share"),
+                    row.get("max_abs_corr"),
+                    row.get("marginal_daily_sharpe_delta"),
+                ]
+            )
+        con.executemany(
+            "INSERT INTO alpha_sleeve_calibration VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            calibration_rows,
+        )
+        con.execute(
+            """
+            CREATE TABLE promoted_sleeves (
+                as_of DATE, start_date DATE, market VARCHAR, sleeve_id VARCHAR,
+                status VARCHAR, gate_version VARCHAR, created_by VARCHAR,
+                promoted_at TIMESTAMP, gates_snapshot_json VARCHAR
+            )
+            """
+        )
+        promotion_rows = []
+        for row in payload.get("promoted_sleeves") or []:
+            promotion_rows.append(
+                [
+                    row.get("as_of"),
+                    row.get("start_date"),
+                    row.get("market"),
+                    row.get("sleeve_id"),
+                    row.get("status"),
+                    row.get("gate_version"),
+                    row.get("created_by"),
+                    row.get("promoted_at"),
+                    row.get("gates_snapshot_json"),
+                ]
+            )
+        con.executemany(
+            "INSERT INTO promoted_sleeves VALUES (CAST(? AS DATE), CAST(? AS DATE), ?, ?, ?, ?, ?, CAST(? AS TIMESTAMP), ?)",
+            promotion_rows,
+        )
+        con.execute(
+            """
+            CREATE TABLE portfolio_hedged_backtest (
+                as_of DATE, return_date DATE, market VARCHAR, sleeve_id VARCHAR,
+                long_return_r DOUBLE, beta_hedge_return_r DOUBLE, hedge_cost_r DOUBLE,
+                net_return_r DOUBLE, gross_long_r DOUBLE, hedge_notional_r DOUBLE,
+                net_beta_r DOUBLE, benchmark VARCHAR, detail_json VARCHAR
+            )
+            """
+        )
+        hedge_daily_rows = []
+        for row in (payload.get("portfolio_hedge") or {}).get("daily") or []:
+            hedge_daily_rows.append(
+                [
+                    row.get("as_of"),
+                    row.get("return_date"),
+                    row.get("market"),
+                    row.get("sleeve_id"),
+                    row.get("long_return_r"),
+                    row.get("beta_hedge_return_r"),
+                    row.get("hedge_cost_r"),
+                    row.get("net_return_r"),
+                    row.get("gross_long_r"),
+                    row.get("hedge_notional_r"),
+                    row.get("net_beta_r"),
+                    row.get("benchmark"),
+                    row.get("detail_json"),
+                ]
+            )
+        if hedge_daily_rows:
+            con.executemany(
+                "INSERT INTO portfolio_hedged_backtest VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                hedge_daily_rows,
+            )
+        con.execute(
+            """
+            CREATE TABLE portfolio_hedge_ledger (
+                as_of DATE, signal_date DATE, entry_date DATE, exit_date DATE,
+                return_date DATE, market VARCHAR, sleeve_id VARCHAR, symbol_or_basket VARCHAR,
+                long_r DOUBLE, hedge_instrument VARCHAR, hedge_r DOUBLE, beta DOUBLE,
+                beta_raw DOUBLE, beta_corr DOUBLE, long_ret_pct DOUBLE, hedge_ret_pct DOUBLE,
+                long_return_r DOUBLE, beta_hedge_return_r DOUBLE, hedge_cost_r DOUBLE,
+                net_return_r DOUBLE, gross_long_r DOUBLE, hedge_notional_r DOUBLE,
+                net_beta_r DOUBLE, reason_json VARCHAR
+            )
+            """
+        )
+        hedge_ledger_rows = []
+        for row in (payload.get("portfolio_hedge") or {}).get("ledger") or []:
+            hedge_ledger_rows.append(
+                [
+                    row.get("as_of"),
+                    row.get("signal_date"),
+                    row.get("entry_date"),
+                    row.get("exit_date"),
+                    row.get("return_date"),
+                    row.get("market"),
+                    row.get("sleeve_id"),
+                    row.get("symbol_or_basket"),
+                    row.get("long_r"),
+                    row.get("hedge_instrument"),
+                    row.get("hedge_r"),
+                    row.get("beta"),
+                    row.get("beta_raw"),
+                    row.get("beta_corr"),
+                    row.get("long_ret_pct"),
+                    row.get("hedge_ret_pct"),
+                    row.get("long_return_r"),
+                    row.get("beta_hedge_return_r"),
+                    row.get("hedge_cost_r"),
+                    row.get("net_return_r"),
+                    row.get("gross_long_r"),
+                    row.get("hedge_notional_r"),
+                    row.get("net_beta_r"),
+                    row.get("reason_json"),
+                ]
+            )
+        if hedge_ledger_rows:
+            con.executemany(
+                "INSERT INTO portfolio_hedge_ledger VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                hedge_ledger_rows,
+            )
     finally:
         con.close()
 
@@ -1522,14 +983,22 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     correlations = build_correlation_payload(sleeves)
     enrich_relationship_metrics(metrics, sleeves, correlations)
     apply_factor_lab_relationship_gates(metrics)
+    calibration = build_calibration_payload(metrics, sleeves)
+    promoted_sleeves = build_promotion_contract(metrics, calibration, as_of.isoformat(), start.isoformat())
+    calibration["promotions"] = promoted_sleeves
+    apply_promotion_contract_to_metrics(metrics, promoted_sleeves)
     sync_sleeve_statuses_from_metrics(sleeves, metrics)
     combo = build_combo_payload(sleeves)
+    portfolio_hedge = build_portfolio_hedged_backtest(sleeves, args.us_db, args.cn_db, start, as_of)
     payload = {
         "as_of": as_of.isoformat(),
         "start": start.isoformat(),
         "sleeves": metrics,
+        "calibration": calibration,
+        "promoted_sleeves": promoted_sleeves,
         "correlations": correlations,
         "combo": combo,
+        "portfolio_hedge": portfolio_hedge,
         "daily_returns": {s.sleeve_id: daily_series(s.rows) for s in sleeves},
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }

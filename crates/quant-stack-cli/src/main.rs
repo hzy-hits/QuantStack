@@ -5,7 +5,6 @@ use quant_stack_core::alpha::{self, AlphaEvalConfig};
 use quant_stack_core::report_model;
 use serde_json::Value;
 use std::fs::{self, File};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as ProcessCommand, Stdio};
 use std::thread;
@@ -361,7 +360,7 @@ fn run_daily(args: DailyArgs) -> Result<()> {
         cn_horizon_days: 2,
         auto_select: true,
         emit_bulletin: true,
-        no_project_copies: false,
+        no_project_copies: true,
     };
     if args.dry_run {
         println!(
@@ -521,7 +520,7 @@ fn prepare_cn_for_alpha(stack_root: &Path, args: &DailyArgs, markets: &[String])
     let cn_root = stack_root.join("quant-research-cn");
     let factor_lab_root = stack_root.join("factor-lab");
     if args.dry_run {
-        println!("dry-run: would import CN Factor Lab factors and render pre-alpha payloads");
+        println!("dry-run: would import CN Factor Lab factors and refresh CN report ledgers");
         enter_daily_state(DailyPipelineState::CnFactorImported, args, markets);
         enter_daily_state(DailyPipelineState::CnPreAlphaRendered, args, markets);
         return Ok(());
@@ -550,6 +549,7 @@ fn prepare_cn_for_alpha(stack_root: &Path, args: &DailyArgs, markets: &[String])
         .arg(&args.date)
         .current_dir(&cn_root);
     run_or_print("cn pre-alpha render", render, false)?;
+    cleanup_legacy_cn_report_artifacts(&cn_root, &args.date, &cn_slot(&args.session))?;
     enter_daily_state(DailyPipelineState::CnPreAlphaRendered, args, markets);
     Ok(())
 }
@@ -557,7 +557,9 @@ fn prepare_cn_for_alpha(stack_root: &Path, args: &DailyArgs, markets: &[String])
 fn finalize_cn_report(stack_root: &Path, args: &DailyArgs, markets: &[String]) -> Result<()> {
     let cn_root = stack_root.join("quant-research-cn");
     if args.dry_run {
-        println!("dry-run: would render CN bulletin payloads, charts, and final agent report");
+        println!(
+            "dry-run: would refresh CN report ledgers/charts and remove legacy CN report artifacts"
+        );
         enter_daily_state(DailyPipelineState::CnBulletinRendered, args, markets);
         enter_daily_state(DailyPipelineState::CnPayloadsFinalized, args, markets);
         enter_daily_state(DailyPipelineState::CnChartsGenerated, args, markets);
@@ -576,184 +578,53 @@ fn finalize_cn_report(stack_root: &Path, args: &DailyArgs, markets: &[String]) -
     run_or_print("cn bulletin render", render, false)?;
     enter_daily_state(DailyPipelineState::CnBulletinRendered, args, markets);
 
-    append_cn_factor_prior(stack_root, &args.date)?;
-    annotate_and_snapshot_cn_payloads(&cn_root, &args.date, &cn_slot(&args.session))?;
-    let cn_structural_payload = if cn_slot(&args.session) == "daily" {
-        cn_root
-            .join("reports")
-            .join(format!("{}_payload_structural.md", args.date))
-    } else {
-        cn_root.join("reports").join(format!(
-            "{}_payload_structural_{}.md",
-            args.date,
-            cn_slot(&args.session)
-        ))
-    };
-    inject_shared_report_model_status(
-        stack_root,
-        "cn",
-        &args.date,
-        &args.session,
-        &cn_structural_payload,
-    )?;
-    verify_cn_payloads(&cn_root, &args.date)?;
+    cleanup_legacy_cn_report_artifacts(&cn_root, &args.date, &cn_slot(&args.session))?;
     enter_daily_state(DailyPipelineState::CnPayloadsFinalized, args, markets);
 
     generate_cn_charts(&cn_root, &args.date, &cn_slot(&args.session));
     enter_daily_state(DailyPipelineState::CnChartsGenerated, args, markets);
 
     if args.with_narrative || args.send_reports {
-        run_cn_agents(stack_root, args)?;
-        let slot = cn_slot(&args.session);
-        let report = if slot == "daily" {
-            cn_root
-                .join("reports")
-                .join(format!("{}_report_zh.md", args.date))
-        } else {
-            cn_root
-                .join("reports")
-                .join(format!("{}_report_zh_{}.md", args.date, slot))
-        };
-        enforce_shared_report_model_status(stack_root, "cn", &args.date, &args.session, &report)?;
+        info!("legacy CN agents disabled; Main Strategy V2 replaces the CN daily report");
         enter_daily_state(DailyPipelineState::CnNarrativeRendered, args, markets);
     }
     Ok(())
 }
 
-fn append_cn_factor_prior(stack_root: &Path, date: &str) -> Result<()> {
-    let cn_root = stack_root.join("quant-research-cn");
-    let factor_lab_root = stack_root.join("factor-lab");
-    let structural = cn_root
-        .join("reports")
-        .join(format!("{date}_payload_structural.md"));
-    if !structural.is_file() || !factor_lab_root.is_dir() {
-        return Ok(());
-    }
-
-    let output = ProcessCommand::new("python3")
-        .arg("scripts/run_strategy.py")
-        .arg("--market")
-        .arg("cn")
-        .arg("--today")
-        .arg("--date")
-        .arg(date)
-        .current_dir(&factor_lab_root)
-        .output();
-
-    let mut section = String::new();
-    section.push_str("\n## Factor Lab research prior / recall lead\n\n");
-    section.push_str("以下是 Factor Lab research prior / recall lead，不是独立交易指令。\n");
-    section.push_str("它不能决定 Headline Gate、今日市场主方向或主书排序；只有通过主系统方向、execution gate、流动性和追价过滤后，才能进入主书。\n\n");
-    match output {
-        Ok(out) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            section.push_str("状态: FRESH。可作为研究附录展示，但不得覆盖主系统结论。\n\n");
-            section.push_str(&sanitize_factor_lab_text(&text));
-            section.push('\n');
-        }
-        Ok(out) => {
-            warn!(status = %out.status, "Factor Lab strategy output failed");
-            section
-                .push_str("状态: UNAVAILABLE。候选输出失败或缺少交易日信息，忽略其方向性结论。\n");
-        }
-        Err(err) => {
-            warn!(error = %err, "failed to run Factor Lab strategy output");
-            section
-                .push_str("状态: UNAVAILABLE。候选输出失败或缺少交易日信息，忽略其方向性结论。\n");
-        }
-    }
-    section.push_str("\n请在最终研报中完整展示上述清单，但明确标注为研究附录，不得让其主导 headline 或主书排序。\n");
-
-    let mut current = String::new();
-    File::open(&structural)?.read_to_string(&mut current)?;
-    if !current.contains("## Factor Lab research prior / recall lead") {
-        current.push_str(&section);
-        fs::write(structural, current)?;
-    }
-    Ok(())
-}
-
-fn sanitize_factor_lab_text(text: &str) -> String {
-    let mut out = text
-        .replace(
-            "## Factor Lab Independent Trading Signal",
-            "## Factor Lab research prior / recall lead",
-        )
-        .replace(
-            "## Factor Lab Research Candidates",
-            "## Factor Lab research prior / recall lead",
-        )
-        .replace("怎么操作:", "研究观察:")
-        .replace("买入价", "参考价")
-        .replace("止损", "风控线")
-        .replace("止盈", "观察上沿")
-        .replace("仓位", "研究权重")
-        .replace("买入", "研究关注");
-    out = out
-        .lines()
-        .map(|line| {
-            if line.contains("明天开盘") && line.contains("只") {
-                "研究候选清单如下（仅 recall lead，进入主书前仍需 gate）".to_string()
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    out.trim().to_string()
-}
-
-fn annotate_and_snapshot_cn_payloads(cn_root: &Path, date: &str, slot: &str) -> Result<()> {
+fn cleanup_legacy_cn_report_artifacts(cn_root: &Path, date: &str, slot: &str) -> Result<()> {
     let reports = cn_root.join("reports");
-    let label = match slot {
-        "morning" => "盘前",
-        "evening" => "盘后",
-        other => other,
-    };
-    let meaning = if slot == "morning" {
-        "盘前报告：价格/资金数据按最新可用收盘解释，重点是隔夜事件、今日触发条件、开盘后确认与撤销规则；不要把它写成收盘复盘。"
-    } else {
-        "盘后报告：应以今日收盘、全天资金流、事件兑现和早盘假设复盘为主；不要把早盘条件原样复制。"
-    };
-    let block = format!(
-        "## 报告时段\n- Slot: {slot} / {label}\n- 报告日期: {date}\n- 解释: {meaning}\n\n---\n\n"
-    );
     for section in ["macro", "structural", "events"] {
-        let src = reports.join(format!("{date}_payload_{section}.md"));
-        if !src.is_file() {
-            continue;
-        }
-        let mut text = fs::read_to_string(&src)?;
-        if !text
-            .get(..text.len().min(1000))
-            .unwrap_or("")
-            .contains("## 报告时段")
-        {
-            text = format!("{block}{text}");
-            fs::write(&src, &text)?;
-        }
+        remove_file_if_exists(&reports.join(format!("{date}_payload_{section}.md")))?;
         if slot != "daily" {
-            fs::copy(
-                &src,
-                reports.join(format!("{date}_payload_{section}_{slot}.md")),
-            )?;
+            remove_file_if_exists(&reports.join(format!("{date}_payload_{section}_{slot}.md")))?;
         }
+    }
+    remove_file_if_exists(&reports.join(format!("{date}_factor_lab_appendix.md")))?;
+    if slot != "daily" {
+        remove_file_if_exists(&reports.join(format!("{date}_factor_lab_appendix_{slot}.md")))?;
+        remove_file_if_exists(&reports.join(format!("{date}_report_zh.md")))?;
+    }
+    remove_dir_if_exists(&reports.join(format!("agents-{date}")))?;
+    if slot != "daily" {
+        remove_dir_if_exists(&reports.join(format!("agents-{date}-{slot}")))?;
     }
     Ok(())
 }
 
-fn verify_cn_payloads(cn_root: &Path, date: &str) -> Result<()> {
-    for section in ["macro", "structural", "events"] {
-        let path = cn_root
-            .join("reports")
-            .join(format!("{date}_payload_{section}.md"));
-        let metadata = fs::metadata(&path)
-            .with_context(|| format!("missing CN payload {}", path.display()))?;
-        if metadata.len() == 0 {
-            anyhow::bail!("empty CN payload {}", path.display());
-        }
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed to remove {}", path.display())),
     }
-    Ok(())
+}
+
+fn remove_dir_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed to remove {}", path.display())),
+    }
 }
 
 fn generate_cn_charts(cn_root: &Path, date: &str, slot: &str) {
@@ -782,27 +653,6 @@ fn generate_cn_charts(cn_root: &Path, date: &str, slot: &str) {
             }
         }
     }
-}
-
-fn run_cn_agents(stack_root: &Path, args: &DailyArgs) -> Result<()> {
-    let cn_root = stack_root.join("quant-research-cn");
-    let slot = cn_slot(&args.session);
-    let previous = find_previous_cn_report(&cn_root, &args.date, &slot);
-    let mut cmd = ProcessCommand::new("bash");
-    cmd.arg("scripts/run_agents.sh")
-        .arg(&args.date)
-        .arg(&slot)
-        .current_dir(&cn_root)
-        .env("SEND_EMAIL", "0")
-        .env("QUANT_DELIVERY_MODE", args.delivery_mode.as_str())
-        .env("QUANT_STACK_ROOT", stack_root);
-    if let Some(path) = previous {
-        cmd.arg(path);
-    }
-    if let Some(recipient) = args.test_recipient.as_deref() {
-        cmd.env("QUANT_TEST_RECIPIENT", recipient);
-    }
-    run_or_print("cn agents", cmd, args.dry_run)
 }
 
 fn run_cn_review_maintenance(
@@ -838,25 +688,6 @@ fn run_cn_review_maintenance(
         .current_dir(&cn_root);
     run_or_warn("cn review maintenance", cmd);
     enter_daily_state(DailyPipelineState::CnReviewMaintenance, args, markets);
-    Ok(())
-}
-
-fn inject_shared_report_model_status(
-    stack_root: &Path,
-    market: &str,
-    date: &str,
-    session: &str,
-    payload: &Path,
-) -> Result<()> {
-    if !payload.is_file() {
-        anyhow::bail!(
-            "payload missing for shared report model status injection: {}",
-            payload.display()
-        );
-    }
-    let block = shared_report_model_status_block(stack_root, market, date, session)?;
-    let text = fs::read_to_string(payload)?;
-    fs::write(payload, upsert_shared_report_model_status(&text, &block))?;
     Ok(())
 }
 
@@ -1000,53 +831,6 @@ fn find_shared_report_model(stack_root: &Path, market: &str, date: &str) -> Resu
         })
 }
 
-fn find_previous_cn_report(cn_root: &Path, date: &str, slot: &str) -> Option<PathBuf> {
-    let reports_dir = cn_root.join("reports");
-    let current_rank = slot_rank(slot);
-    let mut candidates = Vec::new();
-    let entries = fs::read_dir(reports_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|v| v.to_str()) else {
-            continue;
-        };
-        let Some((report_date, report_slot)) = parse_cn_report_name(name) else {
-            continue;
-        };
-        let key = (report_date.as_str(), slot_rank(&report_slot));
-        if key < (date, current_rank) {
-            candidates.push((report_date, slot_rank(&report_slot), path));
-        }
-    }
-    candidates.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    candidates.pop().map(|(_, _, path)| path)
-}
-
-fn parse_cn_report_name(name: &str) -> Option<(String, String)> {
-    if !name.ends_with(".md") || name.len() < 23 {
-        return None;
-    }
-    let date = name.get(0..10)?.to_string();
-    if !date.chars().all(|c| c.is_ascii_digit() || c == '-') {
-        return None;
-    }
-    if name == format!("{date}_report_zh.md") {
-        return Some((date, "evening".to_string()));
-    }
-    let prefix = format!("{date}_report_zh_");
-    name.strip_prefix(&prefix)
-        .and_then(|rest| rest.strip_suffix(".md"))
-        .map(|slot| (date, slot.to_string()))
-}
-
-fn slot_rank(slot: &str) -> i32 {
-    match slot {
-        "morning" => 0,
-        "evening" | "daily" => 1,
-        _ => 1,
-    }
-}
-
 fn cn_slot(session: &str) -> String {
     match session {
         "pre" | "morning" => "morning".to_string(),
@@ -1096,34 +880,7 @@ fn send_reports(
             "post" | "evening" | "daily" => "post",
             other => other,
         };
-        let report_path = stack_root
-            .join("quant-research-v1")
-            .join("reports")
-            .join(format!("{date}_report_zh_{us_session}.md"));
-        if !args.dry_run {
-            enforce_shared_report_model_status(&stack_root, "us", date, us_session, &report_path)?;
-        }
-        let mut cmd = ProcessCommand::new("uv");
-        cmd.arg("run")
-            .arg("python")
-            .arg("scripts/send_report.py")
-            .arg("--send")
-            .arg("--date")
-            .arg(date)
-            .arg("--session")
-            .arg(us_session)
-            .arg("--lang")
-            .arg("zh")
-            .arg("--delivery-mode")
-            .arg(args.delivery_mode.as_str())
-            .current_dir(stack_root.join("quant-research-v1"));
-        if let Some(recipient) = args.test_recipient.as_deref() {
-            cmd.arg("--test-recipient").arg(recipient);
-        }
-        if args.delivery_dry_run || args.dry_run {
-            cmd.arg("--dry-run");
-        }
-        run_or_print("us delivery", cmd, false)?;
+        send_daily_strategy_report(&stack_root, date, us_session, "us", args, false)?;
     }
 
     if markets.iter().any(|m| m == "cn") {
@@ -1133,69 +890,18 @@ fn send_reports(
             "daily" => "daily",
             other => other,
         };
-        let cn_root = stack_root.join("quant-research-cn");
-        let report_path = if slot == "daily" {
-            cn_root.join("reports").join(format!("{date}_report_zh.md"))
-        } else {
-            cn_root
-                .join("reports")
-                .join(format!("{date}_report_zh_{slot}.md"))
-        };
-        let subject = if slot == "daily" {
-            format!("A股量化研究日报 — {date}")
-        } else if slot == "morning" {
-            format!("A股量化研究盘前日报 — {date}")
-        } else if slot == "evening" {
-            format!("A股量化研究盘后日报 — {date}")
-        } else {
-            format!("A股量化研究{slot}日报 — {date}")
-        };
-        if !args.dry_run {
-            enforce_shared_report_model_status(&stack_root, "cn", date, session, &report_path)?;
-        }
-        let mut cmd = ProcessCommand::new("python3");
-        cmd.arg("scripts/send_email.py")
-            .arg(report_path)
-            .arg("--subject")
-            .arg(subject)
-            .arg("--delivery-mode")
-            .arg(args.delivery_mode.as_str())
-            .current_dir(&cn_root);
-        let chart_dir = cn_chart_dir(&cn_root, date, slot);
-        if chart_dir.is_dir() {
-            cmd.arg("--charts").arg(chart_dir);
-        }
-        if let Some(recipient) = args.test_recipient.as_deref() {
-            cmd.arg("--test-recipient").arg(recipient);
-        }
-        if args.delivery_dry_run || args.dry_run {
-            cmd.arg("--dry-run");
-        }
-        run_or_print("cn delivery", cmd, false)?;
-
-        if should_send_production_decision(slot) {
-            send_production_decision_report(&stack_root, date, slot, args)?;
-        }
+        send_daily_strategy_report(&stack_root, date, slot, "cn", args, false)?;
     }
     Ok(())
 }
 
-fn should_send_production_decision(slot: &str) -> bool {
-    match std::env::var("QUANT_SEND_PRODUCTION_DECISION") {
-        Ok(value) => {
-            let normalized = value.trim().to_ascii_lowercase();
-            return matches!(normalized.as_str(), "1" | "true" | "yes" | "on");
-        }
-        Err(_) => {}
-    }
-    matches!(slot, "morning" | "pre")
-}
-
-fn send_production_decision_report(
+fn send_daily_strategy_report(
     stack_root: &Path,
     date: &str,
     slot: &str,
+    market: &str,
     args: &DailyArgs,
+    skip_generate: bool,
 ) -> Result<()> {
     let mut cmd = ProcessCommand::new("python3");
     cmd.arg("scripts/send_production_decision_report.py")
@@ -1203,9 +909,14 @@ fn send_production_decision_report(
         .arg(date)
         .arg("--session")
         .arg(slot)
+        .arg("--market")
+        .arg(market)
         .arg("--delivery-mode")
         .arg(args.delivery_mode.as_str())
         .current_dir(stack_root);
+    if skip_generate {
+        cmd.arg("--skip-generate");
+    }
     if let Some(recipient) = args.test_recipient.as_deref() {
         cmd.arg("--test-recipient").arg(recipient);
     }
@@ -1215,15 +926,7 @@ fn send_production_decision_report(
     if args.dry_run {
         cmd.arg("--dry-run");
     }
-    run_or_print("production decision delivery", cmd, false)
-}
-
-fn cn_chart_dir(cn_root: &Path, date: &str, slot: &str) -> PathBuf {
-    let slot_dir = cn_root.join("reports").join("charts").join(date).join(slot);
-    if slot != "daily" && slot_dir.is_dir() {
-        return slot_dir;
-    }
-    cn_root.join("reports").join("charts").join(date)
+    run_or_print("daily strategy report delivery", cmd, false)
 }
 
 fn parse_markets(markets: &str) -> Vec<String> {

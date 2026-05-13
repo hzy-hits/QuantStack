@@ -18,6 +18,12 @@ if str(QUANT_V1_SRC) not in sys.path:
 from quant_bot.analytics import cn_opportunity_ranker as ranker  # noqa: E402
 
 
+def _write_ai_infra_universe(root: Path, rows: list[dict]) -> None:
+    path = root / "data" / "global_universe_v2.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows), encoding="utf-8")
+
+
 def _make_v2_report(root: Path) -> None:
     out = root / "2026-05-06"
     out.mkdir(parents=True)
@@ -213,6 +219,102 @@ def _make_cn_db(path: Path) -> None:
 
 
 class CnOpportunityRankerTests(unittest.TestCase):
+    def test_ai_infra_expand_filters_cn_candidates_and_keeps_bfs_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ai_root = Path(tmpdir) / "ai_infra"
+            _write_ai_infra_universe(
+                ai_root,
+                [
+                    {
+                        "asset_pool": "中国A股资产池",
+                        "market_country": "CN",
+                        "ticker": "300308.SZ",
+                        "company": "中际旭创",
+                        "bfs_depth": "D3",
+                        "module": "CPO optical",
+                        "current_pool": "核心候选",
+                        "total_score": 92,
+                    },
+                    {
+                        "asset_pool": "中国A股资产池",
+                        "market_country": "CN",
+                        "ticker": "002281.SZ",
+                        "company": "光迅科技",
+                        "bfs_depth": "D3-D4",
+                        "module": "光模块",
+                        "current_pool": "候选池",
+                        "total_score": 84,
+                    },
+                ],
+            )
+
+            payload = ranker.build_ranker_payload(
+                as_of=ranker.date(2026, 5, 12),
+                candidates=[{"symbol": "002281.SZ", "name": "光迅科技"}, {"symbol": "600519.SH", "name": "消费票"}],
+                candidate_status="unit",
+                cn_db=ai_root / "missing.duckdb",
+                top=10,
+                ai_infra_root=ai_root,
+                ai_infra_mode="enforce_expand",
+            )
+            by_symbol = {row["symbol"]: row for row in payload["all_rows"]}
+
+            self.assertEqual(set(by_symbol), {"002281.SZ", "300308.SZ"})
+            self.assertEqual(payload["ai_infra_gate"]["retained_candidate_count"], 1)
+            self.assertEqual(payload["ai_infra_gate"]["added_universe_count"], 1)
+            self.assertIn("600519.SH", payload["ai_infra_gate"]["excluded_symbols"])
+            self.assertEqual(by_symbol["002281.SZ"]["ai_infra_bfs_depth"], "D3-D4")
+            self.assertEqual(by_symbol["300308.SZ"]["ai_infra_module"], "CPO optical")
+            self.assertTrue(all(row.get("ai_infra_universe") for row in payload["all_rows"]))
+
+    def test_ai_infra_right_side_tape_leadership_can_become_execution_sleeve(self) -> None:
+        rows = ranker.score_rows(
+            [
+                {
+                    "symbol": "601179.SH",
+                    "name": "中国西电",
+                    "ai_infra_universe": True,
+                    "narrative_group": "ai_infra",
+                    "supercycle_layer": "ai_power_nuclear_grid",
+                    "supercycle_priority": 2,
+                    "pct_chg": 2.5,
+                    "ret_5d": 9.0,
+                    "ret_20d": 18.0,
+                    "volume_ratio": 2.0,
+                    "turnover_rate": 3.0,
+                    "flow_volume_confirmation": 1.7,
+                    "flow_information_score": 0.92,
+                    "flow_tape_z": 2.0,
+                    "flow_large_flow_z": 1.8,
+                    "net_mf_pct_circ_mv": 0.7,
+                    "large_net_pct_circ_mv": 0.45,
+                    "extra_large_net_pct_circ_mv": 0.25,
+                    "rzye_5d_delta_pct": 1.2,
+                    "sector_main_net_pct": 1.0,
+                    "sector_pct_chg": 1.3,
+                    "p_touch_limit": 0.35,
+                    "p_limit_up": 0.12,
+                    "p_failed_board": 0.02,
+                    "amount": 500000,
+                    "circ_mv": 2000000,
+                }
+            ]
+        )
+
+        self.assertEqual(rows[0]["alpha_sleeve_id"], ranker.CN_TAPE_LEADERSHIP_SLEEVE)
+        self.assertEqual(rows[0]["execution_source"], "ai_infra_tape_leadership_runtime")
+        self.assertEqual(rows[0]["production_tier"], "top_stock_trade")
+        self.assertEqual(rows[0]["production_action"], "buy_planned_entry")
+
+    def test_cn_supercycle_profile_prioritizes_ai_infra_over_consumer(self) -> None:
+        semiconductor = ranker.cn_supercycle_profile({"industry": "半导体", "name": "先进封测"})
+        consumer = ranker.cn_supercycle_profile({"industry": "白酒", "name": "消费票"})
+
+        self.assertEqual(semiconductor["supercycle_priority"], 1)
+        self.assertEqual(semiconductor["supercycle_layer"], "ai_chip_equipment_materials_packaging")
+        self.assertGreater(ranker.cn_narrative_fit({"industry": "半导体"}), ranker.cn_narrative_fit({"industry": "白酒"}))
+        self.assertEqual(consumer["supercycle_layer"], "excluded_consumer")
+
     def test_ranker_outputs_production_tiers_without_hard_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
@@ -239,8 +341,10 @@ class CnOpportunityRankerTests(unittest.TestCase):
 
             self.assertEqual(payload["candidate_count"], 2)
             self.assertEqual(rows[0]["symbol"], "000001.SZ")
-            self.assertEqual(rows[0]["production_tier"], "top_probe")
-            self.assertEqual(rows[0]["production_action"], "planned_entry_probe")
+            self.assertEqual(rows[0]["production_tier"], "top_stock_trade")
+            self.assertEqual(rows[0]["production_action"], "buy_planned_entry")
+            self.assertIn("price_first_signal", rows[0]["score_components"])
+            self.assertIn("informed_flow", rows[0]["score_components"])
             self.assertNotIn("research_only", rows[0]["production_tier"])
             self.assertEqual(rows[1]["symbol"], "000002.SZ")
             self.assertEqual(rows[1]["production_tier"], "event_risk_watch")

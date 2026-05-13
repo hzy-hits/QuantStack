@@ -1,0 +1,463 @@
+version: 1
+
+defaults:
+  timezone: Asia/Shanghai
+  timeout_minutes: 180
+
+tasks:
+  us.premarket:
+    group: us
+    schedule: "0 20 * * 1-5"
+    cwd: quant-research-v1
+    command: ["./scripts/run_full.sh", "--prod", "--premarket"]
+    log: ops/logs/us.premarket.log
+    legacy_log: quant-research-v1/logs/cron_premarket.log
+    lock: ops/state/us.premarket.lock
+    timeout_minutes: 240
+    sends_email: true
+    market: us
+    session: premarket
+    owner: us_pipeline
+    outputs:
+      - quant-research-v1/reports
+      - quant-research-v1/logs
+
+  us.postmarket:
+    group: us
+    schedule: "0 5 * * 2-6"
+    cwd: quant-research-v1
+    command: ["./scripts/run_full.sh", "--prod"]
+    log: ops/logs/us.postmarket.log
+    legacy_log: quant-research-v1/logs/cron_postmarket.log
+    lock: ops/state/us.postmarket.lock
+    timeout_minutes: 240
+    sends_email: true
+    market: us
+    session: postmarket
+    owner: us_pipeline
+    outputs:
+      - quant-research-v1/reports
+      - quant-research-v1/logs
+
+  cn.precompute_alpha:
+    group: cn
+    schedule: "20 7 * * 1-5"
+    cwd: quant-research-cn
+    env:
+      QUANT_CN_REVIEW_BACKFILL_DAYS: "7"
+    command: ["bash", "scripts/precompute_alpha.sh"]
+    log: ops/logs/cn.precompute_alpha.log
+    legacy_log: quant-research-cn/reports/logs/cron_precompute_alpha.log
+    lock: ops/state/cn.precompute_alpha.lock
+    timeout_minutes: 120
+    sends_email: false
+    market: cn
+    session: precompute
+    owner: cn_pipeline
+    outputs:
+      - quant-research-cn/reports/review_dashboard
+      - data/strategy_backtest_history.duckdb
+
+  cn.morning:
+    group: cn
+    schedule: "30 8 * * 1-5"
+    cwd: .
+    command:
+      - ./target/release/quant-stack
+      - daily
+      - --date
+      - "{cst_date}"
+      - --markets
+      - cn
+      - --session
+      - morning
+      - --run-producers
+      - --with-narrative
+      - --send-reports
+      - --delivery-mode
+      - prod
+      - --stack-root
+      - "{stack_root}"
+    log: ops/logs/cn.morning.log
+    legacy_log: quant-research-cn/reports/logs/cron_morning.log
+    lock: ops/state/cn.morning.lock
+    timeout_minutes: 240
+    sends_email: true
+    market: cn
+    session: morning
+    owner: cn_pipeline
+    outputs:
+      - quant-research-cn/reports
+
+  cn.evening:
+    group: cn
+    schedule: "0 18 * * 1-5"
+    cwd: .
+    command:
+      - ./target/release/quant-stack
+      - daily
+      - --date
+      - "{cst_date}"
+      - --markets
+      - cn
+      - --session
+      - evening
+      - --run-producers
+      - --with-narrative
+      - --send-reports
+      - --delivery-mode
+      - prod
+      - --stack-root
+      - "{stack_root}"
+    log: ops/logs/cn.evening.log
+    legacy_log: quant-research-cn/reports/logs/cron_evening.log
+    lock: ops/state/cn.evening.lock
+    timeout_minutes: 240
+    sends_email: true
+    market: cn
+    session: evening
+    owner: cn_pipeline
+    outputs:
+      - quant-research-cn/reports
+
+  weekly.us:
+    group: weekly
+    schedule: "30 9 * * 6"
+    cwd: quant-research-v1
+    command: ["./scripts/run_weekly.sh"]
+    log: ops/logs/weekly.us.log
+    legacy_log: quant-research-v1/logs/cron_weekly.log
+    lock: ops/state/weekly.us.lock
+    timeout_minutes: 180
+    sends_email: true
+    market: us
+    session: weekly
+    owner: us_pipeline
+    outputs:
+      - quant-research-v1/reports
+
+  weekly.cn:
+    group: weekly
+    schedule: "0 10 * * 6"
+    cwd: quant-research-cn
+    command: ["bash", "scripts/weekly_pipeline.sh"]
+    log: ops/logs/weekly.cn.log
+    legacy_log: quant-research-cn/reports/logs/cron_weekly.log
+    lock: ops/state/weekly.cn.lock
+    timeout_minutes: 180
+    sends_email: true
+    market: cn
+    session: weekly
+    owner: cn_pipeline
+    outputs:
+      - quant-research-cn/reports
+
+  factor.cn.daily:
+    group: factor
+    schedule: "0 4 * * 1-5"
+    cwd: factor-lab
+    command: ["bash", "scripts/daily_factors.sh", "--market", "cn"]
+    log: ops/logs/factor.cn.daily.log
+    legacy_log: factor-lab/logs/daily_{cst_yyyymmdd}.log
+    lock: ops/state/factor.cn.daily.lock
+    timeout_minutes: 240
+    sends_email: false
+    market: cn
+    session: factor_daily
+    owner: factor_lab
+    outputs:
+      - factor-lab/data/factor_lab.duckdb
+      - factor-lab/reports
+
+  factor.us.daily:
+    group: factor
+    schedule: "0 9 * * 2-6"
+    cwd: factor-lab
+    command: ["bash", "scripts/daily_factors.sh", "--market", "us"]
+    log: ops/logs/factor.us.daily.log
+    legacy_log: factor-lab/logs/daily_{cst_yyyymmdd}.log
+    lock: ops/state/factor.us.daily.lock
+    timeout_minutes: 240
+    sends_email: false
+    market: us
+    session: factor_daily
+    owner: factor_lab
+    outputs:
+      - factor-lab/data/factor_lab.duckdb
+      - factor-lab/reports
+
+  paper.record:
+    group: paper
+    schedule: "33 4 * * 2-6"
+    cwd: factor-lab
+    command: ["python3", "scripts/paper_trade.py", "record"]
+    log: ops/logs/paper.record.log
+    legacy_log: factor-lab/logs/paper_{cst_yyyymmdd}.log
+    lock: ops/state/paper.record.lock
+    timeout_minutes: 60
+    sends_email: false
+    market: all
+    session: paper
+    owner: factor_lab
+    outputs:
+      - factor-lab/data/factor_lab.duckdb
+
+  paper.evaluate:
+    group: paper
+    schedule: "47 7 * * 2-6"
+    cwd: factor-lab
+    command: ["python3", "scripts/paper_trade.py", "evaluate"]
+    log: ops/logs/paper.evaluate.log
+    legacy_log: factor-lab/logs/paper_{cst_yyyymmdd}.log
+    lock: ops/state/paper.evaluate.lock
+    timeout_minutes: 60
+    sends_email: false
+    market: all
+    session: paper
+    owner: factor_lab
+    outputs:
+      - factor-lab/data/factor_lab.duckdb
+
+  paper.report:
+    group: paper
+    schedule: "53 7 * * 2-6"
+    cwd: factor-lab
+    command: ["python3", "scripts/paper_trade.py", "report"]
+    log: ops/logs/paper.report.log
+    legacy_log: factor-lab/logs/paper_{cst_yyyymmdd}.log
+    lock: ops/state/paper.report.lock
+    timeout_minutes: 60
+    sends_email: false
+    market: all
+    session: paper
+    owner: factor_lab
+    outputs:
+      - factor-lab/reports
+
+  autoresearch.cn.morning:
+    group: autoresearch
+    schedule: "0 6 * * 1-5"
+    cwd: factor-lab
+    command: ["bash", "scripts/autoresearch.sh", "--market", "cn"]
+    log: ops/logs/autoresearch.cn.morning.log
+    legacy_log: factor-lab/logs/autoresearch_{cst_yyyymmdd}.log
+    lock: ops/state/autoresearch.cn.morning.lock
+    timeout_minutes: 180
+    sends_email: false
+    market: cn
+    session: morning
+    owner: factor_lab
+    outputs:
+      - factor-lab/runtime/autoresearch
+      - factor-lab/reports/autoresearch_exports/ai_supply_chain
+      - factor-lab/research_rollups
+
+  autoresearch.all.midday:
+    group: autoresearch
+    schedule: "0 10 * * 1-5"
+    cwd: factor-lab
+    command: ["bash", "scripts/autoresearch.sh"]
+    log: ops/logs/autoresearch.all.midday.log
+    legacy_log: factor-lab/logs/autoresearch_{cst_yyyymmdd}.log
+    lock: ops/state/autoresearch.all.midday.lock
+    timeout_minutes: 180
+    sends_email: false
+    market: all
+    session: midday
+    owner: factor_lab
+    outputs:
+      - factor-lab/runtime/autoresearch
+      - factor-lab/reports/autoresearch_exports/ai_supply_chain
+      - factor-lab/research_rollups
+
+  autoresearch.all.afternoon:
+    group: autoresearch
+    schedule: "0 14 * * 1-5"
+    cwd: factor-lab
+    command: ["bash", "scripts/autoresearch.sh"]
+    log: ops/logs/autoresearch.all.afternoon.log
+    legacy_log: factor-lab/logs/autoresearch_{cst_yyyymmdd}.log
+    lock: ops/state/autoresearch.all.afternoon.lock
+    timeout_minutes: 180
+    sends_email: false
+    market: all
+    session: afternoon
+    owner: factor_lab
+    outputs:
+      - factor-lab/runtime/autoresearch
+      - factor-lab/reports/autoresearch_exports/ai_supply_chain
+      - factor-lab/research_rollups
+
+  factor.maintenance.weekly:
+    group: maintenance
+    schedule: "17 8 * * 6"
+    cwd: factor-lab
+    command: ["python3", "scripts/weekly_maintenance.py", "--days", "250"]
+    log: ops/logs/factor.maintenance.weekly.log
+    legacy_log: factor-lab/logs/maintenance_{cst_yyyymmdd}.log
+    lock: ops/state/factor.maintenance.weekly.lock
+    timeout_minutes: 180
+    sends_email: false
+    market: all
+    session: maintenance
+    owner: factor_lab
+    outputs:
+      - factor-lab/data/factor_lab.duckdb
+      - factor-lab/reports
+
+  research.ai_supply_chain_candidates:
+    group: research
+    schedule: "20 11 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/extract_ai_supply_chain_relationship_candidates.py
+      - --as-of
+      - "{cst_date}"
+      - --lookback-days
+      - "14"
+    log: ops/logs/research.ai_supply_chain_candidates.log
+    lock: ops/state/research.ai_supply_chain_candidates.lock
+    timeout_minutes: 60
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/ai_supply_chain_candidates
+
+  research.ai_infra_bfs_discovery_queue:
+    group: research
+    schedule: "30 11 * * 1-5"
+    cwd: ai_infra
+    command:
+      - python3
+      - scripts/generate_bfs_supply_chain_discovery_queue.py
+    log: ops/logs/research.ai_infra_bfs_discovery_queue.log
+    lock: ops/state/research.ai_infra_bfs_discovery_queue.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ai_infra/reports/bfs_supply_chain_discovery_queue_v1.csv
+      - ai_infra/reports/bfs_supply_chain_discovery_queue_v1.md
+      - ai_infra/notes/2026-05-13-chatgpt-pro-bfs-supply-chain-discovery-prompt.md
+
+  research.ai_infra_expansion_candidates:
+    group: research
+    schedule: "35 11 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - ai_infra/scripts/generate_expansion_candidates.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.ai_infra_expansion_candidates.log
+    lock: ops/state/research.ai_infra_expansion_candidates.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ai_infra/reports/expansion_candidates_v1.csv
+      - ai_infra/reports/expansion_candidates_v1.md
+
+  research.ai_infra_source_ingest:
+    group: research
+    schedule: "45 11 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/ingest_ai_source_documents.py
+      - --as-of
+      - "{cst_date}"
+      - --max-docs
+      - "20"
+      - --timeout
+      - "8"
+    log: ops/logs/research.ai_infra_source_ingest.log
+    lock: ops/state/research.ai_infra_source_ingest.lock
+    timeout_minutes: 60
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ai_infra/reports/source_document_tasks_v1.csv
+      - ai_infra/reports/source_evidence_extracts_v1.csv
+      - ai_infra/data/source_cache
+
+  research.ai_infra_promotion_plan:
+    group: research
+    schedule: "55 11 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/promote_ai_infra_expansion_candidates.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.ai_infra_promotion_plan.log
+    lock: ops/state/research.ai_infra_promotion_plan.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ai_infra/reports/expansion_candidates_promoted_v1.csv
+      - ai_infra/reports/expansion_candidates_rejected_v1.json
+
+  research.ai_supercycle_readiness:
+    group: research
+    schedule: "5 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/verify_ai_supercycle_readiness.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.ai_supercycle_readiness.log
+    lock: ops/state/research.ai_supercycle_readiness.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/ai_supercycle_readiness
+
+  us.watchdog.reboot:
+    group: watchdog
+    schedule: "@reboot"
+    sleep_seconds: 180
+    cwd: quant-research-v1
+    command: ["uv", "run", "python", "scripts/cron_watchdog.py"]
+    log: ops/logs/us.watchdog.reboot.log
+    legacy_log: quant-research-v1/logs/cron_watchdog.log
+    lock: ops/state/us.watchdog.reboot.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: us
+    session: watchdog
+    owner: us_pipeline
+    outputs:
+      - quant-research-v1/logs/cron_watchdog_state.json
+
+  us.watchdog:
+    group: watchdog
+    schedule: "12,27,42,57 * * * *"
+    cwd: quant-research-v1
+    command: ["uv", "run", "python", "scripts/cron_watchdog.py"]
+    log: ops/logs/us.watchdog.log
+    legacy_log: quant-research-v1/logs/cron_watchdog.log
+    lock: ops/state/us.watchdog.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: us
+    session: watchdog
+    owner: us_pipeline
+    outputs:
+      - quant-research-v1/logs/cron_watchdog_state.json

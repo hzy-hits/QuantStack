@@ -200,7 +200,6 @@ def load_strategy_rows(db_path: Path, start: date, as_of: date) -> pd.DataFrame:
               AND m.realized_ret_pct IS NOT NULL
               AND m.strategy_family IN (
                 'oversold_contrarian',
-                'structural_core',
                 'continuation_breakout',
                 'early_accumulation'
               )
@@ -956,7 +955,6 @@ def main() -> None:
 
     oversold = usable_dedup[usable_dedup["strategy_family"] == "oversold_contrarian"].copy()
     ev_positive = oversold[pd.to_numeric(oversold["ev_lcb_80_pct"], errors="coerce") > 0].copy()
-    structural = usable_dedup[usable_dedup["strategy_family"] == "structural_core"].copy()
     breakout = usable_dedup[usable_dedup["strategy_family"] == "continuation_breakout"].copy()
     early = usable_dedup[usable_dedup["strategy_family"] == "early_accumulation"].copy()
 
@@ -965,7 +963,6 @@ def main() -> None:
     baselines = [
         baseline_all.to_dict(),
         baseline_ev.to_dict(),
-        metric_for_df("Structural core baseline", structural).to_dict(),
         metric_for_df("Continuation breakout diagnostic", breakout).to_dict(),
         metric_for_df("Early accumulation diagnostic", early).to_dict(),
     ]

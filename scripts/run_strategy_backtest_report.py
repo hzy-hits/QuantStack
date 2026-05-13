@@ -264,8 +264,6 @@ def row_policy(row: dict[str, Any], market: str, horizon_days: int) -> dict[str,
         direction = "long"
         if family == "oversold_contrarian":
             confidence = "ev_positive" if is_cn_oversold_ev_positive_row(row) else "ev_unproven"
-        elif family == "structural_core":
-            confidence = "legacy"
         else:
             confidence = "research"
         execution = "planned_entry" if action == "TRADE" else normalize_execution(row.get("execution_mode") or row.get("execution_rule"))
@@ -473,6 +471,7 @@ def load_cn_strategy_model_rows(
           AND (m.evaluation_date IS NULL OR m.evaluation_date <= CAST(? AS DATE))
           AND m.action_intent = 'TRADE'
           AND m.realized_ret_pct IS NOT NULL
+          AND m.strategy_family <> 'structural_core'
         ORDER BY m.report_date, m.symbol
         """,
         [start.isoformat(), cutoff.isoformat(), as_of.isoformat()],
@@ -1015,6 +1014,7 @@ def load_cn_current_strategy_candidates(con: duckdb.DuckDBPyConnection, as_of: d
               WHERE report_date = CAST(? AS DATE)
           )
           AND m.selection_status IN ('selected', 'exploration')
+          AND m.strategy_family <> 'structural_core'
         ORDER BY
           CASE m.alpha_state
             WHEN 'positive_ev_setup' THEN 0
@@ -1030,8 +1030,6 @@ def load_cn_current_strategy_candidates(con: duckdb.DuckDBPyConnection, as_of: d
     )
     for row in rows:
         confidence = "EV_POSITIVE" if is_cn_oversold_ev_positive_row(row) else "EV_UNPROVEN"
-        if str(row.get("strategy_family") or "").lower() == "structural_core":
-            confidence = "LEGACY"
         row["report_bucket"] = row.get("strategy_family")
         row["signal_direction"] = "long"
         row["signal_confidence"] = confidence

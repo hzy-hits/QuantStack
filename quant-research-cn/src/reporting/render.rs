@@ -1,12 +1,13 @@
-/// Payload renderer — generates structured Markdown for 4 Claude agent consumption.
+/// Legacy payload renderer used to refresh report_decisions/report_review ledgers.
+/// The unified quant-stack daily pipeline removes these Markdown payloads after
+/// Main Strategy V2 materializes the replacement daily report.
 ///
-/// Outputs 3 split files:
-///   1. `{date}_payload_macro.md`      → 宏观分析师 + 风险分析师
-///   2. `{date}_payload_structural.md`  → 量化分析师 + 风险分析师
-///   3. `{date}_payload_events.md`      → 事件分析师
+/// Outputs 3 temporary split files:
+///   1. `{date}_payload_macro.md`
+///   2. `{date}_payload_structural.md`
+///   3. `{date}_payload_events.md`
 ///
-/// The payload is the program's output. ALL arithmetic is computed upstream.
-/// Agents NEVER touch arithmetic — every number they see is pre-computed.
+/// The payload is not a user-facing report and is not an agent entry point.
 use anyhow::Result;
 use chrono::{FixedOffset, NaiveDate, Utc};
 use duckdb::Connection;
@@ -1892,6 +1893,7 @@ fn query_strategy_ev_rows(db: &Connection, date_str: &str) -> Vec<StrategyEvView
                COALESCE(ev_norm_lcb_80, 0), eligible, COALESCE(fail_reasons, '')
         FROM strategy_ev
         WHERE as_of = CAST(? AS DATE)
+          AND strategy_family <> 'structural_core'
         ORDER BY eligible DESC, ev_norm_lcb_80 DESC, ev_pct DESC, samples DESC
         LIMIT 12";
     let Ok(mut stmt) = db.prepare(sql) else {
@@ -1945,6 +1947,7 @@ fn query_current_paper_trades(db: &Connection, date_str: &str) -> Vec<PaperTrade
         WHERE p.report_date = CAST(? AS DATE)
           AND p.session = 'daily'
           AND p.selection_status IN ('selected', 'exploration')
+          AND p.strategy_family <> 'structural_core'
         ORDER BY
             CASE COALESCE(m.alpha_state, '')
                 WHEN 'positive_ev_setup' THEN 0
@@ -1977,6 +1980,7 @@ fn query_recent_paper_trades(db: &Connection, date_str: &str) -> Vec<PaperTradeL
           AND CAST(? AS DATE) IS NOT NULL
           AND p.session = 'daily'
           AND p.selection_status = 'selected'
+          AND p.strategy_family <> 'structural_core'
         ORDER BY p.report_date DESC,
             CASE p.action_intent WHEN 'TRADE' THEN 0 WHEN 'SETUP' THEN 1 WHEN 'OBSERVE' THEN 2 ELSE 3 END,
             p.symbol";
@@ -2002,6 +2006,7 @@ fn query_v2_signal_context(db: &Connection, ts_code: &str, date_str: &str) -> V2
           AND m.symbol = ?
           AND m.session = 'daily'
           AND m.selection_status IN ('selected', 'exploration')
+          AND m.strategy_family <> 'structural_core'
         ORDER BY
           CASE WHEN m.strategy_family = 'oversold_contrarian' THEN 0 ELSE 1 END,
           CASE m.action_intent WHEN 'TRADE' THEN 0 WHEN 'SETUP' THEN 1 WHEN 'OBSERVE' THEN 2 ELSE 3 END,

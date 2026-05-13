@@ -21,7 +21,7 @@ def load_price_context(
     sym_placeholders = ",".join("?" * len(symbols))
 
     price_ctx = con.execute(f"""
-        WITH latest AS (
+        WITH price_history AS (
             SELECT symbol,
                    adj_close,
                    close,
@@ -42,10 +42,17 @@ def load_price_context(
             FROM prices_daily
             WHERE symbol IN ({sym_placeholders})
               AND date <= ?
+              AND close IS NOT NULL
+        ),
+        latest AS (
+            SELECT *,
+                   ROW_NUMBER() OVER (PARTITION BY symbol ORDER BY date DESC) AS rn
+            FROM price_history
         )
-        SELECT * FROM latest
-        WHERE date = (SELECT MAX(date) FROM prices_daily WHERE date <= ? AND close IS NOT NULL)
-    """, symbols + [as_of_str, as_of_str]).fetchdf()
+        SELECT * EXCLUDE (rn)
+        FROM latest
+        WHERE rn = 1
+    """, symbols + [as_of_str]).fetchdf()
 
     return price_ctx
 

@@ -4,7 +4,6 @@ use chrono::NaiveDate;
 use clap::Parser;
 use quant_stack_core::alpha::{self, AlphaEvalConfig};
 use quant_stack_core::report_model;
-use serde_json::Value;
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -15,8 +14,6 @@ use std::time::Duration;
 use tracing::{info, warn};
 
 const DATA_TIMEOUT_SECS: u64 = 3600;
-const SPLIT_TIMEOUT_SECS: u64 = 60;
-const AGENT_TIMEOUT_SECS: u64 = 2400;
 const EMAIL_TIMEOUT_SECS: u64 = 120;
 const LOCK_FILE: &str = "/tmp/quant-research-pipeline.lock";
 
@@ -78,9 +75,6 @@ enum UsPipelineState {
     FactorLabImportComplete,
     SharedAlphaEvaluated,
     SharedReportModelWritten,
-    PayloadReady,
-    PayloadSplit,
-    FactorLabInjected,
     AgentsComplete,
     ReportReady,
     DeliveryReady,
@@ -98,9 +92,6 @@ impl UsPipelineState {
             Self::FactorLabImportComplete => "factor_lab_import_complete",
             Self::SharedAlphaEvaluated => "shared_alpha_evaluated",
             Self::SharedReportModelWritten => "shared_report_model_written",
-            Self::PayloadReady => "payload_ready",
-            Self::PayloadSplit => "payload_split",
-            Self::FactorLabInjected => "factor_lab_injected",
             Self::AgentsComplete => "agents_complete",
             Self::ReportReady => "report_ready",
             Self::DeliveryReady => "delivery_ready",
@@ -114,7 +105,6 @@ enum UsPipelineStep {
     Preflight,
     DataPipeline,
     FactorLab,
-    PayloadSplit,
     AgentAnalysis,
     EmailSend,
 }
@@ -125,7 +115,6 @@ impl UsPipelineStep {
             Self::Preflight => "preflight",
             Self::DataPipeline => "data pipeline",
             Self::FactorLab => "factor lab",
-            Self::PayloadSplit => "split payload",
             Self::AgentAnalysis => "agent analysis",
             Self::EmailSend => "email send",
         }
@@ -369,43 +358,24 @@ fn run_attempt(ctx: &UsPipelineContext, attempt: u8) -> std::result::Result<(), 
         .map_err(|e| UsPipelineFailure::new(UsPipelineStep::DataPipeline, e))?;
     enter_state(ctx, UsPipelineState::SharedReportModelWritten, attempt);
 
-    let payload = ctx
-        .project_dir
-        .join("reports")
-        .join(format!("{}_payload_{}.md", ctx.date, ctx.session));
-    ensure_nonempty(&payload)
-        .map_err(|e| UsPipelineFailure::new(UsPipelineStep::DataPipeline, e))?;
-    println!("Payload: {} bytes", file_size(&payload).unwrap_or(0));
-    enter_state(ctx, UsPipelineState::PayloadReady, attempt);
-
-    split_payload(ctx).map_err(|e| UsPipelineFailure::new(UsPipelineStep::PayloadSplit, e))?;
-    validate_split_payloads(ctx)
-        .map_err(|e| UsPipelineFailure::new(UsPipelineStep::PayloadSplit, e))?;
-    inject_shared_report_model_status(ctx)
-        .map_err(|e| UsPipelineFailure::new(UsPipelineStep::PayloadSplit, e))?;
-    enter_state(ctx, UsPipelineState::PayloadSplit, attempt);
-
-    inject_factor_lab_candidates(ctx)
-        .map_err(|e| UsPipelineFailure::new(UsPipelineStep::FactorLab, e))?;
-    enter_state(ctx, UsPipelineState::FactorLabInjected, attempt);
-
-    run_agents(ctx, previous_report.as_deref())
+    disable_legacy_agents(ctx)
         .map_err(|e| UsPipelineFailure::new(UsPipelineStep::AgentAnalysis, e))?;
     enter_state(ctx, UsPipelineState::AgentsComplete, attempt);
 
-    let report = ctx
-        .project_dir
-        .join("reports")
-        .join(format!("{}_report_zh_{}.md", ctx.date, ctx.session));
-    ensure_nonempty(&report)
+    render_replacement_report(ctx)
         .map_err(|e| UsPipelineFailure::new(UsPipelineStep::AgentAnalysis, e))?;
-    enforce_shared_report_model_status(ctx, &report)
-        .map_err(|e| UsPipelineFailure::new(UsPipelineStep::AgentAnalysis, e))?;
-    println!(
-        "Chinese report: {} ({} bytes)",
-        report.display(),
-        file_size(&report).unwrap_or(0)
-    );
+    let report = legacy_us_report_path(ctx);
+    if ctx.dry_run {
+        println!("dry-run: would materialize US report {}", report.display());
+    } else {
+        ensure_nonempty(&report)
+            .map_err(|e| UsPipelineFailure::new(UsPipelineStep::AgentAnalysis, e))?;
+        println!(
+            "US report: {} ({} bytes)",
+            report.display(),
+            file_size(&report).unwrap_or(0)
+        );
+    }
     enter_state(ctx, UsPipelineState::ReportReady, attempt);
 
     enter_state(ctx, UsPipelineState::DeliveryReady, attempt);
@@ -547,7 +517,7 @@ fn run_shared_alpha_gate(ctx: &UsPipelineContext) -> Result<()> {
             .join("quant-research-cn/data/quant_cn_report.duckdb"),
         us_horizon_days: 3,
         cn_horizon_days: 2,
-        write_project_copies: true,
+        write_project_copies: false,
     };
     alpha::evaluate(&config)?;
     Ok(())
@@ -587,190 +557,41 @@ fn materialize_us_report_model(ctx: &UsPipelineContext) -> Result<()> {
     Ok(())
 }
 
-fn split_payload(ctx: &UsPipelineContext) -> Result<()> {
+fn disable_legacy_agents(ctx: &UsPipelineContext) -> Result<()> {
     println!();
-    println!("[4/7] Split payload");
-    let mut cmd = timeout_command(SPLIT_TIMEOUT_SECS, "uv");
-    cmd.arg("run")
-        .arg("python")
-        .arg("scripts/split_payload.py")
-        .arg("--date")
+    println!("[6/7] Legacy US agents disabled; Main Strategy V2 replaces the US daily report");
+    cleanup_legacy_us_report_artifacts(ctx)
+}
+
+fn legacy_us_report_path(ctx: &UsPipelineContext) -> PathBuf {
+    ctx.project_dir
+        .join("reports")
+        .join(format!("{}_report_zh_{}.md", ctx.date, ctx.session))
+}
+
+fn run_daily_report_command(
+    ctx: &UsPipelineContext,
+    label: &str,
+    skip_generate: bool,
+    delivery_dry_run: bool,
+) -> Result<()> {
+    let mut cmd = timeout_command(EMAIL_TIMEOUT_SECS, &ctx.python_bin);
+    cmd.arg(
+        ctx.stack_root
+            .join("scripts/send_production_decision_report.py"),
+    );
+    cmd.arg("--date")
         .arg(&ctx.date)
         .arg("--session")
         .arg(&ctx.session)
-        .current_dir(&ctx.project_dir);
-    run_command("payload split", cmd, ctx.dry_run)
-}
-
-fn validate_split_payloads(ctx: &UsPipelineContext) -> Result<()> {
-    if ctx.dry_run {
-        return Ok(());
-    }
-    for section in ["macro", "structural", "news"] {
-        ensure_nonempty(&ctx.project_dir.join("reports").join(format!(
-            "{}_payload_{}_{}.md",
-            ctx.date, section, ctx.session
-        )))?;
-    }
-    Ok(())
-}
-
-fn inject_shared_report_model_status(ctx: &UsPipelineContext) -> Result<()> {
-    if ctx.dry_run {
-        return Ok(());
-    }
-    let structural = ctx.project_dir.join("reports").join(format!(
-        "{}_payload_structural_{}.md",
-        ctx.date, ctx.session
-    ));
-    if !structural.is_file() {
-        bail!(
-            "structural payload missing for shared report model status: {}",
-            structural.display()
-        );
-    }
-    let block = shared_report_model_status_block(ctx)?;
-    let text = fs::read_to_string(&structural)?;
-    fs::write(
-        &structural,
-        upsert_shared_report_model_status(&text, &block),
-    )?;
-    Ok(())
-}
-
-fn inject_factor_lab_candidates(ctx: &UsPipelineContext) -> Result<()> {
-    println!();
-    println!("[5/7] Inject Factor Lab research candidates");
-    if ctx.dry_run {
-        println!("dry-run: would append Factor Lab candidates to structural payload");
-        return Ok(());
-    }
-
-    let structural = ctx.project_dir.join("reports").join(format!(
-        "{}_payload_structural_{}.md",
-        ctx.date, ctx.session
-    ));
-    if !structural.is_file() {
-        warn!(path = %structural.display(), "structural payload missing; skip factor lab injection");
-        return Ok(());
-    }
-
-    let output = run_factor_lab_strategy(ctx).unwrap_or_else(|err| {
-        warn!(error = %err, "factor lab signal injection failed");
-        String::new()
-    });
-    let (status, trade_date, age_days) = factor_lab_status(&ctx.date, &output);
-    let mut file = OpenOptions::new()
-        .append(true)
-        .open(&structural)
-        .with_context(|| format!("failed to open {}", structural.display()))?;
-    writeln!(file)?;
-    writeln!(file, "## Factor Lab Research Candidates")?;
-    writeln!(file)?;
-    writeln!(file, "以下是 Factor Lab 的研究候选，不是独立交易指令。")?;
-    writeln!(
-        file,
-        "它不能决定 Headline Gate、今日大盘结论或主书方向；只有通过主系统方向、execution gate、流动性和追价过滤后，才能进入主书。"
-    )?;
-    match status {
-        FactorLabStatus::Fresh => {
-            if let Some(trade_date) = trade_date {
-                writeln!(
-                    file,
-                    "状态: FRESH。候选输出交易日 {trade_date}，可作为研究附录展示，但不得覆盖主系统结论。"
-                )?;
-            } else {
-                writeln!(
-                    file,
-                    "状态: FRESH。未发现明显日期滞后，可作为研究附录展示，但不得覆盖主系统结论。"
-                )?;
-            }
-        }
-        FactorLabStatus::Stale => {
-            writeln!(
-                file,
-                "状态: STALE。候选输出使用的最新交易日为 {}，较报告日 {} 滞后 {} 天。只允许放在附录，不得作为主报告确认信号。",
-                trade_date.unwrap_or_else(|| "unknown".to_string()),
-                ctx.date,
-                age_days.unwrap_or(999)
-            )?;
-        }
-        FactorLabStatus::Unavailable => {
-            writeln!(
-                file,
-                "状态: UNAVAILABLE。候选输出失败或缺少交易日信息，忽略其方向性结论。"
-            )?;
-        }
-    }
-    writeln!(file, "每只股票附带参考价、风控线、观察上沿和研究权重。")?;
-    writeln!(file)?;
-    if !output.trim().is_empty() {
-        writeln!(file, "{}", output.trim_end())?;
-    }
-    writeln!(file)?;
-    writeln!(
-        file,
-        "最终研报只需保留状态说明和紧凑表格，不要复述整段“使用方式”说明；它不得主导 headline 或主书排序。"
-    )?;
-    println!(
-        "Factor Lab candidates injected into {}",
-        structural.display()
-    );
-    Ok(())
-}
-
-fn run_factor_lab_strategy(ctx: &UsPipelineContext) -> Result<String> {
-    let output = ProcessCommand::new(&ctx.python_bin)
-        .arg("scripts/run_strategy.py")
         .arg("--market")
         .arg("us")
-        .arg("--today")
-        .arg("--date")
-        .arg(&ctx.date)
-        .current_dir(&ctx.factor_lab_root)
-        .output()
-        .context("failed to spawn Factor Lab strategy")?;
-    if !output.status.success() {
-        bail!(
-            "Factor Lab strategy failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn run_agents(ctx: &UsPipelineContext, previous_report: Option<&Path>) -> Result<()> {
-    println!();
-    println!("[6/7] Run US analysis agents");
-    let mut cmd = timeout_command(
-        AGENT_TIMEOUT_SECS,
-        ctx.project_dir.join("scripts/run_agents.sh"),
-    );
-    cmd.arg(&ctx.date).arg(&ctx.session);
-    if let Some(prev) = previous_report {
-        cmd.arg(prev);
-    }
-    cmd.current_dir(&ctx.project_dir);
-    run_command("us agents", cmd, ctx.dry_run)
-}
-
-fn send_report(ctx: &UsPipelineContext) -> Result<()> {
-    println!();
-    println!("[7/7] Send US report");
-    let mut cmd = timeout_command(EMAIL_TIMEOUT_SECS, "uv");
-    cmd.arg("run")
-        .arg("python")
-        .arg("scripts/send_report.py")
-        .arg("--send")
-        .arg("--date")
-        .arg(&ctx.date)
-        .arg("--session")
-        .arg(&ctx.session)
-        .arg("--lang")
-        .arg("zh")
         .arg("--delivery-mode")
         .arg(ctx.delivery_mode.as_str())
-        .current_dir(&ctx.project_dir);
+        .current_dir(&ctx.stack_root);
+    if skip_generate {
+        cmd.arg("--skip-generate");
+    }
     if let Some(recipient) = ctx
         .test_recipient
         .as_deref()
@@ -778,119 +599,63 @@ fn send_report(ctx: &UsPipelineContext) -> Result<()> {
     {
         cmd.arg("--test-recipient").arg(recipient);
     }
-    if ctx.delivery_dry_run || ctx.dry_run {
+    if delivery_dry_run {
+        cmd.arg("--delivery-dry-run");
+    }
+    if ctx.dry_run {
         cmd.arg("--dry-run");
     }
-    run_command("us delivery", cmd, ctx.dry_run)
+    run_command(label, cmd, ctx.dry_run)
 }
 
-fn enforce_shared_report_model_status(ctx: &UsPipelineContext, report: &Path) -> Result<()> {
-    if ctx.dry_run {
-        return Ok(());
+fn render_replacement_report(ctx: &UsPipelineContext) -> Result<()> {
+    run_daily_report_command(ctx, "us final market report render", false, true)?;
+    cleanup_legacy_us_report_artifacts(ctx)
+}
+
+fn send_report(ctx: &UsPipelineContext) -> Result<()> {
+    println!();
+    println!("[7/7] Send US report");
+    run_daily_report_command(ctx, "us daily report delivery", true, ctx.delivery_dry_run)?;
+    cleanup_legacy_us_report_artifacts(ctx)
+}
+
+fn cleanup_legacy_us_report_artifacts(ctx: &UsPipelineContext) -> Result<()> {
+    let reports = ctx.project_dir.join("reports");
+    remove_file_if_exists(&reports.join(format!("{}_payload_{}.md", ctx.date, ctx.session)))?;
+    remove_file_if_exists(&reports.join(format!("{}_payload.md", ctx.date)))?;
+    for section in ["macro", "structural", "news"] {
+        remove_file_if_exists(&reports.join(format!(
+            "{}_payload_{}_{}.md",
+            ctx.date, section, ctx.session
+        )))?;
+        remove_file_if_exists(&reports.join(format!("{}_payload_{}.md", ctx.date, section)))?;
     }
-    let block = shared_report_model_status_block(ctx)?;
-    let text = fs::read_to_string(report)
-        .with_context(|| format!("failed to read final report {}", report.display()))?;
-    fs::write(report, upsert_shared_report_model_status(&text, &block))
-        .with_context(|| format!("failed to write final report {}", report.display()))?;
+    remove_file_if_exists(&reports.join(format!(
+        "{}_factor_lab_appendix_{}.md",
+        ctx.date, ctx.session
+    )))?;
+    remove_file_if_exists(&reports.join(format!("{}_factor_lab_appendix.md", ctx.date)))?;
+    remove_dir_if_exists(
+        &ctx.project_dir
+            .join(format!("run-agents-{}-{}", ctx.date, ctx.session)),
+    )?;
     Ok(())
 }
 
-fn upsert_shared_report_model_status(text: &str, block: &str) -> String {
-    const HEADING: &str = "## Shared Report Model Status";
-    let normalized_block = block.trim_end();
-    if let Some(start) = text.find(HEADING) {
-        if let Some(separator) = text[start..].find("\n---\n") {
-            let end = start + separator + "\n---\n".len();
-            let prefix = &text[..start];
-            let tail = text[end..].trim_start_matches('\n');
-            return format!("{prefix}{normalized_block}\n\n{tail}");
-        }
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed to remove {}", path.display())),
     }
-    format!("{normalized_block}\n\n{text}")
 }
 
-fn shared_report_model_status_block(ctx: &UsPipelineContext) -> Result<String> {
-    let model_path = ctx
-        .project_dir
-        .join("reports")
-        .join(format!("{}_report_model_us_post.json", ctx.date));
-    let text = fs::read_to_string(&model_path)
-        .with_context(|| format!("shared report model missing: {}", model_path.display()))?;
-    let model: Value = serde_json::from_str(&text)
-        .with_context(|| format!("invalid shared report model JSON: {}", model_path.display()))?;
-    let alpha = model
-        .get("alpha_bulletin")
-        .and_then(Value::as_object)
-        .ok_or_else(|| anyhow!("shared report model missing alpha_bulletin"))?;
-    let ev_status = alpha
-        .get("ev_status")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let selected_policy = alpha
-        .get("selected_policy")
-        .and_then(Value::as_str)
-        .unwrap_or("none");
-    let tactical_policy = alpha
-        .get("tactical_policy")
-        .and_then(Value::as_str)
-        .unwrap_or("none");
-    let evaluated_through = alpha
-        .get("evaluated_through")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    let count = |key: &str| {
-        alpha
-            .get(key)
-            .and_then(Value::as_array)
-            .map(Vec::len)
-            .unwrap_or(0)
-    };
-    let probation_symbols = section_symbols(alpha, "probation_alpha");
-    Ok(format!(
-        "## Shared Report Model Status\n\
-         - market: `us`\n\
-         - as_of: `{}`\n\
-         - session: `{}` (stable alpha model source: `post`)\n\
-         - ev_status: `{}`\n\
-         - selected_policy: `{}`\n\
-         - tactical_policy: `{}`\n\
-         - evaluated_through: `{}`\n\
-         - section_counts: execution={} probation={} tactical={} options={} recall={} blocked={}\n\
-         - probation_symbols: `{}` (trial-only max 0.25R/0.5R, not a formal Fresh Entry)\n\
-         - rule: final report must not create formal Fresh Entry Tickets unless `execution_alpha` is non-empty in this shared model; `probation_alpha` is trial-only sizing, not formal execution.\n\
-         \n\
-         ---\n",
-        ctx.date,
-        ctx.session,
-        ev_status,
-        selected_policy,
-        tactical_policy,
-        evaluated_through,
-        count("execution_alpha"),
-        count("probation_alpha"),
-        count("tactical_alpha"),
-        count("options_alpha"),
-        count("recall_alpha"),
-        count("blocked_alpha"),
-        probation_symbols,
-    ))
-}
-
-fn section_symbols(alpha: &serde_json::Map<String, Value>, key: &str) -> String {
-    let symbols: Vec<String> = alpha
-        .get(key)
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.get("symbol").and_then(Value::as_str))
-        .take(5)
-        .map(ToString::to_string)
-        .collect();
-    if symbols.is_empty() {
-        "none".to_string()
-    } else {
-        symbols.join(", ")
+fn remove_dir_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_dir_all(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err).with_context(|| format!("failed to remove {}", path.display())),
     }
 }
 
@@ -1109,42 +874,4 @@ fn pid_is_alive(pid: u32) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum FactorLabStatus {
-    Fresh,
-    Stale,
-    Unavailable,
-}
-
-fn factor_lab_status(as_of: &str, output: &str) -> (FactorLabStatus, Option<String>, Option<i64>) {
-    if output.trim().is_empty() {
-        return (FactorLabStatus::Unavailable, None, None);
-    }
-    let trade_date = extract_factor_lab_trade_date(output);
-    let Some(trade_date) = trade_date else {
-        return (FactorLabStatus::Fresh, None, None);
-    };
-    let age_days = NaiveDate::parse_from_str(as_of, "%Y-%m-%d")
-        .ok()
-        .zip(NaiveDate::parse_from_str(&trade_date, "%Y-%m-%d").ok())
-        .map(|(as_of, trade)| (as_of - trade).num_days());
-    if age_days.unwrap_or(999) <= 3 {
-        (FactorLabStatus::Fresh, Some(trade_date), age_days)
-    } else {
-        (FactorLabStatus::Stale, Some(trade_date), age_days)
-    }
-}
-
-fn extract_factor_lab_trade_date(output: &str) -> Option<String> {
-    let marker = "数据截止:";
-    let idx = output.find(marker)?;
-    let after = output[idx + marker.len()..].trim_start();
-    let date = after.get(0..10)?;
-    if NaiveDate::parse_from_str(date, "%Y-%m-%d").is_ok() {
-        Some(date.to_string())
-    } else {
-        None
-    }
 }

@@ -15,6 +15,8 @@ A daily US equities quantitative research pipeline. It:
 
 You are the narrative layer. You read the facts and write the human-readable report.
 
+Production framing: US stock decisions use price + news/event + options/flow jointly. Options explain confirmation, skew, liquidity, and expected move; they are not the default traded instrument unless the payload explicitly says so. Portfolio language should separate long alpha from beta hedge and residual risk attribution instead of presenting a naked ranked-stock list.
+
 ## What the Program Does. What You Do.
 
 | Program | You (agent) |

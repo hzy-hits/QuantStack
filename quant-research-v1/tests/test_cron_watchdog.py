@@ -87,6 +87,32 @@ def test_find_due_runs_returns_latest_missing_postmarket(tmp_path: Path):
     assert due.local_day == date(2026, 4, 16)
 
 
+def test_root_runner_us_postmarket_missing_report_is_due(tmp_path: Path, monkeypatch):
+    stack_root = tmp_path / "quant-stack"
+    us_root = stack_root / "quant-research-v1"
+    (us_root / "reports").mkdir(parents=True)
+    (stack_root / "quant-research-cn").mkdir(parents=True)
+    (stack_root / "factor-lab").mkdir(parents=True)
+    monkeypatch.setenv("QUANT_STACK_ROOT", str(stack_root))
+
+    tasks = {task.name: task for task in build_default_tasks(us_root)}
+    task = tasks["us-postmarket"]
+    assert task.workdir == stack_root
+    assert task.completion.path_template == "quant-research-v1/reports/{logical_date}_report_zh_post.md"
+
+    now_local = datetime(2026, 5, 7, 8, 0, tzinfo=LOCAL_TZ)
+    due = [
+        item
+        for item in find_due_runs(now_local, tasks=(task,), lookback_days=1)
+        if item.logical_date == date(2026, 5, 6)
+    ][0]
+    assert task_completed(due) is False
+
+    report = stack_root / "quant-research-v1" / "reports" / "2026-05-06_report_zh_post.md"
+    report.write_text("x" * 300, encoding="utf-8")
+    assert task_completed(due) is True
+
+
 def test_task_completed_uses_log_markers(tmp_path: Path):
     log_dir = tmp_path / "reports" / "logs"
     log_dir.mkdir(parents=True)

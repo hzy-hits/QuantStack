@@ -3,7 +3,7 @@
 
 This is the production ranking layer for current A-share rows. It keeps every
 oversold candidate ranked, while Alpha Factory-proven sleeve members and
-qualified observed-lifecycle rows can move from watchlist into probe tiers.
+qualified observed-lifecycle rows can move from watchlist into stock-trade tiers.
 """
 from __future__ import annotations
 
@@ -17,14 +17,43 @@ from typing import Any
 
 import duckdb
 
+from quant_bot.analytics import ai_infra_universe
+
 
 STACK_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_V2_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2"
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "cn_opportunity_ranker"
 DEFAULT_CN_DB = STACK_ROOT / "quant-research-cn" / "data" / "quant_cn_report.duckdb"
 CN_ALPHA_FACTORY_EXECUTION_SLEEVE = "cn_oversold_ev_positive"
+CN_TAPE_LEADERSHIP_SLEEVE = "cn_tape_leadership_continuation"
+CN_ALPHA_FACTORY_EXECUTION_SLEEVES = {CN_ALPHA_FACTORY_EXECUTION_SLEEVE, CN_TAPE_LEADERSHIP_SLEEVE}
 CN_OBSERVED_LIFECYCLE_SLEEVE = "cn_observed_lifecycle_prob"
 CN_EXECUTION_ALPHA_STATE = "positive_ev_setup"
+CN_CONSUMER_INDUSTRIES = {
+    "食品", "白酒", "乳制品", "红黄酒", "软饮料", "啤酒",
+    "家用电器", "家居用品", "服饰", "纺织", "日用化工",
+    "文教休闲", "百货", "超市连锁", "其他商业", "商贸代理",
+    "商品城", "电器连锁", "酒店餐饮", "旅游景点", "旅游服务",
+    "农业综合", "种植业", "饲料", "渔业", "林业",
+}
+CN_AI_PRIMARY_INDUSTRIES = {"半导体", "元器件", "通信设备", "IT设备"}
+CN_AI_POWER_GRID_INDUSTRIES = {"电气设备", "电器仪表", "新型电力", "火力发电", "水力发电", "供气供热"}
+CN_AI_INDUSTRIAL_SUPPORT_INDUSTRIES = {"专用机械", "机床制造", "化工机械"}
+CN_AI_INFRA_INDUSTRIES = (
+    CN_AI_PRIMARY_INDUSTRIES
+    | CN_AI_POWER_GRID_INDUSTRIES
+    | CN_AI_INDUSTRIAL_SUPPORT_INDUSTRIES
+)
+CN_HARD_ASSET_INDUSTRIES = {
+    "煤炭开采", "石油开采", "石油加工", "石油贸易", "焦炭加工",
+    "小金属", "铜", "铝", "铅锌", "黄金",
+    "普钢", "特种钢", "钢加工", "矿物制品", "水泥", "玻璃",
+    "化工原料", "化工机械", "农药化肥",
+    "供气供热", "火力发电", "水力发电", "新型电力",
+    "建筑工程", "工程机械", "专用机械", "机床制造",
+    "运输设备", "船舶", "航空", "港口", "水运", "铁路", "公路", "路桥",
+}
+CN_DEPRIORITIZED_TECH_INDUSTRIES = {"互联网", "软件服务"}
 
 
 @dataclass(frozen=True)
@@ -83,18 +112,22 @@ class RankerConfig:
 
     score_weights: dict[str, float] = field(
         default_factory=lambda: {
-            "strategy_ev": 0.20,
-            "observed_lifecycle": 0.22,
-            "tushare_flow": 0.22,
-            "oversold_reversion": 0.10,
-            "execution_quality": 0.16,
-            "limit_heat": 0.09,
-            "liquidity": 0.08,
-            "factor_lab": 0.05,
-            "sector_heat": 0.02,
+            "strategy_ev": 0.07,
+            "observed_lifecycle": 0.07,
+            "price_first_signal": 0.24,
+            "informed_flow": 0.22,
+            "oversold_reversion": 0.01,
+            "execution_quality": 0.10,
+            "limit_heat": 0.06,
+            "liquidity": 0.05,
+            "factor_lab": 0.02,
+            "sector_heat": 0.06,
+            "tape_leadership": 0.14,
+            "narrative_fit": 0.10,
+            "supercycle_priority": 0.07,
             "risk_penalty": -0.08,
-            "falling_knife": -0.08,
-            "headline_risk": -0.20,
+            "falling_knife": -0.11,
+            "headline_risk": -0.16,
         }
     )
     headline: NewsRiskConfig = field(default_factory=NewsRiskConfig)
@@ -116,6 +149,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--config", type=Path, default=None, help="Optional JSON scoring config override.")
     parser.add_argument("--top", type=int, default=30, help="Number of rows to keep in the headline table.")
+    parser.add_argument("--ai-infra-root", type=Path, default=ai_infra_universe.DEFAULT_AI_INFRA_ROOT)
+    parser.add_argument(
+        "--ai-infra-mode",
+        choices=["off", "enforce", "expand", "enforce_expand"],
+        default="enforce_expand",
+        help="Filter to the AI infra workbench and optionally append every local AI-infra symbol.",
+    )
     return parser.parse_args()
 
 
@@ -258,6 +298,107 @@ def normalize_cn_symbol(value: Any) -> str:
     if len(digits) != 6:
         return text
     return f"{digits}.SH" if digits.startswith(("6", "9")) else f"{digits}.SZ"
+
+
+def cn_narrative_group(row: dict[str, Any]) -> str:
+    explicit = str(row.get("narrative_group") or "").strip()
+    if explicit:
+        return explicit
+    industry = str(row.get("industry") or "").strip()
+    if industry in CN_CONSUMER_INDUSTRIES:
+        return "excluded_consumer"
+    if industry in CN_AI_INFRA_INDUSTRIES:
+        return "ai_infra"
+    if industry in CN_HARD_ASSET_INDUSTRIES:
+        return "hard_assets_energy_heavy"
+    if industry in CN_DEPRIORITIZED_TECH_INDUSTRIES:
+        return "deprioritized_internet_software"
+    return "neutral"
+
+
+def cn_supercycle_profile(row: dict[str, Any]) -> dict[str, Any]:
+    industry = str(row.get("industry") or "").strip()
+    name = str(row.get("name") or "").strip()
+    if industry in CN_CONSUMER_INDUSTRIES:
+        return {
+            "supercycle_layer": "excluded_consumer",
+            "supercycle_priority": 9,
+            "supply_chain_role": "excluded_daily_consumption",
+            "bottleneck_focus": "outside current AI infra / hard-asset mandate",
+        }
+    if industry in CN_AI_PRIMARY_INDUSTRIES:
+        if industry == "通信设备" or "光" in name:
+            layer = "ai_networking_optical_cpo"
+            role = "CPO/optical/fiber/datacenter communications candidate"
+            bottleneck = "optical bandwidth and AI datacenter interconnect"
+        elif industry == "半导体":
+            layer = "ai_chip_equipment_materials_packaging"
+            role = "AI chip, equipment, packaging/test or semiconductor material candidate"
+            bottleneck = "chip supply chain capacity and advanced packaging/materials"
+        elif industry == "IT设备":
+            layer = "ai_datacenter_edge_infra"
+            role = "AI server/storage/network appliance candidate"
+            bottleneck = "datacenter hardware and edge inference infrastructure"
+        else:
+            layer = "ai_electronics_components"
+            role = "electronic component supplier candidate"
+            bottleneck = "AI hardware component availability"
+        return {
+            "supercycle_layer": layer,
+            "supercycle_priority": 1,
+            "supply_chain_role": role,
+            "bottleneck_focus": bottleneck,
+        }
+    if industry in CN_AI_POWER_GRID_INDUSTRIES:
+        return {
+            "supercycle_layer": "ai_power_nuclear_grid",
+            "supercycle_priority": 2,
+            "supply_chain_role": "power/grid/electrification capacity candidate",
+            "bottleneck_focus": "firm power, grid equipment and AI datacenter electricity scarcity",
+        }
+    if industry in CN_AI_INDUSTRIAL_SUPPORT_INDUSTRIES:
+        return {
+            "supercycle_layer": "ai_industrial_capex",
+            "supercycle_priority": 2,
+            "supply_chain_role": "industrial equipment and automation capacity candidate",
+            "bottleneck_focus": "AI supply-chain capex, precision equipment and manufacturing throughput",
+        }
+    if industry in CN_HARD_ASSET_INDUSTRIES:
+        return {
+            "supercycle_layer": "hard_assets_energy_heavy",
+            "supercycle_priority": 3,
+            "supply_chain_role": "upstream material, energy or heavy-industry input candidate",
+            "bottleneck_focus": "resource/input cost and heavy-capex scarcity",
+        }
+    if industry in CN_DEPRIORITIZED_TECH_INDUSTRIES:
+        return {
+            "supercycle_layer": "deprioritized_internet_software",
+            "supercycle_priority": 6,
+            "supply_chain_role": "software/internet name without clear AI-infra bottleneck",
+            "bottleneck_focus": "requires direct AI-lab/cloud/product evidence before priority upgrade",
+        }
+    return {
+        "supercycle_layer": "neutral",
+        "supercycle_priority": 5,
+        "supply_chain_role": "not yet mapped to AI supercycle supply chain",
+        "bottleneck_focus": "no confirmed bottleneck tag",
+    }
+
+
+def cn_narrative_fit(row: dict[str, Any]) -> float:
+    group = cn_narrative_group(row)
+    priority = int(cn_supercycle_profile(row).get("supercycle_priority") or 9)
+    if group == "ai_infra" and priority <= 1:
+        return 1.0
+    if group == "ai_infra":
+        return 0.88
+    if group == "hard_assets_energy_heavy":
+        return 0.76
+    if group == "neutral":
+        return 0.45
+    if group == "deprioritized_internet_software":
+        return 0.20
+    return 0.0
 
 
 def load_v2_candidates(v2_root: Path, as_of: date) -> tuple[list[dict[str, Any]], str, str | None]:
@@ -445,6 +586,48 @@ def load_prices(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date)
         """,
     )
     return {normalize_cn_symbol(row.get("symbol")): row for row in rows}
+
+
+def load_price_features(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date) -> dict[str, dict[str, Any]]:
+    if not symbols or not table_exists(con, "price_features"):
+        return {}
+    rows = latest_symbol_rows(
+        con,
+        table="price_features",
+        date_col="as_of",
+        symbols=symbols,
+        as_of=as_of,
+        select_sql="""
+        SELECT
+            p.ts_code AS symbol,
+            p.as_of AS price_features_as_of,
+            p.close_now,
+            p.close_5d_ago,
+            p.close_20d_ago,
+            p.high_20d,
+            p.low_20d,
+            p.avg_vol_5,
+            p.avg_vol_base,
+            p.std5_ret,
+            p.std20_ret,
+            p.ret_5d,
+            p.ret_20d,
+            p.atr_pct_14,
+            p.n_obs AS price_feature_n_obs
+        FROM price_features p
+        JOIN latest l ON l.ts_code = p.ts_code AND l.latest_date = p.as_of
+        """,
+    )
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        symbol = normalize_cn_symbol(row.get("symbol"))
+        avg_vol_5 = round_or_none(row.get("avg_vol_5"))
+        avg_vol_base = round_or_none(row.get("avg_vol_base"))
+        row["flow_volume_confirmation"] = (
+            None if avg_vol_5 is None or avg_vol_base in (None, 0) else avg_vol_5 / avg_vol_base
+        )
+        out[symbol] = row
+    return out
 
 
 def load_moneyflow(
@@ -861,6 +1044,7 @@ def load_market_data(
         out: dict[str, dict[str, Any]] = {symbol: dict(daily.get(symbol) or {}) for symbol in symbols}
         sources = [
             load_prices(con, symbols, as_of),
+            load_price_features(con, symbols, as_of),
             load_moneyflow(con, symbols, as_of, daily),
             load_margin(con, symbols, as_of),
             load_analytics(con, symbols, as_of),
@@ -915,11 +1099,21 @@ def add_percentiles(rows: list[dict[str, Any]]) -> None:
         "negative_log20": True,
         "rsi_14": False,
         "mean_reversion_score": True,
+        "pct_chg": True,
+        "ret_5d": True,
+        "ret_20d": True,
+        "avg_vol_5": True,
+        "avg_vol_base": True,
+        "flow_volume_confirmation": True,
+        "atr_pct_14": False,
         "flow_information_score": True,
         "flow_large_flow_z": True,
         "flow_margin_z": True,
+        "flow_tape_z": True,
+        "flow_market_vol_z": True,
         "net_mf_pct_circ_mv": True,
         "large_net_pct_circ_mv": True,
+        "extra_large_net_pct_circ_mv": True,
         "rzye_5d_delta_pct": True,
         "setup_score": True,
         "entry_quality_score": True,
@@ -1037,6 +1231,30 @@ def enrich_base_rows(
             "fade_risk": first_number(features.get("fade_risk"), detail.get("fade_risk"), nested_get(nested, "shadow_option_alpha", "fade_risk")),
             "downside_stress": first_number(features.get("downside_stress"), detail.get("downside_stress"), nested.get("downside_stress")),
         }
+        for key in [
+            "ai_infra_universe",
+            "ai_infra_asset_pool",
+            "ai_infra_market_country",
+            "ai_infra_bfs_depth",
+            "ai_infra_module",
+            "ai_infra_current_pool",
+            "ai_infra_total_score",
+            "ai_infra_score_bucket",
+            "ai_infra_evidence_state",
+            "ai_infra_counterevidence",
+            "ai_infra_dependency_path",
+            "ai_infra_dependency_edge",
+            "ai_infra_verification_status",
+            "supercycle_layer",
+            "supercycle_priority",
+            "supply_chain_role",
+            "bottleneck_focus",
+            "evidence_contract",
+            "research_index",
+            "narrative_group",
+        ]:
+            if key in candidate and candidate.get(key) not in (None, ""):
+                combined[key] = candidate.get(key)
         if combined.get("denoise_residual_zscore") is not None:
             combined["negative_residual"] = -float(combined["denoise_residual_zscore"])
         if combined.get("log_return_20d_pct") is not None:
@@ -1061,11 +1279,20 @@ def production_tier(rank: int, row: dict[str, Any], config: RankerConfig = DEFAU
     falling_knife = round_or_none(row.get("falling_knife_score")) or 0.0
     alpha_sleeve = str(row.get("alpha_sleeve_id") or "")
     observed_qualified = bool(row.get("observed_lifecycle_qualified"))
+    strong_tape_regime = str(row.get("market_tape_regime") or "") == "strong_trend"
+    trend_leadership_ok = bool(row.get("trend_leadership_ok"))
+    narrative_group = cn_narrative_group(row)
     if is_special_treatment_name(row.get("name")):
         return (
             "special_treatment_watch",
             "special_treatment_no_probe",
             "0R until a dedicated ST/restructuring sleeve exists; ordinary oversold lifecycle buckets do not apply",
+        )
+    if narrative_group == "excluded_consumer":
+        return (
+            "deprioritized_consumer_watch",
+            "rank_only_no_new_trade",
+            "0R: daily-consumption names are excluded from the current A-share narrative book",
         )
     if headline_risk >= config.event_risk_zero_r:
         return (
@@ -1077,39 +1304,57 @@ def production_tier(rank: int, row: dict[str, Any], config: RankerConfig = DEFAU
         return (
             "falling_knife_watch",
             "wait_for_flow_reversal",
-            "0R default; only manual tiny after positive flow reversal",
+            "0R default; trade only after positive flow reversal",
         )
-    if alpha_sleeve != CN_ALPHA_FACTORY_EXECUTION_SLEEVE and not observed_qualified:
+    if alpha_sleeve == CN_ALPHA_FACTORY_EXECUTION_SLEEVE and strong_tape_regime and not trend_leadership_ok:
+        if rank <= config.secondary_probe_count:
+            return (
+                "secondary_stock_trade",
+                "buy_only_if_intraday_relative_strength_confirms",
+                "0.10R/name secondary only; strong tape favors leaders, so oversold needs same-day relative strength",
+            )
+        return (
+            "active_watch",
+            "wait_for_trend_or_market_regime_to_fit",
+            "0R default in strong tape; oversold is not a primary execution sleeve here",
+        )
+    if alpha_sleeve not in CN_ALPHA_FACTORY_EXECUTION_SLEEVES and not observed_qualified:
         return (
             "ranked_watch",
             "rank_only_no_new_trade",
             "0R until Alpha Factory sleeve membership or observed lifecycle probability is present",
         )
-    if alpha_sleeve != CN_ALPHA_FACTORY_EXECUTION_SLEEVE and observed_qualified:
+    if alpha_sleeve not in CN_ALPHA_FACTORY_EXECUTION_SLEEVES and observed_qualified:
         observed_tier = str(row.get("observed_lifecycle_tier") or "")
-        if observed_tier == "observed_micro_probe" and rank <= config.secondary_probe_count:
-            return (
-                "observed_lifecycle_micro_probe",
-                "pullback_observed_micro_probe",
-                "0.02R/name after pullback/flow confirmation; observed mean positive but LCB weak",
-            )
         if observed_tier == "observed_micro_probe":
             return (
                 "observed_lifecycle_watch",
-                "wait_for_rank_or_price_confirmation",
-                "0R default; micro-probe evidence is not top-ranked",
+                "wait_for_positive_lcb_confirmation",
+                "0R: observed evidence is positive on mean but LCB is not strong enough for a trade",
+            )
+        if strong_tape_regime and not trend_leadership_ok:
+            if rank <= config.secondary_probe_count:
+                return (
+                    "observed_lifecycle_secondary_trade",
+                    "buy_only_if_intraday_relative_strength_confirms",
+                    "0.10R/name secondary only; strong tape puts lifecycle mean-reversion behind leaders",
+                )
+            return (
+                "observed_lifecycle_watch",
+                "wait_for_weak_market_or_price_leadership",
+                "0R in strong tape unless the stock also becomes a price/flow leader",
             )
         if rank <= config.top_probe_count:
             return (
-                "observed_lifecycle_probe",
-                "planned_entry_observed_probe",
-                "0.05R/name; observed historical analogs are positive; no chase above entry zone",
+                "observed_lifecycle_trade",
+                "buy_planned_entry_observed",
+                "0.14R/name risk budget; observed historical analogs are positive; no chase above entry zone",
             )
         if rank <= config.secondary_probe_count:
             return (
-                "observed_lifecycle_secondary",
-                "pullback_observed_micro_probe",
-                "0.03R/name after pullback/flow confirmation",
+                "observed_lifecycle_secondary_trade",
+                "buy_pullback_observed",
+                "0.10R/name risk budget after pullback/flow confirmation",
             )
         return (
             "observed_lifecycle_watch",
@@ -1118,21 +1363,21 @@ def production_tier(rank: int, row: dict[str, Any], config: RankerConfig = DEFAU
         )
     if rank <= config.top_probe_count:
         return (
-            "top_probe",
-            "planned_entry_probe",
-            "0.20R/name; top-5 basket <=1.00R; no chase above entry zone",
+            "top_stock_trade",
+            "buy_planned_entry",
+            "0.35R/name; top-5 basket <=1.20R; no chase above entry zone",
         )
     if rank <= config.secondary_probe_count:
         return (
-            "secondary_probe",
-            "pullback_or_intraday_confirmation_probe",
-            "0.10R/name; use only after planned-entry/pullback touch",
+            "secondary_stock_trade",
+            "buy_pullback_or_intraday_confirmation",
+            "0.15R/name; use only after planned-entry/pullback touch",
         )
     if rank <= config.active_watch_count:
         return (
             "active_watch",
             "prepare_order_but_wait_for_price",
-            "0.05R optional micro-probe after price confirms",
+            "0R until price/flow confirms and the ranker reruns",
         )
     return (
         "bench_ranked",
@@ -1145,6 +1390,16 @@ def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG
     if not rows:
         return []
     add_percentiles(rows)
+    tape_candidate_count = sum(
+        1 for row in rows if str(row.get("alpha_sleeve_id") or "") == CN_TAPE_LEADERSHIP_SLEEVE
+    )
+    leadership_like_count = sum(
+        1
+        for row in rows
+        if (round_or_none(row.get("ret_5d")) or 0.0) >= 6.0
+        and (round_or_none(row.get("pct_chg")) or 0.0) >= 1.2
+    )
+    strong_tape_market = tape_candidate_count >= 3 or leadership_like_count >= 6
     for row in rows:
         probability_decile = round_or_none(row.get("probability_decile"))
         decile_score = None if probability_decile is None else clamp(probability_decile / 10.0)
@@ -1171,6 +1426,28 @@ def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG
                 (row.get("negative_log20_rank"), 0.26),
                 (row.get("rsi_14_rank"), 0.20),
                 (row.get("mean_reversion_score_rank"), 0.12),
+            ]
+        )
+        price_first_signal = weighted(
+            [
+                (row.get("pct_chg_rank"), 0.18),
+                (row.get("ret_5d_rank"), 0.20),
+                (row.get("ret_20d_rank"), 0.10),
+                (row.get("volume_ratio_rank"), 0.16),
+                (row.get("turnover_rate_rank"), 0.14),
+                (row.get("flow_volume_confirmation_rank"), 0.12),
+                (row.get("sector_pct_chg_rank"), 0.10),
+            ]
+        )
+        informed_flow = weighted(
+            [
+                (row.get("flow_information_score_rank"), 0.24),
+                (row.get("flow_tape_z_rank"), 0.16),
+                (row.get("flow_large_flow_z_rank"), 0.15),
+                (row.get("net_mf_pct_circ_mv_rank"), 0.16),
+                (row.get("large_net_pct_circ_mv_rank"), 0.14),
+                (row.get("extra_large_net_pct_circ_mv_rank"), 0.07),
+                (row.get("rzye_5d_delta_pct_rank"), 0.08),
             ]
         )
         tushare_flow = weighted(
@@ -1221,6 +1498,59 @@ def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG
                 (row.get("sector_pct_chg_rank"), 0.35),
             ]
         )
+        narrative_group = cn_narrative_group(row)
+        narrative_fit = cn_narrative_fit(row)
+        supercycle_profile = cn_supercycle_profile(row)
+        row.update({key: row.get(key) or value for key, value in supercycle_profile.items()})
+        priority_value = row.get("supercycle_priority") or supercycle_profile.get("supercycle_priority") or 9
+        supercycle_priority = 1.0 - ((int(priority_value) - 1) / 8.0)
+        supercycle_priority = clamp(supercycle_priority)
+        row["narrative_group"] = narrative_group
+        row["narrative_fit_score"] = round(narrative_fit * 100.0, 2)
+        row["supercycle_priority_score"] = round(supercycle_priority * 100.0, 2)
+        tape_leadership = weighted(
+            [
+                (price_first_signal, 0.42),
+                (informed_flow, 0.26),
+                (sector_heat, 0.14),
+                (limit_heat, 0.10),
+                (liquidity, 0.08),
+            ]
+        )
+        alpha_sleeve = str(row.get("alpha_sleeve_id") or "")
+        if alpha_sleeve == CN_TAPE_LEADERSHIP_SLEEVE:
+            tape_leadership = max(tape_leadership, 0.96)
+        ret_5d = round_or_none(row.get("ret_5d")) or round_or_none(row.get("ret_5d_pct")) or 0.0
+        pct_chg = round_or_none(row.get("pct_chg")) or 0.0
+        trend_leadership_ok = bool(
+            alpha_sleeve == CN_TAPE_LEADERSHIP_SLEEVE
+            or (
+                ret_5d >= 6.0
+                and pct_chg >= 1.2
+                and price_first_signal >= 0.65
+                and informed_flow >= 0.55
+                and (sector_heat >= 0.40 or limit_heat >= 0.55)
+            )
+        )
+        row["market_tape_regime"] = "strong_trend" if strong_tape_market else "weak_or_mixed"
+        row["trend_leadership_ok"] = trend_leadership_ok
+        if (
+            not alpha_sleeve
+            and bool(row.get("ai_infra_universe"))
+            and narrative_group == "ai_infra"
+            and trend_leadership_ok
+        ):
+            alpha_sleeve = CN_TAPE_LEADERSHIP_SLEEVE
+            row["alpha_sleeve_id"] = alpha_sleeve
+            row["execution_source"] = "ai_infra_tape_leadership_runtime"
+            row["alpha_factory_role"] = "execution_sleeve"
+            row["trend_leadership_reason"] = (
+                "AI-infra universe member with right-side price leadership, "
+                "informed flow and sector/limit confirmation."
+            )
+            if not row.get("reason"):
+                row["reason"] = row["trend_leadership_reason"]
+            tape_leadership = max(tape_leadership, 0.96)
         risk_penalty = weighted(
             [
                 (inverse_rank(row.get("risk_unit_pct_rank")), 0.25),
@@ -1234,29 +1564,50 @@ def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG
         falling_knife = weighted(
             [
                 (row.get("negative_log20_rank"), 0.30),
-                (1.0 - tushare_flow, 0.30),
+                (1.0 - informed_flow, 0.30),
                 (1.0 - execution_quality, 0.15),
                 (headline_risk, 0.25),
             ]
         )
         row["falling_knife_score"] = round(falling_knife * 100.0, 2)
+        row["price_first_signal_score"] = round(price_first_signal * 100.0, 2)
+        row["informed_flow_score"] = round(informed_flow * 100.0, 2)
+        oversold_regime_discount = 0.0
+        if strong_tape_market and not trend_leadership_ok and (
+            alpha_sleeve == CN_ALPHA_FACTORY_EXECUTION_SLEEVE
+            or bool(row.get("observed_lifecycle_qualified"))
+            or str(row.get("execution_source") or "") == "observed_lifecycle_prob"
+        ):
+            strategy_ev *= 0.55
+            observed_lifecycle *= 0.35
+            oversold_reversion *= 0.25
+            oversold_regime_discount = 0.06
+        row["oversold_regime_discount_pct"] = round(oversold_regime_discount * 100.0, 2)
         raw = (
-            config.score_weights["strategy_ev"] * strategy_ev
-            + config.score_weights["observed_lifecycle"] * observed_lifecycle
-            + config.score_weights["tushare_flow"] * tushare_flow
-            + config.score_weights["oversold_reversion"] * oversold_reversion
-            + config.score_weights["execution_quality"] * execution_quality
-            + config.score_weights["limit_heat"] * limit_heat
-            + config.score_weights["liquidity"] * liquidity
-            + config.score_weights["factor_lab"] * factor_lab
-            + config.score_weights["sector_heat"] * sector_heat
-            + config.score_weights["risk_penalty"] * risk_penalty
-            + config.score_weights["falling_knife"] * falling_knife
-            + config.score_weights["headline_risk"] * headline_risk
+            config.score_weights.get("strategy_ev", 0.0) * strategy_ev
+            + config.score_weights.get("observed_lifecycle", 0.0) * observed_lifecycle
+            + config.score_weights.get("price_first_signal", 0.0) * price_first_signal
+            + config.score_weights.get("informed_flow", 0.0) * informed_flow
+            + config.score_weights.get("tushare_flow", 0.0) * tushare_flow
+            + config.score_weights.get("oversold_reversion", 0.0) * oversold_reversion
+            + config.score_weights.get("execution_quality", 0.0) * execution_quality
+            + config.score_weights.get("limit_heat", 0.0) * limit_heat
+            + config.score_weights.get("liquidity", 0.0) * liquidity
+            + config.score_weights.get("factor_lab", 0.0) * factor_lab
+            + config.score_weights.get("sector_heat", 0.0) * sector_heat
+            + config.score_weights.get("tape_leadership", 0.0) * tape_leadership
+            + config.score_weights.get("narrative_fit", 0.0) * narrative_fit
+            + config.score_weights.get("supercycle_priority", 0.0) * supercycle_priority
+            + config.score_weights.get("risk_penalty", 0.0) * risk_penalty
+            + config.score_weights.get("falling_knife", 0.0) * falling_knife
+            + config.score_weights.get("headline_risk", 0.0) * headline_risk
+            - oversold_regime_discount
         )
         row["score_components"] = {
             "strategy_ev": round(strategy_ev * 100.0, 2),
             "observed_lifecycle": round(observed_lifecycle * 100.0, 2),
+            "price_first_signal": round(price_first_signal * 100.0, 2),
+            "informed_flow": round(informed_flow * 100.0, 2),
             "tushare_flow": round(tushare_flow * 100.0, 2),
             "oversold_reversion": round(oversold_reversion * 100.0, 2),
             "execution_quality": round(execution_quality * 100.0, 2),
@@ -1264,9 +1615,13 @@ def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG
             "liquidity": round(liquidity * 100.0, 2),
             "factor_lab": round(factor_lab * 100.0, 2),
             "sector_heat": round(sector_heat * 100.0, 2),
+            "tape_leadership": round(tape_leadership * 100.0, 2),
+            "narrative_fit": round(narrative_fit * 100.0, 2),
+            "supercycle_priority": round(supercycle_priority * 100.0, 2),
             "risk_penalty": round(risk_penalty * 100.0, 2),
             "falling_knife": round(falling_knife * 100.0, 2),
             "headline_risk": round(headline_risk * 100.0, 2),
+            "oversold_regime_discount": round(oversold_regime_discount * 100.0, 2),
         }
         row["rank_score"] = round(clamp(raw) * 100.0, 2)
 
@@ -1320,16 +1675,52 @@ def public_row(row: dict[str, Any]) -> dict[str, Any]:
         "observed_lifecycle_sleeve_id",
         "observed_lifecycle_reason",
         "suggested_hold_days",
+        "ai_infra_universe",
+        "ai_infra_asset_pool",
+        "ai_infra_market_country",
+        "ai_infra_bfs_depth",
+        "ai_infra_module",
+        "ai_infra_current_pool",
+        "ai_infra_total_score",
+        "ai_infra_score_bucket",
+        "ai_infra_evidence_state",
+        "ai_infra_counterevidence",
+        "ai_infra_dependency_path",
+        "ai_infra_dependency_edge",
+        "ai_infra_verification_status",
         "risk_unit_pct",
         "strategy_samples",
         "strategy_fills",
         "denoise_residual_zscore",
         "log_return_20d_pct",
         "rsi_14",
+        "pct_chg",
+        "ret_5d",
+        "ret_20d",
+        "avg_vol_5",
+        "avg_vol_base",
+        "flow_volume_confirmation",
+        "price_first_signal_score",
+        "informed_flow_score",
+        "market_tape_regime",
+        "trend_leadership_ok",
+        "trend_leadership_reason",
+        "oversold_regime_discount_pct",
+        "narrative_group",
+        "narrative_reason",
+        "narrative_fit_score",
+        "supercycle_layer",
+        "supercycle_priority",
+        "supercycle_priority_score",
+        "supply_chain_role",
+        "bottleneck_focus",
         "flow_information_score",
         "flow_large_flow_z",
+        "flow_tape_z",
+        "flow_market_vol_z",
         "net_mf_pct_circ_mv",
         "large_net_pct_circ_mv",
+        "extra_large_net_pct_circ_mv",
         "rzye_5d_delta_pct",
         "p_touch_limit",
         "p_limit_up",
@@ -1337,6 +1728,9 @@ def public_row(row: dict[str, Any]) -> dict[str, Any]:
         "probability_decile",
         "turnover_rate",
         "volume_ratio",
+        "pe_ttm",
+        "pb",
+        "total_mv",
         "circ_mv",
         "amount",
         "lab_composite",
@@ -1371,36 +1765,37 @@ def render_markdown(payload: dict[str, Any]) -> str:
     lines = [
         f"# CN Opportunity Ranker - {payload['as_of']}",
         "",
-        "生产版：Alpha Factory sleeve 和 `cn_observed_lifecycle_prob` 都可以产出小仓/微仓 Execution Alpha；其他 oversold 只做 ranked watch。财报造假、虚假陈述、留置调查等事件风险会直接降级为 0R 观察。",
+        "生产版：A 股先看价格、成交、资金流和板块联动；新闻只作为滞后标签和事件风险扣分。强趋势 tape leadership 是主执行层；当前叙事优先 AI infra 与矿产/能源/重工，日常消费排除，互联网/软件降优先级。",
         "",
         "## Data",
         "",
         f"- candidates: {payload.get('candidate_count', 0)}",
         f"- source_report: `{payload.get('source_report') or '-'}`",
         f"- cn_db: `{payload.get('cn_db') or '-'}`",
-        "- Tushare fields used: daily_basic, moneyflow, margin_detail, sector_fund_flow, limit_up_model_predictions",
-        "- News fields used: news_enriched, stock_news",
+        "- First-signal fields used: prices, price_features, daily_basic, moneyflow, margin_detail, sector_fund_flow, limit_up_model_predictions",
+        "- Lagging risk-label fields used: news_enriched, stock_news",
         "",
         "## Production Basket",
         "",
-        "| Rank | Symbol | Name | Source | Tier | Action | Size | Entry | ExpR | LCBR | n | Score |",
-        "|---:|---|---|---|---|---|---|---|---:|---:|---:|---:|",
+        "| Rank | Symbol | Name | Layer | Source | Tier | Action | Size | Entry | ExpR | LCBR | n | Score |",
+        "|---:|---|---|---|---|---|---|---|---|---:|---:|---:|---:|",
     ]
     basket_rows = [
         row
         for row in rows
         if (
-            "probe" in str(row.get("production_tier") or "")
-            or "probe" in str(row.get("production_action") or "")
+            "trade" in str(row.get("production_tier") or "")
+            or str(row.get("production_action") or "").startswith("buy_")
         )
         and not str(row.get("size_hint") or "").startswith("0R")
     ]
     for row in basket_rows[:10]:
         lines.append(
-            "| {rank} | {symbol} | {name} | {source} | {tier} | {action} | {size} | {entry} | {expr} | {lcbr} | {n} | {score:.2f} |".format(
+            "| {rank} | {symbol} | {name} | {layer} | {source} | {tier} | {action} | {size} | {entry} | {expr} | {lcbr} | {n} | {score:.2f} |".format(
                 rank=row.get("rank"),
                 symbol=row.get("symbol") or "",
                 name=row.get("name") or "",
+                layer=row.get("supercycle_layer") or row.get("narrative_group") or "-",
                 source=row.get("alpha_sleeve_id") or row.get("observed_lifecycle_sleeve_id") or "rank_only",
                 tier=row.get("production_tier") or "",
                 action=row.get("production_action") or "",
@@ -1413,13 +1808,13 @@ def render_markdown(payload: dict[str, Any]) -> str:
             )
         )
     if not basket_rows:
-        lines.append("| - | - | - | - | no production basket today | - | 0R | - | - | - | - | 0.00 |")
+        lines.append("| - | - | - | - | - | no production basket today | - | 0R | - | - | - | - | 0.00 |")
     lines += [
         "",
         "## Top Ranked",
         "",
-        "| Rank | Symbol | Name | Industry | Score | Source | Tier | ExpR | LCBR | Hit | Stop | n | Headline | Knife | EV | LCB80 | Flow | Reason |",
-        "|---:|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Rank | Symbol | Name | Industry | Layer | Score | Source | Tier | ExpR | LCBR | Hit | Stop | n | Price | Flow | Headline | Knife | EV | LCB80 | Reason |",
+        "|---:|---|---|---|---|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for row in rows:
         tier = str(row.get("production_tier") or "")
@@ -1433,11 +1828,12 @@ def render_markdown(payload: dict[str, Any]) -> str:
         if len(reason) > 70:
             reason = reason[:67] + "..."
         lines.append(
-            "| {rank} | {symbol} | {name} | {industry} | {score:.2f} | {source} | {tier} | {expr} | {lcbr} | {hit} | {stop} | {n} | {headline} | {knife} | {ev} | {lcb} | {flow} | {reason} |".format(
+            "| {rank} | {symbol} | {name} | {industry} | {layer} | {score:.2f} | {source} | {tier} | {expr} | {lcbr} | {hit} | {stop} | {n} | {price} | {flow} | {headline} | {knife} | {ev} | {lcb} | {reason} |".format(
                 rank=row.get("rank"),
                 symbol=row.get("symbol") or "",
                 name=row.get("name") or "",
                 industry=row.get("industry") or "",
+                layer=row.get("supercycle_layer") or row.get("narrative_group") or "-",
                 score=round_or_none(row.get("rank_score")) or 0.0,
                 source=row.get("alpha_sleeve_id") or row.get("observed_lifecycle_sleeve_id") or "rank_only",
                 tier=row.get("production_tier") or "",
@@ -1446,11 +1842,12 @@ def render_markdown(payload: dict[str, Any]) -> str:
                 hit=fmt_num(None if row.get("p_hit_1r_t3") is None else float(row.get("p_hit_1r_t3")) * 100.0, 0),
                 stop=fmt_num(None if row.get("p_stop_t3") is None else float(row.get("p_stop_t3")) * 100.0, 0),
                 n=row.get("observed_probability_n") or "-",
+                price=fmt_num(row.get("price_first_signal_score"), 0),
+                flow=fmt_num(row.get("informed_flow_score"), 0),
                 headline=fmt_num((round_or_none(row.get("headline_risk")) or 0.0) * 100.0, 0),
                 knife=fmt_num(row.get("falling_knife_score"), 0),
                 ev=fmt_pct(row.get("ev_pct")),
                 lcb=fmt_pct(row.get("ev_lcb80_pct")),
-                flow=fmt_num(row.get("flow_information_score"), 2),
                 reason=reason,
             )
         )
@@ -1468,8 +1865,10 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "## Operating Rule",
         "",
         "- `cn_oversold_ev_positive` remains the proven Alpha Factory sleeve.",
-        "- `cn_observed_lifecycle_prob` rows can become tiny observed probes when historical analog probability is positive.",
-        "- Top 5 sleeve rows: planned-entry probe; top-5 basket default <= 1R.",
+        "- AI supercycle layer/priority is a rank input; A-share news is still only lagging risk/evidence, not the first signal.",
+        "- `cn_observed_lifecycle_prob` rows can become stock trades when historical analog probability is positive.",
+        "- News is never promoted into fresh alpha by itself; it is a lagging risk label unless confirmed by price/volume/flow/sector behavior.",
+        "- Top 5 sleeve rows: planned-entry stock trade; top-5 basket default <= 1R.",
         "- Rank 6-10 sleeve rows: only after pullback or intraday confirmation.",
         "- Non-sleeve oversold rows remain ranked watch with 0R default size.",
         "- This is a ranker, not a broker adapter; order execution still needs live price and account checks.",
@@ -1507,6 +1906,11 @@ def write_duckdb(path: Path, rows: list[dict[str, Any]], as_of: date) -> None:
                 ev_lcb80_pct DOUBLE,
                 denoise_residual_zscore DOUBLE,
                 log_return_20d_pct DOUBLE,
+                pct_chg DOUBLE,
+                ret_5d DOUBLE,
+                ret_20d DOUBLE,
+                price_first_signal_score DOUBLE,
+                informed_flow_score DOUBLE,
                 flow_information_score DOUBLE,
                 net_mf_pct_circ_mv DOUBLE,
                 p_touch_limit DOUBLE,
@@ -1516,46 +1920,53 @@ def write_duckdb(path: Path, rows: list[dict[str, Any]], as_of: date) -> None:
             """
         )
         con.execute("DELETE FROM cn_opportunity_ranker WHERE as_of = CAST(? AS DATE)", [as_of.isoformat()])
-        con.executemany(
-            """
-            INSERT INTO cn_opportunity_ranker VALUES (
-                CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
-            )
-            """,
+        records = [
             [
-                [
-                    as_of.isoformat(),
-                    row.get("rank"),
-                    row.get("symbol"),
-                    row.get("name"),
-                    row.get("industry"),
-                    row.get("rank_score"),
-                    row.get("alpha_sleeve_id"),
-                    row.get("observed_lifecycle_sleeve_id"),
-                    row.get("execution_source"),
-                    row.get("alpha_factory_role"),
-                    row.get("production_tier"),
-                    row.get("production_action"),
-                    row.get("size_hint"),
-                    row.get("expected_r_t3"),
-                    row.get("lcb80_r_t3"),
-                    row.get("p_win_t1"),
-                    row.get("p_hit_1r_t3"),
-                    row.get("p_stop_t3"),
-                    row.get("observed_probability_n"),
-                    row.get("ev_pct"),
-                    row.get("ev_lcb80_pct"),
-                    row.get("denoise_residual_zscore"),
-                    row.get("log_return_20d_pct"),
-                    row.get("flow_information_score"),
-                    row.get("net_mf_pct_circ_mv"),
-                    row.get("p_touch_limit"),
-                    row.get("turnover_rate"),
-                    json.dumps(row.get("score_components") or {}, ensure_ascii=False, sort_keys=True),
-                ]
-                for row in rows
-            ],
-        )
+                as_of.isoformat(),
+                row.get("rank"),
+                row.get("symbol"),
+                row.get("name"),
+                row.get("industry"),
+                row.get("rank_score"),
+                row.get("alpha_sleeve_id"),
+                row.get("observed_lifecycle_sleeve_id"),
+                row.get("execution_source"),
+                row.get("alpha_factory_role"),
+                row.get("production_tier"),
+                row.get("production_action"),
+                row.get("size_hint"),
+                row.get("expected_r_t3"),
+                row.get("lcb80_r_t3"),
+                row.get("p_win_t1"),
+                row.get("p_hit_1r_t3"),
+                row.get("p_stop_t3"),
+                row.get("observed_probability_n"),
+                row.get("ev_pct"),
+                row.get("ev_lcb80_pct"),
+                row.get("denoise_residual_zscore"),
+                row.get("log_return_20d_pct"),
+                row.get("pct_chg"),
+                row.get("ret_5d"),
+                row.get("ret_20d"),
+                row.get("price_first_signal_score"),
+                row.get("informed_flow_score"),
+                row.get("flow_information_score"),
+                row.get("net_mf_pct_circ_mv"),
+                row.get("p_touch_limit"),
+                row.get("turnover_rate"),
+                json.dumps(row.get("score_components") or {}, ensure_ascii=False, sort_keys=True),
+            ]
+            for row in rows
+        ]
+        if records:
+            con.executemany(
+                """
+                INSERT INTO cn_opportunity_ranker VALUES (
+                    CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                records,
+            )
     finally:
         con.close()
 
@@ -1569,7 +1980,22 @@ def build_ranker_payload(
     source_report: str | None = None,
     top: int = 30,
     config: RankerConfig = DEFAULT_CONFIG,
+    ai_infra_root: Path | None = None,
+    ai_infra_mode: str = "off",
 ) -> dict[str, Any]:
+    input_candidate_count = len(candidates)
+    ai_infra_gate = None
+    if ai_infra_mode != "off":
+        include_all = ai_infra_mode in {"expand", "enforce_expand"}
+        candidates, gate = ai_infra_universe.merge_with_universe_candidates(
+            candidates,
+            market="CN",
+            ai_infra_root=ai_infra_root,
+            include_all_universe=include_all,
+        )
+        ai_infra_gate = gate.as_dict()
+        candidate_status = f"{candidate_status}+ai_infra_{ai_infra_mode}"
+
     symbols = sorted({normalize_cn_symbol(row.get("symbol")) for row in candidates if normalize_cn_symbol(row.get("symbol"))})
     industry_by_symbol = {
         normalize_cn_symbol(row.get("symbol")): str(row.get("industry") or "")
@@ -1596,13 +2022,18 @@ def build_ranker_payload(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "mode": "production_opportunity_ranker",
         "candidate_status": candidate_status,
+        "input_candidate_count": input_candidate_count,
         "candidate_count": len(candidates),
         "ranked_count": len(public_rows),
         "source_report": source_report,
         "cn_db": str(cn_db),
+        "ai_infra_mode": ai_infra_mode,
+        "ai_infra_root": str(ai_infra_root or ai_infra_universe.DEFAULT_AI_INFRA_ROOT),
+        "ai_infra_gate": ai_infra_gate,
         "score_config": asdict(config),
         "score_weights": config.score_weights,
         "notes": [
+            "Candidate universe is the ai_infra BFS workbench when ai_infra_mode is active.",
             "Alpha Factory sleeve membership is the execution contract; broad oversold rows are rank-only.",
             "Headline/event risk and falling-knife risk can force 0R action tier.",
             "Designed for 200-point Tushare daily data: no minute-data or top_list dependency.",
@@ -1642,6 +2073,8 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         source_report=source_report,
         top=args.top,
         config=config,
+        ai_infra_root=getattr(args, "ai_infra_root", None),
+        ai_infra_mode=getattr(args, "ai_infra_mode", "off"),
     )
     write_ranker_outputs(payload, args.output_root)
     return payload

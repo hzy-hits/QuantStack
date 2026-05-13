@@ -2,7 +2,8 @@
 """
 Main daily pipeline entry point.
 
-Output: a structured Markdown payload file in reports/{date}_payload_{session}.md
+Output: a legacy structured Markdown payload that quant-stack removes after
+Main Strategy V2 materializes the replacement daily report.
 Feed that file to whichever agent you want (Claude Code, Codex, OpenClaw, etc.)
 The agent writes the narrative. The program computes the probabilities.
 
@@ -19,8 +20,8 @@ Pipeline:
     3. Fetch prices + options chains (yfinance)
     4. Compute probabilities: momentum regime P, earnings drift P, Bonferroni
     5. Score and filter → top 10-20 notable items
-    6. Render structured Markdown payload
-    → Feed payload to agent of your choice
+    6. Render legacy structured Markdown payload for compatibility
+    → quant-stack cleans the payload; do not feed it to agents
 """
 from __future__ import annotations
 
@@ -900,9 +901,7 @@ def main() -> None:
         log.info("pipeline_complete", run_id=run_id, payload=str(session_payload_path), session=session)
         print(f"\n✓ Payload ready: {session_payload_path}")
         print(f"  Charts: {chart_output_dir}/ ({len(chart_paths)} files)")
-        print(f"  Feed to agent: claude < {session_payload_path}")
-        print(f"  Or: codex '{session_payload_path}'")
-        print(f"  Or open in any LLM chat\n")
+        print("  Legacy agent payload only; unified quant-stack daily cleans this after Main Strategy V2 report materializes.\n")
 
     except Exception as e:
         log.error("pipeline_failed", run_id=run_id, error=str(e), session=session)
