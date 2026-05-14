@@ -54,7 +54,8 @@ ai_infra 原文研究 / BFS 发现
 7. 任何新 ticker 进入交易候选前，必须先有 evidence card / source registry / relationship ledger 或 universe 晋级记录。
 8. 美股报告里的公司名保持原始英文名；A 股和港股可以显示中文名。
 9. 每日报告必须区分 production candidate、watch/research-only candidate、benchmark/hedge/context。
-10. 不要把当前凌乱 worktree 直接推到 `main`。需要发布时，建专门分支、分逻辑提交、生成 review packet。
+10. 本仓库不是 broker；rebalance / execution ledger 只记录研究建议、paper/intended tilt 或人工确认状态，不代表真实下单。
+11. 不要把当前凌乱 worktree 直接推到 `main`。需要发布时，建专门分支、分逻辑提交、生成 review packet。
 
 ## 模块职责
 
@@ -233,6 +234,8 @@ python3 -m unittest \
   tests.test_ai_infra_expansion_lane \
   tests.test_send_production_decision_report
 ```
+
+更多当前 specialist smoke tests、source-review loop、rebalance ledger 命令见 `CLAUDE_HANDOFF.md`。
 
 共享控制面示例：
 

@@ -27,9 +27,13 @@ main
 当前已推送到 `origin/main`。最新关键提交：
 
 ```text
+7e34f69 Append factor-lab autoresearch session logs (2026-05-13)
+83f6503 Make rebalance execution recording hands-off
+8740537 Track AI rebalance suggestion vs execution drift
+1cefc8e Add weekly + trailing 4-week rolling alpha to promotion backtest
+bce4325 Add Fear & Greed macro context and tape rebalance suggestions
+2cecd77 Add MR earnings/valuation layer, AI cross-compare, promo alpha backtest
 53507f2 Enforce AI infra specialist pipeline
-1c3d7a1 Wire factor lab into AI infra discovery
-b6d29f9 Add AI infra research workbench
 ```
 
 如果在新机器接手：
@@ -62,6 +66,21 @@ ai_infra 原文研究 / BFS 发现
   -> 对 SPY / QQQ / SMH / 上证 / 深成指等 benchmark 做归因
   -> 每日报告
 ```
+
+## Review 结论
+
+当前 Claude 结果已经够后续 agent 接手，核心链路和 guardrails 都在仓库内落地了：
+
+- AI universe / source-review / promotion plan / production basket audit 已成闭环。
+- US/CN ranker、Main Strategy V2、benchmark attribution、earnings/source-review calendar 已接入。
+- Factor Lab 已能输出 AI Infra research hypothesis / `DATA_REQUIREMENTS` / discovery queue。
+- Rebalance 现在是 paper/intended tilt ledger；本仓库仍不是 broker，不会真实下单。
+
+继续开发前要特别注意三点：
+
+1. `ai_infra/reports/`、`ai_infra/evidence/`、`reports/` 是本地/私有/generated artifact，默认不要提交。
+2. `maintain_rebalance_history.py --auto-accept` 只是在 ledger 中记录建议被接受，不代表真实交易执行。
+3. 后续新增任何 ticker 仍必须先过 source-review；不能因为 tape、MR radar、Fear & Greed 或期权异动直接进 production。
 
 ## 必读顺序
 
@@ -121,6 +140,7 @@ ai_infra 原文研究 / BFS 发现
 8. 美股报告公司名保持英文原名；A 股/港股可以用中文名。
 9. 每日报告必须分清 production candidates、watch/research-only、benchmark、hedge、macro context。
 10. 不要提交 ignored 的本地私有数据、source cache、reports、logs、DuckDB、credentials、token、target、venv。
+11. 本仓库不是 broker；rebalance / execution ledger 只记录研究建议、paper/intended tilt 或人工确认状态，不代表真实下单。
 
 ## 新公司晋级流程
 
@@ -196,26 +216,57 @@ python3 scripts/run_main_strategy_v2_backtest.py --as-of 2026-05-13
 ```bash
 python3 -m unittest \
   quant-research-v1.tests.test_main_strategy_v2_backtest \
+  quant-research-v1.tests.test_ai_infra_universe \
+  quant-research-v1.tests.test_us_opportunity_ranker \
+  quant-research-v1.tests.test_cn_opportunity_ranker \
   tests.test_ai_infra_bfs_discovery_queue \
   tests.test_ai_infra_expansion_lane \
-  tests.test_send_production_decision_report \
+  tests.test_ai_infra_universe_satellite_adr \
   tests.test_ai_supercycle_readiness \
   tests.test_phase_0_6_guardrails \
   tests.test_cn_tape_supercycle_layers \
+  tests.test_send_production_decision_report \
   tests.test_source_review_calendar \
   tests.test_satellite_pool_report \
   tests.test_score_source_review_readiness \
   tests.test_benchmark_attribution \
   tests.test_audit_production_basket_ai_universe \
-  quant-research-v1.tests.test_ai_infra_universe \
-  quant-research-v1.tests.test_us_opportunity_ranker \
-  quant-research-v1.tests.test_cn_opportunity_ranker
+  tests.test_score_ten_x_candidates \
+  tests.test_scaffold_evidence_cards \
+  tests.test_derive_promotion_plan \
+  tests.test_apply_promotion_plan \
+  tests.test_ema_tape_overlay \
+  tests.test_score_mean_reversion_radar \
+  tests.test_ai_tape_cross_compare \
+  tests.test_maintain_promotion_history \
+  tests.test_backtest_promotion_history \
+  tests.test_ingest_fear_greed_index \
+  tests.test_maintain_rebalance_history \
+  tests.test_record_rebalance_execution
 ```
 
 跑完报告之后检查 AI universe 合规：
 
 ```bash
 python3 scripts/audit_production_basket_ai_universe.py --as-of 2026-05-13
+```
+
+Source-review closed loop：
+
+```bash
+python3 scripts/score_source_review_readiness.py --as-of 2026-05-13
+python3 scripts/scaffold_evidence_cards_from_readiness.py --as-of 2026-05-13
+python3 scripts/derive_promotion_plan_from_readiness.py --as-of 2026-05-13
+python3 scripts/apply_promotion_plan.py --as-of 2026-05-13 --dry-run
+```
+
+Tape / radar / rebalance review loop：
+
+```bash
+python3 scripts/score_ten_x_candidates.py --as-of 2026-05-13
+python3 scripts/score_mean_reversion_radar.py --as-of 2026-05-13
+python3 scripts/build_ai_tape_cross_compare.py --as-of 2026-05-13
+python3 scripts/maintain_rebalance_history.py --as-of 2026-05-13 --auto-accept
 ```
 
 Factor Lab tests 需要从 `factor-lab/` 目录跑：
@@ -371,7 +422,7 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 
 操作员不必每天手动记录 rebalance 执行了，两条路：
 
-1. **完全 hands-off (默认 cron)** — `maintain_rebalance_history.py --auto-accept`：suggestion 落 ledger 时自动把 `executed_tilt_pct = suggested_tilt_pct`，`notes` 标 `auto-accept`。`ops/tasks.yaml` 的 `research.rebalance_history` cron 已加这个 flag → 操作员什么都不做 = 系统按建议执行。
+1. **完全 hands-off (默认 cron)** — `maintain_rebalance_history.py --auto-accept`：suggestion 落 ledger 时自动把 `executed_tilt_pct = suggested_tilt_pct`，`notes` 标 `auto-accept`。`ops/tasks.yaml` 的 `research.rebalance_history` cron 已加这个 flag → 操作员什么都不做 = 系统把建议记为 paper/intended tilt 已接受；不代表真实下单。
 2. **一条命令 hand override** — `scripts/record_rebalance_execution.py`：
    - `--accept-all` 接受全部建议
    - `--accept NVDA AAOI` 只接受这些
@@ -405,9 +456,9 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 
 ## 第七批已完成 (2026-05-13 续 6)
 
-主线: AI book 仍绝对主力；fear & greed 仅作 macro context、不能促进任何 ticker 进 production；rebalance suggestion 仅 提示不执行。
+主线: AI book 仍绝对主力；fear & greed 仅作 macro context、不能促进任何 ticker 进 production；rebalance suggestion 是 paper/intended tilt ledger，不是真实 broker 执行。
 
-1. **Cross-compare rebalance suggestion** — `build_ai_tape_cross_compare.py` 加 `build_rebalance_suggestion`：每个 leader +2.5% (cap +10% basket)；`cheap_vs_sector`/`fair_vs_sector` laggard 滚 -3% (cap -10%)；`rich_vs_sector` laggard 单独 trim。 当前输出：4 个 leaders 总 +10%（澜起/生益/长电/AAOI）；ANET 因 rich_vs_sector 触发 trim -2%。明确 **operator must confirm — not auto-execute**。
+1. **Cross-compare rebalance suggestion** — `build_ai_tape_cross_compare.py` 加 `build_rebalance_suggestion`：每个 leader +2.5% (cap +10% basket)；`cheap_vs_sector`/`fair_vs_sector` laggard 滚 -3% (cap -10%)；`rich_vs_sector` laggard 单独 trim。 当前输出：4 个 leaders 总 +10%（澜起/生益/长电/AAOI）；ANET 因 rich_vs_sector 触发 trim -2%。第十批之后 cron 会用 `--auto-accept` 把建议记录为已接受的 paper/intended tilt；真实交易仍不在本仓库执行。
 2. **Fear & Greed 指数** — `scripts/ingest_fear_greed_index.py` 先打 CNN API（当前我们网络 418，自动 fallback），再走 VIX 252d 反向 percentile + SPY vs EMA50 距离 + SPY 5d return percentile 三因子代理。当前 proxy=73.57 → Greed。落到 `fear_greed.{md,json}` 并在 combined report + us_daily_report 渲染段。`tests/test_ingest_fear_greed_index.py` 覆盖 3 case。
 3. **新 cron**: `research.fear_greed_ingest` (08:05 CST, US 市场)。
 4. **跑通整条管线** — 完整管线 8 步从 F&G ingest → MR / 10x / cross-compare 都正确生成；audit --strict 通过 (US basket=5/5, CN 1/1)，readiness 10/1/0。
@@ -458,14 +509,15 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 
 ## 建议的下一步
 
-1. **SEC EDGAR 财报抽取** — 留给 Factor Lab 探索（用户已决定本仓库不直接拉接口）。
-2. **Factor Lab `DATA_REQUIREMENTS` schema 合同**。
-3. **海外指数 ingestion 扩展** — `^HSI`/`^STI`/`^FTSE`/`^IBEX`。
-4. **AKShare bridge 完整集成** — `cn_index_ingest` 直接走 producer 的 FastAPI 桥。
-5. **promotion_alpha 持续累积** — 等几周后 backtest 才有真数字；可加 rolling 4-week / 12-week aggregate。
-6. **Cross-compare 加 rebalance suggestion** — leaders vs laggards 那两段加自动 weight tilt 建议（如「增 5% leaders / 减 5% rich laggards」），但仍需操作员复核。
-7. **MR radar add 5d ADV / news sentiment** — 当前只 tape + valuation；加换手 + 24h 新闻数量帮助辨别 fundamental shock vs purely tape weakness。
-8. **AI Tape leader 价格回撤监控** — leader 段持续运行：当 `bull; rising` 滑成 `tangled` 或 `bear` 时立即通知（cron 监控）。
+1. **Source-review primary document automation** — SEC EDGAR / transcripts / official releases 可以先由 Factor Lab 探索；真正进入 promotion 前必须落 evidence card 和 counterevidence。
+2. **Factor Lab `DATA_REQUIREMENTS` schema 合同** — 固定字段、owner、blocking level、source type、expected artifact，避免 discovery queue 和生产管线继续口头约定。
+3. **Full validation wrapper** — 增加一个 `ops` task 或 `make ai-infra-smoke`，串起 readiness、Main Strategy V2、production basket audit、source-review readiness、Factor Lab local tests 和 Rust checks。
+4. **Generated artifact index** — 给 `reports/review_dashboard/*` 和 `ai_infra/reports/*` 做一个每日 index/manifest；这些文件仍默认 ignored，但要让 agent 知道在哪里找。
+5. **海外指数 ingestion 扩展** — `^HSI`、`^STI`、`^FTSE`、`^IBEX`，并在 satellite benchmark attribution 中明确用途。
+6. **AKShare bridge 完整集成** — `cn_index_ingest` 直接走 producer 的 FastAPI 桥，减少脚本各自拉数据的分叉。
+7. **promotion_alpha 持续累积** — 几周后再看 5/20/60d forward alpha；可加 rolling 12-week aggregate 和 drawdown by promotion cohort。
+8. **MR radar add 5d ADV / news sentiment** — 当前偏 tape + valuation；加换手、新闻数量和 source-review state，帮助辨别 fundamental shock vs purely tape weakness。
+9. **AI Tape leader 价格回撤监控** — leader 段持续运行：当 `bull; rising` 滑成 `tangled` 或 `bear` 时触发 review task，而不是直接交易。
 
 ## 接手时不要做的事
 
@@ -485,7 +537,7 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 本地路径：/home/ivena/coding/quant-stack
 GitHub：git@github.com:hzy-hits/QuantStack.git
 分支：main
-最新关键提交：53507f2 Enforce AI infra specialist pipeline
+最新关键提交：7e34f69 Append factor-lab autoresearch session logs (2026-05-13)
 
 先读 CLAUDE_HANDOFF.md，然后按它的“必读顺序”阅读 AGENTS.md、README.md、docs/AI_INFRA_SPECIALIST_PIPELINE_REORG.md、docs/AI_SUPERCYCLE_PIPELINE_CONTRACT.md、docs/AI_INFRA_QUANT_FUND_INTEGRATION.md、docs/MODULE_BOUNDARIES.md 和 ai_infra/START_HERE.md。
 

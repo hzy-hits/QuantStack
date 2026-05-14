@@ -7046,6 +7046,83 @@ def render_source_review_calendar_section(
     return lines
 
 
+def cn_left_side_watch_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return CN ranker rows that look like left-side (oversold/contrarian) ideas.
+
+    The CN ranker can throttle the `cn_oversold_ev_positive` sleeve to 0R when
+    the tape regime is strong, which makes the daily report look like it only
+    knows momentum. Surfacing these rows independently — even if size=0 —
+    lets the operator decide whether to inject a left-side leg into the mix.
+    """
+    ranker = (payload.get("cn_opportunity_ranker") or {})
+    sources = (ranker.get("all_rows") or [])
+    if not sources:
+        sources = (payload.get("cn") or {}).get("ranked_watch_rows") or []
+
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in sources:
+        family = str(row.get("strategy_family") or row.get("policy") or "")
+        sleeve = str(row.get("alpha_sleeve_id") or "")
+        is_left_side = (
+            family == "oversold_contrarian"
+            or sleeve.startswith("cn_oversold")
+            or family.endswith("_oversold_reversion")
+            or "oversold" in sleeve
+        )
+        if not is_left_side:
+            continue
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol or symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append(row)
+    out.sort(key=lambda r: (-(round_or_none(r.get("ev_lcb80_pct")) or -999.0), r.get("rank") or 9_999))
+    return out
+
+
+def render_cn_left_side_watch_section(payload: dict[str, Any], *, limit: int = 10) -> list[str]:
+    rows = cn_left_side_watch_rows(payload)
+    lines = [
+        "## A股左侧观察池 (oversold / 超跌 EV-positive)",
+        "",
+        "- 用法: 即便当前强势 tape regime 把左侧 sleeve 压到 0R，这里仍保留 EV-positive 超跌候选；操作员判断是否做左右混合配置。",
+        "- 入池条件: ranker 行的 `strategy_family=oversold_contrarian` 或 sleeve_id 以 `cn_oversold` 开头。",
+        "",
+    ]
+    if not rows:
+        lines += [
+            "- 今日 CN producer 没有输出 `oversold_contrarian` 候选，左侧池为空。",
+            "- 如果连续多日为空，需要检查 producer 是否真的在生成左侧数据集 (`strategy_model_dataset`)。",
+            "",
+        ]
+        return lines
+    lines += [
+        "| Symbol | Name | EV LCB80 | 1D | 5D | Pool | State | Reason |",
+        "|---|---|---:|---:|---:|---|---|---|",
+    ]
+    for row in rows[:limit]:
+        ev = row.get("ev_lcb80_pct")
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(row.get("symbol") or "-"),
+                    clean_table_text(row.get("name") or "-", 22),
+                    fmt_pct(ev) if ev is not None else "-",
+                    fmt_pct(row.get("pct_chg")) if row.get("pct_chg") is not None else "-",
+                    fmt_pct(row.get("ret_5d_pct")) if row.get("ret_5d_pct") is not None else "-",
+                    str(row.get("ai_infra_current_pool") or "-"),
+                    str(row.get("state") or "-"),
+                    clean_table_text(str(row.get("ev_action_reason") or row.get("handling_reason") or "-"), 60),
+                ]
+            )
+            + " |"
+        )
+    lines.append("")
+    return lines
+
+
 def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     as_of = payload["as_of"]
     actions = market_actions(payload, "CN")
@@ -7091,6 +7168,7 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
         "",
     ]
     lines += render_market_watch_table(market_watch_rows(payload, "CN"))
+    lines += render_cn_left_side_watch_section(payload)
     lines += render_earnings_calendar_section(payload, "CN")
     lines += render_source_review_calendar_section(payload, "CN")
     lines += render_benchmark_attribution_section(payload, "CN")

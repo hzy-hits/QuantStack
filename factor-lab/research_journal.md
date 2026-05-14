@@ -379,3 +379,9 @@ Legend: . = tested weak, + = decent IC, ++ = strong IC, +++ = promoted, ! = stro
 - Experiments run: 15
 - OOS passed: 0/0
 - Passing factors: none
+
+## Session 20260514_060003_7f53cb — CN
+- Timestamp: 2026-05-14 06:57
+- Experiments run: 26
+- OOS passed: 0/0
+- Passing factors: none
