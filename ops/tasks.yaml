@@ -603,6 +603,26 @@ tasks:
     outputs:
       - reports/review_dashboard/us_options_anomaly_radar
 
+  research.options_anomaly_alerts:
+    group: research
+    schedule: "8 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/maintain_options_anomaly_alerts.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.options_anomaly_alerts.log
+    lock: ops/state/research.options_anomaly_alerts.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ai_infra/reports/ai_book_options_alerts.jsonl
+      - ai_infra/reports/source_verification_queue_v1.csv
+
   research.main_strategy_v2_report:
     group: research
     schedule: "10 12 * * 1-5"
