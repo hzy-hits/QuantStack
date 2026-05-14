@@ -209,6 +209,18 @@ def score_queue(queue_path: Path) -> list[ReadinessRow]:
         return [_classify(row) for row in reader]
 
 
+def classify_row(row: dict[str, str]) -> ReadinessRow:
+    """Public wrapper around `_classify` so other modules can score a single
+    queue row without subprocessing the full ledger pipeline."""
+    return _classify(row)
+
+
+def tier_and_score(row: dict[str, str]) -> tuple[str, float]:
+    """Convenience helper for callers that only need (readiness_tier, score)."""
+    classified = _classify(row)
+    return classified.readiness_tier, classified.evidence_score
+
+
 def _render_markdown(rows: list[ReadinessRow], queue_path: Path) -> str:
     tier_counts = Counter(row.readiness_tier for row in rows)
     pool_counts = Counter(row.asset_pool for row in rows)

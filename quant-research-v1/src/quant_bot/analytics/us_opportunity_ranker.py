@@ -545,8 +545,29 @@ def enrich_rows(
     return rows
 
 
+def _evidence_state_passes_gate(row: dict[str, Any]) -> bool:
+    """Block tape-only promotion of `待原文核验` AI infra names.
+
+    Methodology requires `原文已证明` or `合理推论` before a universe row
+    can leave watch / research-only. Without that, even Alpha Factory
+    sleeve membership keeps the row in ranked_watch.
+    """
+    state = str(row.get("ai_infra_evidence_state") or row.get("evidence_state") or "")
+    if "原文已证明" in state or "合理推论" in state:
+        return True
+    if not row.get("ai_infra_universe") and not row.get("ai_infra_current_pool"):
+        return True
+    return False
+
+
 def production_tier(rank: int, row: dict[str, Any], config: RankerConfig) -> tuple[str, str, str]:
     headline = round_or_none(row.get("headline_risk")) or 0.0
+    if not _evidence_state_passes_gate(row):
+        return (
+            "ranked_watch",
+            "evidence_state_pending_no_trade",
+            "0R: ai_infra_evidence_state is 待原文核验 / empty; tape alone cannot promote pending-evidence names",
+        )
     if headline >= config.event_risk_zero_r:
         return "event_risk_watch", "negative_headline_no_probe", "0R until event/news risk clears"
     if row.get("supplier_evidence_state") == "negative_supply_evidence":

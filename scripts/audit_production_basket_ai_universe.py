@@ -4,9 +4,11 @@ Reads `us_opportunity_ranker.json` and `cn_opportunity_ranker.json` under a
 review-dashboard date directory and asserts:
 
 1. The `ai_infra_gate.contract` field is `ai_infra_universe_only`.
-2. Every row in `production_basket` carries `ai_infra_universe: True`.
-3. Every row in `production_basket` has a non-empty `ai_infra_current_pool`
-   (i.e. came from the source-reviewed universe ledger, not a fall-through).
+2. Every row in `production_basket` carries `ai_infra_universe: True` AND is a
+   member of the *canonical* `ai_infra/data/global_universe_v2.jsonl` universe
+   reloaded fresh on every run (Codex review 2026-05-14 fix: do not trust
+   emitted flags alone — verify membership independently).
+3. Every row in `production_basket` has a non-empty `ai_infra_current_pool`.
 
 The script exits non-zero on any violation so it can wire into ops cron and
 review_packet generation.
@@ -20,6 +22,28 @@ from pathlib import Path
 
 STACK_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DASHBOARD = STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2"
+DEFAULT_AI_INFRA_ROOT = STACK_ROOT / "ai_infra"
+
+
+def _load_canonical_universe(
+    ai_infra_root: Path = DEFAULT_AI_INFRA_ROOT,
+) -> dict[str, set[str]]:
+    """Reload canonical universe membership per market.
+
+    Uses the same gate module the rankers consume so audit semantics match.
+    Returns {"US": set, "CN": set}. Empty dict if the gate module is unavailable.
+    """
+    src_path = STACK_ROOT / "quant-research-v1" / "src"
+    if str(src_path) not in sys.path:
+        sys.path.insert(0, str(src_path))
+    try:
+        from quant_bot.analytics import ai_infra_universe as gate  # type: ignore
+    except ImportError:
+        return {}
+    return {
+        "US": set(gate.records_by_symbol("US", ai_infra_root=ai_infra_root)),
+        "CN": set(gate.records_by_symbol("CN", ai_infra_root=ai_infra_root)),
+    }
 
 
 def _load(path: Path) -> dict | None:
@@ -28,7 +52,13 @@ def _load(path: Path) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _check_payload(market: str, payload: dict, *, strict: bool = False) -> list[str]:
+def _check_payload(
+    market: str,
+    payload: dict,
+    *,
+    strict: bool = False,
+    canonical_universe: set[str] | None = None,
+) -> list[str]:
     errors: list[str] = []
     gate = payload.get("ai_infra_gate") or {}
     contract = gate.get("contract")
@@ -41,11 +71,19 @@ def _check_payload(market: str, payload: dict, *, strict: bool = False) -> list[
         return errors
 
     for row in basket:
-        symbol = row.get("symbol") or "<unknown>"
+        symbol = (row.get("symbol") or "<unknown>")
         if not row.get("ai_infra_universe"):
-            errors.append(f"{market}: {symbol} in production_basket but ai_infra_universe is not True")
+            errors.append(f"{market}: {symbol} in production_basket but ai_infra_universe flag is not True")
         if not row.get("ai_infra_current_pool"):
             errors.append(f"{market}: {symbol} has no ai_infra_current_pool tag")
+        # Canonical universe cross-check: reload gate output and confirm membership
+        # rather than trusting the emitted flag in the payload.
+        if canonical_universe is not None and symbol and symbol != "<unknown>":
+            if symbol.upper() not in canonical_universe:
+                errors.append(
+                    f"{market}: {symbol} in production_basket but NOT in canonical ai_infra universe "
+                    f"(reloaded from global_universe_v2.jsonl)"
+                )
 
     if strict:
         all_rows = payload.get("all_rows") or []
@@ -58,6 +96,11 @@ def _check_payload(market: str, payload: dict, *, strict: bool = False) -> list[
                     errors.append(
                         f"{market}: {symbol} in all_rows (watch/research-only) bypassed the AI universe gate"
                     )
+                if canonical_universe is not None and symbol and symbol != "<unknown>":
+                    if symbol.upper() not in canonical_universe:
+                        errors.append(
+                            f"{market}: {symbol} in all_rows but NOT in canonical universe (strict)"
+                        )
     return errors
 
 
@@ -98,12 +141,30 @@ def main() -> int:
         action="store_true",
         help="Also require every all_rows entry (watch/research-only) to be ai_infra_universe=True.",
     )
+    parser.add_argument(
+        "--no-canonical-check",
+        action="store_true",
+        help="Skip the canonical-universe cross-check (only inspect payload flags).",
+    )
+    parser.add_argument(
+        "--ai-infra-root",
+        type=Path,
+        default=DEFAULT_AI_INFRA_ROOT,
+        help="Root of ai_infra workspace (contains data/global_universe_v2.jsonl).",
+    )
     args = parser.parse_args()
 
     date_dir = args.dashboard_root / args.as_of
     if not date_dir.exists():
         print(f"audit: dashboard date directory missing: {date_dir}", file=sys.stderr)
         return 2
+
+    canonical = {} if args.no_canonical_check else _load_canonical_universe(args.ai_infra_root)
+    if canonical:
+        print(
+            f"audit: canonical universe loaded — US={len(canonical.get('US', set()))} "
+            f"CN={len(canonical.get('CN', set()))} symbols"
+        )
 
     errors: list[str] = []
     found_any = False
@@ -114,7 +175,14 @@ def main() -> int:
             errors.append(f"{market}: missing {filename}")
             continue
         found_any = True
-        errors.extend(_check_payload(market, payload, strict=args.strict))
+        errors.extend(
+            _check_payload(
+                market,
+                payload,
+                strict=args.strict,
+                canonical_universe=canonical.get(market) if canonical else None,
+            )
+        )
         coverage[market] = _basket_coverage(payload)
 
     if not found_any:

@@ -7,6 +7,7 @@ import argparse
 import csv
 import json
 import re
+import shutil
 import subprocess
 import sys
 from datetime import date, datetime
@@ -257,6 +258,9 @@ def promote_rows(
 
 def write_promoted_csv(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Backup curated promoted CSV before rewrite (Codex review 2026-05-14).
+    if path.exists():
+        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=PROMOTED_FIELDS)
         writer.writeheader()

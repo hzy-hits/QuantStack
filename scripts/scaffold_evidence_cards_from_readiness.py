@@ -325,16 +325,58 @@ def render_index(specs: list[DraftSpec], as_of: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_drafts(specs: list[DraftSpec], out_dir: Path, as_of: str) -> list[Path]:
+_FRESH_DRAFT_MARKER = "状态: **草稿**。需要填入原文 quote、链接、口径"
+
+
+def _looks_like_operator_edit(existing_text: str) -> bool:
+    """Heuristic: detect operator-filled drafts so the scaffolder does not stomp them.
+
+    The freshly rendered template carries a stable marker line and many empty
+    table cells. If the on-disk file is missing the marker, has substantially
+    more non-empty rows, or has any explicit source URL filled in, treat it
+    as touched and skip overwrite by default.
+    """
+    if not existing_text or _FRESH_DRAFT_MARKER not in existing_text:
+        return True
+    if "_pending_evidence_card_link_" not in existing_text and "_待填_" not in existing_text:
+        # Either a custom note added, or templated `_待填_` placeholders were
+        # all resolved → operator has invested in this draft.
+        return True
+    # Look for any source URL the operator may have pasted.
+    if "http://" in existing_text or "https://" in existing_text:
+        return True
+    return False
+
+
+def write_drafts(
+    specs: list[DraftSpec],
+    out_dir: Path,
+    as_of: str,
+    *,
+    force: bool = False,
+) -> tuple[list[Path], list[Path]]:
+    """Write or refresh draft cards. Returns (written, skipped_protected).
+
+    Default behaviour preserves operator edits: any file whose content no
+    longer looks like the unmodified template is skipped. `--force` falls back
+    to the legacy unconditional overwrite.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
+    skipped: list[Path] = []
     for spec in specs:
         filename = f"{_safe_filename(spec.primary_ticker)}.md"
         path = out_dir / filename
+        if not force and path.exists():
+            existing = path.read_text(encoding="utf-8")
+            if _looks_like_operator_edit(existing):
+                skipped.append(path)
+                continue
         path.write_text(render_card(spec, as_of), encoding="utf-8")
         written.append(path)
+    # INDEX is always refreshed — it is purely generated metadata.
     (out_dir / "INDEX.md").write_text(render_index(specs, as_of), encoding="utf-8")
-    return written
+    return written, skipped
 
 
 def main() -> int:
@@ -354,6 +396,12 @@ def main() -> int:
     )
     parser.add_argument("--queue", type=Path, default=DEFAULT_QUEUE)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_DRAFT_ROOT)
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing draft files even if they look operator-edited. "
+        "Default behaviour preserves drafts that have non-template content.",
+    )
     args = parser.parse_args()
 
     cst = datetime.now(timezone(timedelta(hours=8)))
@@ -377,8 +425,11 @@ def main() -> int:
         print("No ready_for_promotion or evidence_partial rows found; nothing to draft.")
         return 0
     out_dir = args.output_root / as_of
-    written = write_drafts(specs, out_dir, as_of)
-    print(f"Evidence card drafts written: {len(written)} files under {out_dir}")
+    written, skipped = write_drafts(specs, out_dir, as_of, force=args.force)
+    msg = f"Evidence card drafts: {len(written)} written, {len(skipped)} preserved (operator-edited) under {out_dir}"
+    if skipped:
+        msg += "; rerun with --force to overwrite"
+    print(msg)
     return 0
 
 

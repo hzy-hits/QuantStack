@@ -1274,6 +1274,26 @@ def enrich_base_rows(
     return rows
 
 
+def _evidence_state_passes_gate(row: dict[str, Any]) -> bool:
+    """Secondary gate: tape leadership alone cannot promote `待原文核验` names.
+
+    Methodology requires `原文已证明` or at minimum `合理推论` before a name
+    can leave the watch/research-only pool. Without an explicit verified
+    evidence state, the ranker keeps the row in ranked_watch regardless of
+    tape strength. This catches the audited failure mode where 待原文核验
+    universe rows were promoted via tape leadership (Codex review 2026-05-14).
+    """
+    state = str(row.get("ai_infra_evidence_state") or row.get("evidence_state") or "")
+    if "原文已证明" in state or "合理推论" in state:
+        return True
+    # Names not in the AI infra universe at all (e.g. legacy mappings) keep
+    # the historical behaviour: they failed the universe gate upstream and
+    # would not reach production_tier in enforce mode anyway.
+    if not row.get("ai_infra_universe") and not row.get("ai_infra_current_pool"):
+        return True
+    return False
+
+
 def production_tier(rank: int, row: dict[str, Any], config: RankerConfig = DEFAULT_CONFIG) -> tuple[str, str, str]:
     headline_risk = round_or_none(row.get("headline_risk")) or 0.0
     falling_knife = round_or_none(row.get("falling_knife_score")) or 0.0
@@ -1282,6 +1302,12 @@ def production_tier(rank: int, row: dict[str, Any], config: RankerConfig = DEFAU
     strong_tape_regime = str(row.get("market_tape_regime") or "") == "strong_trend"
     trend_leadership_ok = bool(row.get("trend_leadership_ok"))
     narrative_group = cn_narrative_group(row)
+    if not _evidence_state_passes_gate(row):
+        return (
+            "ranked_watch",
+            "evidence_state_pending_no_trade",
+            "0R: ai_infra_evidence_state is 待原文核验 / empty; tape alone cannot promote pending-evidence names",
+        )
     if is_special_treatment_name(row.get("name")):
         return (
             "special_treatment_watch",

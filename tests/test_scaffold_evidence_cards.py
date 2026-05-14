@@ -203,12 +203,42 @@ class ScaffoldEvidenceCardTests(unittest.TestCase):
                 self.module.load_queue(queue_path),
             )
             out_dir = root / "drafts"
-            written = self.module.write_drafts(specs, out_dir, "2026-05-13")
+            written, skipped = self.module.write_drafts(specs, out_dir, "2026-05-13")
             names = sorted(p.name for p in written)
             self.assertEqual(names, ["NVDA.md", "TSM.md"])
+            self.assertEqual(skipped, [])
             index = (out_dir / "INDEX.md").read_text(encoding="utf-8")
             self.assertIn("NVIDIA", index)
             self.assertIn("TSMC", index)
+
+    def test_write_drafts_preserves_operator_edits(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            queue_path = root / "queue.csv"
+            readiness_path = root / "readiness.csv"
+            _write_csv(queue_path, QUEUE_HEADERS, [_base_queue_row()])
+            _write_csv(readiness_path, READINESS_HEADERS, [_base_readiness_row()])
+            specs = self.module.collect_specs(
+                self.module.load_readiness(readiness_path),
+                self.module.load_queue(queue_path),
+            )
+            out_dir = root / "drafts"
+            # First run: clean writes
+            self.module.write_drafts(specs, out_dir, "2026-05-13")
+            # Simulate operator edit by removing the fresh-draft marker and adding URL
+            (out_dir / "NVDA.md").write_text(
+                "# NVDA operator edits\nSource: https://www.sec.gov/nvda-10k\nrevenue 60B\n",
+                encoding="utf-8",
+            )
+            # Second run: should skip the edited file
+            written2, skipped2 = self.module.write_drafts(specs, out_dir, "2026-05-13")
+            self.assertEqual(written2, [])
+            self.assertEqual([p.name for p in skipped2], ["NVDA.md"])
+            self.assertIn("operator edits", (out_dir / "NVDA.md").read_text(encoding="utf-8"))
+            # Force-mode overwrites even operator edits
+            written3, skipped3 = self.module.write_drafts(specs, out_dir, "2026-05-13", force=True)
+            self.assertEqual([p.name for p in written3], ["NVDA.md"])
+            self.assertEqual(skipped3, [])
 
 
 if __name__ == "__main__":

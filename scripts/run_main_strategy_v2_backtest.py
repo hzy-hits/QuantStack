@@ -1444,56 +1444,17 @@ def _ema_lookup(overlay: dict[str, dict[str, Any]] | None, ticker_field: str) ->
 
 
 def _readiness_tier(row: dict[str, str]) -> tuple[str, float]:
-    """Inline the AI Infra source-review readiness gates.
+    """Single source of truth: delegate to `score_source_review_readiness`.
 
-    Mirrors `scripts/score_source_review_readiness.py` so the daily report can
-    annotate each calendar row without spawning a subprocess. Keep the two in
-    sync; the standalone scorer remains authoritative for the dashboard ledger.
+    Previously this function was an inline copy of the canonical scorer with a
+    "keep in sync" warning, which guaranteed drift. After the 2026-05-14 Codex
+    review flagged the duplication, we import the public `tier_and_score`
+    helper instead so a single change in the scorer reaches the daily report.
     """
-
-    def _filled(text: str | None) -> bool:
-        if not text:
-            return False
-        stripped = text.strip()
-        return bool(stripped) and stripped not in {"-", "—", "待核验", "TBD", "tbd", "TODO", "todo", "?"}
-
-    primary = _filled(row.get("primary_sources_to_find"))
-    metrics = _filled(row.get("metrics_to_verify"))
-    upgrade = _filled(row.get("upgrade_conditions"))
-    downgrade = _filled(row.get("downgrade_conditions"))
-    counter = _filled(row.get("counterevidence"))
-    evidence_state = (row.get("evidence_state") or "").strip()
-    proved = "原文已证明" in evidence_state
-    partial = "合理推论" in evidence_state
-    pending = "待原文核验" in evidence_state or "待核验" in evidence_state
-
-    score = 0.0
-    score += 0.30 if primary else 0.0
-    score += 0.15 if metrics else 0.0
-    score += 0.15 if upgrade else 0.0
-    score += 0.10 if downgrade else 0.0
-    score += 0.10 if counter else 0.0
-    if proved:
-        score += 0.20
-    elif partial:
-        score += 0.10
-    elif pending:
-        score += 0.05
-
-    raw_counter = (row.get("counterevidence") or "").replace("，", ",").replace("；", ",").replace(";", ",")
-    counter_items = [piece.strip() for piece in raw_counter.split(",") if piece.strip() and piece.strip() not in {"-", "—"}]
-
-    if not primary:
-        return "g0_blocked", round(score, 3)
-    if proved and metrics and upgrade and counter:
-        return "ready_for_promotion", round(score, 3)
-    if len(counter_items) >= 3 and not proved:
-        return "blocked_by_counterevidence", round(score, 3)
-    if partial or proved:
-        return "evidence_partial", round(score, 3)
-    if pending and metrics and upgrade:
-        return "pending_human_review", round(score, 3)
-    return "unscored", round(score, 3)
+    # Local import keeps the rest of this module independent of the script's
+    # CLI side-effects on module load.
+    from score_source_review_readiness import tier_and_score
+    return tier_and_score(row)
 
 
 def _source_review_market_matches(row: dict[str, str], market: str) -> bool:
@@ -2884,6 +2845,13 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
                 f"target {ranked.get('target') or ranked.get('target_price') or row.get('target') or row.get('target_price') or '-'}; "
                 f"{ranked.get('time_exit') or row.get('time_exit') or '3 sessions / next catalyst'}"
             )
+        evidence_state = (
+            ranked.get("ai_infra_evidence_state")
+            or ranked.get("evidence_state")
+            or row.get("ai_infra_evidence_state")
+            or row.get("evidence_state")
+            or ""
+        )
         actionable.append(
             {
                 "market": market,
@@ -2899,6 +2867,8 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
                 "hedge_notional_r": row.get("hedge_notional_r"),
                 "net_beta_r": row.get("net_beta_r"),
                 "trigger": _decision_trigger(market, row, ranked, guard_by_market.get(market, {})),
+                "evidence_state": evidence_state,
+                "ai_infra_evidence_state": ranked.get("ai_infra_evidence_state") or row.get("ai_infra_evidence_state") or "",
             }
         )
     actionable.sort(
@@ -6895,13 +6865,33 @@ def calendar_focus_symbols(*groups: Iterable[dict[str, Any]]) -> set[str]:
     return symbols
 
 
+def _evidence_state_for_action(row: dict[str, Any]) -> str:
+    """Return a short evidence-state badge for the production action table.
+
+    Sources (in priority order): explicit `evidence_state` on the action row,
+    the AI-infra universe `ai_infra_evidence_state` (set by the universe gate),
+    or fallback to `unknown` so an operator can immediately see when the row
+    lacks source-review evidence and treat it as research-only sizing.
+    """
+    state = str(row.get("evidence_state") or row.get("ai_infra_evidence_state") or "").strip()
+    if not state:
+        return "unknown"
+    if "原文已证明" in state:
+        return "原文已证明"
+    if "合理推论" in state:
+        return "合理推论"
+    if "待原文核验" in state or "待核验" in state:
+        return "待原文核验"
+    return state[:24]
+
+
 def render_market_action_table(actions: list[dict[str, Any]]) -> list[str]:
     lines = [
-        "| Symbol | Action | Size | Entry | Risk / Exit | Hedge | Trigger |",
-        "|---|---|---:|---|---|---|---|",
+        "| Symbol | Action | Size | Entry | Evidence | Risk / Exit | Hedge | Trigger |",
+        "|---|---|---:|---|---|---|---|---|",
     ]
     if not actions:
-        lines.append("| - | no trade | 0R | - | - | - | no current execution candidate |")
+        lines.append("| - | no trade | 0R | - | - | - | - | no current execution candidate |")
         lines.append("")
         return lines
     for row in actions:
@@ -6911,6 +6901,7 @@ def render_market_action_table(actions: list[dict[str, Any]]) -> list[str]:
             f"| {row.get('symbol')} {row.get('name') or ''} | "
             f"{action_label(row.get('action'))} | {fmt_r(row.get('size_r'))} | "
             f"{clean_table_text(row.get('entry'), 60)} | "
+            f"{_evidence_state_for_action(row)} | "
             f"{clean_table_text(human_risk_plan(row.get('risk_plan')), 90)} | "
             f"{hedge} | {clean_table_text(human_trigger_text(market, row), 110)} |"
         )

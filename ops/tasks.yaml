@@ -473,7 +473,7 @@ tasks:
 
   research.source_review_readiness:
     group: research
-    schedule: "8 12 * * 1-5"
+    schedule: "6 12 * * 1-5"
     cwd: .
     command:
       - python3
@@ -530,7 +530,7 @@ tasks:
 
   research.promotion_plan:
     group: research
-    schedule: "11 12 * * 1-5"
+    schedule: "10 12 * * 1-5"
     cwd: .
     command:
       - python3
@@ -549,7 +549,7 @@ tasks:
 
   research.ten_x_radar_strict:
     group: research
-    schedule: "16 12 * * 1-5"
+    schedule: "22 12 * * 1-5"
     cwd: .
     command:
       - python3
@@ -625,7 +625,7 @@ tasks:
 
   research.main_strategy_v2_report:
     group: research
-    schedule: "10 12 * * 1-5"
+    schedule: "25 12 * * 1-5"
     cwd: .
     command:
       - python3
@@ -646,7 +646,7 @@ tasks:
 
   research.production_basket_audit:
     group: research
-    schedule: "15 12 * * 1-5"
+    schedule: "27 12 * * 1-5"
     cwd: .
     command:
       - python3
@@ -665,7 +665,7 @@ tasks:
 
   research.mean_reversion_radar:
     group: research
-    schedule: "20 12 * * 1-5"
+    schedule: "13 12 * * 1-5"
     cwd: .
     command:
       - python3
@@ -684,7 +684,7 @@ tasks:
 
   research.promotion_history:
     group: research
-    schedule: "13 12 * * 1-5"
+    schedule: "11 12 * * 1-5"
     cwd: .
     command:
       - python3
@@ -703,7 +703,7 @@ tasks:
 
   research.ai_tape_cross_compare:
     group: research
-    schedule: "22 12 * * 1-5"
+    schedule: "15 12 * * 1-5"
     cwd: .
     command:
       - python3
@@ -722,7 +722,7 @@ tasks:
 
   research.rebalance_history:
     group: research
-    schedule: "23 12 * * 1-5"
+    schedule: "18 12 * * 1-5"
     cwd: .
     command:
       - python3
@@ -743,7 +743,7 @@ tasks:
 
   research.promotion_alpha_backtest:
     group: research
-    schedule: "24 12 * * 1-5"
+    schedule: "20 12 * * 1-5"
     cwd: .
     command:
       - python3

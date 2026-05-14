@@ -278,6 +278,11 @@ def build_queue(rows: list[dict[str, str]]) -> list[dict[str, str]]:
 
 
 def write_csv(path: Path, queue: list[dict[str, str]]) -> None:
+    # Backup curated CSVs before rewrite so operator edits (e.g. manual
+    # counterevidence updates) can be recovered. Codex review 2026-05-14.
+    if path.exists():
+        import shutil
+        shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()

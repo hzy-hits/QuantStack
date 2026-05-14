@@ -204,6 +204,10 @@ def enrich_rows(rows: list[dict[str, str]], limit: int) -> list[dict[str, str]]:
 
 
 def write_csv(rows: list[dict[str, str]], path: Path) -> None:
+    # Backup curated CSV before rewrite (Codex review 2026-05-14).
+    if path.exists():
+        import shutil as _shutil
+        _shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
     with path.open("w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=FIELDS)
         writer.writeheader()
