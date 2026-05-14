@@ -586,6 +586,23 @@ tasks:
     outputs:
       - reports/review_dashboard/fear_greed
 
+  research.options_anomaly_radar:
+    group: research
+    schedule: "7 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/score_options_anomaly_radar.py
+    log: ops/logs/research.options_anomaly_radar.log
+    lock: ops/state/research.options_anomaly_radar.lock
+    timeout_minutes: 10
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/us_options_anomaly_radar
+
   research.main_strategy_v2_report:
     group: research
     schedule: "10 12 * * 1-5"

@@ -3035,6 +3035,120 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
 
 
 FEAR_GREED_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "fear_greed"
+OPTIONS_ANOMALY_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_options_anomaly_radar"
+
+
+def load_options_anomaly_payload(as_of: str) -> list[dict[str, Any]]:
+    path = OPTIONS_ANOMALY_ROOT / as_of / "options_anomaly.csv"
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as handle:
+        return list(csv.DictReader(handle))
+
+
+def _parse_float(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 8) -> list[str]:
+    rows = payload.get("options_anomaly_rows") or []
+    if not rows:
+        return [
+            "## US 期权异常 (far-OTM call/put) — tape/timing 用",
+            "",
+            "- 当日 AI universe 内无符合阈值的远 OTM 异常 (Σvol ≥ 200, |delta| ≤ 0.20)。",
+            "- 工件: `reports/review_dashboard/us_options_anomaly_radar/<date>/options_anomaly.{csv,md}`",
+            "",
+        ]
+    # Pick top by squeeze and pressure separately.
+    squeeze = sorted(rows, key=lambda r: -(_parse_float(r.get("short_squeeze_score")) or 0.0))[:top_n]
+    pressure = sorted(rows, key=lambda r: -(_parse_float(r.get("selling_pressure_score")) or 0.0))[:top_n]
+    lines: list[str] = [
+        "## US 期权异常 (far-OTM call/put) — tape/timing 用",
+        "",
+        "- 远 OTM call 大量异常 → 卖方对冲压力 → **short-squeeze** 候选 (加仓做多时机)。",
+        "- 远 OTM put 大量异常 → 抛售/对冲升温 → **selling-pressure** 候选 (轻仓/避开)。",
+        "- 期权数据只是 tape/timing/crowding context，**不能晋级 production basket**。",
+        "",
+        "### Short-Squeeze (call-heavy)",
+        "",
+        "| Symbol | Spot | Call Vol | Vol/OI | Put Vol | PC z | Skew z | Squeeze |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    any_squeeze = False
+    for row in squeeze:
+        score = _parse_float(row.get("short_squeeze_score")) or 0.0
+        if score <= 0:
+            continue
+        any_squeeze = True
+        spot = _parse_float(row.get("spot_close"))
+        pc_z = _parse_float(row.get("pc_ratio_z"))
+        sk_z = _parse_float(row.get("skew_z"))
+        vol_oi = _parse_float(row.get("far_otm_call_vol_oi_ratio"))
+        lines.append(
+            f"| {row.get('symbol')} | "
+            f"{spot:.2f} | " if spot is not None else f"| {row.get('symbol')} | - | "
+        )
+    # Rebuild cleanly (avoid the earlier conditional-row stitching) — note we
+    # just clear and redo the squeeze block once we know the data.
+    lines = lines[:11]
+    if not any_squeeze:
+        lines.append("| - | - | - | - | - | - | - | _今日无 squeeze 候选_ |")
+    else:
+        for row in squeeze:
+            score = _parse_float(row.get("short_squeeze_score")) or 0.0
+            if score <= 0:
+                continue
+            spot = _parse_float(row.get("spot_close"))
+            pc_z = _parse_float(row.get("pc_ratio_z"))
+            sk_z = _parse_float(row.get("skew_z"))
+            vol_oi = _parse_float(row.get("far_otm_call_vol_oi_ratio"))
+            lines.append(
+                f"| {row.get('symbol')} | "
+                f"{(spot if spot is not None else 0):.2f} | "
+                f"{row.get('far_otm_call_volume')} | "
+                f"{(vol_oi if vol_oi is not None else 0):.2f} | "
+                f"{row.get('far_otm_put_volume')} | "
+                f"{(f'{pc_z:+.2f}' if pc_z is not None else '-')} | "
+                f"{(f'{sk_z:+.2f}' if sk_z is not None else '-')} | "
+                f"{score:,.0f} |"
+            )
+    lines.append("")
+    lines += [
+        "### Selling-Pressure (put-heavy)",
+        "",
+        "| Symbol | Spot | Put Vol | Vol/OI | Call Vol | PC z | Skew z | Pressure |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    any_pressure = False
+    for row in pressure:
+        score = _parse_float(row.get("selling_pressure_score")) or 0.0
+        if score <= 0:
+            continue
+        any_pressure = True
+        spot = _parse_float(row.get("spot_close"))
+        pc_z = _parse_float(row.get("pc_ratio_z"))
+        sk_z = _parse_float(row.get("skew_z"))
+        vol_oi = _parse_float(row.get("far_otm_put_vol_oi_ratio"))
+        lines.append(
+            f"| {row.get('symbol')} | "
+            f"{(spot if spot is not None else 0):.2f} | "
+            f"{row.get('far_otm_put_volume')} | "
+            f"{(vol_oi if vol_oi is not None else 0):.2f} | "
+            f"{row.get('far_otm_call_volume')} | "
+            f"{(f'{pc_z:+.2f}' if pc_z is not None else '-')} | "
+            f"{(f'{sk_z:+.2f}' if sk_z is not None else '-')} | "
+            f"{score:,.0f} |"
+        )
+    if not any_pressure:
+        lines.append("| - | - | - | - | - | - | - | _今日无 selling-pressure 候选_ |")
+    lines.append("")
+    return lines
 
 
 def load_fear_greed_payload(as_of: str) -> dict[str, Any] | None:
@@ -7201,6 +7315,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     lines += render_market_action_table(actions)
     lines += render_market_selection_rationale(payload, actions, "US")
     lines += render_fear_greed_section(payload)
+    lines += render_options_anomaly_section(payload)
     lines += [
         "## 主题和证据",
         "",
@@ -8429,6 +8544,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "satellite_pool_report": satellite_pool_report,
         "ema_tape_overlay": ema_overlay,
         "fear_greed": load_fear_greed_payload(as_of.isoformat()),
+        "options_anomaly_rows": load_options_anomaly_payload(as_of.isoformat()),
         "promotion_contract": promotion_contract,
     }
     assert_promoted_execution_rows(payload)
