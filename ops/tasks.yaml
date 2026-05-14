@@ -603,6 +603,23 @@ tasks:
     outputs:
       - reports/review_dashboard/us_options_anomaly_radar
 
+  research.options_tenor_radar:
+    group: research
+    schedule: "7 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/score_options_tenor_radar.py
+    log: ops/logs/research.options_tenor_radar.log
+    lock: ops/state/research.options_tenor_radar.lock
+    timeout_minutes: 10
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/us_options_tenor_radar
+
   research.options_anomaly_alerts:
     group: research
     schedule: "8 12 * * 1-5"

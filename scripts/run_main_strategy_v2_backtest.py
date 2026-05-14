@@ -3009,6 +3009,7 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
 
 FEAR_GREED_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "fear_greed"
 OPTIONS_ANOMALY_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_options_anomaly_radar"
+OPTIONS_TENOR_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_options_tenor_radar"
 
 
 def load_options_anomaly_payload(as_of: str) -> list[dict[str, Any]]:
@@ -3017,6 +3018,54 @@ def load_options_anomaly_payload(as_of: str) -> list[dict[str, Any]]:
         return []
     with path.open("r", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
+
+
+def load_options_tenor_signals(as_of: str) -> list[dict[str, Any]]:
+    path = OPTIONS_TENOR_ROOT / as_of / "options_tenor_signals.jsonl"
+    if not path.exists():
+        return []
+    out: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
+def render_options_tenor_section(payload: dict[str, Any], *, top_n: int = 12) -> list[str]:
+    signals = payload.get("options_tenor_signals") or []
+    lines = [
+        "## US 期权多时段 (weekly → half-year) 跨 Tenor 信号",
+        "",
+        "- 数据源: `options_chain_quotes` 按 DTE 切桶 (weekly 0-9 / biweekly 10-21 / monthly 22-50 / quarterly 51-120 / half_year 121-220 / leaps 221+)。",
+        "- 期权信号仅作 tape / event / crowding 上下文，**不能晋级 production basket**。",
+        "- 详细 per-ticker tenor 拆分见 `reports/review_dashboard/us_options_tenor_radar/<date>/options_tenor.md`。",
+        "",
+    ]
+    if not signals:
+        lines += ["- 今日无跨 tenor 信号触发。", ""]
+        return lines
+    lines += [
+        "| Symbol | Pattern | Score | 指引 |",
+        "|---|---|---:|---|",
+    ]
+    sorted_sigs = sorted(signals, key=lambda s: -(s.get("score") or 0.0))
+    for sig in sorted_sigs[:top_n]:
+        try:
+            score = float(sig.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        guidance = (sig.get("guidance") or "")[:200]
+        lines.append(
+            f"| {sig.get('symbol')} | {sig.get('pattern')} | {score:.1f} | {guidance} |"
+        )
+    lines.append("")
+    return lines
 
 
 def _parse_float(value: Any) -> float | None:
@@ -7311,6 +7360,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     lines += render_market_selection_rationale(payload, actions, "US")
     lines += render_fear_greed_section(payload)
     lines += render_options_anomaly_section(payload)
+    lines += render_options_tenor_section(payload)
     lines += [
         "## 主题和证据",
         "",
@@ -8540,6 +8590,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "ema_tape_overlay": ema_overlay,
         "fear_greed": load_fear_greed_payload(as_of.isoformat()),
         "options_anomaly_rows": load_options_anomaly_payload(as_of.isoformat()),
+        "options_tenor_signals": load_options_tenor_signals(as_of.isoformat()),
         "promotion_contract": promotion_contract,
     }
     assert_promoted_execution_rows(payload)
