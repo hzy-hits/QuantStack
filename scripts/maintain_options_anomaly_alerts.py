@@ -8,19 +8,20 @@ Two outputs, both keyed by `(as_of, ticker, side)` so re-runs are safe:
    spot, vol, oi }. Downstream tooling (cron monitors, weekly review) can
    diff/tail this file.
 
-2. `ai_infra/reports/source_verification_queue_v1.csv` — `counterevidence`
+2. `ai_infra/reports/source_verification_queue_v1.csv` — `market_context_notes`
    column gets an inline tag like
        `[options-flow-alert 2026-05-13: squeeze_score=124973, vol_oi=11.69]`
    for any ticker in the queue whose score exceeds the threshold. The tag is
    idempotent: re-runs replace the existing same-date tag rather than
-   stacking duplicates. The original counterevidence prose is preserved.
+   stacking duplicates. The original counterevidence prose is kept strictly
+   for fundamental / source-review objections.
 
 Alert thresholds (configurable via CLI):
 - squeeze: score ≥ 5000 OR (vol_oi ≥ 3.0 AND score ≥ 1500)
 - pressure: score ≥ 3000 OR (vol_oi ≥ 3.0 AND score ≥ 1000)
 
 Hard rule (per methodology): an options anomaly is **tape / crowding** context
-only. The queue annotation is a *note*, not a promotion.
+only. The queue annotation is a *market context note*, not promotion evidence.
 """
 from __future__ import annotations
 
@@ -38,17 +39,25 @@ STACK_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RADAR_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_options_anomaly_radar"
 DEFAULT_ALERTS_JSONL = STACK_ROOT / "ai_infra" / "reports" / "ai_book_options_alerts.jsonl"
 DEFAULT_QUEUE = STACK_ROOT / "ai_infra" / "reports" / "source_verification_queue_v1.csv"
-
-ALERT_TAG_PATTERN = re.compile(r"\s*\|\s*\[options-flow-alert (?P<date>\d{4}-\d{2}-\d{2})[^\]]*\]")
+MARKET_CONTEXT_FIELD = "market_context_notes"
 
 
 def _parse_float(value: Any) -> float | None:
     if value is None or value == "":
         return None
+    if isinstance(value, str):
+        value = value.replace(",", "").strip()
+        if not value:
+            return None
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_int(value: Any) -> int:
+    parsed = _parse_float(value)
+    return int(parsed) if parsed is not None else 0
 
 
 def _qualifies_squeeze(score: float, vol_oi: float | None, *, score_floor: float, score_strong_oi: float, vol_oi_floor: float) -> bool:
@@ -86,8 +95,8 @@ def collect_alerts(
             pc_z = _parse_float(row.get("pc_ratio_z"))
             skew_z = _parse_float(row.get("skew_z"))
             squeeze = _parse_float(row.get("short_squeeze_score")) or 0.0
-            call_vol = int(row.get("far_otm_call_volume") or 0)
-            call_oi = int(row.get("far_otm_call_oi") or 0)
+            call_vol = _parse_int(row.get("far_otm_call_volume"))
+            call_oi = _parse_int(row.get("far_otm_call_oi"))
             call_vol_oi = _parse_float(row.get("far_otm_call_vol_oi_ratio"))
             if _qualifies_squeeze(
                 squeeze, call_vol_oi,
@@ -108,8 +117,8 @@ def collect_alerts(
                     "spot": round(spot, 2) if spot is not None else None,
                 })
             pressure = _parse_float(row.get("selling_pressure_score")) or 0.0
-            put_vol = int(row.get("far_otm_put_volume") or 0)
-            put_oi = int(row.get("far_otm_put_oi") or 0)
+            put_vol = _parse_int(row.get("far_otm_put_volume"))
+            put_oi = _parse_int(row.get("far_otm_put_oi"))
             put_vol_oi = _parse_float(row.get("far_otm_put_vol_oi_ratio"))
             if _qualifies_pressure(
                 pressure, put_vol_oi,
@@ -168,19 +177,23 @@ def merge_alerts_jsonl(path: Path, new_alerts: list[dict[str, Any]]) -> tuple[in
     return added, refreshed
 
 
-def _format_tag(alert: dict[str, Any]) -> str:
-    bits = [f"{alert['side']}_score={alert['score']:.0f}"]
-    if alert.get("vol_oi") is not None:
-        bits.append(f"vol_oi={alert['vol_oi']:.2f}")
-    if alert.get("pc_z") is not None:
-        bits.append(f"pc_z={alert['pc_z']:+.2f}")
-    if alert.get("skew_z") is not None:
-        bits.append(f"skew_z={alert['skew_z']:+.2f}")
-    return f" | [options-flow-alert {alert['as_of']}: {', '.join(bits)}]"
+def _drop_alert_tag_for_date(value: str, as_of: str) -> str:
+    """Remove same-day options-flow tags from note-like fields."""
+    cleaned = re.sub(
+        rf"\s*(?:\|\s*)?\[options-flow-alert {re.escape(as_of)}[^\]]*\]",
+        "",
+        value or "",
+    )
+    return cleaned.strip().strip("|").strip()
+
+
+def _append_context_note(base: str, tag: str) -> str:
+    cleaned = base.strip()
+    return f"{cleaned} | {tag}" if cleaned else tag
 
 
 def annotate_queue(queue_path: Path, alerts: list[dict[str, Any]]) -> tuple[int, int]:
-    """Idempotently merge today's alerts into the queue counterevidence column.
+    """Idempotently merge today's alerts into market_context_notes.
 
     Returns (rows_touched, distinct_tickers_touched).
     """
@@ -191,6 +204,8 @@ def annotate_queue(queue_path: Path, alerts: list[dict[str, Any]]) -> tuple[int,
         reader = csv.DictReader(handle)
         fieldnames = reader.fieldnames or []
         rows = list(reader)
+    if MARKET_CONTEXT_FIELD not in fieldnames:
+        fieldnames = [*fieldnames, MARKET_CONTEXT_FIELD]
 
     queue_index: dict[str, list[int]] = {}
     for idx, row in enumerate(rows):
@@ -199,10 +214,8 @@ def annotate_queue(queue_path: Path, alerts: list[dict[str, Any]]) -> tuple[int,
 
     # Group alerts by ticker so a name gets a single combined tag per date.
     by_ticker: dict[str, list[dict[str, Any]]] = {}
-    as_of_dates: set[str] = set()
     for alert in alerts:
         by_ticker.setdefault(alert["ticker"], []).append(alert)
-        as_of_dates.add(alert["as_of"])
 
     touched_rows = 0
     touched_tickers = 0
@@ -218,21 +231,23 @@ def annotate_queue(queue_path: Path, alerts: list[dict[str, Any]]) -> tuple[int,
         )
         # All alerts share a date (this script runs per-day).
         as_of = ticker_alerts[0]["as_of"]
-        tag = f" | [options-flow-alert {as_of}: {tag_payload}]"
+        tag = f"[options-flow-alert {as_of}: {tag_payload}]"
         for idx in matches:
             row = rows[idx]
-            base = row.get("counterevidence") or ""
-            # Drop any prior tag for the *same date* so re-runs do not stack duplicates.
-            cleaned = re.sub(
-                rf"\s*\|\s*\[options-flow-alert {re.escape(as_of)}[^\]]*\]", "", base
-            ).rstrip()
-            row["counterevidence"] = cleaned + tag
+            # Legacy clean-up: older versions wrote options-flow tags into
+            # counterevidence. Keep that field fundamental/source-review only.
+            row["counterevidence"] = _drop_alert_tag_for_date(row.get("counterevidence") or "", as_of)
+            market_base = _drop_alert_tag_for_date(row.get(MARKET_CONTEXT_FIELD) or "", as_of)
+            row[MARKET_CONTEXT_FIELD] = _append_context_note(market_base, tag)
             touched_rows += 1
+
+    if touched_rows == 0:
+        return 0, touched_tickers
 
     backup = queue_path.with_suffix(queue_path.suffix + ".bak")
     shutil.copy2(queue_path, backup)
     with queue_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({key: row.get(key, "") for key in fieldnames})

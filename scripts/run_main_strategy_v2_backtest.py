@@ -1572,6 +1572,7 @@ def build_source_review_calendar(
             "downgrade_conditions": row.get("downgrade_conditions") or "",
             "evidence_state": row.get("evidence_state") or "",
             "counterevidence": row.get("counterevidence") or "",
+            "market_context_notes": row.get("market_context_notes") or "",
             "dependency_path": row.get("dependency_path") or "",
             "in_focus": any(alias.upper() in focus for alias in ticker_aliases),
         }
@@ -1667,6 +1668,7 @@ def build_satellite_pool_report(
                 "verification_status": row.get("verification_status") or "",
                 "evidence_state": row.get("evidence_state") or "",
                 "counterevidence": row.get("counterevidence") or "",
+                "market_context_notes": row.get("market_context_notes") or "",
                 "primary_sources_to_find": row.get("primary_sources_to_find") or "",
                 "metrics_to_verify": row.get("metrics_to_verify") or "",
                 "upgrade_conditions": row.get("upgrade_conditions") or "",
@@ -1764,8 +1766,8 @@ def render_satellite_pool_report_section(payload: dict[str, Any], *, limit_per_r
         lines += [
             f"### {region} ({len(region_rows)})",
             "",
-            "| Rank | Ticker | Company | Depth | Module | Readiness | Tape | Priority |",
-            "|---:|---|---|---|---|---|---|---|",
+            "| Rank | Ticker | Company | Depth | Module | Readiness | Tape | Market Context | Priority |",
+            "|---:|---|---|---|---|---|---|---|---|",
         ]
         for entry in region_rows[:limit_per_region]:
             readiness = entry.get("readiness_tier") or "unscored"
@@ -1782,6 +1784,7 @@ def render_satellite_pool_report_section(payload: dict[str, Any], *, limit_per_r
                         clean_table_text(entry.get("module") or "-", 28),
                         f"{readiness}{score_text}",
                         clean_table_text(entry.get("ema_summary") or "no_data", 42),
+                        clean_table_text(entry.get("market_context_notes") or "-", 42),
                         entry.get("priority_tier") or "-",
                     ]
                 )
@@ -7130,8 +7133,8 @@ def render_source_review_calendar_section(
         f"- Readiness 分布: {summary_text}",
         "- 用法: `ready_for_promotion` 表示 evidence card 模板写齐且 evidence_state 含「原文已证明」；其他 tier 仍需人工核验。没有 evidence card 不能晋级为 production candidate。",
         "",
-        "| Tier | Ticker | Company | Depth | Module | Readiness | Tape (EMA21/50) |",
-        "|---|---|---|---|---|---|---|",
+        "| Tier | Ticker | Company | Depth | Module | Readiness | Tape (EMA21/50) | Market Context |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     if rows:
         for row in rows[:limit]:
@@ -7150,12 +7153,13 @@ def render_source_review_calendar_section(
                         clean_table_text(row.get("module") or "-", 28),
                         f"{readiness}{score_text}",
                         clean_table_text(row.get("ema_summary") or "no_data", 48),
+                        clean_table_text(row.get("market_context_notes") or "-", 44),
                     ]
                 )
                 + " |"
             )
     else:
-        lines.append("| - | - | 无待核验候选 | - | - | - | - |")
+        lines.append("| - | - | 无待核验候选 | - | - | - | - | - |")
     lines.append("")
     return lines
 

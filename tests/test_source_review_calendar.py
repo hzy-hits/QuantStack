@@ -107,6 +107,7 @@ class SourceReviewCalendarTests(unittest.TestCase):
                             "module": "GPU",
                             "verification_status": "pending_original_source_verification",
                             "upgrade_conditions": "original sources prove sustained demand",
+                            "market_context_notes": "[options-flow-alert 2026-05-13: squeeze_score=9000]",
                         }
                     ],
                 },
@@ -120,6 +121,8 @@ class SourceReviewCalendarTests(unittest.TestCase):
         # Renderer surfaces readiness_tier instead of verification_status; the
         # raw verification field still ships through the JSON artifact.
         self.assertIn("Readiness", rendered)
+        self.assertIn("Market Context", rendered)
+        self.assertIn("options-flow-alert", rendered)
 
 
 if __name__ == "__main__":

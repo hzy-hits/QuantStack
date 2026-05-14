@@ -54,6 +54,11 @@ supplier/customer relationship only when there is local cached evidence or a
 fresh primary/news source. If evidence is missing, the output must say that the
 relationship is a research requirement, not an established reason to trade.
 
+Market tape is a separate channel. K-line, options flow, IV, volume/flow and
+crowding alerts may be recorded in `market_context_notes` or standalone market
+ledgers, but they must not mutate `evidence_state`, `verification_status` or the
+`counterevidence` field used by source-review readiness gates.
+
 ## Priority Ladder
 
 1. AI labs, cloud, model distribution, accelerators, memory, optical/CPO and

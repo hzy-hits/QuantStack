@@ -39,30 +39,32 @@ QUEUE_HEADERS = [
     "verification_status", "source_priority", "primary_sources_to_find",
     "metrics_to_verify", "upgrade_conditions", "downgrade_conditions",
     "evidence_state", "counterevidence", "dependency_path", "dependency_edge",
-    "etf_clue", "smart_money_clue",
+    "etf_clue", "smart_money_clue", "market_context_notes",
 ]
+LEGACY_QUEUE_HEADERS = [field for field in QUEUE_HEADERS if field != "market_context_notes"]
 
 
 def _write_radar(path: Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=RADAR_HEADERS)
+        writer = csv.DictWriter(handle, fieldnames=RADAR_HEADERS, lineterminator="\n")
         writer.writeheader()
         for row in rows:
             writer.writerow({k: row.get(k, "") for k in RADAR_HEADERS})
 
 
-def _write_queue(path: Path, rows: list[dict[str, str]]) -> None:
+def _write_queue(path: Path, rows: list[dict[str, str]], *, headers: list[str] | None = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = headers or QUEUE_HEADERS
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=QUEUE_HEADERS)
+        writer = csv.DictWriter(handle, fieldnames=fieldnames, lineterminator="\n")
         writer.writeheader()
         for row in rows:
-            writer.writerow({k: row.get(k, "") for k in QUEUE_HEADERS})
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
 
 
 def _radar_row(symbol: str, *, squeeze: float = 0.0, pressure: float = 0.0,
-                call_vol: int = 0, put_vol: int = 0,
+                call_vol: int | str = 0, put_vol: int | str = 0,
                 call_voi: str | float | None = None, put_voi: str | float | None = None,
                 as_of: str = "2026-05-13", spot: float = 100.0,
                 pc_z: float | None = None, skew_z: float | None = None) -> dict[str, str]:
@@ -91,6 +93,7 @@ def _queue_row(ticker: str, counter: str = "default counter") -> dict[str, str]:
         "evidence_state": "待原文核验", "counterevidence": counter,
         "dependency_path": "GPU -> X", "dependency_edge": "客户边",
         "etf_clue": "SMH", "smart_money_clue": "13F",
+        "market_context_notes": "",
     }
 
 
@@ -102,7 +105,7 @@ class OptionsAlertsMaintainerTests(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             radar = Path(tmp) / "radar.csv"
             _write_radar(radar, [
-                _radar_row("STX", squeeze=124973, call_vol=10385, call_voi=11.69, pc_z=0.47, skew_z=-2.59),
+                _radar_row("STX", squeeze=124973, call_vol="10,385", call_voi=11.69, pc_z=0.47, skew_z=-2.59),
                 _radar_row("BORING", squeeze=200, call_vol=50, call_voi=0.1),  # below threshold
                 _radar_row("TINY_VOL_OI", squeeze=1800, call_vol=200, call_voi=3.5),  # passes vol_oi gate
             ])
@@ -111,6 +114,8 @@ class OptionsAlertsMaintainerTests(unittest.TestCase):
             self.assertIn(("STX", "squeeze"), tickers)
             self.assertIn(("TINY_VOL_OI", "squeeze"), tickers)
             self.assertNotIn(("BORING", "squeeze"), tickers)
+            stx = next(a for a in alerts if a["ticker"] == "STX")
+            self.assertEqual(stx["vol"], 10385)
 
     def test_collect_alerts_pressure_side(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -155,15 +160,16 @@ class OptionsAlertsMaintainerTests(unittest.TestCase):
             with queue.open() as h:
                 rows = {r["ticker"]: r for r in csv.DictReader(h)}
             stx = rows["STX"]
-            self.assertIn("options-flow-alert 2026-05-13", stx["counterevidence"])
-            self.assertIn("squeeze_score=124973", stx["counterevidence"])
-            self.assertIn("HDD周期", stx["counterevidence"])  # base prose preserved
+            self.assertEqual(stx["counterevidence"], "HDD周期; AI relevance indirect")
+            self.assertIn("options-flow-alert 2026-05-13", stx["market_context_notes"])
+            self.assertIn("squeeze_score=124973", stx["market_context_notes"])
             self.assertEqual(rows["OTHER"]["counterevidence"], "competition pressure")
+            self.assertEqual(rows["OTHER"]["market_context_notes"], "")
             # Re-run: tag should be replaced, not stacked
             self.module.annotate_queue(queue, alerts)
             with queue.open() as h:
                 rows2 = {r["ticker"]: r for r in csv.DictReader(h)}
-            tag_count = rows2["STX"]["counterevidence"].count("options-flow-alert 2026-05-13")
+            tag_count = rows2["STX"]["market_context_notes"].count("options-flow-alert 2026-05-13")
             self.assertEqual(tag_count, 1)
 
     def test_queue_annotation_combines_squeeze_and_pressure(self) -> None:
@@ -180,9 +186,30 @@ class OptionsAlertsMaintainerTests(unittest.TestCase):
             with queue.open() as h:
                 rows = list(csv.DictReader(h))
             mu = rows[0]
-            self.assertIn("squeeze_score=40053", mu["counterevidence"])
-            self.assertIn("pressure_score=3865", mu["counterevidence"])
-            self.assertEqual(mu["counterevidence"].count("options-flow-alert 2026-05-13"), 1)
+            self.assertEqual(mu["counterevidence"], "HBM cycle risk")
+            self.assertIn("squeeze_score=40053", mu["market_context_notes"])
+            self.assertIn("pressure_score=3865", mu["market_context_notes"])
+            self.assertEqual(mu["market_context_notes"].count("options-flow-alert 2026-05-13"), 1)
+
+    def test_queue_annotation_migrates_legacy_counterevidence_tag(self) -> None:
+        with TemporaryDirectory() as tmp:
+            queue = Path(tmp) / "queue.csv"
+            _write_queue(
+                queue,
+                [_queue_row("STX", counter="HDD周期 | [options-flow-alert 2026-05-13: old]")],
+                headers=LEGACY_QUEUE_HEADERS,
+            )
+            alerts = [{
+                "as_of": "2026-05-13", "ticker": "STX", "side": "squeeze",
+                "score": 124973.0, "vol": 10000, "oi": 1000, "vol_oi": 11.69,
+                "pc_z": 0.4, "skew_z": -2.5, "spot": 800.0,
+            }]
+            self.module.annotate_queue(queue, alerts)
+            with queue.open() as h:
+                row = next(csv.DictReader(h))
+            self.assertEqual(row["counterevidence"], "HDD周期")
+            self.assertIn("market_context_notes", row)
+            self.assertIn("squeeze_score=124973", row["market_context_notes"])
 
     def test_queue_annotation_skips_unknown_tickers(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -195,6 +222,7 @@ class OptionsAlertsMaintainerTests(unittest.TestCase):
             }]
             touched_rows, touched_tickers = self.module.annotate_queue(queue, alerts)
             self.assertEqual((touched_rows, touched_tickers), (0, 0))
+            self.assertFalse(queue.with_suffix(queue.suffix + ".bak").exists())
 
 
 if __name__ == "__main__":

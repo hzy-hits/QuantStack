@@ -35,7 +35,7 @@ FIELDS = (
     "verification_status", "source_priority", "primary_sources_to_find",
     "metrics_to_verify", "upgrade_conditions", "downgrade_conditions",
     "evidence_state", "counterevidence", "dependency_path", "dependency_edge",
-    "etf_clue", "smart_money_clue",
+    "etf_clue", "smart_money_clue", "market_context_notes",
 )
 
 TPL_SOURCE_PRIORITY = "Find latest annual report, latest quarterly results, earnings call transcript, investor presentation, and official product/capacity pages first."
@@ -690,7 +690,7 @@ def main() -> int:
         print(f"backup: {backup}")
 
     with args.queue.open("a", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDS)
+        writer = csv.DictWriter(handle, fieldnames=FIELDS, lineterminator="\n")
         for row in new_rows:
             writer.writerow(row)
     print(f"appended {len(new_rows)} rows; skipped {len(skipped)}")

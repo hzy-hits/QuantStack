@@ -132,11 +132,13 @@ new ticker / company lead
 - source status：primary / primary-ish / secondary-only / pending。
 - evidence claims：客户、产品、订单、收入、backlog、产能、技术路线、现金流。
 - counterevidence：库存、毛利率、债务、客户集中、融资、电力、监管、竞争。
+- market_context_notes：K线、期权、flow、拥挤度、事件定价等交易上下文；不能当作原文证据或反证。
 - promotion decision：promote / watch / reject / need source。
 
 ## 量化与组合规则
 
 量化扫描只回答 AI universe 内公司的排序、时点、风险和组合权重，不负责证明产业链关系。
+K线/期权/flow 只能写入 market context 或独立交易 ledger，不能改写 `evidence_state` 或 `counterevidence`。
 
 推荐 sizing stack：
 

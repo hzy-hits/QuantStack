@@ -39,6 +39,7 @@ OUTPUT_FIELDS = [
     "dependency_edge",
     "etf_clue",
     "smart_money_clue",
+    "market_context_notes",
 ]
 
 
@@ -278,7 +279,7 @@ def build_queue(rows: list[dict[str, str]]) -> list[dict[str, str]]:
 
 def write_csv(path: Path, queue: list[dict[str, str]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, extrasaction="ignore")
+        writer = csv.DictWriter(handle, fieldnames=OUTPUT_FIELDS, extrasaction="ignore", lineterminator="\n")
         writer.writeheader()
         writer.writerows(queue)
 

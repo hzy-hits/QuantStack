@@ -119,6 +119,7 @@ ai_infra 原文研究 / BFS 发现
 | `scripts/derive_promotion_plan_from_readiness.py` | 把 readiness ledger 翻成 promote_now / watch_with_review / research_only / reject_until_resolved 推荐表，落到 `reports/review_dashboard/ai_infra_promotion_plan/<date>/promotion_plan.{csv,md}`。 |
 | `scripts/apply_promotion_plan.py` | 人工确认后，把 `promote_now` 行追加到 `ai_infra/reports/expansion_candidates_promoted_v1.csv`。默认 dry-run，需 `--confirm`；append-only，写前自动备份 `.bak`。 |
 | `scripts/maintain_promotion_history.py` | 把 daily `promotion_plan.csv` 累积到 `ai_infra/reports/promotion_history.csv`；按 `(as_of, primary_ticker)` 幂等更新。长期追踪 promote/reject 决策。 |
+| `scripts/maintain_options_anomaly_alerts.py` | 把 US far-OTM call/put 异动累积到 `ai_infra/reports/ai_book_options_alerts.jsonl`，并把匹配 source-review queue 的 ticker 标到 `market_context_notes`。它只能提供 tape/crowding 上下文，不能改 `counterevidence` / `evidence_state` / promotion tier。 |
 | `scripts/score_mean_reversion_radar.py` | 美股 top-100 均值回归 radar；近 7 日财报屏蔽 + PE/PS vs 行业中位估值层；输出 AI universe LEAD 段 + 非 AI Context 段；落 `reports/review_dashboard/us_mean_reversion_radar/<date>/mean_reversion_radar.{csv,md}`。 |
 | `scripts/build_ai_tape_cross_compare.py` | 把 ten-x leaders (bull; rising) 和 MR AI universe 滞后并到一页，让操作员在 AI 池子内部决定 lean leaders 还是 rotate laggards。落 `reports/review_dashboard/ai_tape_cross_compare/<date>/ai_tape_cross_compare.md`。 |
 | `scripts/backtest_promotion_history.py` | 对 `promote_now` 历史行查 prices_daily + SPY，算 5/20/60d 绝对收益和相对 alpha + IR + hit rate。落 `reports/review_dashboard/ai_infra_promotion_alpha/<date>/promotion_alpha_ledger.{csv,md}`。 |
@@ -135,7 +136,7 @@ ai_infra 原文研究 / BFS 发现
 3. 新公司必须先进入 `ai_infra` expansion/source-review queue，再补 evidence card、原文来源和 counterevidence。
 4. 没有原文证据，不能写成 source-confirmed supplier/customer relationship。
 5. K线只能说明 trend、pricing、crowding、risk，不能证明产业链关系。
-6. 期权只能说明 volatility、event pricing、liquidity、crowding clue，不能提升 evidence status。
+6. 期权只能说明 volatility、event pricing、liquidity、crowding clue；只能进入 `market_context_notes` 或 market ledger，不能提升 evidence status，也不能写进 `counterevidence`。
 7. `SPY`、`QQQ`、`SMH`、`000001.SH`、`399001.SZ`、`399006.SZ`、`000300.SH` 等只能做 benchmark、hedge、macro context，不能成为 production stock candidate。
 8. 美股报告公司名保持英文原名；A 股/港股可以用中文名。
 9. 每日报告必须分清 production candidates、watch/research-only、benchmark、hedge、macro context。

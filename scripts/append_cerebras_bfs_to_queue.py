@@ -48,6 +48,7 @@ FIELDS = (
     "dependency_edge",
     "etf_clue",
     "smart_money_clue",
+    "market_context_notes",
 )
 
 # Common templates by module type — keep prose terse and aligned to the
@@ -854,7 +855,7 @@ def main() -> int:
         print(f"backup: {args.queue.with_suffix(args.queue.suffix + '.bak')}")
 
     with args.queue.open("a", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDS)
+        writer = csv.DictWriter(handle, fieldnames=FIELDS, lineterminator="\n")
         for row in new_rows:
             writer.writerow(row)
     print(f"Appended {len(new_rows)} new rows; skipped {len(skipped)} existing")
