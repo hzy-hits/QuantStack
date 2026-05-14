@@ -28,10 +28,25 @@ from __future__ import annotations
 import base64
 import mimetypes
 import re
+from email.header import Header
 from email.mime.base import MIMEBase
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+
+
+def _encode_subject(subject: str) -> str:
+    """RFC 2047 encode any non-ASCII subject so Gmail/mail clients render
+    Chinese (and em-dash etc.) correctly instead of mojibake.
+
+    ASCII-only subjects pass through unchanged so existing English headers
+    are not touched.
+    """
+    try:
+        subject.encode("ascii")
+        return subject
+    except UnicodeEncodeError:
+        return Header(subject, "utf-8").encode()
 from pathlib import Path
 
 import markdown
@@ -382,7 +397,7 @@ def build_email_message(
         └── ...
     """
     msg = MIMEMultipart("related")
-    msg["Subject"] = subject
+    msg["Subject"] = _encode_subject(subject)
     msg["From"] = sender
     if to:
         msg["To"] = to
@@ -628,7 +643,7 @@ def send_alert_email(
 
     msg = MIMEText(body, "plain", "utf-8")
     msg["To"] = to
-    msg["Subject"] = subject
+    msg["Subject"] = _encode_subject(subject)
 
     service = _get_gmail_service(credentials_path, token_path)
     old_timeout = socket.getdefaulttimeout()
