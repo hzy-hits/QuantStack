@@ -603,6 +603,44 @@ tasks:
     outputs:
       - reports/review_dashboard/us_options_anomaly_radar
 
+  research.wedge_instruments_ingest:
+    group: research
+    schedule: "10 6 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/ingest_wedge_instrument_prices.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.wedge_instruments_ingest.log
+    lock: ops/state/research.wedge_instruments_ingest.lock
+    timeout_minutes: 20
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - quant-research-v1/data/quant.duckdb
+
+  research.bubble_hedge_radar:
+    group: research
+    schedule: "14 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/score_bubble_hedge_radar.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.bubble_hedge_radar.log
+    lock: ops/state/research.bubble_hedge_radar.lock
+    timeout_minutes: 10
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/bubble_hedge_radar
+
   research.options_tenor_radar:
     group: research
     schedule: "7 12 * * 1-5"

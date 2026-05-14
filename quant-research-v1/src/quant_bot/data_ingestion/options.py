@@ -617,7 +617,7 @@ def _process_symbol(
 def fetch_options_snapshot_with_quotes(
     symbols: list[str],
     as_of: date,
-    max_expiries: int = 2,
+    max_expiries: int = 12,
 ) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """
     For each symbol, fetch options chain from CBOE and compute:
@@ -689,7 +689,7 @@ def fetch_options_snapshot_with_quotes(
 def fetch_options_snapshot(
     symbols: list[str],
     as_of: date,
-    max_expiries: int = 2,
+    max_expiries: int = 12,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """
     Backwards-compatible wrapper for callers that only need snapshot/analysis.

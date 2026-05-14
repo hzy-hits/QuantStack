@@ -3010,6 +3010,69 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
 FEAR_GREED_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "fear_greed"
 OPTIONS_ANOMALY_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_options_anomaly_radar"
 OPTIONS_TENOR_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_options_tenor_radar"
+BUBBLE_HEDGE_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "bubble_hedge_radar"
+
+
+def load_bubble_hedge_payload(as_of: str) -> dict[str, Any] | None:
+    path = BUBBLE_HEDGE_ROOT / as_of / "bubble_hedge.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def render_bubble_hedge_section(payload: dict[str, Any], *, victim_top_n: int = 8) -> list[str]:
+    bubble = payload.get("bubble_hedge") or {}
+    if not bubble:
+        return [
+            "## Bubble Hedge — Wedge / Victim / Confirmation",
+            "",
+            "- 工件未生成。运行 `scripts/score_bubble_hedge_radar.py` 后再看。",
+            "",
+        ]
+    lines = [
+        "## Bubble Hedge — Wedge / Victim / Confirmation",
+        "",
+        "Hedge-Wedge-Confirm-Press 框架对 AI book 的风险口径。",
+        "**不替代量化决策**；只是告诉操作员当前在哪个阶段。",
+        "",
+    ]
+    for note in bubble.get("guidance") or []:
+        lines.append(f"- {note}")
+    lines.append("")
+
+    confirm = bubble.get("confirmation") or {}
+    lines += [
+        f"- SMH {confirm.get('smh_close')} | EMA20 {confirm.get('smh_ema20')} / EMA50 {confirm.get('smh_ema50')} / EMA200 {confirm.get('smh_ema200')}",
+        f"- 站上 EMA20/EMA50/EMA200: {confirm.get('smh_above_ema20')}/{confirm.get('smh_above_ema50')}/{confirm.get('smh_above_ema200')} | "
+        f"SMH↔TLT 20d corr: {confirm.get('ai_book_vs_tlt_corr_20d')} | trendline break: {confirm.get('trendline_break')}",
+        "",
+    ]
+    victims = bubble.get("victims") or []
+    if victims:
+        lines += [
+            "### Victim shortlist (高分 = 越脆弱)",
+            "",
+            "| Symbol | Company | Module | px vs EMA50 | β vs TLT | Score | Reasons |",
+            "|---|---|---|---:|---:|---:|---|",
+        ]
+        for v in victims[:victim_top_n]:
+            ema50 = v.get("px_vs_ema50_pct")
+            beta = v.get("beta_vs_tlt_20d")
+            lines.append(
+                f"| {v.get('symbol')} | {(v.get('company') or '')[:24]} | "
+                f"{(v.get('module') or '')[:28]} | "
+                f"{f'{ema50:+.1f}%' if ema50 is not None else '-'} | "
+                f"{f'{beta:+.2f}' if beta is not None else '-'} | "
+                f"{v.get('convex_score', 0):.1f} | "
+                f"{', '.join((v.get('reasons') or [])[:3])} |"
+            )
+        lines.append("")
+    lines.append("详细 wedge layer 见 `reports/review_dashboard/bubble_hedge_radar/<date>/bubble_hedge.md`。")
+    lines.append("")
+    return lines
 
 
 def load_options_anomaly_payload(as_of: str) -> list[dict[str, Any]]:
@@ -7361,6 +7424,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     lines += render_fear_greed_section(payload)
     lines += render_options_anomaly_section(payload)
     lines += render_options_tenor_section(payload)
+    lines += render_bubble_hedge_section(payload)
     lines += [
         "## 主题和证据",
         "",
@@ -8591,6 +8655,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "fear_greed": load_fear_greed_payload(as_of.isoformat()),
         "options_anomaly_rows": load_options_anomaly_payload(as_of.isoformat()),
         "options_tenor_signals": load_options_tenor_signals(as_of.isoformat()),
+        "bubble_hedge": load_bubble_hedge_payload(as_of.isoformat()),
         "promotion_contract": promotion_contract,
     }
     assert_promoted_execution_rows(payload)
