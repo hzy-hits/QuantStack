@@ -28,6 +28,8 @@ class UsOpportunityRankerTests(unittest.TestCase):
             _write_ai_infra_universe(
                 ai_root,
                 [
+                    # All three rows carry evidence_state so they clear the
+                    # production-pool gate that enforce_expand now applies.
                     {
                         "asset_pool": "美国资产池",
                         "market_country": "US",
@@ -37,6 +39,7 @@ class UsOpportunityRankerTests(unittest.TestCase):
                         "module": "800G optical",
                         "current_pool": "P0",
                         "total_score": 91,
+                        "evidence_state": "原文已证明: datacom transceiver mix and AI exposure",
                     },
                     {
                         "asset_pool": "美国资产池",
@@ -47,6 +50,7 @@ class UsOpportunityRankerTests(unittest.TestCase):
                         "module": "scale-up connectivity",
                         "current_pool": "P0",
                         "total_score": 87,
+                        "evidence_state": "原文已证明: AEC retimer revenue ramp",
                     },
                     {
                         "asset_pool": "美国资产池",
@@ -57,6 +61,7 @@ class UsOpportunityRankerTests(unittest.TestCase):
                         "module": "NeoCloud",
                         "current_pool": "P1",
                         "total_score": 73,
+                        "evidence_state": "合理推论: GPU cluster financing and customer pipeline",
                     },
                 ],
             )

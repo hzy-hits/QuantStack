@@ -62,6 +62,34 @@ TREND_MAINLINE_PROMOTED_SLEEVES = [
             'price/volume and options/flow confirmation pass the sleeve query"}'
         ),
     },
+    # AI infra production-core sleeve: members of ai_infra/data/global_universe_v2.jsonl
+    # whose evidence_state contains 原文已证明 / 合理推论 are operator-curated for
+    # execution. The pool filter (ai_infra_universe.is_production_grade) is the
+    # gate; this row authorises R assignment once the candidate clears it.
+    {
+        "market": "us",
+        "sleeve_id": "ai_infra_production_core",
+        "status": "promoted",
+        "gate_version": "ai_infra_production_pool_v1",
+        "created_by": "operator_directive_2026_05_14",
+        "gates_snapshot_json": (
+            '{"contract":"AI infra production-pool members (evidence_state 原文已证明 / '
+            '合理推论) receive R after tape, options/flow, headline and portfolio overlay '
+            'checks pass; production pool gate is the operator-approved evidence contract"}'
+        ),
+    },
+    {
+        "market": "cn",
+        "sleeve_id": "ai_infra_production_core",
+        "status": "promoted",
+        "gate_version": "ai_infra_production_pool_v1",
+        "created_by": "operator_directive_2026_05_14",
+        "gates_snapshot_json": (
+            '{"contract":"AI infra production-pool members (evidence_state 原文已证明 / '
+            '合理推论) receive R after tape, observed-lifecycle and portfolio overlay '
+            'checks pass; production pool gate is the operator-approved evidence contract"}'
+        ),
+    },
 ]
 
 

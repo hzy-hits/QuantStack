@@ -33,6 +33,10 @@ from email.mime.base import MIMEBase
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.policy import SMTP
+
+
+EMAIL_POLICY = SMTP.clone(max_line_length=998)
 
 
 def _encode_subject(subject: str) -> str:
@@ -496,7 +500,7 @@ def _get_gmail_service(
 
 def _encode_message(msg: MIMEMultipart) -> dict:
     """Encode MIME message for Gmail API."""
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    raw = base64.urlsafe_b64encode(msg.as_bytes(policy=EMAIL_POLICY)).decode("utf-8")
     return {"raw": raw}
 
 

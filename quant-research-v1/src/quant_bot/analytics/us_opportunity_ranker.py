@@ -24,7 +24,11 @@ from quant_bot.analytics import ai_infra_universe
 STACK_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_opportunity_ranker"
 US_ALPHA_FACTORY_EXECUTION_SLEEVE = "us_v2_stock_probe"
-US_ALPHA_FACTORY_EXECUTION_SLEEVES = {US_ALPHA_FACTORY_EXECUTION_SLEEVE, "us_theme_cluster_momentum"}
+US_ALPHA_FACTORY_EXECUTION_SLEEVES = {
+    US_ALPHA_FACTORY_EXECUTION_SLEEVE,
+    "us_theme_cluster_momentum",
+    ai_infra_universe.PRODUCTION_ALPHA_SLEEVE_ID,
+}
 
 
 @dataclass(frozen=True)
@@ -811,14 +815,21 @@ def build_ranker_payload(
     ai_infra_gate = None
     if ai_infra_mode != "off":
         include_all = ai_infra_mode in {"expand", "enforce_expand"}
+        # Enforce modes execute the production basket → only evidence-confirmed
+        # names (原文已证明 / 合理推论) qualify. Pure expand mode keeps the
+        # research universe so the radar still surfaces 待原文核验 ideas for
+        # operator review (they cannot be promoted by the secondary evidence
+        # gate downstream).
+        pool = "production" if ai_infra_mode in {"enforce", "enforce_expand"} else "research"
         candidates, gate = ai_infra_universe.merge_with_universe_candidates(
             candidates,
             market="US",
             ai_infra_root=ai_infra_root,
             include_all_universe=include_all,
+            pool=pool,
         )
         ai_infra_gate = gate.as_dict()
-        candidate_status = f"{candidate_status}+ai_infra_{ai_infra_mode}"
+        candidate_status = f"{candidate_status}+ai_infra_{ai_infra_mode}_{pool}"
 
     symbols = sorted({normalize_symbol(row.get("symbol")) for row in candidates if normalize_symbol(row.get("symbol"))})
     options: dict[str, dict[str, Any]] = {}

@@ -68,6 +68,8 @@ MAIN_STRATEGY_MODE = "opportunity"
 US_STOCK_ROUNDTRIP_COST_PCT = 0.15
 PORTFOLIO_TOTAL_R_CAP = 1.50
 PORTFOLIO_VAR95_R_CAP = 1.00
+CN_BASKET_R_CAP = 1.20
+US_BASKET_R_CAP = 1.50
 SECTOR_R_CAP = 0.50
 CORR_CLUSTER_R_CAP = 0.75
 CORR_CLUSTER_THRESHOLD = 0.65
@@ -83,7 +85,12 @@ CN_MAX_LIFECYCLE_HOLD_DAYS = 5
 CN_LIFECYCLE_BUCKET_ORDER = ["T+1", "T+2", "T+3", "T+4-T+5", "T+6-T+10", ">T+10", "pending"]
 CN_EXECUTION_ALPHA_STATE = "positive_ev_setup"
 CN_ALPHA_FACTORY_EXECUTION_SLEEVE = "cn_oversold_ev_positive"
-CN_ALPHA_FACTORY_EXECUTION_SLEEVES = {CN_ALPHA_FACTORY_EXECUTION_SLEEVE, CN_TAPE_SLEEVE_ID}
+CN_AI_INFRA_PRODUCTION_SLEEVE = "ai_infra_production_core"
+CN_ALPHA_FACTORY_EXECUTION_SLEEVES = {
+    CN_ALPHA_FACTORY_EXECUTION_SLEEVE,
+    CN_TAPE_SLEEVE_ID,
+    CN_AI_INFRA_PRODUCTION_SLEEVE,
+}
 CN_OBSERVED_LIFECYCLE_SLEEVE = cn_observed_lifecycle_prob.OBSERVED_LIFECYCLE_SLEEVE
 US_ALPHA_FACTORY_EXECUTION_SLEEVE = "us_v2_stock_probe"
 US_ALPHA_FACTORY_EXECUTION_SLEEVES = {US_ALPHA_FACTORY_EXECUTION_SLEEVE, US_THEME_SLEEVE_ID}
@@ -2329,7 +2336,7 @@ def summarize_limit_up(db_path: Path, start: date, as_of: date) -> dict[str, Any
         )
         for row in current:
             row["state"] = "Limit-Up Radar"
-            row["reason"] = "daily model only; requires 9:25/9:35 auction/open confirmation before execution"
+            row["reason"] = "broad-market diagnostic only; not part of the AI-infra production sleeve"
         return {"status": "ok", "performance": perf, "current_date": as_iso(latest), "current": current}
     finally:
         con.close()
@@ -2636,17 +2643,20 @@ def build_profit_guardrails(us: dict[str, Any], cn: dict[str, Any], limit_up: di
                 f"observed_EA={cn_observed_ea}, "
                 f"Positive EV Setup={cn_counts.get('Positive EV Setup', 0)}"
             ),
-            "kill_switch": f"Only `{CN_ALPHA_FACTORY_EXECUTION_SLEEVE}` or `{CN_OBSERVED_LIFECYCLE_SLEEVE}` plus production trade tier can receive new money.",
+            "kill_switch": (
+                f"Only `{CN_AI_INFRA_PRODUCTION_SLEEVE}`, `{CN_ALPHA_FACTORY_EXECUTION_SLEEVE}` or "
+                f"`{CN_OBSERVED_LIFECYCLE_SLEEVE}` plus production trade tier can receive new money."
+            ),
         },
         {
-            "market": "Limit-Up",
-            "profit_state": "radar_only",
+            "market": "Broad A-share radar",
+            "profit_state": "out_of_scope_for_ai_infra",
             "max_auto_size": "0R",
             "why": (
                 f"top-decile lift={fmt_num(limit_perf.get('avg_top_decile_lift'))}, "
-                f"avg EV after cost={fmt_pct(limit_perf.get('avg_next_ret_pct'))}; no 9:25/9:35 confirmation"
+                f"avg EV after cost={fmt_pct(limit_perf.get('avg_next_ret_pct'))}; not an AI-infra production sleeve"
             ),
-            "kill_switch": "Cannot promote to money strategy without auction/open confirmation and positive post-cost live EV.",
+            "kill_switch": "Keep broad-market limit-up rows out of AI-infra sizing; build a separate broad A-share strategy if needed.",
         },
     ]
 
@@ -2818,12 +2828,15 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
     market_order = {"CN": 0, "US": 1}
 
     actionable: list[dict[str, Any]] = []
+    us_trade_plan = payload.get("us_trade_plan") or {}
     for row in overlay_rows:
         final_r = round_or_none(row.get("final_r"))
         if final_r is None or final_r <= 0.0:
             continue
         market = str(row.get("market") or "").upper()
         ranked = (cn_lookup if market == "CN" else us_lookup).get(_symbol_key(row.get("symbol")), {})
+        symbol_key = _symbol_key(row.get("symbol"))
+        trade_plan = us_trade_plan.get(symbol_key) if market == "US" else {}
         action = ranked.get("production_action") or row.get("lifecycle_action") or row.get("state") or "-"
         tier = ranked.get("production_tier") or row.get("production_tier") or row.get("state") or "-"
         entry = (
@@ -2831,6 +2844,7 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
             or ranked.get("entry")
             or row.get("observation_entry_zone")
             or row.get("entry")
+            or (trade_plan or {}).get("entry")
             or ("planned-entry/pullback" if market == "CN" else "stock trade")
         )
         if market == "CN":
@@ -2840,10 +2854,31 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
                 f"{ranked.get('time_exit') or row.get('time_exit') or 'T+1/T+3/T+max review'}"
             )
         else:
+            stop_value = (
+                ranked.get("stop")
+                or ranked.get("stop_price")
+                or row.get("stop")
+                or row.get("stop_price")
+                or (trade_plan or {}).get("stop")
+            )
+            target_value = (
+                ranked.get("target")
+                or ranked.get("target_price")
+                or row.get("target")
+                or row.get("target_price")
+                or (trade_plan or {}).get("target")
+            )
+            plan_suffix = ""
+            if trade_plan:
+                if trade_plan.get("status") == "ok":
+                    plan_suffix = f"; plan {trade_plan.get('rule')} ({trade_plan.get('latest_date')})"
+                elif not stop_value and not target_value:
+                    plan_suffix = f"; plan blocker {trade_plan.get('rule')}"
             risk_plan = (
-                f"stop {ranked.get('stop') or ranked.get('stop_price') or row.get('stop') or row.get('stop_price') or '-'}; "
-                f"target {ranked.get('target') or ranked.get('target_price') or row.get('target') or row.get('target_price') or '-'}; "
+                f"stop {fmt_num(stop_value)}; "
+                f"target {fmt_num(target_value)}; "
                 f"{ranked.get('time_exit') or row.get('time_exit') or '3 sessions / next catalyst'}"
+                f"{plan_suffix}"
             )
         evidence_state = (
             ranked.get("ai_infra_evidence_state")
@@ -2910,16 +2945,6 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
                     "reason": clean_table_text(reason, 120),
                 }
             )
-    for row in (payload.get("limit_up") or {}).get("current") or []:
-        watch.append(
-            {
-                "market": "CN",
-                "symbol": row.get("symbol"),
-                "name": row.get("name") or "",
-                "state": "limit_up_radar",
-                "reason": "0R until 9:25/9:35 auction/open confirmation exists",
-            }
-        )
     watch = watch[:12]
 
     readiness_rows = (payload.get("profit_readiness") or {}).get("rows") or []
@@ -2944,12 +2969,6 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
                 f"proxy={option_ledger.get('proxy_resolved_count', 0)}, "
                 f"unresolved={option_ledger.get('unresolved_count', 0)}; options inform stock ranking/risk only"
             ),
-        },
-        {
-            "area": "Limit-up",
-            "status": "0R",
-            "reason": (readiness_by_area.get("Limit-up") or {}).get("blocker")
-            or "missing auction/open confirmation and live post-cost execution ledger",
         },
         {
             "area": "CN/US rank-only rows",
@@ -2982,7 +3001,7 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
         "headline": (
             f"CN stock basket {len(cn_actions)} names ({fmt_r(cn_r)}), "
             f"US stock trades {len(us_actions)} names ({fmt_r(us_r)}); "
-            "options are auxiliary signals; limit-up/live ledger are not production-closed."
+            "options are auxiliary signals; disabled CN signal families do not create R."
         ),
         "gross_r": round_or_none(gross_r, 4),
         "cn_action_count": len(cn_actions),
@@ -3103,9 +3122,10 @@ def load_options_tenor_signals(as_of: str) -> list[dict[str, Any]]:
 def render_options_tenor_section(payload: dict[str, Any], *, top_n: int = 12) -> list[str]:
     signals = payload.get("options_tenor_signals") or []
     lines = [
-        "## US 期权多时段 (weekly → half-year) 跨 Tenor 信号",
+        "## US 期权多时段 / 临期 (weekly → half-year) 跨 Tenor 信号",
         "",
         "- 数据源: `options_chain_quotes` 按 DTE 切桶 (weekly 0-9 / biweekly 10-21 / monthly 22-50 / quarterly 51-120 / half_year 121-220 / leaps 221+)。",
+        "- 临期期权异动主要看 `weekly`：gamma_trap / short-dated call wall / short-dated put hedge 都在这里归因。",
         "- 期权信号仅作 tape / event / crowding 上下文，**不能晋级 production basket**。",
         "- 详细 per-ticker tenor 拆分见 `reports/review_dashboard/us_options_tenor_radar/<date>/options_tenor.md`。",
         "",
@@ -3128,16 +3148,183 @@ def render_options_tenor_section(payload: dict[str, Any], *, top_n: int = 12) ->
             f"| {sig.get('symbol')} | {sig.get('pattern')} | {score:.1f} | {guidance} |"
         )
     lines.append("")
+    related_lookup = _options_related_context(payload)
+    by_symbol: dict[str, dict[str, Any]] = {}
+    for sig in sorted_sigs:
+        symbol = _symbol_key(sig.get("symbol"))
+        if not symbol:
+            continue
+        try:
+            score = float(sig.get("score") or 0.0)
+        except (TypeError, ValueError):
+            score = 0.0
+        existing = by_symbol.get(symbol)
+        if existing is None or score > existing["score"]:
+            by_symbol[symbol] = {
+                "symbol": symbol,
+                "pattern": sig.get("pattern") or "-",
+                "score": score,
+                "guidance": sig.get("guidance") or "",
+            }
+    lines += [
+        "### 临期 / weekly 异动映射",
+        "",
+        "- 把跨 tenor 信号映射回 AI-infra 状态；production 票只能作为 timing/risk context，source-review 票仍是 0R。",
+        "",
+        "| Symbol | Pattern | Score | Report status | Action |",
+        "|---|---|---:|---|---|",
+    ]
+    for row in sorted(by_symbol.values(), key=lambda r: -r["score"])[:top_n]:
+        context = related_lookup.get(row["symbol"]) or {}
+        status = context.get("status") or "outside current report"
+        lines.append(
+            f"| {row['symbol']} | {row['pattern']} | {row['score']:.1f} | "
+            f"{clean_table_text(status, 36)} | "
+            f"{clean_table_text(_options_tenor_related_guidance(status, row['pattern']), 64)} |"
+        )
+    if not by_symbol:
+        lines.append("| - | - | - | - | - |")
+    lines.append("")
     return lines
 
 
 def _parse_float(value: Any) -> float | None:
-    if value is None or value == "":
+    if value is None:
         return None
+    if isinstance(value, str):
+        value = value.strip().replace(",", "")
+        if value == "":
+            return None
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _format_option_float(value: Any, *, decimals: int = 0) -> str:
+    parsed = _parse_float(value)
+    if parsed is None:
+        return "-"
+    return f"{parsed:,.{decimals}f}"
+
+
+def _options_symbol(row: dict[str, Any]) -> str:
+    return _symbol_key(row.get("symbol") or row.get("ticker"))
+
+
+def _options_symbol_aliases(row: dict[str, Any]) -> set[str]:
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in ("symbol", "ticker", "primary_ticker", "ticker_aliases")
+    )
+    for sep in ("/", ",", ";", "|"):
+        text = text.replace(sep, " ")
+    return {piece.upper().strip() for piece in text.split() if piece.strip()}
+
+
+def _options_related_context(payload: dict[str, Any]) -> dict[str, dict[str, str]]:
+    lookup: dict[str, dict[str, str]] = {}
+
+    def ensure(symbol: str) -> dict[str, str]:
+        symbol = _symbol_key(symbol)
+        entry = lookup.setdefault(
+            symbol,
+            {
+                "status": "outside current report",
+                "module": "-",
+                "readiness": "-",
+                "action": "do not promote from options alone",
+            },
+        )
+        return entry
+
+    decision = payload.get("production_decision_summary") or {}
+    for row in decision.get("actionable") or []:
+        if _symbol_key(row.get("market")) != "US":
+            continue
+        symbol = _symbol_key(row.get("symbol"))
+        if not symbol:
+            continue
+        entry = ensure(symbol)
+        entry["status"] = f"production {fmt_r(row.get('size_r'))}"
+        entry["readiness"] = clean_table_text(
+            row.get("evidence_state") or row.get("ai_infra_evidence_state") or "-",
+            42,
+        )
+        entry["action"] = action_label(row.get("action"))
+
+    for row in decision.get("watch") or []:
+        if _symbol_key(row.get("market")) != "US":
+            continue
+        symbol = _symbol_key(row.get("symbol"))
+        if not symbol:
+            continue
+        entry = ensure(symbol)
+        if entry.get("status") == "outside current report":
+            entry["status"] = f"watch/{row.get('state') or '0R'}"
+            entry["action"] = "watch only / 0R"
+
+    for row in (payload.get("us_opportunity_ranker") or {}).get("all_rows") or []:
+        symbol = _symbol_key(row.get("symbol"))
+        if not symbol:
+            continue
+        entry = ensure(symbol)
+        if entry.get("status") == "outside current report":
+            tier = row.get("production_tier") or row.get("state") or "ranker"
+            entry["status"] = f"ranker/{tier}"
+        if entry.get("module") == "-":
+            entry["module"] = clean_table_text(row.get("ai_infra_module") or row.get("module") or "-", 36)
+        if entry.get("readiness") == "-":
+            entry["readiness"] = clean_table_text(
+                row.get("ai_infra_evidence_state") or row.get("evidence_state") or "-", 42
+            )
+        if entry.get("action") == "do not promote from options alone":
+            entry["action"] = action_label(row.get("production_action") or row.get("size_hint") or "watch only")
+
+    for row in ((payload.get("source_review_calendar") or {}).get("us") or {}).get("rows") or []:
+        for symbol in _options_symbol_aliases(row):
+            entry = ensure(symbol)
+            if entry.get("status") == "outside current report":
+                pool = row.get("current_pool") or "source-review"
+                tier = row.get("readiness_tier") or "unscored"
+                entry["status"] = f"source-review/{pool}"
+                entry["action"] = "evidence review first / 0R"
+                entry["readiness"] = tier
+            if entry.get("module") == "-":
+                entry["module"] = clean_table_text(row.get("module") or "-", 36)
+            if entry.get("readiness") == "-":
+                entry["readiness"] = clean_table_text(
+                    row.get("readiness_tier") or row.get("evidence_state") or "-",
+                    42,
+                )
+    return lookup
+
+
+def _options_related_guidance(status: str, squeeze_score: float, pressure_score: float) -> str:
+    if "production" in status:
+        if pressure_score > squeeze_score:
+            return "production name: reduce chase / tighten risk"
+        return "production name: timing confirmation only"
+    if "ranker" in status or "watch" in status:
+        return "rank/watch only: keep at 0R unless ranker promotes"
+    if "source-review" in status:
+        return "source review first: evidence card before universe/ranker"
+    return "not in current report: research expansion only"
+
+
+def _options_tenor_related_guidance(status: str, pattern: Any) -> str:
+    pattern_text = str(pattern or "")
+    if "production" in status:
+        if pattern_text == "gamma_trap":
+            return "production: avoid IV chase; use as short-term timing/risk flag"
+        if pattern_text == "bearish_stack":
+            return "production: tighten risk / hedge context"
+        return "production: timing context only"
+    if "ranker" in status or "watch" in status:
+        return "rank/watch only: no R unless ranker promotes"
+    if "source-review" in status:
+        return "source review first: evidence card before universe/ranker"
+    return "research expansion only; no report R"
 
 
 def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 8) -> list[str]:
@@ -3153,6 +3340,7 @@ def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 8) -
     # Pick top by squeeze and pressure separately.
     squeeze = sorted(rows, key=lambda r: -(_parse_float(r.get("short_squeeze_score")) or 0.0))[:top_n]
     pressure = sorted(rows, key=lambda r: -(_parse_float(r.get("selling_pressure_score")) or 0.0))[:top_n]
+    related_lookup = _options_related_context(payload)
     lines: list[str] = [
         "## US 期权异常 (far-OTM call/put) — tape/timing 用",
         "",
@@ -3171,17 +3359,6 @@ def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 8) -
         if score <= 0:
             continue
         any_squeeze = True
-        spot = _parse_float(row.get("spot_close"))
-        pc_z = _parse_float(row.get("pc_ratio_z"))
-        sk_z = _parse_float(row.get("skew_z"))
-        vol_oi = _parse_float(row.get("far_otm_call_vol_oi_ratio"))
-        lines.append(
-            f"| {row.get('symbol')} | "
-            f"{spot:.2f} | " if spot is not None else f"| {row.get('symbol')} | - | "
-        )
-    # Rebuild cleanly (avoid the earlier conditional-row stitching) — note we
-    # just clear and redo the squeeze block once we know the data.
-    lines = lines[:11]
     if not any_squeeze:
         lines.append("| - | - | - | - | - | - | - | _今日无 squeeze 候选_ |")
     else:
@@ -3189,16 +3366,14 @@ def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 8) -
             score = _parse_float(row.get("short_squeeze_score")) or 0.0
             if score <= 0:
                 continue
-            spot = _parse_float(row.get("spot_close"))
             pc_z = _parse_float(row.get("pc_ratio_z"))
             sk_z = _parse_float(row.get("skew_z"))
-            vol_oi = _parse_float(row.get("far_otm_call_vol_oi_ratio"))
             lines.append(
-                f"| {row.get('symbol')} | "
-                f"{(spot if spot is not None else 0):.2f} | "
-                f"{row.get('far_otm_call_volume')} | "
-                f"{(vol_oi if vol_oi is not None else 0):.2f} | "
-                f"{row.get('far_otm_put_volume')} | "
+                f"| {_options_symbol(row)} | "
+                f"{_format_option_float(row.get('spot_close'), decimals=2)} | "
+                f"{_format_option_float(row.get('far_otm_call_volume'))} | "
+                f"{_format_option_float(row.get('far_otm_call_vol_oi_ratio'), decimals=2)} | "
+                f"{_format_option_float(row.get('far_otm_put_volume'))} | "
                 f"{(f'{pc_z:+.2f}' if pc_z is not None else '-')} | "
                 f"{(f'{sk_z:+.2f}' if sk_z is not None else '-')} | "
                 f"{score:,.0f} |"
@@ -3219,19 +3394,66 @@ def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 8) -
         spot = _parse_float(row.get("spot_close"))
         pc_z = _parse_float(row.get("pc_ratio_z"))
         sk_z = _parse_float(row.get("skew_z"))
-        vol_oi = _parse_float(row.get("far_otm_put_vol_oi_ratio"))
         lines.append(
-            f"| {row.get('symbol')} | "
-            f"{(spot if spot is not None else 0):.2f} | "
-            f"{row.get('far_otm_put_volume')} | "
-            f"{(vol_oi if vol_oi is not None else 0):.2f} | "
-            f"{row.get('far_otm_call_volume')} | "
+            f"| {_options_symbol(row)} | "
+            f"{_format_option_float(spot, decimals=2)} | "
+            f"{_format_option_float(row.get('far_otm_put_volume'))} | "
+            f"{_format_option_float(row.get('far_otm_put_vol_oi_ratio'), decimals=2)} | "
+            f"{_format_option_float(row.get('far_otm_call_volume'))} | "
             f"{(f'{pc_z:+.2f}' if pc_z is not None else '-')} | "
             f"{(f'{sk_z:+.2f}' if sk_z is not None else '-')} | "
             f"{score:,.0f} |"
         )
     if not any_pressure:
         lines.append("| - | - | - | - | - | - | - | _今日无 selling-pressure 候选_ |")
+    lines.append("")
+    by_symbol: dict[str, dict[str, Any]] = {}
+    for row in [*squeeze, *pressure]:
+        symbol = _options_symbol(row)
+        if not symbol:
+            continue
+        squeeze_score = _parse_float(row.get("short_squeeze_score")) or 0.0
+        pressure_score = _parse_float(row.get("selling_pressure_score")) or 0.0
+        existing = by_symbol.get(symbol)
+        if existing is None or max(squeeze_score, pressure_score) > max(
+            existing["squeeze_score"], existing["pressure_score"]
+        ):
+            by_symbol[symbol] = {
+                "symbol": symbol,
+                "squeeze_score": squeeze_score,
+                "pressure_score": pressure_score,
+            }
+    related_rows = sorted(
+        by_symbol.values(),
+        key=lambda row: -max(row["squeeze_score"], row["pressure_score"]),
+    )[:top_n]
+    lines += [
+        "### Related AI-infra names to watch",
+        "",
+        "- 这里把期权异动映射回 production / ranker / source-review 状态；期权异动不能单独生成 R。",
+        "",
+        "| Symbol | Alert | Report status | AI module | Readiness | Action |",
+        "|---|---|---|---|---|---|",
+    ]
+    for row in related_rows:
+        context = related_lookup.get(row["symbol"]) or {}
+        status = context.get("status") or "outside current report"
+        alert = f"S {row['squeeze_score']:,.0f} / P {row['pressure_score']:,.0f}"
+        guidance = _options_related_guidance(status, row["squeeze_score"], row["pressure_score"])
+        context_action = context.get("action") or ""
+        action_text = (
+            f"{context_action}; {guidance}"
+            if context_action and context_action != "do not promote from options alone"
+            else guidance
+        )
+        lines.append(
+            f"| {row['symbol']} | {alert} | {clean_table_text(status, 36)} | "
+            f"{clean_table_text(context.get('module') or '-', 36)} | "
+            f"{clean_table_text(context.get('readiness') or '-', 42)} | "
+            f"{clean_table_text(action_text, 60)} |"
+        )
+    if not related_rows:
+        lines.append("| - | - | - | - | - | - |")
     lines.append("")
     return lines
 
@@ -3766,7 +3988,7 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
 
     cn_guard = _guardrail_by_market(payload.get("profit_guardrails") or [], "CN")
     us_guard = _guardrail_by_market(payload.get("profit_guardrails") or [], "US")
-    limit_guard = _guardrail_by_market(payload.get("profit_guardrails") or [], "Limit-Up")
+    limit_guard = _guardrail_by_market(payload.get("profit_guardrails") or [], "Broad A-share radar")
     cn_current = cn.get("current") or []
     us_current = us.get("current") or []
     risk_rows = overlay.get("rows") or []
@@ -3784,6 +4006,10 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
     cn_ea_count = count_current_states(cn_current).get("Execution Alpha", 0)
     cn_tape_ea = any(
         row.get("state") == "Execution Alpha" and row.get("alpha_sleeve_id") == CN_TAPE_SLEEVE_ID
+        for row in cn_current
+    )
+    cn_ai_infra_ea = any(
+        row.get("state") == "Execution Alpha" and row.get("alpha_sleeve_id") == CN_AI_INFRA_PRODUCTION_SLEEVE
         for row in cn_current
     )
     if cn_ea_count <= 0:
@@ -3805,7 +4031,7 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
             "state": cn_state,
             "allowed_now": cn_guard.get("max_auto_size") or "0R",
             "evidence": (
-                f"active sleeve={CN_TAPE_SLEEVE_ID if cn_tape_ea else 'oversold/observed lifecycle'}; "
+                f"active sleeve={CN_TAPE_SLEEVE_ID if cn_tape_ea else CN_AI_INFRA_PRODUCTION_SLEEVE if cn_ai_infra_ea else 'oversold/observed lifecycle'}; "
                 f"oversold LCB80 secondary {fmt_pct((cn.get('metrics') or {}).get('v2', {}).get('lcb80_pct'))}; "
                 f"lifecycle {((cn.get('lifecycle') or {}).get('policy') or {}).get('best_bucket') or '-'}; current EA={cn_ea_count}"
             ),
@@ -3854,12 +4080,12 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
             "priority": 3,
         },
         {
-            "area": "Limit-up",
-            "state": limit_guard.get("profit_state") or "radar_only",
+            "area": "Broad A-share radar",
+            "state": limit_guard.get("profit_state") or "out_of_scope_for_ai_infra",
             "allowed_now": limit_guard.get("max_auto_size") or "0R",
             "evidence": f"top-decile lift={fmt_num(limit_perf.get('avg_top_decile_lift'))}, avg next-ret {fmt_pct(limit_perf.get('avg_next_ret_pct'))}",
-            "blocker": "missing 9:25/9:35 auction/open confirmation and live post-cost execution ledger",
-            "next_step": "Add auction gain, auction turnover, 9:35 volume ratio, sector co-move, seal strength, open-board count before any money promotion.",
+            "blocker": "not part of the AI-infra mandate; does not block AI-infra sleeve sizing",
+            "next_step": "Keep it in a separate broad A-share research report if the strategy is needed later.",
             "priority": 4,
         },
         {
@@ -3893,9 +4119,9 @@ def build_profit_readiness(payload: dict[str, Any]) -> dict[str, Any]:
             "money_ready_lines": len(money_ready),
             "highest_priority_blocker": rows[0]["blocker"],
             "today_bias": (
-                "US stock trade only; CN has no current execution-sleeve member; options are auxiliary and limit-up stays radar"
+                "US stock trade only; CN has no current execution-sleeve member; broad-market diagnostics stay out of AI-infra sizing"
                 if cn_ea_count <= 0
-                else "CN execution sleeve plus US stock trade; options are auxiliary and limit-up stays radar"
+                else "CN execution sleeve plus US stock trade; broad-market diagnostics stay out of AI-infra sizing"
             ),
         },
         "rows": sorted(rows, key=lambda row: int(row.get("priority") or 99)),
@@ -3919,42 +4145,31 @@ def build_pipeline_requirements_audit(payload: dict[str, Any]) -> dict[str, Any]
 
     cn_ea = _current_state_count(cn_current, "Execution Alpha")
     us_ea = _current_state_count(us_current, "Execution Alpha")
-    cn_sleeve_rows = [row for row in cn_ranker_rows if row.get("alpha_sleeve_id") in CN_ALPHA_FACTORY_EXECUTION_SLEEVES]
-    cn_observed_rows = [row for row in cn_ranker_rows if row.get("observed_lifecycle_qualified")]
     cn_event_rows = [row for row in cn_ranker_rows if row.get("production_tier") == "event_risk_watch"]
     us_event_rows = [row for row in us_ranker_rows if row.get("production_tier") == "event_risk_watch"]
-    cn_probability_keys = {
-        "p_win_t1",
-        "p_hit_1r_t3",
-        "p_stop_t3",
-        "expected_r_t3",
-        "lcb80_r_t3",
-        "observed_probability_bucket",
-    }
-    has_cn_observed_probability = any(cn_probability_keys & set(row) for row in [*cn_current, *cn_ranker_rows])
+    cn_source_rows = ((payload.get("source_review_calendar") or {}).get("cn") or {}).get("rows") or []
+    ready_source_rows = [row for row in cn_source_rows if row.get("readiness_tier") == "ready_for_promotion"]
     rows = [
         {
             "priority": 1,
-            "area": "CN current-pool to sleeve bridge",
-            "state": "fail_no_current_execution_sleeve" if cn_ea <= 0 else "pass_current_execution_sleeve",
+            "area": "CN AI-infra production sleeve",
+            "state": "fail_no_cn_ai_infra_execution" if cn_ea <= 0 else "pass_cn_ai_infra_execution",
             "evidence": (
                 f"current_total={len(cn_current)}, current_EA={cn_ea}, "
-                f"ranker_sleeve_rows={len(cn_sleeve_rows)}, "
-                f"observed_qualified={len(cn_observed_rows)}, "
-                f"historical_lcb80={fmt_pct((cn.get('metrics') or {}).get('v2', {}).get('lcb80_pct'))}"
+                f"ranker_rows={len(cn_ranker_rows)}, "
+                f"source_review_rows={len(cn_source_rows)}, "
+                f"ready_source_rows={len(ready_source_rows)}"
             ),
-            "requirement": "Current producer must either emit `cn_oversold_ev_positive`, qualify via observed lifecycle probability, or explicitly declare no-trade.",
-            "next_change": "Keep daily reconciliation: current candidates vs Alpha Factory sleeve and observed probability sleeve, with top missing reasons.",
+            "requirement": "A-share R only comes from AI-infra names that have source-reviewed evidence and a promoted execution sleeve.",
+            "next_change": "Map ready source-review CN names into the promoted AI-infra execution sleeve; broad-market limit-up data is out of scope and must not block AI-infra R.",
         },
         {
             "priority": 2,
-            "area": "CN observed probability layer",
-            "state": "pass_observed_probability" if has_cn_observed_probability else "fail_missing_observed_probability",
-            "evidence": "current/ranker rows do not expose p_win_t1, p_hit_1r_t3, p_stop_t3, expected_r_t3, lcb80_r_t3"
-            if not has_cn_observed_probability
-            else f"observed probability fields present; qualified={len(cn_observed_rows)}",
-            "requirement": "Ranker action must be driven by observed historical analog probabilities, not only strategy labels.",
-            "next_change": "Build `cn_observed_lifecycle_prob`: state vector -> nearest historical buckets -> expected R / LCB / hold-days.",
+            "area": "CN source-review promotion",
+            "state": "partial_source_review_only" if ready_source_rows else "fail_no_ready_cn_source_review",
+            "evidence": f"ready_for_promotion={len(ready_source_rows)}, total_cn_source_rows={len(cn_source_rows)}",
+            "requirement": "Ready source-review rows still need explicit promotion into universe/relationship ledger before ranker size.",
+            "next_change": "Promote verified A-share AI-infra rows with evidence cards, then let the production ranker size only those names.",
         },
         {
             "priority": 3,
@@ -3988,8 +4203,10 @@ def build_pipeline_requirements_audit(payload: dict[str, Any]) -> dict[str, Any]
         {
             "priority": 6,
             "area": "Live execution ledger",
-            "state": "fail_missing_cn_live_fills" if "missing" in str(live_row.get("blocker") or "").lower() else "partial_live_ledger",
-            "evidence": live_row.get("blocker") or "-",
+            "state": "not_applicable_no_cn_actions"
+            if cn_ea <= 0
+            else ("fail_missing_cn_live_fills" if "missing" in str(live_row.get("blocker") or "").lower() else "partial_live_ledger"),
+            "evidence": "no CN production actions today" if cn_ea <= 0 else (live_row.get("blocker") or "-"),
             "requirement": "Every production action must be reconciled to fill/slippage/exit, especially CN T+1.",
             "next_change": "Set QUANT_CN_ACTIVITY_CSV and store realized fill/exit into the daily review DB.",
         },
@@ -4000,7 +4217,7 @@ def build_pipeline_requirements_audit(payload: dict[str, Any]) -> dict[str, Any]
         "summary": {
             "fail_count": len(failing),
             "top_blocker": (failing[0] if failing else rows[0]).get("area"),
-            "production_bias": "US only today; CN is research/ranked-watch until current-pool bridge and observed probability layer are fixed"
+            "production_bias": "US only today; CN stays source-review/research until AI-infra names are promoted into a production sleeve"
             if cn_ea <= 0
             else "CN and US both have execution rows; size still controlled by ranker and live ledger",
         },
@@ -4126,11 +4343,14 @@ def build_strategy_direction(
 ) -> list[dict[str, Any]]:
     us_guard = _guardrail_by_market(profit_guardrails, "US")
     cn_guard = _guardrail_by_market(profit_guardrails, "CN")
-    limit_guard = _guardrail_by_market(profit_guardrails, "Limit-Up")
     us_ea, us_pev, us_blocked = _current_summary(us.get("current") or [])
     cn_ea, cn_pev, cn_blocked = _current_summary(cn.get("current") or [])
     cn_tape_ea = any(
         row.get("state") == "Execution Alpha" and row.get("alpha_sleeve_id") == CN_TAPE_SLEEVE_ID
+        for row in cn.get("current") or []
+    )
+    cn_ai_infra_ea = any(
+        row.get("state") == "Execution Alpha" and row.get("alpha_sleeve_id") == CN_AI_INFRA_PRODUCTION_SLEEVE
         for row in cn.get("current") or []
     )
 
@@ -4143,21 +4363,28 @@ def build_strategy_direction(
     us_v2_fresh, us_v2_days = _freshness_summary((us.get("freshness") or {}).get("v2") or {})
     us_legacy = us["metrics"]["legacy"]
     us_legacy_fresh, us_legacy_days = _freshness_summary((us.get("freshness") or {}).get("legacy") or {})
-    limit_perf = limit_up.get("performance") or {}
 
     rows = [
         {
             "market": "CN",
-            "strategy_family": CN_TAPE_SLEEVE_ID if cn_tape_ea else "oversold_contrarian",
-            "direction": "AI-infra right-side tape leadership" if cn_tape_ea else "fear/high-vol oversold reversal",
+            "strategy_family": (
+                CN_TAPE_SLEEVE_ID if cn_tape_ea else CN_AI_INFRA_PRODUCTION_SLEEVE if cn_ai_infra_ea else "oversold_contrarian"
+            ),
+            "direction": (
+                "AI-infra right-side tape leadership"
+                if cn_tape_ea
+                else "source-reviewed AI-infra production universe"
+                if cn_ai_infra_ea
+                else "fear/high-vol oversold reversal"
+            ),
             "role": "primary",
             "tier": cn_guard.get("profit_state") or "opportunity_stock_trade",
             "max_size": cn_guard.get("max_auto_size") or "0R",
-            "post_cost_lcb80_pct": None if cn_tape_ea else cn_v2.get("lcb80_pct"),
-            "avg_pct": None if cn_tape_ea else cn_v2.get("avg_pct"),
-            "n": cn_ea if cn_tape_ea else cn_v2.get("n"),
-            "active_dates": None if cn_tape_ea else cn_v2.get("active_dates"),
-            "max_drawdown_pct": None if cn_tape_ea else cn_v2.get("max_drawdown_pct"),
+            "post_cost_lcb80_pct": None if cn_tape_ea or cn_ai_infra_ea else cn_v2.get("lcb80_pct"),
+            "avg_pct": None if cn_tape_ea or cn_ai_infra_ea else cn_v2.get("avg_pct"),
+            "n": cn_ea if cn_tape_ea or cn_ai_infra_ea else cn_v2.get("n"),
+            "active_dates": None if cn_tape_ea or cn_ai_infra_ea else cn_v2.get("active_dates"),
+            "max_drawdown_pct": None if cn_tape_ea or cn_ai_infra_ea else cn_v2.get("max_drawdown_pct"),
             "freshness_state": cn_v2_fresh,
             "freshness_days": cn_v2_days,
             "current_execution_alpha": cn_ea,
@@ -4166,6 +4393,8 @@ def build_strategy_direction(
             "reason": (
                 "current A-share execution is AI-infra price/flow/sector leadership; news remains a lagging risk label"
                 if cn_tape_ea
+                else "current A-share execution comes from the source-reviewed AI-infra production universe; price/flow ranker controls tiers and broad-market diagnostics stay out"
+                if cn_ai_infra_ea
                 else
                 "strongest current post-cost evidence; high fear/vol is edge context, not a US-style blocker; "
                 f"lifecycle best={cn_lifecycle_policy.get('best_bucket') or '-'}, max=T+{cn_lifecycle_policy.get('max_hold_days') or '-'}"
@@ -4211,27 +4440,6 @@ def build_strategy_direction(
             "current_blocked": us_blocked,
             "reason": "option ledger is diagnostic only; it must not block stock trades",
             "kill_switch": "No option orders from this report; use options data only as stock decision evidence.",
-        },
-        {
-            "market": "CN",
-            "strategy_family": "limit_up_model",
-            "direction": "daily limit-up ignition radar",
-            "role": "radar",
-            "tier": limit_guard.get("profit_state") or "radar_only",
-            "max_size": limit_guard.get("max_auto_size") or "0R",
-            "post_cost_lcb80_pct": None,
-            "avg_pct": limit_perf.get("avg_next_ret_pct"),
-            "n": limit_perf.get("days"),
-            "active_dates": limit_perf.get("days"),
-            "max_drawdown_pct": None,
-            "freshness_state": "radar_only",
-            "freshness_days": None,
-            "current_execution_alpha": 0,
-            "current_positive_ev_setup": 0,
-            "current_blocked": 0,
-            "reason": "top-decile lift is useful for a watchlist, but auction/open confirmation is missing",
-            "kill_switch": limit_guard.get("kill_switch") or "",
-            "top_decile_lift": limit_perf.get("avg_top_decile_lift"),
         },
         {
             "market": "US",
@@ -4307,7 +4515,7 @@ def render_adjustment_rules() -> list[str]:
         "- CN narrative filter excludes daily-consumption names, boosts AI infra and hard-asset/energy/heavy-industry leaders, and deprioritizes internet/software.",
         "- US theme-cluster momentum is the main stock trade sleeve; legacy HIGH/MOD single-name rows are ranked watch only.",
         "- US options/flow are auxiliary stock-ranking evidence; missing option leg ledger must not block stock trades.",
-        "- Limit-up remains radar by data availability, but strong names stay on the opportunity board.",
+        "- Broad-market A-share diagnostics are not AI-infra sleeves and must not block or promote AI-infra R.",
         "- Legacy families are comparison baselines, not fresh-entry production sleeves.",
         "",
     ]
@@ -4327,7 +4535,7 @@ def render_strategy_direction(payload: dict[str, Any]) -> str:
             f"Primary: {primary.get('market', '-')} {primary.get('strategy_family', '-')} "
             f"({primary.get('tier', '-')}); secondary: {secondary.get('market', '-')} "
             f"{secondary.get('strategy_family', '-')} ({secondary.get('tier', '-')}); "
-            f"radar: {radar.get('strategy_family', '-')} stays {radar.get('tier', '-')}. "
+            f"diagnostic: {radar.get('strategy_family', 'broad-market rows')} stays outside AI-infra sizing. "
             "This is the current ranked state, not a fixed strategy allocation."
         ),
         "",
@@ -4628,6 +4836,47 @@ def _atr_proxy(closes: list[tuple[date, float]], window: int) -> float | None:
     if not ranges:
         return None
     return round(sum(ranges) / len(ranges), 3)
+
+
+def build_us_stock_trade_plan(
+    db_path: Path,
+    symbols: Iterable[str],
+    as_of: date,
+) -> dict[str, dict[str, Any]]:
+    """Mechanical stock entry/stop/target fallback for US production rows.
+
+    The US theme cluster sleeve already uses a simple stock plan:
+    entry = latest close, stop = -6%, target = +10%. The AI-infra production
+    ranker can promote a name without carrying those price fields, so the final
+    report fills them from the same local convention rather than printing
+    `stop -; target -`.
+    """
+    clean_symbols = sorted({_symbol_key(symbol) for symbol in symbols if _symbol_key(symbol)})
+    series = _load_benchmark_closes(db_path, "us", clean_symbols, as_of, lookback_days=120)
+    plans: dict[str, dict[str, Any]] = {}
+    for symbol in clean_symbols:
+        closes = series.get(symbol) or []
+        if not closes:
+            plans[symbol] = {
+                "status": "missing_price",
+                "entry": None,
+                "stop": None,
+                "target": None,
+                "latest_date": None,
+                "rule": "missing US prices_daily close; no mechanical stock plan",
+            }
+            continue
+        latest_date, entry = closes[-1]
+        plans[symbol] = {
+            "status": "ok",
+            "entry": round_or_none(entry, 4),
+            "stop": round_or_none(entry * 0.94, 4),
+            "target": round_or_none(entry * 1.10, 4),
+            "latest_date": latest_date.isoformat(),
+            "atr20_pct": _atr_proxy(closes, window=20),
+            "rule": "entry=latest close; stop=-6%; target=+10%; review in 3 sessions / next catalyst",
+        }
+    return plans
 
 
 def _pairwise_corr(series_by_symbol: dict[str, dict[date, float]], window: int) -> dict[str, float | None]:
@@ -4955,6 +5204,28 @@ def _portfolio_var95_proxy(exposures: dict[str, float], return_lookup: dict[str,
     return 1.65 * math.sqrt(max(variance, 0.0))
 
 
+def _scale_overlay_rows(
+    rows: list[dict[str, Any]],
+    *,
+    cap: float,
+    reason: str,
+    market: str | None = None,
+) -> None:
+    eligible = [
+        row
+        for row in rows
+        if (market is None or str(row.get("market") or "").upper() == market)
+        and float(row.get("final_r") or 0.0) > 0.0
+    ]
+    total = sum(float(row.get("final_r") or 0.0) for row in eligible)
+    if total <= cap or total <= 0.0:
+        return
+    scale = cap / total
+    for row in eligible:
+        row["final_r"] = float(row.get("final_r") or 0.0) * scale
+        row.setdefault("risk_reasons", []).append(reason)
+
+
 def build_portfolio_risk_overlay(
     us: dict[str, Any],
     cn: dict[str, Any],
@@ -5083,6 +5354,11 @@ def build_portfolio_risk_overlay(
             row["risk_reasons"].append("cn_shadow_option_missing")
         row["shadow_option_haircut"] = haircut
         row["final_r"] *= haircut
+
+    _scale_overlay_rows(rows, cap=CN_BASKET_R_CAP, market="CN", reason="cn_basket_cap_scaled")
+    _scale_overlay_rows(rows, cap=US_BASKET_R_CAP, market="US", reason="us_basket_cap_scaled")
+    _scale_overlay_rows(rows, cap=PORTFOLIO_TOTAL_R_CAP, reason="total_portfolio_cap_scaled")
+
     # Sector caps.
     for market in ["CN", "US"]:
         cap = SECTOR_R_CAP
@@ -7372,12 +7648,14 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
                 f"{row.get('leader_count') or 0} | {flow} |"
             )
         lines.append("")
+    elif actions:
+        lines += ["- 已有 AI-infra 生产 universe 个股进入执行候选；板块层面今天没有形成新的行业级共振。", ""]
     else:
-        lines += ["- 今天没有板块通过叙事和 tape 过滤。", ""]
+        lines += ["- 今天没有 AI-infra 板块同时通过叙事、tape 和可执行 sleeve gate。", ""]
     lines += [
         "## 可交易名单",
         "",
-        "这里的右侧票看价格、成交、资金和板块同步；左侧票必须有价值/超跌赔率，不允许只因为跌多了就买。",
+        "这里的 A 股票必须同时属于 AI-infra 可审计主线、通过 source-review/关系账本，并进入已推广的执行 sleeve；非 AI-infra broad-market 信号不生成 R，也不能阻拦 AI-infra sleeve。",
         "",
     ]
     lines += render_market_action_table(actions)
@@ -7389,7 +7667,6 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
         "",
     ]
     lines += render_market_watch_table(market_watch_rows(payload, "CN"))
-    lines += render_cn_left_side_watch_section(payload)
     lines += render_earnings_calendar_section(payload, "CN")
     lines += render_source_review_calendar_section(payload, "CN")
     lines += render_benchmark_attribution_section(payload, "CN")
@@ -7474,16 +7751,23 @@ def render_report(payload: dict[str, Any]) -> str:
         row.get("state") == "Execution Alpha" and row.get("alpha_sleeve_id") == CN_TAPE_SLEEVE_ID
         for row in cn.get("current") or []
     )
+    cn_ai_infra_ea_count = sum(
+        1
+        for row in cn.get("current") or []
+        if row.get("state") == "Execution Alpha" and row.get("alpha_sleeve_id") == CN_AI_INFRA_PRODUCTION_SLEEVE
+    )
     cn_evidence_label = (
         "CN tape leadership active; oversold evidence kept as secondary context"
         if cn_tape_ea
+        else f"CN `{CN_AI_INFRA_PRODUCTION_SLEEVE}` current_EA {cn_ai_infra_ea_count}; broad-market signals out of scope"
+        if cn_ai_infra_ea_count > 0
         else f"CN oversold_contrarian LCB80 {fmt_pct(cn_v2.get('lcb80_pct'))}"
     )
     conclusion = (
         f"今日生产动作：{decision_summary.get('headline') or 'no production action today'} "
         f"证据口径：US stock-net LCB80 {fmt_pct((us.get('metrics') or {}).get('v2_stock_only_net', {}).get('lcb80_pct'))}; "
         f"{cn_evidence_label}. "
-        "0R 区：rank-only、事件风险、ST/退市类、涨停无竞价确认、未闭环期权。"
+        "0R 区：rank-only、事件风险、ST/退市类、非 AI-infra broad-market 信号、未闭环期权。"
     )
 
     lines: list[str] = [
@@ -7577,18 +7861,6 @@ def render_report(payload: dict[str, Any]) -> str:
     lines += render_cn_opportunity_ranker_section(payload)
     lines += render_cn_lifecycle_section(cn)
     lines += [
-        "## 涨停模型雷达表现",
-        "",
-    ]
-    perf = limit_up.get("performance") or {}
-    lines += [
-        f"- Performance days: {perf.get('days', 0)}",
-        f"- Avg top-decile hit rate: {fmt_pct((perf.get('avg_top_decile_hit_rate') or 0) * 100.0) if perf else '-'}",
-        f"- Avg top-decile lift: {fmt_num(perf.get('avg_top_decile_lift'))}",
-        f"- Avg failed-board rate: {fmt_pct((perf.get('avg_failed_board_rate') or 0) * 100.0) if perf else '-'}",
-        f"- Avg EV after cost / next return proxy: {fmt_pct(perf.get('avg_next_ret_pct'))}",
-        "- Rule: daily `limit_up_model` rows are always Limit-Up Radar without 9:25 / 9:35 confirmation.",
-        "",
         "## 最近候选表现",
         "",
         "| Market | Symbol | Name | State | Policy | Note |",
@@ -7609,15 +7881,13 @@ def render_report(payload: dict[str, Any]) -> str:
     lines += render_current_table(us.get("current") or [], "us")
     lines += ["### CN", ""]
     lines += render_current_table(cn.get("current") or [], "cn")
-    lines += ["### Limit-Up Radar", ""]
-    lines += render_limit_table(limit_up.get("current") or [])
     lines += [
         "## 下一步需要的数据",
         "",
         "- US: keep real option expression history with selected legs so V2 options have true bid/ask leg PnL coverage.",
         "- US: persist `options_chain_quotes` daily so option shadow ledger can move from proxy to true bid/ask leg PnL.",
         "- Portfolio: keep sector/industry tags, stock/index/futures price history, hedge fills and residual beta attribution complete enough for long alpha + beta hedge sizing.",
-        "- CN: add 9:25 auction gain, auction turnover, 9:35 volume ratio, sector co-move count, first touch time, seal strength, and open-board count.",
+        "- CN: keep source-reviewed AI-infra universe, relationship ledger, K-line/flow features, lifecycle labels, and execution fills complete enough for sleeve sizing.",
         "- CN: keep fill_date/exit_date/max_favorable/max_adverse in `strategy_model_dataset`; lifecycle gate now depends on T+1/T+3/T+5 bucket evidence.",
         "- CN: shadow option fields remain risk haircuts only until there is a real listed option/futures expression and executable quote history.",
         "- CN: keep Tobit volatility and market fear/high-vol fields in candidate exports; they drive risk unit and admission.",
@@ -7635,9 +7905,15 @@ def render_factorlab_brief(payload: dict[str, Any]) -> str:
         row.get("state") == "Execution Alpha" and row.get("alpha_sleeve_id") == CN_TAPE_SLEEVE_ID
         for row in cn.get("current") or []
     )
+    cn_ai_infra_ea = any(
+        row.get("state") == "Execution Alpha" and row.get("alpha_sleeve_id") == CN_AI_INFRA_PRODUCTION_SLEEVE
+        for row in cn.get("current") or []
+    )
     cn_current_line = (
         f"- CN current execution: `{CN_TAPE_SLEEVE_ID}` active; A-share execution is right-side AI-infra tape leadership today"
         if cn_tape_ea
+        else f"- CN current execution: `{CN_AI_INFRA_PRODUCTION_SLEEVE}` active; source-reviewed AI-infra production names control A-share execution today"
+        if cn_ai_infra_ea
         else f"- CN oversold_contrarian LCB80: {fmt_pct(cn['metrics']['v2'].get('lcb80_pct'))}; freshness={cn.get('freshness', {}).get('v2', {}).get('state')}"
     )
     return "\n".join(
@@ -7684,7 +7960,7 @@ def render_factorlab_brief(payload: dict[str, Any]) -> str:
             "",
             "- 不能因为 HIGH/MOD、CORE、结构核心这些标签本身而给正常仓位；只有生产交易层才能给股票 R。",
             "- 没有 T+1/T+2 真实退出的 A股结果不能算胜率。",
-            "- 涨停模型在没有 9:25/9:35 数据前只能是 Radar。",
+            "- 非 AI-infra broad-market 信号不能进入 AI-infra 生产 R，也不能阻拦 AI-infra sleeve。",
         ]
     ).rstrip() + "\n"
 
@@ -8621,6 +8897,18 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         for row in ((us_ranker or {}).get("production_basket") or [])
         if row.get("symbol")
     ]
+    us_trade_plan_symbols = sorted(
+        {
+            str(row.get("symbol") or "").upper()
+            for row in [
+                *((us_ranker or {}).get("all_rows") or []),
+                *((us_ranker or {}).get("production_basket") or []),
+                *(us.get("current") or []),
+            ]
+            if row.get("symbol")
+        }
+    )
+    us_trade_plan = build_us_stock_trade_plan(args.us_db, us_trade_plan_symbols, as_of)
     cn_basket_symbols = [
         str(row.get("symbol") or "").upper()
         for row in ((cn_ranker or {}).get("production_basket") or [])
@@ -8652,6 +8940,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "benchmark_attribution": benchmark_attribution,
         "satellite_pool_report": satellite_pool_report,
         "ema_tape_overlay": ema_overlay,
+        "us_trade_plan": us_trade_plan,
         "fear_greed": load_fear_greed_payload(as_of.isoformat()),
         "options_anomaly_rows": load_options_anomaly_payload(as_of.isoformat()),
         "options_tenor_signals": load_options_tenor_signals(as_of.isoformat()),

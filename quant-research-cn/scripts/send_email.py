@@ -18,9 +18,11 @@ import argparse
 import base64
 import re
 from pathlib import Path
+from email.header import Header
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.image import MIMEImage
+from email.policy import SMTP
 from datetime import datetime
 
 import yaml
@@ -34,6 +36,7 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
 PROJECT_DIR = Path(__file__).resolve().parent.parent
 CREDENTIALS_FILE = PROJECT_DIR / "credentials.json"
 TOKEN_FILE = PROJECT_DIR / "token.json"
+EMAIL_POLICY = SMTP.clone(max_line_length=998)
 
 # Chart display order and Chinese titles
 CHART_TITLES = {
@@ -63,6 +66,15 @@ CHART_SECTION_MAP = {
     "sector_flow": "主题观察",
     "fund_flow_trend": "风险地图",
 }
+
+
+def _encode_subject(subject: str) -> str:
+    """Encode non-ASCII subjects so mail clients do not render mojibake."""
+    try:
+        subject.encode("ascii")
+        return subject
+    except UnicodeEncodeError:
+        return Header(subject, "utf-8").encode()
 
 
 def load_config(*, required: bool = True):
@@ -342,7 +354,7 @@ hr {{
 
     # Build multipart/related message (required for CID images)
     msg = MIMEMultipart("related")
-    msg["Subject"] = subject or f"A股量化研究日报 — {date_str}"
+    msg["Subject"] = _encode_subject(subject or f"A股量化研究日报 — {date_str}")
     msg["Bcc"] = ", ".join(recipients)
 
     # Alternative part: plain text + HTML
@@ -362,7 +374,7 @@ hr {{
         img.add_header("Content-Disposition", "inline", filename=cp.name)
         msg.attach(img)
 
-    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
+    raw = base64.urlsafe_b64encode(msg.as_bytes(policy=EMAIL_POLICY)).decode("utf-8")
     return {"raw": raw}
 
 

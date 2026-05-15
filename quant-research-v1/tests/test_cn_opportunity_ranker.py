@@ -234,6 +234,9 @@ class CnOpportunityRankerTests(unittest.TestCase):
                         "module": "CPO optical",
                         "current_pool": "核心候选",
                         "total_score": 92,
+                        # Production-grade evidence so enforce_expand keeps the row
+                        # under the production pool gate (added 2026-05-15).
+                        "evidence_state": "原文已证明: 800G CPO product roadmap and customer wins",
                     },
                     {
                         "asset_pool": "中国A股资产池",
@@ -244,6 +247,7 @@ class CnOpportunityRankerTests(unittest.TestCase):
                         "module": "光模块",
                         "current_pool": "候选池",
                         "total_score": 84,
+                        "evidence_state": "合理推论: optical module revenue mix",
                     },
                 ],
             )

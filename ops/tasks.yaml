@@ -490,6 +490,32 @@ tasks:
     outputs:
       - reports/review_dashboard/ai_infra_source_review_readiness
 
+  research.production_universe_refresh:
+    # Derive the evidence-confirmed subset of the AI infra research universe
+    # so the operator can see which names are eligible for the production
+    # basket. The rankers themselves filter via the in-memory gate, so this
+    # task is documentation-only — but it must run after readiness scoring
+    # and BEFORE main_strategy_v2_report (12:25) so the snapshot reflects
+    # today's promotions.
+    group: research
+    schedule: "7 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/generate_production_universe.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.production_universe_refresh.log
+    lock: ops/state/research.production_universe_refresh.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ai_infra/reports/production_universe_v1.jsonl
+      - ai_infra/reports/production_universe_v1.md
+
   research.ten_x_radar:
     group: research
     schedule: "12 12 * * 1-5"
@@ -641,6 +667,28 @@ tasks:
     outputs:
       - reports/review_dashboard/bubble_hedge_radar
 
+  research.victim_put_suggestions:
+    # Pairs each bubble-hedge victim with concrete OTM put contracts (delta
+    # -0.20 to -0.35, DTE 30-60 when available). Runs AFTER bubble_hedge_radar
+    # because it reads victims from bubble_hedge.json.
+    group: research
+    schedule: "16 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/score_victim_put_suggestions.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.victim_put_suggestions.log
+    lock: ops/state/research.victim_put_suggestions.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/bubble_hedge_radar
+
   research.options_tenor_radar:
     group: research
     schedule: "7 12 * * 1-5"
@@ -688,7 +736,14 @@ tasks:
       - --date
       - "{cst_date}"
       - --ai-infra-mode
-      - enforce
+      # enforce_expand combines two contracts: (1) filter incoming candidates
+      # to AI infra universe members AND (2) inject the full production pool
+      # (原文已证明 / 合理推论 names) so the ranker always sees the
+      # evidence-confirmed core (NVDA / AVGO / AMZN / GOOGL / MRVL / CRWV /
+      # ORCL / TSM). Without the inject step, days where main_strategy_v2's
+      # candidate filter only surfaces 待原文核验 radar names like
+      # MU / KC / MTSI produce 0R after the secondary evidence gate trips.
+      - enforce_expand
     log: ops/logs/research.main_strategy_v2_report.log
     lock: ops/state/research.main_strategy_v2_report.lock
     timeout_minutes: 60

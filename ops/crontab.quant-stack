@@ -44,6 +44,28 @@ QUANT_STACK_ROOT=/home/ivena/coding/quant-stack
 45 11 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ai_infra_source_ingest
 55 11 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ai_infra_promotion_plan
 5 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ai_supercycle_readiness
+0 6 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.cn_index_ingest
+5 6 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.satellite_index_ingest
+6 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.source_review_readiness
+7 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.production_universe_refresh
+12 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ten_x_radar
+9 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.evidence_card_drafts
+10 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.promotion_plan
+22 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ten_x_radar_strict
+5 8 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.fear_greed_ingest
+7 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.options_anomaly_radar
+10 6 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.wedge_instruments_ingest
+14 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.bubble_hedge_radar
+16 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.victim_put_suggestions
+7 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.options_tenor_radar
+8 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.options_anomaly_alerts
+25 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.main_strategy_v2_report
+27 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.production_basket_audit
+13 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.mean_reversion_radar
+11 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.promotion_history
+15 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ai_tape_cross_compare
+18 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.rebalance_history
+20 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.promotion_alpha_backtest
 
 # -- Watchdog --
 @reboot cd $QUANT_STACK_ROOT && ops/run_task.sh us.watchdog.reboot

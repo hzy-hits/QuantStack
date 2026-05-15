@@ -26,6 +26,13 @@ SATELLITE_US_ADRS: dict[str, str] = {
     "ASML.AS": "ASML",   # ASML Holding NV, NASDAQ-listed (primary US listing).
 }
 
+# Production-pool Alpha Factory sleeve. Members of the production universe
+# (evidence_state 原文已证明 / 合理推论) are *by definition* operator-approved
+# for execution, so we mint a sleeve_id that downstream rankers honour as a
+# valid Alpha Factory sleeve. Tape / risk / news still decide the actual R
+# size — this only opens the door past the alpha-sleeve gate.
+PRODUCTION_ALPHA_SLEEVE_ID = "ai_infra_production_core"
+
 
 @dataclass(frozen=True)
 class UniverseGateResult:
@@ -35,6 +42,7 @@ class UniverseGateResult:
     added_universe_count: int
     universe_symbol_count: int
     excluded_symbols: tuple[str, ...]
+    pool: str = "research"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -44,6 +52,7 @@ class UniverseGateResult:
             "added_universe_count": self.added_universe_count,
             "universe_symbol_count": self.universe_symbol_count,
             "excluded_symbols": list(self.excluded_symbols),
+            "pool": self.pool,
             "contract": "ai_infra_universe_only",
         }
 
@@ -104,6 +113,20 @@ def is_excluded_record(record: dict[str, Any]) -> bool:
     return "排除" in text or str(record.get("score_bucket") or "").lower() == "exclude"
 
 
+def is_production_grade(record: dict[str, Any]) -> bool:
+    """Production pool gate.
+
+    A record is production-grade when evidence_state shows the BFS edge has
+    cleared the G0-G2 review (原文已证明 or 合理推论). Records still flagged
+    待原文核验 / 证据不足 / 原文需核验 only / unscored stay in the research
+    pool — they belong on the radar but cannot be executed.
+    """
+    state = str(record.get("evidence_state") or "")
+    if not state:
+        return False
+    return "原文已证明" in state or "合理推论" in state
+
+
 def market_symbols_for_record(record: dict[str, Any], market: str) -> list[str]:
     market = market.upper()
     raw_symbols = split_tickers(record.get("ticker"))
@@ -134,10 +157,36 @@ def market_symbols_for_record(record: dict[str, Any], market: str) -> list[str]:
     return []
 
 
-def records_by_symbol(market: str, ai_infra_root: Path | None = None) -> dict[str, dict[str, Any]]:
+_VALID_POOLS = ("research", "production")
+
+
+def _resolve_pool(pool: str) -> str:
+    if pool not in _VALID_POOLS:
+        raise ValueError(f"unknown pool {pool!r}; expected one of {_VALID_POOLS}")
+    return pool
+
+
+def records_by_symbol(
+    market: str,
+    ai_infra_root: Path | None = None,
+    *,
+    pool: str = "research",
+) -> dict[str, dict[str, Any]]:
+    """Return a symbol->record map for the requested AI infra pool.
+
+    ``pool="research"`` (default) keeps backward-compatible behaviour: every
+    non-excluded record is returned. ``pool="production"`` restricts to
+    evidence-confirmed names per :func:`is_production_grade` — this is the
+    enforce-mode contract that prevents 待原文核验 ideas from leaking into the
+    daily production basket.
+    """
+    pool = _resolve_pool(pool)
+    production = pool == "production"
     by_symbol: dict[str, dict[str, Any]] = {}
     for record in load_records(ai_infra_root):
         if is_excluded_record(record):
+            continue
+        if production and not is_production_grade(record):
             continue
         for symbol in market_symbols_for_record(record, market):
             by_symbol.setdefault(symbol, record)
@@ -192,7 +241,16 @@ def enrich_candidate(candidate: dict[str, Any], record: dict[str, Any], *, marke
     out.setdefault("policy", "ai_infra_bfs_universe")
     out.setdefault("state", "AI Infra Universe Watch")
     out.setdefault("execution_source", "ai_infra_universe")
-    out.setdefault("alpha_factory_role", "ai_infra_rank_only")
+    production_grade = is_production_grade(record)
+    # Production-grade names auto-attach to the Alpha Factory production sleeve
+    # so the ranker's `alpha_sleeve_id not in EXECUTION_SLEEVES` watch gate
+    # opens. Watch-pool / radar names stay on "ai_infra_rank_only" — they
+    # cannot leave watch even with positive tape.
+    if production_grade:
+        out.setdefault("alpha_sleeve_id", PRODUCTION_ALPHA_SLEEVE_ID)
+        out.setdefault("alpha_factory_role", "execution_sleeve")
+    else:
+        out.setdefault("alpha_factory_role", "ai_infra_rank_only")
     out.setdefault("reason", "AI Infra BFS universe member; rank by price, flow, news, options and risk before any R.")
     if market.upper() == "CN":
         out.setdefault("narrative_group", "ai_infra")
@@ -239,8 +297,9 @@ def filter_and_enrich_candidates(
     *,
     market: str,
     ai_infra_root: Path | None = None,
+    pool: str = "research",
 ) -> tuple[list[dict[str, Any]], UniverseGateResult]:
-    by_symbol = records_by_symbol(market, ai_infra_root)
+    by_symbol = records_by_symbol(market, ai_infra_root, pool=pool)
     retained: list[dict[str, Any]] = []
     excluded: list[str] = []
     normalizer = normalize_cn_symbol if market.upper() == "CN" else normalize_us_symbol
@@ -261,6 +320,7 @@ def filter_and_enrich_candidates(
         added_universe_count=0,
         universe_symbol_count=len(by_symbol),
         excluded_symbols=tuple(sorted(set(excluded))),
+        pool=pool,
     )
 
 
@@ -270,9 +330,12 @@ def merge_with_universe_candidates(
     market: str,
     ai_infra_root: Path | None = None,
     include_all_universe: bool = True,
+    pool: str = "research",
 ) -> tuple[list[dict[str, Any]], UniverseGateResult]:
-    by_symbol = records_by_symbol(market, ai_infra_root)
-    retained, base_gate = filter_and_enrich_candidates(candidates, market=market, ai_infra_root=ai_infra_root)
+    by_symbol = records_by_symbol(market, ai_infra_root, pool=pool)
+    retained, base_gate = filter_and_enrich_candidates(
+        candidates, market=market, ai_infra_root=ai_infra_root, pool=pool
+    )
     seen = {str(row.get("symbol") or "").upper() for row in retained}
     added = []
     if include_all_universe:
@@ -286,4 +349,5 @@ def merge_with_universe_candidates(
         added_universe_count=len(added),
         universe_symbol_count=len(by_symbol),
         excluded_symbols=base_gate.excluded_symbols,
+        pool=pool,
     )

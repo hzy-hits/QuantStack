@@ -27,11 +27,17 @@ DEFAULT_AI_INFRA_ROOT = STACK_ROOT / "ai_infra"
 
 def _load_canonical_universe(
     ai_infra_root: Path = DEFAULT_AI_INFRA_ROOT,
+    *,
+    pool: str = "production",
 ) -> dict[str, set[str]]:
-    """Reload canonical universe membership per market.
+    """Reload canonical universe membership per market for the given pool.
 
     Uses the same gate module the rankers consume so audit semantics match.
     Returns {"US": set, "CN": set}. Empty dict if the gate module is unavailable.
+
+    Default ``pool="production"`` enforces the hard contract that production
+    basket entries must be evidence-confirmed (原文已证明 / 合理推论). Set
+    ``pool="research"`` for legacy / radar audits.
     """
     src_path = STACK_ROOT / "quant-research-v1" / "src"
     if str(src_path) not in sys.path:
@@ -41,8 +47,8 @@ def _load_canonical_universe(
     except ImportError:
         return {}
     return {
-        "US": set(gate.records_by_symbol("US", ai_infra_root=ai_infra_root)),
-        "CN": set(gate.records_by_symbol("CN", ai_infra_root=ai_infra_root)),
+        "US": set(gate.records_by_symbol("US", ai_infra_root=ai_infra_root, pool=pool)),
+        "CN": set(gate.records_by_symbol("CN", ai_infra_root=ai_infra_root, pool=pool)),
     }
 
 
@@ -82,7 +88,8 @@ def _check_payload(
             if symbol.upper() not in canonical_universe:
                 errors.append(
                     f"{market}: {symbol} in production_basket but NOT in canonical ai_infra universe "
-                    f"(reloaded from global_universe_v2.jsonl)"
+                    f"(reloaded from global_universe_v2.jsonl; pool gate likely "
+                    f"failed — evidence_state must contain 原文已证明 or 合理推论)"
                 )
 
     if strict:
@@ -152,6 +159,16 @@ def main() -> int:
         default=DEFAULT_AI_INFRA_ROOT,
         help="Root of ai_infra workspace (contains data/global_universe_v2.jsonl).",
     )
+    parser.add_argument(
+        "--pool",
+        choices=["production", "research"],
+        default="production",
+        help=(
+            "Which AI infra pool to audit production_basket against. "
+            "Default 'production' (evidence-confirmed only) is the hard "
+            "execution contract; 'research' is the legacy radar audit."
+        ),
+    )
     args = parser.parse_args()
 
     date_dir = args.dashboard_root / args.as_of
@@ -159,10 +176,15 @@ def main() -> int:
         print(f"audit: dashboard date directory missing: {date_dir}", file=sys.stderr)
         return 2
 
-    canonical = {} if args.no_canonical_check else _load_canonical_universe(args.ai_infra_root)
+    canonical = (
+        {}
+        if args.no_canonical_check
+        else _load_canonical_universe(args.ai_infra_root, pool=args.pool)
+    )
     if canonical:
         print(
-            f"audit: canonical universe loaded — US={len(canonical.get('US', set()))} "
+            f"audit: canonical universe (pool={args.pool}) loaded — "
+            f"US={len(canonical.get('US', set()))} "
             f"CN={len(canonical.get('CN', set()))} symbols"
         )
 

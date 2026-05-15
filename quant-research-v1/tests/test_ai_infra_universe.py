@@ -117,5 +117,83 @@ class AiInfraUniverseTests(unittest.TestCase):
             self.assertTrue(all(row["ai_infra_universe"] for row in rows))
 
 
+    def test_production_pool_filters_to_evidence_confirmed_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_universe(
+                root,
+                [
+                    {
+                        "asset_pool": "美国资产池",
+                        "market_country": "US",
+                        "ticker": "NVDA",
+                        "company": "NVIDIA",
+                        "bfs_depth": "D1",
+                        "module": "GPU",
+                        "current_pool": "核心池",
+                        "evidence_state": "原文已证明: data center segment strong",
+                    },
+                    {
+                        "asset_pool": "美国资产池",
+                        "market_country": "US",
+                        "ticker": "AVGO",
+                        "company": "Broadcom",
+                        "bfs_depth": "D1-D2",
+                        "module": "Custom ASIC",
+                        "current_pool": "核心池",
+                        "evidence_state": "合理推论+待原文核验: ASIC mix",
+                    },
+                    {
+                        "asset_pool": "美国资产池",
+                        "market_country": "US",
+                        "ticker": "AMD",
+                        "company": "AMD",
+                        "bfs_depth": "D1",
+                        "module": "GPU",
+                        "current_pool": "核心/候选池",
+                        "evidence_state": "原文需核验: Instinct segment metrics",
+                    },
+                    {
+                        "asset_pool": "美国资产池",
+                        "market_country": "US",
+                        "ticker": "FOO",
+                        "company": "Foo",
+                        "bfs_depth": "D5",
+                        "module": "speculative",
+                        "current_pool": "雷达池",
+                        "evidence_state": "证据不足: unverified",
+                    },
+                ],
+            )
+
+            research = universe.records_by_symbol("US", root, pool="research")
+            production = universe.records_by_symbol("US", root, pool="production")
+
+            self.assertEqual(set(research), {"NVDA", "AVGO", "AMD", "FOO"})
+            # Only 原文已证明 (NVDA) and 合理推论 (AVGO) clear the gate.
+            self.assertEqual(set(production), {"NVDA", "AVGO"})
+
+            # merge_with_universe_candidates threads pool param into the gate.
+            rows, gate = universe.merge_with_universe_candidates(
+                [{"symbol": "AMD"}],
+                market="US",
+                ai_infra_root=root,
+                include_all_universe=True,
+                pool="production",
+            )
+            symbols = {row["symbol"] for row in rows}
+            self.assertEqual(symbols, {"NVDA", "AVGO"})
+            self.assertEqual(gate.pool, "production")
+            # AMD candidate is dropped because it's not production-grade.
+            self.assertIn("AMD", gate.excluded_symbols)
+
+    def test_production_pool_rejects_unknown_pool_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_universe(root, [])
+            with self.assertRaises(ValueError):
+                universe.records_by_symbol("US", root, pool="bogus")
+
+
 if __name__ == "__main__":
     unittest.main()

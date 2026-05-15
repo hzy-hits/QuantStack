@@ -26,7 +26,11 @@ DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "cn_opportun
 DEFAULT_CN_DB = STACK_ROOT / "quant-research-cn" / "data" / "quant_cn_report.duckdb"
 CN_ALPHA_FACTORY_EXECUTION_SLEEVE = "cn_oversold_ev_positive"
 CN_TAPE_LEADERSHIP_SLEEVE = "cn_tape_leadership_continuation"
-CN_ALPHA_FACTORY_EXECUTION_SLEEVES = {CN_ALPHA_FACTORY_EXECUTION_SLEEVE, CN_TAPE_LEADERSHIP_SLEEVE}
+CN_ALPHA_FACTORY_EXECUTION_SLEEVES = {
+    CN_ALPHA_FACTORY_EXECUTION_SLEEVE,
+    CN_TAPE_LEADERSHIP_SLEEVE,
+    ai_infra_universe.PRODUCTION_ALPHA_SLEEVE_ID,
+}
 CN_OBSERVED_LIFECYCLE_SLEEVE = "cn_observed_lifecycle_prob"
 CN_EXECUTION_ALPHA_STATE = "positive_ev_setup"
 CN_CONSUMER_INDUSTRIES = {
@@ -1162,6 +1166,26 @@ def inverse_rank(value: Any) -> float | None:
     return 1.0 - clamp(parsed)
 
 
+def attach_mechanical_price_plan(row: dict[str, Any]) -> None:
+    """Fill a conservative stock plan when promoted AI-infra rows lack model fills."""
+    entry = first_number(row.get("close_now"), row.get("close"), row.get("reference_close"))
+    if entry is None or entry <= 0:
+        return
+    risk = first_number(row.get("risk_unit_pct"), row.get("atr_pct_14"), row.get("std20_ret"))
+    if risk is None or risk <= 0:
+        risk = 6.0
+    risk = max(3.0, min(float(risk), 8.0))
+    high = entry * (1.0 + min(risk, 8.0) * 0.25 / 100.0)
+    if not row.get("observation_entry_zone"):
+        row["observation_entry_zone"] = f"{round(entry, 2)}-{round(high, 2)}"
+    if not row.get("handling_line"):
+        row["handling_line"] = round(entry * (1.0 - risk / 100.0), 2)
+    if not row.get("first_target"):
+        row["first_target"] = round(entry * (1.0 + risk / 100.0), 2)
+    if first_number(row.get("risk_unit_pct")) is None:
+        row["risk_unit_pct"] = round(risk, 4)
+
+
 def enrich_base_rows(
     candidates: list[dict[str, Any]],
     market: dict[str, dict[str, Any]],
@@ -1270,6 +1294,7 @@ def enrich_base_rows(
         else:
             combined["execution_source"] = "rank_only"
             combined["alpha_factory_role"] = "rank_only"
+        attach_mechanical_price_plan(combined)
         rows.append(combined)
     return rows
 
@@ -2013,14 +2038,16 @@ def build_ranker_payload(
     ai_infra_gate = None
     if ai_infra_mode != "off":
         include_all = ai_infra_mode in {"expand", "enforce_expand"}
+        pool = "production" if ai_infra_mode in {"enforce", "enforce_expand"} else "research"
         candidates, gate = ai_infra_universe.merge_with_universe_candidates(
             candidates,
             market="CN",
             ai_infra_root=ai_infra_root,
             include_all_universe=include_all,
+            pool=pool,
         )
         ai_infra_gate = gate.as_dict()
-        candidate_status = f"{candidate_status}+ai_infra_{ai_infra_mode}"
+        candidate_status = f"{candidate_status}+ai_infra_{ai_infra_mode}_{pool}"
 
     symbols = sorted({normalize_cn_symbol(row.get("symbol")) for row in candidates if normalize_cn_symbol(row.get("symbol"))})
     industry_by_symbol = {
