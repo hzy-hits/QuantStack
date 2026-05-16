@@ -34,9 +34,29 @@ from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.policy import SMTP
+from email.utils import formataddr
 
 
 EMAIL_POLICY = SMTP.clone(max_line_length=998)
+
+
+def _format_sender(name: str | None, addr: str) -> str:
+    """Build an RFC 5322 From value with an RFC 2047-encoded display name.
+
+    Sending `From: me` lets Gmail fill the display name server-side; when the
+    account name is non-ASCII (e.g. 黄振宇) some delivery paths surface it as
+    raw UTF-8 bytes → mojibake (é»„æŒ¯å®‡). Setting the header ourselves with an
+    explicitly encoded name removes that dependency.
+    """
+    if not addr or addr == "me":
+        return addr or "me"
+    if not name:
+        return addr
+    try:
+        name.encode("ascii")
+        return formataddr((name, addr))
+    except UnicodeEncodeError:
+        return formataddr((str(Header(name, "utf-8").encode()), addr))
 
 
 def _encode_subject(subject: str) -> str:
@@ -76,6 +96,19 @@ def load_recipients(config_path: str = "config.yaml") -> list[str]:
     if not recipients or recipients == ["you@example.com"]:
         raise ValueError("No recipients configured. Edit config.yaml → reporting.recipients")
     return recipients
+
+
+def load_sender_name(config_path: str = "config.yaml") -> str | None:
+    """Optional sender display name from config.yaml → reporting.sender_name."""
+    p = Path(config_path)
+    if not p.exists():
+        return None
+    try:
+        cfg = yaml.safe_load(p.read_text()) or {}
+    except yaml.YAMLError:
+        return None
+    name = (cfg.get("reporting", {}) or {}).get("sender_name")
+    return str(name).strip() or None if name else None
 TOKEN_PATH = Path("token.json")
 CREDENTIALS_PATH = Path("credentials.json")
 
@@ -390,17 +423,55 @@ def build_email_message(
     sender: str = "me",
     bcc: list[str] | None = None,
 ) -> MIMEMultipart:
-    """Build a multipart/related MIME message with inline chart images.
+    """Build a MIME message; structure depends on whether inline images exist.
 
-    Uses the RFC 2387 structure Gmail expects:
+    When there ARE inline charts, use the RFC 2387 nested structure:
         multipart/related
         ├── multipart/alternative
-        │   ├── text/plain (fallback)
-        │   └── text/html  (with cid: refs)
-        ├── image/png (Content-ID)
-        └── ...
+        │   ├── text/plain
+        │   └── text/html (with cid: refs)
+        └── image/png (Content-ID)
+
+    When there are NO charts, the top level is `multipart/alternative`
+    directly. A `multipart/related` wrapper with zero related parts is what
+    several Chinese mail clients (QQ Mail / 163 / Foxmail) mishandle — they
+    fail to descend into the inner alternative and render the raw base64 body
+    as 乱码. Only wrap in `related` when an image actually needs relating.
     """
-    msg = MIMEMultipart("related")
+    # Resolve which charts are real, attachable images first.
+    images: list[tuple[MIMEImage, str]] = []
+    for chart_path in chart_paths:
+        path = Path(chart_path)
+        if not path.exists():
+            continue
+        cid = chart_cid_map.get(str(path))
+        if not cid:
+            continue
+        mime_type, _ = mimetypes.guess_type(str(path))
+        if not mime_type or not mime_type.startswith("image/"):
+            mime_type = "image/png"
+        with open(path, "rb") as f:
+            img = MIMEImage(f.read(), _subtype=mime_type.split("/")[1])
+        img.add_header("Content-ID", f"<{cid}>")
+        img.add_header("Content-Disposition", "inline", filename=path.name)
+        images.append((img, path.name))
+
+    # Plain-text fallback (strip tags roughly).
+    plain = re.sub(r'<[^>]+>', '', html)
+    plain = re.sub(r'\n{3,}', '\n\n', plain).strip()
+    alt_part = MIMEMultipart("alternative")
+    alt_part.attach(MIMEText(plain[:5000], "plain", "utf-8"))
+    alt_part.attach(MIMEText(html, "html", "utf-8"))
+
+    if images:
+        msg: MIMEMultipart = MIMEMultipart("related")
+        msg.attach(alt_part)
+        for img, _name in images:
+            msg.attach(img)
+    else:
+        # No inline images → the alternative IS the message.
+        msg = alt_part
+
     msg["Subject"] = _encode_subject(subject)
     msg["From"] = sender
     if to:
@@ -409,36 +480,6 @@ def build_email_message(
         msg["To"] = "undisclosed-recipients:;"
     if bcc:
         msg["Bcc"] = ", ".join(bcc)
-
-    # Wrap HTML in multipart/alternative (required by Gmail for CID images)
-    alt_part = MIMEMultipart("alternative")
-    # Plain-text fallback (strip tags roughly)
-    plain = re.sub(r'<[^>]+>', '', html)
-    plain = re.sub(r'\n{3,}', '\n\n', plain).strip()
-    alt_part.attach(MIMEText(plain[:5000], "plain", "utf-8"))
-    alt_part.attach(MIMEText(html, "html", "utf-8"))
-    msg.attach(alt_part)
-
-    # Inline chart images
-    for chart_path in chart_paths:
-        path = Path(chart_path)
-        if not path.exists():
-            continue
-
-        cid = chart_cid_map.get(str(path))
-        if not cid:
-            continue
-
-        mime_type, _ = mimetypes.guess_type(str(path))
-        if not mime_type or not mime_type.startswith("image/"):
-            mime_type = "image/png"
-
-        with open(path, "rb") as f:
-            img = MIMEImage(f.read(), _subtype=mime_type.split("/")[1])
-
-        img.add_header("Content-ID", f"<{cid}>")
-        img.add_header("Content-Disposition", "inline", filename=path.name)
-        msg.attach(img)
 
     return msg
 
@@ -512,6 +553,7 @@ def prepare_email(
     to: str = "",
     subject: str = "",
     bcc: list[str] | None = None,
+    sender: str = "me",
 ) -> tuple[MIMEMultipart, dict[str, str]]:
     """
     Prepare email message from a markdown report file + chart images.
@@ -531,7 +573,9 @@ def prepare_email(
     html = _md_to_html(md_text, chart_cid_map, chart_paths)
 
     # Build MIME message
-    msg = build_email_message(to, subject, html, chart_paths, chart_cid_map, bcc=bcc)
+    msg = build_email_message(
+        to, subject, html, chart_paths, chart_cid_map, sender=sender, bcc=bcc
+    )
 
     return msg, chart_cid_map
 
@@ -563,17 +607,22 @@ def send_report_email(
     service = _get_gmail_service(credentials_path, token_path)
     msg_ids = []
 
+    # Resolve the authenticated account address once — used both as the
+    # visible To on Bcc sends AND as the explicit From address so we never
+    # rely on Gmail filling an unencoded non-ASCII display name.
+    account_addr = ""
+    try:
+        account_addr = (
+            service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        )
+    except Exception as e:
+        log.warning("gmail_profile_lookup_failed", error=str(e))
+
     # Gmail API rejects an empty/placeholder To header on single-message Bcc sends.
-    # Use the authenticated sender address as the visible To while keeping recipients
-    # hidden in Bcc.
-    visible_to = direct_to
-    if not visible_to and bcc_recipients:
-        try:
-            visible_to = (
-                service.users().getProfile(userId="me").execute().get("emailAddress", "")
-            )
-        except Exception as e:
-            log.warning("gmail_profile_lookup_failed", error=str(e))
+    visible_to = direct_to or account_addr
+
+    # Explicit, RFC 2047-encoded From — fixes garbled sender name (é»„æŒ¯å®‡).
+    sender = _format_sender(load_sender_name(config_path), account_addr or "me")
 
     # Set socket-level timeout to prevent indefinite hangs on Gmail API calls
     old_timeout = socket.getdefaulttimeout()
@@ -585,6 +634,7 @@ def send_report_email(
             visible_to,
             subject,
             bcc=bcc_recipients,
+            sender=sender,
         )
         result = service.users().messages().send(
             userId="me", body=_encode_message(msg)

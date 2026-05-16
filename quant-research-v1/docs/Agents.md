@@ -1,247 +1,190 @@
-# Agents.md — Philosophy and Instructions for Agents Reading the Payload
+# Agents.md — Philosophy and Instructions for Agents Working on the AI-Infra Fund Pipeline
 
-This file is for any LLM agent (Claude Code, Codex, GPT-4, or any other) that is given a `reports/{date}_payload.md` file to narrate. Read this before reading the payload.
-
----
-
-## What This System Is
-
-A daily US equities quantitative research pipeline. It:
-
-1. Fetches market data (prices, options, news, SEC filings, macro, crowd probabilities)
-2. Runs probability and risk mathematics on the data
-3. Filters the universe to 10-20 items worth attention today
-4. Outputs a structured Markdown payload — **this file you are about to read**
-
-You are the narrative layer. You read the facts and write the human-readable report.
-
-Production framing: US stock decisions use price + news/event + options/flow jointly. Options explain confirmation, skew, liquidity, and expected move; they are not the default traded instrument unless the payload explicitly says so. Portfolio language should separate long alpha from beta hedge and residual risk attribution instead of presenting a naked ranked-stock list.
-
-## What the Program Does. What You Do.
-
-| Program | You (agent) |
-|---|---|
-| Fetches all data | Read only what is in the payload |
-| Computes all numbers | Explain numbers in plain English |
-| Ranks items by notability | Narrate in payload rank order |
-| Computes probabilities | Interpret what probabilities mean |
-| Flags data gaps | Reduce confidence language accordingly |
-| Identifies market context | Connect individual items to the backdrop |
-
-**You never:**
-- Invent, estimate, interpolate, or round into a number not in the payload
-- Fetch additional data or reference external events not mentioned
-- Make buy, sell, or hold recommendations
-- State or imply high confidence when the payload flags uncertainty
+This file is for any agent (Claude Code, Codex, GPT, or a human) that reads the
+daily report, narrates it, or modifies the pipeline. Read this first. It is the
+philosophy spine — every script, prompt, and report section should be coherent
+with what is written here.
 
 ---
 
-## How to Read the Payload
+## 1. What This System Is
 
-### Tier 1 — Market Context (always present, read first)
+QuantStack is an **AI-infrastructure specialist fund research pipeline**. It is
+no longer a broad-market scanner. The mandate is narrow on purpose:
 
-The `market_context` section gives you the backdrop for everything else. Before writing about any individual item, understand:
+> Find, verify, and size positions in the supply chain that the AI build-out
+> depends on — and know exactly when to stop buying and start hedging.
 
-- Are major indices (SPY/QQQ/IWM) up or down, and by how much? Is small cap (IWM) diverging from large cap?
-- What is VIX doing? Is it elevated (>20), spiking, or calm?
-- Which sectors are leading and which are lagging? (All 11 sector ETFs are always shown)
-- Are rates rising or falling? Is HY credit spread widening (stress signal)?
-- What are the Polymarket crowd probabilities saying about macro events?
-- What fraction of the S&P 500 is above their 200MA? (market breadth health)
+The daily product is two reports: `us_daily_report.md` and `cn_daily_report.md`
+(under `reports/review_dashboard/main_strategy_v2/{date}/`). They are
+**deterministic, program-generated markdown** — there is no LLM in the
+narration loop. The program computes everything; an agent's job is to *audit,
+extend, and explain* — never to invent numbers.
 
-This context tells you whether individual moves are idiosyncratic or part of a broad market event.
-
-### Tier 2 — Notable Items (grouped by signal confidence)
-
-Items are grouped into three tiers based on multi-source signal classification:
-
-**HIGH CONFIDENCE** — 2+ sources (options, momentum, event) aligned in the same direction, no conflicts. These deserve a trade thesis.
-
-**MODERATE** — Partial alignment or weaker conviction. Worth monitoring, not yet actionable.
-
-**WATCH / DIVERGENCE** — Conflicting sources or insufficient data. Flag the contradiction; do not imply a direction.
-
-Each item includes:
-
-- **Signal classification**: `signal_type`, `confidence`, `direction`, `direction_score`, per-source signed scores and quality weights
-- **Score and primary reason**: the composite notability score and which dimension drove it
-- **Price context**: today's move, volume, ATR-based daily risk in dollars
-- **Momentum probabilities** (from `momentum_risk` module): `trend_prob`, `p_upside`, `p_downside`, `regime`, `z_score`, `strength_bucket`
-  - These are historical base rates: P(5D return > 0 | regime, vol_bucket)
-- **Options-implied analysis** (when available):
-  - Probability cone: lognormal 1σ/2σ price ranges (risk-neutral — NOT real-world odds)
-  - IV skew at 5% OTM moneyness (>1.0 = market fears downside more)
-  - Directional bias signal (bullish/bearish/neutral from skew + P/C ratio)
-  - Chain liquidity score (good/fair/poor)
-  - Unusual options activity (strikes where volume >> open interest)
-- **Earnings probabilities** (from `earnings_risk` module, when present): `p_upside`, `p_downside`, `n_obs`, `surprise_quintile`, `expected_move_pct`
-- **News**: recent headlines (Finnhub)
-- **SEC filings**: recent 8-K filings with plain-English item descriptions
-- **Index changes**: S&P 500 / Nasdaq 100 additions or removals (forced passive flows)
-- **Uncertainty flags**: `low_sample_size`, `missing_options`, `stale_macro`, `surprise_unknown`, etc.
+The AI book is the **absolute mainline**. Broad-market indices, macro, and
+sector context appear only as a compressed background section near the end of
+the report. If a change makes the report more about broad market and less
+about the AI-infra book, it is wrong.
 
 ---
 
-## Probability Interpretation Guide
+## 2. The Gate Stack — How a Name Becomes Tradable
 
-### Two probability frameworks (never merge them)
+A ticker is not "tradable" because it looks good on a chart. It must clear four
+gates, in order. Every gate is a hard filter; tape/price only decides *timing*
+within the names that already passed.
 
-The payload contains two distinct probability families. They answer different questions and must be presented side-by-side, never combined into a single number.
-
-| Framework | Source | Question answered | Label in payload |
+| # | Gate | Where | Pass condition |
 |---|---|---|---|
-| Historical base rate | `momentum_risk` / `earnings_risk` | P(5D return > 0 \| regime, vol_bucket) | `trend_prob`, `p_upside` |
-| Options-implied | `options_analysis` | Where does the market price the stock ending up? | Probability cone (1σ/2σ ranges) |
+| 1 | **Universe pool** | `ai_infra_universe.py` | Member of `ai_infra/data/global_universe_v2.jsonl`, not 排除池 |
+| 2 | **Evidence gate** | `is_production_grade()` | `evidence_state` contains `原文已证明` or `合理推论` (G0-G2 cleared) |
+| 3 | **Alpha Factory sleeve** | `production_tier()` | Carries a promoted sleeve id (production names auto-attach `ai_infra_production_core`) |
+| 4 | **Risk regime gate** | `score_risk_regime_engine.py` | Hedge/Wedge/Confirm/Press multiplier scales the new-add R |
 
-Write it as: *"Historically, stocks in this regime/volume context have had a positive 5D return 55% of the time. Meanwhile, the options market prices a 68% probability of the stock staying between $104 and $127 over the next 14 days. These are different measures — one is backward-looking base rate, the other is risk-neutral market pricing."*
+- **Research pool** = every BFS candidate (the radar). **Production pool** =
+  only names that cleared gate 2. Rankers in `enforce`/`enforce_expand` mode
+  use the production pool; the research pool stays radar-only.
+- A name still on `待原文核验` / `证据不足` belongs on the radar and can be
+  discussed, but **cannot receive R**. Tape strength alone never promotes it.
+- This is the methodology's core discipline: **evidence before exposure.**
 
-### Momentum probabilities
+---
 
-`trend_prob` / `p_upside` from the momentum module is:
-> P(5-day forward return > 0 | regime, volume_bucket)
+## 3. The BFS Dependency Framework
 
-where `regime` is `trending` / `mean_reverting` / `noisy` (from lag-1 return autocorrelation) and `vol_bucket` is relative volume tertile (`low` / `mid` / `high`).
+The universe is built by breadth-first search over the AI compute dependency
+graph, rooted at token demand (OpenAI / Anthropic / Gemini):
 
-Write it as: *"In trending regimes with elevated volume, this symbol type has had a positive 5-day return 68% of the time historically (n=142, 90% CI: 61–74%)."*
+```
+D0  Labs / clouds / model demand        (OpenAI, Anthropic, hyperscalers)
+D1  Compute & accelerators              (NVDA, AMD, AVGO custom ASIC)
+D2  Memory / networking / optical       (HBM, CPO, 800G/1.6T, SerDes)
+D3  Chip equipment / packaging / test   (CoWoS, substrate, metrology)
+D4  Data-center / power / cooling       (NeoCloud, firm power, liquid cooling)
+D5  Raw inputs / second-order suppliers
+```
 
-### Options-implied probability cone
+`bfs_depth` and `dependency_edge` (客户边/BOM边/技术边/现金流边/产能边) are how
+a candidate justifies its place. Shallow depth + multiple edges = closer to the
+bottleneck = higher conviction. A name with no traceable edge to token demand
+does not belong in the universe.
 
-The probability cone shows lognormal 1σ/2σ price ranges derived from ATM implied volatility:
-> S × exp(±σ × √T) for 1σ; S × exp(±2σ × √T) for 2σ
+---
 
-**These are risk-neutral ranges, NOT real-world odds.** They represent what the market is pricing, not what will happen. Always include this caveat.
+## 4. Options as Duration / Tenor Insight
 
-Write it as: *"The options market implies a 68% probability of the stock staying between $104 and $127 by March 21 (14 days). The 2σ range extends to $93–$139. These are risk-neutral ranges from ATM IV of 65%, not real-world forecasts."*
+Options are **never the traded instrument** in the daily basket — they are
+evidence about timing, positioning, and asymmetric risk. Read them three ways:
 
-### Signal classification
+- **Far-OTM anomaly** (`score_options_anomaly_radar.py`): unusually heavy
+  far-OTM calls (delta ≤ 0.20, vol ≫ OI) can signal a short-squeeze setup or
+  informed positioning ("老鼠仓"). Heavy far-OTM puts signal selling pressure
+  or a hedge being laid. Flagged tickers feed the source-review queue's
+  counter-evidence column.
+- **Multi-tenor structure** (`score_options_tenor_radar.py`): the chain is
+  bucketed weekly / biweekly / monthly / quarterly / half-year / LEAPS. Where
+  the volume sits tells you the *horizon* of the conviction. Short-dated call
+  walls = gamma/tactical; long-dated LEAPS calls = structural / insider-tilt.
+- **Victim puts** (`score_victim_put_suggestions.py`): for each bubble-hedge
+  victim, the concrete OTM put contract (delta -0.20 to -0.35, DTE 30-60) that
+  expresses the downside — defined max loss = premium. Never short outright.
 
-Each item receives a multi-source signal classification with:
-- `confidence`: HIGH / MODERATE / LOW / NO_SIGNAL
-- `direction`: long / short / neutral
-- `direction_score`: quality-weighted signed score in [-1, 1]
-- Per-source breakdown: options, momentum, event — each with signed score and quality weight
+Duration matters: a fat multiple is a long-duration asset. When the discount
+rate rises, the NPV of 2030 cash flows compresses first. The options surface
+prices that risk before the stock does.
 
-**How to narrate by tier:**
+---
 
-| Confidence | Agent should write... |
+## 5. The Risk Regime — Hedge / Wedge / Confirm / Press
+
+This is the fund's bubble-survival doctrine. You do **not** short the thing
+going parabolic. You find the wedge, buy puts on the victim, and wait for
+confirmation before you press. `score_risk_regime_engine.py` turns this into a
+discrete daily state with a hard R multiplier on the AI-infra book:
+
+| State | Trigger | AI-infra new-add R | Posture |
+|---|---|---|---|
+| **HEDGE** | tape healthy, wedge not biting | `1.0x` | baseline; carry small SPX/HYG hedge |
+| **WEDGE** | rates up (TLT 20d ≤ -2%) / credit widening / SMH↔TLT corr ≤ -0.5 | `0.6x` | keep buying smaller; hold TBT / TLT put-spread |
+| **CONFIRM** | SMH lost EMA20 but holds EMA50, or extreme greed + wedge biting | `0.4x` | freeze adds to stretched names; prep trim list |
+| **PRESS** | SMH lost EMA50, or trendline break | `0.0x` | freeze new adds; press victim shorts |
+
+- The **wedge** is the trend that kills the bubble (rates), not the bubble
+  itself. You go long the wedge to protect the book.
+- The **victim** is the convex-to-downside name next to the bubble that cannot
+  survive a *pause* — cheap vol, levered, evidence-thin.
+- **Confirmation** is a trendline *break*, not a dip. Patience is the edge.
+- The gate multiplier applies *after* basket caps — it is the final word on
+  book size. Caps define the maximum; the regime shrinks it.
+
+---
+
+## 6. How to Read the Report
+
+Section order is the priority order. AI-infra first, background last.
+
+1. **可交易名单** — the production basket. Each row cleared all four gates.
+   Size is in R; entry/stop/target and hedge instrument are explicit.
+2. **逐票复核** — per-name review: why it ranked, evidence state, tape.
+3. **风控引擎 (Hedge/Wedge/Confirm/Press)** — current regime + R multiplier.
+   This gates everything above it.
+4. **恐惧贪婪 / 期权异常 / 期权多时段** — sentiment + options timing context.
+5. **Bubble Hedge — Wedge/Victim/Confirmation** — the descriptive layers.
+6. **AI 证据 / 供应链账本 / 10x 雷达 / 层归因** — the research depth.
+7. **Source Review Calendar** — the evidence pipeline feeding the universe.
+8. **Benchmark Snapshot / AI Book vs Benchmark** — broad-market *background*.
+
+---
+
+## 7. Program Computes. Agent Narrates.
+
+| Program does | Agent does |
 |---|---|
-| HIGH | A trade thesis: (1) WHY this setup exists (macro + micro catalyst), (2) WHAT could go wrong (risk scenarios that invalidate the thesis). Be specific. |
-| MODERATE | Directional lean with the probability cone context. "The data leans bullish but conviction is moderate because..." |
-| LOW / divergence | Name the contradiction explicitly. "Options are pricing bearish (P/C 4.25, skew 1.3) while momentum is bullish (5D +5%). This divergence suggests..." |
-| NO_SIGNAL | Brief mention only. "Ranked by notability, no directional signal from available data." |
+| Fetches data, runs all math | Reads only what is in the payload |
+| Applies the four gates | Explains *why* a name passed or was held |
+| Sizes R, computes the regime | Interprets what the regime means for the book |
+| Flags evidence gaps | Reduces confidence language accordingly |
 
-**Never say "high confidence signal" for a MODERATE or LOW item.** Match your language to the tier.
-
-### Earnings probabilities
-
-`p_upside` from the earnings module is:
-> P(5-day excess return vs SPY > 0 | surprise_quintile, pre-event regime, sector)
-
-This is a hierarchical estimate. If `n_obs` is small (< 10), say so. If `surprise_unknown: true` is flagged, the estimate uses sector/global priors — not the specific company's history.
-
-Write it as: *"Based on 23 historical events for this company in the 'beat' surprise bucket, there is a 71% historical rate of positive 5-day outperformance vs SPY (90% CI: 52–86%)."*
-
-### Bonferroni p-values and strength buckets
-
-| `strength_bucket` | What it means | Language to use |
-|---|---|---|
-| `strong` | Bonferroni p ≤ 0.01, CI tight | "statistically notable after multiple-testing correction" |
-| `moderate` | Bonferroni p ≤ 0.05 | "moderately significant after correction" |
-| `weak` | Bonferroni p ≤ 0.10 | "weakly significant; interpret cautiously" |
-| `inconclusive` | Everything else | "statistically inconclusive" — do not imply edge |
-
-Never say "strong signal" when `strength_bucket` is `weak` or `inconclusive`.
-
-### Polymarket probabilities
-
-These are crowd-implied prediction-market odds, not model forecasts. They reflect collective market participant beliefs. Use them as sentiment context:
-> *"Polymarket crowd currently implies a 34% probability of a Fed rate cut in May."*
-
-Do not conflate with the model's own probability outputs.
-
-### Missing or stale data
-
-If a field is null, missing, or flagged as stale:
-- Say it plainly: "Options data is unavailable for this symbol."
-- Reduce confidence: "Without options implied vol, we cannot assess whether the options market is pricing an unusual move."
-- Do not substitute estimates or imply the data exists.
+**Never:**
+- Invent, estimate, or round a number not in the payload.
+- Recommend buying a name still on `待原文核验`.
+- Imply the risk regime is calmer than the gate says.
+- Promote a name on tape strength alone.
 
 ---
 
-## Structural Context (SEPA / Trend Template)
+## 8. System Prompt (for programmatic narration)
 
-Each equity item may include `trend_template` facts. These are computed structural properties — not buy/sell criteria. Use them to enrich the narrative context:
-
-- `conditions_met: 6/8` means the stock meets most of Minervini's trend template criteria (price above key moving averages, 200MA trending up, close to 52-week highs)
-- `stage: 2` means the stock is in an advancing stage — not basing, not topping
-- `vcp_contraction: 3` means the volatility contraction pattern has completed three compression legs (decreasing ATR over successive windows)
-- `rs_rank: 87` means this stock has outperformed 87% of the universe over the lookback period
-
-Use these to say: *"The stock is in a stage 2 advance, meeting 6 of 8 trend template criteria, with a 3-contraction VCP suggesting supply is drying up near the 52-week high."* Then connect this to whether the probabilities and options market support the picture.
-
-The agent decides what the structural facts mean in the context of all the other evidence. The program never uses these to block or promote items — that's your job.
-
----
-
-## Output Format
-
-1. **Executive Summary** — exactly 3 sentences: market regime today, strongest signal finding, key risk or uncertainty
-
-2. **Market Context** — explain Tier 1 data: index moves, VIX, sector rotation, rates, commodities, Polymarket
-
-3. **HIGH CONFIDENCE — Trade Theses** — For each HIGH item, write a 2-paragraph thesis:
-   - Paragraph 1: WHY this setup exists — connect the macro backdrop, micro catalyst, and what the options market is pricing
-   - Paragraph 2: WHAT could go wrong — specific risk scenarios that would invalidate the thesis
-   - Include the probability cone context (where the market expects the stock to end up)
-   - Do NOT repeat raw numbers — interpret what they mean for someone deciding whether to act
-
-4. **MODERATE — Directional Leans** — Briefer format: one paragraph per item with the directional lean, probability cone, and the key uncertainty that keeps it from HIGH
-
-5. **WATCH / Divergence** — Name contradictions explicitly. "Options say X while momentum says Y." These are attention items, not action items.
-
-6. **Cross-Asset / Universe Context** — sector divergences, macro connections across items, breadth
-
-7. **Risks and Data Quality** — what data was missing, stale, or low-sample; which conclusions should be discounted; what event risks are not modeled (gaps, weekend risk, assignment risk)
-
----
-
-## System Prompt (for programmatic use)
-
-If calling an agent API rather than pasting the payload manually, prepend this system prompt:
+If feeding the report to an LLM for a second-opinion narrative, prepend:
 
 ```
-You are the narrative layer for a daily quantitative research payload.
+You are the narrative layer for an AI-infrastructure specialist fund's daily
+research report. The report is already computed and gated — you explain it,
+you do not re-decide it.
 
-Use only the numbers, symbols, dates, rankings, and facts present in the payload. Do not invent, estimate, backfill, or round into a new number that is not explicitly present. If data is missing, stale, contradictory, or flagged as low quality, say so plainly and reduce confidence. This is research only, not financial advice.
+Mandate: the AI-infra book is the absolute mainline. Broad market is background.
 
-How to read the payload:
-- Items are grouped by signal confidence: HIGH, MODERATE, LOW/WATCH. Match your language to the tier.
-- `score` ranks notability; it is not a forecast.
-- Signal classification: `confidence` (HIGH/MODERATE/LOW/NO_SIGNAL), `direction` (long/short/neutral), `direction_score` (quality-weighted signed score), per-source breakdown (options, momentum, event).
-- Two probability frameworks exist side-by-side — never merge them:
-  - Historical base rates (`trend_prob`, `p_upside` from momentum_risk): P(5D return > 0 | regime, vol_bucket)
-  - Options-implied probability cone (1σ/2σ lognormal ranges from ATM IV): risk-neutral terminal ranges, NOT real-world odds
-- Earnings probabilities (`p_upside` from earnings_risk): P(5D excess return > 0 | surprise_quintile, regime, sector)
-- Polymarket probabilities are crowd-implied prediction-market odds. Use them as sentiment context only.
-- `strength_bucket` values: strong / moderate / weak / inconclusive. Never imply stronger language than the bucket.
-- If `n_obs < 10` or `surprise_unknown: true`, explicitly state that confidence is low.
-- Options-implied data: always caveat as risk-neutral. "The market prices..." not "there is a 68% chance..."
-- Do not mention tickers, catalysts, sectors, comparisons, or macro claims not present in the payload.
+Hard rules:
+- Use only numbers, tickers, dates, and states present in the report.
+- A name is tradable only if it cleared all four gates (universe pool →
+  evidence gate 原文已证明/合理推论 → Alpha Factory sleeve → risk regime).
+  Never imply a 待原文核验 name is tradable.
+- The risk regime (HEDGE/WEDGE/CONFIRM/PRESS) gates book size. Never narrate a
+  posture looser than the stated regime.
+- Options are evidence about timing and asymmetric risk, never the traded
+  instrument. Far-OTM anomalies = positioning signal. Tenor = conviction
+  horizon. Victim puts = defined-risk downside expression.
+- The wedge is rates, not the bubble. Do not suggest shorting the parabola.
+- This is research, not financial advice.
 
-Output format:
-1. Executive Summary: exactly 3 sentences.
-2. Market Context.
-3. HIGH CONFIDENCE — Trade Theses: 2-paragraph thesis per item (WHY it exists, WHAT could go wrong).
-4. MODERATE — Directional Leans: one paragraph per item, cone context, key uncertainty.
-5. WATCH / Divergence: name contradictions explicitly.
-6. Cross-Asset / Universe Context.
-7. Risks and Data Quality.
-
-Tone: direct, opinionated, institutional. Do NOT repeat numbers — interpret what they mean. Do NOT list items sequentially — group by theme within each tier. Say what the data implies, not just what it shows.
+Output: (1) regime + book posture in 2 sentences; (2) the production basket —
+why each name cleared the gates; (3) the wedge/victim/confirmation read;
+(4) evidence gaps and what is still 待原文核验.
 ```
 
 ---
 
-*This file is part of the quant-research-v1 pipeline. See also:*
-- *`CLAUDE.md` — developer instructions and known bugs*
-- *`QUANT_BOT_DESIGN.md` — full system design and probability architecture*
+*Companion docs:*
+- *`CLAUDE.md` — developer instructions and pipeline architecture*
+- *`ai_infra/docs/` — BFS methodology, G0-G4 evidence gates, financials/options methodology*
+- *`CLAUDE_HANDOFF.md` — current pipeline state and follow-ups*

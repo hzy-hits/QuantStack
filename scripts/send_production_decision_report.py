@@ -129,6 +129,28 @@ def render_standalone_from_json(as_of: str, market: str) -> Path:
 
 
 def generate_report(as_of: str, start: str) -> None:
+    # Refresh the bubble-hedge + risk-regime artifacts first so the report's
+    # Hedge/Wedge/Confirm/Press gate reflects today's tape. These run on a
+    # different cron cadence; refreshing here keeps the emailed report fresh
+    # regardless of when the radar cron last fired. Non-fatal if they fail —
+    # run_main_strategy_v2 degrades the gate to 1.0x when artifacts are stale.
+    for label, script in (
+        ("bubble hedge radar", "score_bubble_hedge_radar.py"),
+        ("risk regime engine", "score_risk_regime_engine.py"),
+    ):
+        try:
+            subprocess.run(
+                [sys.executable, str(STACK_ROOT / "scripts" / script), "--as-of", as_of],
+                cwd=STACK_ROOT,
+                check=True,
+            )
+        except subprocess.CalledProcessError as exc:  # noqa: PERF203
+            print(f"warn: {label} refresh failed ({exc}); report will use stale/default gate")
+
+    # Pin --ai-infra-mode explicitly. run_main_strategy_v2_backtest.py infers
+    # enforce_expand only when default DBs are used; passing it here removes
+    # the implicit dependency so the emailed report always carries the
+    # AI-infra production basket (the whole point of the daily report).
     subprocess.run(
         [
             sys.executable,
@@ -137,6 +159,8 @@ def generate_report(as_of: str, start: str) -> None:
             as_of,
             "--start",
             start,
+            "--ai-infra-mode",
+            "enforce_expand",
         ],
         cwd=STACK_ROOT,
         check=True,

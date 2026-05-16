@@ -689,6 +689,28 @@ tasks:
     outputs:
       - reports/review_dashboard/bubble_hedge_radar
 
+  research.risk_regime_engine:
+    # Hedge/Wedge/Confirm/Press regime classifier. Reads bubble_hedge.json and
+    # emits a discrete state + R multiplier that gates AI-infra basket sizing.
+    # Runs AFTER bubble_hedge_radar (12:14) and BEFORE main_strategy_v2 (12:25).
+    group: research
+    schedule: "17 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/score_risk_regime_engine.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.risk_regime_engine.log
+    lock: ops/state/research.risk_regime_engine.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/risk_regime
+
   research.options_tenor_radar:
     group: research
     schedule: "7 12 * * 1-5"

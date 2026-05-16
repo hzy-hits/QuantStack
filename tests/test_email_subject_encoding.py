@@ -78,6 +78,78 @@ class EmailSubjectEncodingTests(unittest.TestCase):
             msg=subject_lines[0],
         )
 
+    def test_no_image_report_top_level_is_multipart_alternative(self) -> None:
+        # A multipart/related wrapper with zero related parts is rendered as
+        # raw base64 (乱码) by QQ Mail / 163 / Foxmail. Daily reports carry no
+        # inline charts → the top level must be multipart/alternative.
+        original = "A股量化研究盘前日报 — 2026-05-15"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = Path(tmpdir) / "report.md"
+            report.write_text("# 测试报告\n\n今天没有可交易标的。\n", encoding="utf-8")
+            msg, _ = self.gmail.prepare_email(report, [], "me@example.com", original)
+        self.assertEqual(msg.get_content_type(), "multipart/alternative")
+        subtypes = [p.get_content_type() for p in msg.walk()]
+        self.assertEqual(
+            subtypes,
+            ["multipart/alternative", "text/plain", "text/html"],
+        )
+
+    def test_report_with_charts_uses_multipart_related(self) -> None:
+        # When inline images exist, the related wrapper is correct and needed.
+        import base64 as _b64
+        png = _b64.b64decode(
+            b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = Path(tmpdir) / "report.md"
+            report.write_text("# 测试\n\n## 板块\n\n内容。\n", encoding="utf-8")
+            chart = Path(tmpdir) / "chart.png"
+            chart.write_bytes(png)
+            msg, _ = self.gmail.prepare_email(
+                report, [chart], "me@example.com", "Daily Report"
+            )
+        self.assertEqual(msg.get_content_type(), "multipart/related")
+        self.assertIn("image/png", [p.get_content_type() for p in msg.walk()])
+
+    def test_format_sender_rfc2047_encodes_chinese_name(self) -> None:
+        # User report (2026-05-15): sender display name 黄振宇 arrived as
+        # é»„æŒ¯å®‡ — UTF-8 bytes read as Latin-1. The From display name must
+        # be RFC 2047 encoded.
+        result = self.gmail._format_sender("黄振宇", "13502448752hzy@gmail.com")
+        self.assertTrue(result.startswith("=?utf-8?"), msg=result)
+        self.assertIn("<13502448752hzy@gmail.com>", result)
+        # round-trips back to the original name
+        import email.utils
+        from email.header import decode_header, make_header
+        name, addr = email.utils.parseaddr(result)
+        self.assertEqual(str(make_header(decode_header(name))), "黄振宇")
+        self.assertEqual(addr, "13502448752hzy@gmail.com")
+
+    def test_format_sender_ascii_name_passes_through(self) -> None:
+        result = self.gmail._format_sender("Quant Bot", "bot@example.com")
+        self.assertEqual(result, "Quant Bot <bot@example.com>")
+
+    def test_format_sender_no_name_returns_bare_address(self) -> None:
+        self.assertEqual(
+            self.gmail._format_sender(None, "bot@example.com"), "bot@example.com"
+        )
+
+    def test_prepared_email_from_header_is_ascii_safe(self) -> None:
+        # The raw From header line must be pure ASCII (encoded-word), never
+        # raw UTF-8 bytes.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = Path(tmpdir) / "report.md"
+            report.write_text("# 测试\n", encoding="utf-8")
+            sender = self.gmail._format_sender("黄振宇", "acct@gmail.com")
+            msg, _ = self.gmail.prepare_email(
+                report, [], "to@example.com", "主题", sender=sender
+            )
+            raw = base64.urlsafe_b64decode(self.gmail._encode_message(msg)["raw"])
+        from_lines = [ln for ln in raw.splitlines() if ln.startswith(b"From:")]
+        self.assertEqual(len(from_lines), 1)
+        from_lines[0].decode("ascii")  # raises if non-ASCII bytes leaked
+        self.assertIn(b"=?utf-8?", from_lines[0])
+
     def test_cn_legacy_sender_raw_subject_is_encoded(self) -> None:
         path = STACK_ROOT / "quant-research-cn" / "scripts" / "send_email.py"
         spec = importlib.util.spec_from_file_location("cn_send_email", path)

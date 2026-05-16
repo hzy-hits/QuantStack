@@ -77,6 +77,21 @@ def _encode_subject(subject: str) -> str:
         return Header(subject, "utf-8").encode()
 
 
+def _format_sender(name: str | None, addr: str) -> str:
+    """RFC 5322 From with an RFC 2047-encoded display name (fixes 乱码 sender)."""
+    from email.utils import formataddr
+
+    if not addr or addr == "me":
+        return addr or "me"
+    if not name:
+        return addr
+    try:
+        name.encode("ascii")
+        return formataddr((name, addr))
+    except UnicodeEncodeError:
+        return formataddr((str(Header(name, "utf-8").encode()), addr))
+
+
 def load_config(*, required: bool = True):
     config_path = PROJECT_DIR / "config.yaml"
     if not config_path.exists():
@@ -235,7 +250,7 @@ def _insert_charts_into_html(html_body: str, chart_paths: list[Path], cid_map: d
     return html_body
 
 
-def build_email(report_path: str, recipients: list[str], chart_paths: list[Path] | None = None, subject: str | None = None) -> dict:
+def build_email(report_path: str, recipients: list[str], chart_paths: list[Path] | None = None, subject: str | None = None, sender: str = "me") -> dict:
     """Build MIME message with inline charts."""
     report = Path(report_path)
     if not report.exists():
@@ -352,18 +367,8 @@ hr {{
 
     date_str = report.stem.split("_")[0] if "_" in report.stem else datetime.now().strftime("%Y-%m-%d")
 
-    # Build multipart/related message (required for CID images)
-    msg = MIMEMultipart("related")
-    msg["Subject"] = _encode_subject(subject or f"A股量化研究日报 — {date_str}")
-    msg["Bcc"] = ", ".join(recipients)
-
-    # Alternative part: plain text + HTML
-    alt_part = MIMEMultipart("alternative")
-    alt_part.attach(MIMEText(md_content, "plain", "utf-8"))
-    alt_part.attach(MIMEText(html_body, "html", "utf-8"))
-    msg.attach(alt_part)
-
-    # Inline chart images
+    # Resolve real inline images first.
+    images = []
     for cp in chart_paths:
         cid = cid_map.get(str(cp))
         if not cid or not cp.exists():
@@ -372,7 +377,27 @@ hr {{
             img = MIMEImage(f.read(), _subtype="png")
         img.add_header("Content-ID", f"<{cid}>")
         img.add_header("Content-Disposition", "inline", filename=cp.name)
-        msg.attach(img)
+        images.append(img)
+
+    # Alternative part: plain text + HTML.
+    alt_part = MIMEMultipart("alternative")
+    alt_part.attach(MIMEText(md_content, "plain", "utf-8"))
+    alt_part.attach(MIMEText(html_body, "html", "utf-8"))
+
+    # Only wrap in multipart/related when there are inline images. A
+    # multipart/related with zero related parts is rendered as raw base64
+    # (乱码) by several Chinese mail clients (QQ Mail / 163 / Foxmail).
+    if images:
+        msg: MIMEMultipart = MIMEMultipart("related")
+        msg.attach(alt_part)
+        for img in images:
+            msg.attach(img)
+    else:
+        msg = alt_part
+
+    msg["Subject"] = _encode_subject(subject or f"A股量化研究日报 — {date_str}")
+    msg["From"] = sender
+    msg["Bcc"] = ", ".join(recipients)
 
     raw = base64.urlsafe_b64encode(msg.as_bytes(policy=EMAIL_POLICY)).decode("utf-8")
     return {"raw": raw}
@@ -419,7 +444,14 @@ def send(
         return
 
     service = get_gmail_service()
-    message = build_email(report_path, recipients, chart_paths, subject=subject)
+    account_addr = ""
+    try:
+        account_addr = service.users().getProfile(userId="me").execute().get("emailAddress", "")
+    except Exception as exc:  # noqa: BLE001
+        print(f"  warn: profile lookup failed ({exc}); From falls back to 'me'")
+    sender_name = (load_config(required=False).get("reporting", {}) or {}).get("sender_name")
+    sender = _format_sender(sender_name, account_addr or "me")
+    message = build_email(report_path, recipients, chart_paths, subject=subject, sender=sender)
 
     result = service.users().messages().send(userId="me", body=message).execute()
     msg_id = result.get("id", "unknown")
