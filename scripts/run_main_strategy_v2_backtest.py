@@ -3867,6 +3867,113 @@ def render_actionable_selection_rationale(payload: dict[str, Any], actions: list
     return lines
 
 
+def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict[str, dict[str, Any]]:
+    """Compact per-stock options read — what the options market already knows.
+
+    Options are evidence for the *stock* decision, never a traded instrument
+    here. For each basket name we translate four readings into plain language:
+
+    - positioning : pc_ratio_z (call-heavy vs put-heavy order flow)
+    - expected move : iv_ann, plus vrp (IV cheap or rich vs realised vol)
+    - downside fear : skew_z (elevated put skew = crowd prices asymmetry)
+    - conviction horizon : where chain volume sits (weekly = tactical,
+      LEAPS = structural multi-year bet)
+    """
+    out: dict[str, dict[str, Any]] = {}
+    syms = sorted({str(s).upper() for s in symbols if s})
+    if not us_db.exists() or not syms:
+        return out
+    placeholders = ", ".join("?" for _ in syms)
+    con = duckdb.connect(str(us_db), read_only=True)
+    try:
+        sentiment: dict[str, dict[str, Any]] = {}
+        try:
+            for row in con.execute(
+                f"SELECT symbol, pc_ratio_z, skew_z, vrp, iv_ann, rv_ann "
+                f"FROM options_sentiment WHERE as_of = ? AND symbol IN ({placeholders})",
+                [as_of.isoformat(), *syms],
+            ).fetchall():
+                sentiment[str(row[0]).upper()] = {
+                    "pc_ratio_z": row[1], "skew_z": row[2], "vrp": row[3],
+                    "iv_ann": row[4], "rv_ann": row[5],
+                }
+        except duckdb.Error:
+            sentiment = {}
+        tenor_vol: dict[str, dict[str, float]] = {}
+        try:
+            for row in con.execute(
+                f"SELECT symbol, "
+                f"  SUM(CASE WHEN days_to_exp <= 21 THEN volume ELSE 0 END) AS short_v, "
+                f"  SUM(CASE WHEN days_to_exp >= 121 THEN volume ELSE 0 END) AS long_v, "
+                f"  SUM(volume) AS total_v "
+                f"FROM options_chain_quotes "
+                f"WHERE as_of = ? AND symbol IN ({placeholders}) AND volume IS NOT NULL "
+                f"GROUP BY symbol",
+                [as_of.isoformat(), *syms],
+            ).fetchall():
+                tenor_vol[str(row[0]).upper()] = {
+                    "short": float(row[1] or 0.0),
+                    "long": float(row[2] or 0.0),
+                    "total": float(row[3] or 0.0),
+                }
+        except duckdb.Error:
+            tenor_vol = {}
+    finally:
+        con.close()
+
+    for sym in syms:
+        sent = sentiment.get(sym) or {}
+        tenor = tenor_vol.get(sym) or {}
+        parts: list[str] = []
+
+        pcz = round_or_none(sent.get("pc_ratio_z"))
+        if pcz is None:
+            parts.append("定位 n/a")
+        elif pcz <= -1.0:
+            parts.append("call 偏多(看涨定位)")
+        elif pcz >= 1.0:
+            parts.append("put 偏空(看跌定位)")
+        else:
+            parts.append("定位中性")
+
+        iv = round_or_none(sent.get("iv_ann"))
+        vrp = round_or_none(sent.get("vrp"))
+        if iv is not None:
+            em = f"IV {iv * 100:.0f}%"
+            if vrp is not None:
+                if vrp <= -0.05:
+                    em += "·便宜(IV<实际波动)"
+                elif vrp >= 0.05:
+                    em += "·贵(IV>实际波动)"
+                else:
+                    em += "·合理"
+            parts.append(em)
+
+        skz = round_or_none(sent.get("skew_z"))
+        if skz is not None:
+            if skz >= 1.0:
+                parts.append("下行恐惧高(put skew 抬升)")
+            elif skz <= -1.0:
+                parts.append("下行恐惧低(skew 平淡)")
+            else:
+                parts.append("下行恐惧中")
+
+        total = tenor.get("total") or 0.0
+        if total > 0:
+            long_share = (tenor.get("long") or 0.0) / total
+            short_share = (tenor.get("short") or 0.0) / total
+            if long_share >= 0.15:
+                parts.append("信仰久期长(LEAPS/远月堆积)")
+            elif short_share >= 0.70:
+                parts.append("信仰久期短(战术为主)")
+            else:
+                parts.append("信仰久期中")
+
+        if parts:
+            out[sym] = {"verdict": " | ".join(parts), **sent}
+    return out
+
+
 def render_market_selection_rationale(payload: dict[str, Any], actions: list[dict[str, Any]], market: str) -> list[str]:
     market_actions = [row for row in actions if str(row.get("market") or "").upper() == market.upper()]
     if not market_actions:
@@ -3877,6 +3984,7 @@ def render_market_selection_rationale(payload: dict[str, Any], actions: list[dic
         "这一段只解释已经给 R 的票。每只票都按同一个顺序复核：先看量化是否站得住，再看新闻/事件有没有硬伤，最后看历史证据和退出纪律。",
         "",
     ]
+    verdicts = payload.get("options_verdicts") or {}
     for action in market_actions[:14]:
         ranked = actionable_ranked_row(payload, action)
         symbol = action.get("symbol") or ranked.get("symbol") or "-"
@@ -3890,6 +3998,9 @@ def render_market_selection_rationale(payload: dict[str, Any], actions: list[dic
             f"{clean_table_text(history_reason(market.upper(), ranked, payload), 170)}。"
             f"交易上不追无限高，参考入口 `{entry}`，风控 `{risk}`，仓位 {fmt_r(action.get('size_r'))}。",
         ]
+        verdict = (verdicts.get(str(symbol).upper()) or {}).get("verdict")
+        if verdict:
+            lines.append(f"  - 期权读数：{verdict}")
     lines.append("")
     return lines
 
@@ -8996,6 +9107,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         }
     )
     us_trade_plan = build_us_stock_trade_plan(args.us_db, us_trade_plan_symbols, as_of)
+    options_verdicts = build_options_verdicts(args.us_db, us_trade_plan_symbols, as_of)
     cn_basket_symbols = [
         str(row.get("symbol") or "").upper()
         for row in ((cn_ranker or {}).get("production_basket") or [])
@@ -9028,6 +9140,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "satellite_pool_report": satellite_pool_report,
         "ema_tape_overlay": ema_overlay,
         "us_trade_plan": us_trade_plan,
+        "options_verdicts": options_verdicts,
         "fear_greed": load_fear_greed_payload(as_of.isoformat()),
         "options_anomaly_rows": load_options_anomaly_payload(as_of.isoformat()),
         "options_tenor_signals": load_options_tenor_signals(as_of.isoformat()),
