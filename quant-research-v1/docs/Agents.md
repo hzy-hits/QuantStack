@@ -119,7 +119,39 @@ discrete daily state with a hard R multiplier on the AI-infra book:
 
 ---
 
-## 6. How to Read the Report
+## 6. Convexity Discipline — payoff shape is a hard filter
+
+`ΔP = −D·Δr + ½·C·(Δr)²` — the second term is convexity. It is squared, so
+the more violent the move, the more it pays. The whole doctrine of this fund
+is to be a *convexity hunter*:
+
+> duration = you assume the world is linear
+> convexity = you admit it is non-linear
+> black swan = convexity erupting at the tail
+
+Every expression the system emits is classified (`scripts/lib/convexity.py`):
+
+| Profile | Shape | Examples in this system |
+|---|---|---|
+| **convex** | bounded loss, non-linear upside | victim puts, wedge put-spreads, LEAPS calls, deep-OTM wings |
+| **linear** | symmetric, bounded both ways | a production-basket stock long with a stop |
+| **anti_convex** | capped gain, tail ruin — **FORBIDDEN** | selling options, shorting vol, leveraged range-trading |
+
+**Hard rule — `assert_no_anticonvex` blocks the report:** the system NEVER
+suggests an anti-convex expression. Selling premium / shorting volatility /
+leveraged range-trading wins small and often, then loses everything once on
+the tail (XIV 2018, Optionsellers 2020). This is structural suicide, not a
+sizing question — it is forbidden as a rule, not discouraged as a preference.
+No agent may relax it to "improve carry".
+
+A linear stock long is allowed (the stop bounds it). The aspiration is
+convex: limited downside, non-linear upside — long the wedge, puts on the
+victim, calls on the wash-out. Convexity is not free: convex assets carry
+worse (premium paid, lower yield). You pay the carry to own the tail.
+
+---
+
+## 7. How to Read the Report
 
 Section order is the priority order. AI-infra first, background last.
 
@@ -136,7 +168,7 @@ Section order is the priority order. AI-infra first, background last.
 
 ---
 
-## 7. Program Computes. Agent Narrates.
+## 8. Program Computes. Agent Narrates.
 
 | Program does | Agent does |
 |---|---|
@@ -153,7 +185,7 @@ Section order is the priority order. AI-infra first, background last.
 
 ---
 
-## 8. System Prompt (for programmatic narration)
+## 9. System Prompt (for programmatic narration)
 
 If feeding the report to an LLM for a second-opinion narrative, prepend:
 

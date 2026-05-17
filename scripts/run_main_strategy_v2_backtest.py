@@ -38,7 +38,10 @@ if str(QUANT_V1_SRC) not in sys.path:
     sys.path.insert(0, str(QUANT_V1_SRC))
 
 from lib import hedge as hedge_lib  # noqa: E402
+from lib.convexity import assert_no_anticonvex, classify_convexity  # noqa: E402
 from score_risk_regime_engine import classify_regime as classify_risk_regime  # noqa: E402
+
+_CONVEXITY_SHORT = {"convex": "凸", "linear": "线性", "anti_convex": "反凸", "none": "-"}
 from quant_bot.analytics import cn_observed_lifecycle_prob, cn_opportunity_ranker, us_opportunity_ranker  # noqa: E402
 from sleeves.cn_tape_leadership import (  # noqa: E402
     CN_TAPE_SLEEVE_ID,
@@ -2894,6 +2897,7 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
                 "symbol": row.get("symbol"),
                 "name": row.get("name") or ranked.get("name") or "",
                 "action": action,
+                "convexity": classify_convexity(action),
                 "size_r": final_r,
                 "tier": tier,
                 "source": _row_source(row, ranked),
@@ -7475,19 +7479,22 @@ def _evidence_state_for_action(row: dict[str, Any]) -> str:
 
 def render_market_action_table(actions: list[dict[str, Any]]) -> list[str]:
     lines = [
-        "| Symbol | Action | Size | Entry | Evidence | Risk / Exit | Hedge | Trigger |",
-        "|---|---|---:|---|---|---|---|---|",
+        "| Symbol | Action | 凸性 | Size | Entry | Evidence | Risk / Exit | Hedge | Trigger |",
+        "|---|---|---|---:|---|---|---|---|---|",
     ]
     if not actions:
-        lines.append("| - | no trade | 0R | - | - | - | - | no current execution candidate |")
+        lines.append("| - | no trade | - | 0R | - | - | - | - | no current execution candidate |")
         lines.append("")
         return lines
     for row in actions:
         hedge = f"{row.get('hedge') or '-'} {fmt_num(row.get('hedge_notional_r'), 4)}R"
         market = str(row.get("market") or "")
+        convexity = _CONVEXITY_SHORT.get(
+            str(row.get("convexity") or classify_convexity(row.get("action"))), "-"
+        )
         lines.append(
             f"| {row.get('symbol')} {row.get('name') or ''} | "
-            f"{action_label(row.get('action'))} | {fmt_r(row.get('size_r'))} | "
+            f"{action_label(row.get('action'))} | {convexity} | {fmt_r(row.get('size_r'))} | "
             f"{clean_table_text(row.get('entry'), 60)} | "
             f"{_evidence_state_for_action(row)} | "
             f"{clean_table_text(human_risk_plan(row.get('risk_plan')), 90)} | "
@@ -8929,6 +8936,22 @@ def ranker_rows_as_current_rows(market: str, ranker: dict[str, Any]) -> list[dic
     return out
 
 
+def assert_convexity_discipline(payload: dict[str, Any]) -> None:
+    """Hard guardrail — the report must never instruct an anti-convex expression.
+
+    Selling premium / shorting vol / leveraged range-trading is forbidden by
+    the convexity doctrine (Agents.md §6). This collects every executable
+    instruction the report emits and refuses to render if any is anti-convex.
+    """
+    expressions: list[str] = []
+    summary = payload.get("production_decision_summary") or {}
+    for row in summary.get("actionable") or []:
+        expressions.append(str(row.get("action") or ""))
+    regime = payload.get("risk_regime") or {}
+    expressions.append(str(regime.get("hedge_directive") or ""))
+    assert_no_anticonvex(expressions)
+
+
 def assert_promoted_execution_rows(payload: dict[str, Any]) -> None:
     promoted_rows = (payload.get("promotion_contract") or {}).get("rows") or []
     trade_tiers = {"top_probe", "secondary_probe", "top_stock_trade", "secondary_stock_trade"}
@@ -9177,6 +9200,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     payload["profit_readiness"] = build_profit_readiness(payload)
     payload["pipeline_requirements_audit"] = build_pipeline_requirements_audit(payload)
     payload["production_decision_summary"] = build_production_decision_summary(payload)
+    assert_convexity_discipline(payload)
     return payload
 
 
