@@ -56,6 +56,7 @@ from quant_bot.data_ingestion.options import (
     upsert_options_chain_quotes,
     is_options_eligible, OPTIONS_PROXY_MAP,
 )
+from quant_bot.analytics import ai_infra_universe
 from quant_bot.analytics.momentum_risk import run_momentum_risk, store_analysis
 from quant_bot.analytics.earnings_risk import run_earnings_risk
 from quant_bot.analytics.mean_reversion import run_mean_reversion, store_mean_reversion
@@ -359,6 +360,18 @@ def main() -> None:
             broad_screen_hits=broad_screen_hits,
         )
         all_symbols = universe["_all"]
+        # Augment with the AI-infra universe US names. The S&P/Nasdaq scan
+        # misses ADRs and names the report's enforce_expand basket surfaces
+        # (TSM/ASML/ASX/ABB ...), leaving them with no prices_daily history
+        # and no analytics. Union them in so every name we may rank has data.
+        try:
+            ai_infra_us = list(ai_infra_universe.records_by_symbol("US", pool="research"))
+            extra_ai = sorted(set(ai_infra_us) - set(all_symbols))
+            if extra_ai:
+                all_symbols = sorted(set(all_symbols) | set(ai_infra_us))
+                log.info("universe_ai_infra_augmented", added=len(extra_ai))
+        except Exception as e:  # noqa: BLE001
+            log.warning("ai_infra_universe_augment_failed", error=str(e))
         core_symbols = {
             symbol
             for bucket, symbols in universe.items()
@@ -588,6 +601,19 @@ def main() -> None:
             for s in cfg.data.options_extra_symbols
             if str(s).strip()
         ]
+        # AI-infra universe (research pool) — the production basket is injected
+        # at report time, AFTER this fetch, so names like AMZN/GOOGL/ORCL/TSM/
+        # CRWV would otherwise have no chain unless they happened to be in the
+        # day's notable screen. Pull options for every options-eligible AI-infra
+        # name so iv/vrp/tenor are always available for the 逐票复核 verdict.
+        try:
+            ai_infra_option_syms = [
+                s for s in ai_infra_universe.records_by_symbol("US", pool="research")
+                if is_options_eligible(s)
+            ]
+        except Exception as e:  # noqa: BLE001
+            log.warning("ai_infra_options_list_failed", error=str(e))
+            ai_infra_option_syms = []
         fetch_syms = sorted(set(
             [s for s in candidate_syms if is_options_eligible(s)]
             + non_equity_optionable
@@ -595,12 +621,14 @@ def main() -> None:
             + watchlist_option_syms
             + configured_extra_options
             + env_extra_options
+            + ai_infra_option_syms
         ))
         options_max_expiries = max(1, int(cfg.data.options_max_expiries or 1))
         log.info("step_options_targeted", fetch_count=len(fetch_syms),
                  candidates=len(candidate_syms),
                  watchlist=len(watchlist_option_syms),
                  extra=len(configured_extra_options) + len(env_extra_options),
+                 ai_infra=len(ai_infra_option_syms),
                  max_expiries=options_max_expiries)
 
         snapshot_df, analysis_df, chain_quote_df = fetch_options_snapshot_with_quotes(
