@@ -175,6 +175,33 @@ class RegimeClassifierTests(unittest.TestCase):
         self.assertEqual(d.state, "hedge")
         self.assertFalse(d.signals["move_wedge"])
 
+    def test_capitulation_triggers_fifth_state(self) -> None:
+        cap = {"capitulation": True, "fired_count": 4,
+               "fired_signals": ["vix_peak_rollover", "hy_oas_peak",
+                                 "put_call_extreme", "volume_exhaustion"]}
+        d = self.m.classify_regime(
+            _wedge(tlt=-5.0),  # wedge biting
+            _confirm(smh_above_ema50=False),  # tape broken
+            [],
+            capitulation=cap,
+        )
+        # CAPITULATION overrides PRESS — selling exhausted, flip to convex long.
+        self.assertEqual(d.state, "capitulation")
+        self.assertEqual(d.r_multiplier, 1.0)
+        self.assertTrue(d.new_adds_allowed)
+        self.assertIn("LEAPS call", d.victim_action)
+
+    def test_capitulation_below_threshold_does_not_trigger(self) -> None:
+        cap = {"capitulation": False, "fired_count": 2, "fired_signals": []}
+        d = self.m.classify_regime(
+            _wedge(tlt=0.5), _confirm(smh_above_ema50=False), [], capitulation=cap,
+        )
+        self.assertEqual(d.state, "press")  # falls through to normal precedence
+
+    def test_no_capitulation_arg_is_backward_compatible(self) -> None:
+        d = self.m.classify_regime(_wedge(tlt=0.5), _confirm(), [])
+        self.assertEqual(d.state, "hedge")
+
     def test_missing_signals_default_to_hedge(self) -> None:
         d = self.m.classify_regime([], {}, [])
         self.assertEqual(d.state, "hedge")

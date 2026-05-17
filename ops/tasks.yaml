@@ -689,10 +689,35 @@ tasks:
     outputs:
       - reports/review_dashboard/bubble_hedge_radar
 
+  research.capitulation_radar:
+    # 5-signal capitulation / bottom radar (VIX peak-rollover, HY OAS peak,
+    # put/call extreme, volume exhaustion, high-beta leadership). Feeds the
+    # risk-regime engine's 5th state (CAPITULATION). Runs AFTER
+    # bubble_hedge_radar (12:14), BEFORE risk_regime_engine (12:17).
+    group: research
+    schedule: "15 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/score_capitulation_radar.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.capitulation_radar.log
+    lock: ops/state/research.capitulation_radar.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/capitulation_radar
+
   research.risk_regime_engine:
-    # Hedge/Wedge/Confirm/Press regime classifier. Reads bubble_hedge.json and
-    # emits a discrete state + R multiplier that gates AI-infra basket sizing.
-    # Runs AFTER bubble_hedge_radar (12:14) and BEFORE main_strategy_v2 (12:25).
+    # Hedge/Wedge/Confirm/Press/Capitulation regime classifier. Reads
+    # bubble_hedge.json + capitulation_radar.json and emits a discrete state +
+    # R multiplier that gates AI-infra basket sizing.
+    # Runs AFTER bubble_hedge_radar (12:14) + capitulation_radar (12:15),
+    # BEFORE main_strategy_v2 (12:25).
     group: research
     schedule: "17 12 * * 1-5"
     cwd: .

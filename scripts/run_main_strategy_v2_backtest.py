@@ -5386,8 +5386,24 @@ def _scale_overlay_rows(
         row.setdefault("risk_reasons", []).append(reason)
 
 
-def build_risk_regime(bubble_hedge: dict[str, Any] | None) -> dict[str, Any]:
-    """Classify the Hedge/Wedge/Confirm/Press regime from the bubble-hedge layers.
+CAPITULATION_RADAR_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "capitulation_radar"
+
+
+def load_capitulation_payload(as_of: str) -> dict[str, Any] | None:
+    path = CAPITULATION_RADAR_ROOT / as_of / "capitulation_radar.json"
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def build_risk_regime(
+    bubble_hedge: dict[str, Any] | None,
+    capitulation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Classify the Hedge/Wedge/Confirm/Press/Capitulation regime.
 
     Computed inline (not via cron artifact) so the gate is always fresh for the
     emailed report regardless of when score_risk_regime_engine.py last ran.
@@ -5407,6 +5423,7 @@ def build_risk_regime(bubble_hedge: dict[str, Any] | None) -> dict[str, Any]:
         bubble_hedge.get("wedge") or [],
         bubble_hedge.get("confirmation") or {},
         bubble_hedge.get("victims") or [],
+        capitulation=capitulation,
     )
     out = decision.as_dict()
     out["artifact_missing"] = False
@@ -9074,7 +9091,8 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     profit_guardrails = build_profit_guardrails(us, cn, limit_up)
     strategy_direction = build_strategy_direction(us, cn, limit_up, profit_guardrails)
     bubble_hedge_payload = load_bubble_hedge_payload(as_of.isoformat())
-    risk_regime = build_risk_regime(bubble_hedge_payload)
+    capitulation_payload = load_capitulation_payload(as_of.isoformat())
+    risk_regime = build_risk_regime(bubble_hedge_payload, capitulation_payload)
     portfolio_risk_overlay = build_portfolio_risk_overlay(
         us,
         cn,

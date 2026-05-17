@@ -136,6 +136,7 @@ def generate_report(as_of: str, start: str) -> None:
     # run_main_strategy_v2 degrades the gate to 1.0x when artifacts are stale.
     for label, script in (
         ("bubble hedge radar", "score_bubble_hedge_radar.py"),
+        ("capitulation radar", "score_capitulation_radar.py"),
         ("risk regime engine", "score_risk_regime_engine.py"),
     ):
         try:

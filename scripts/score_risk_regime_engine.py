@@ -37,6 +37,7 @@ from typing import Any
 
 STACK_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BUBBLE_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "bubble_hedge_radar"
+DEFAULT_CAPITULATION_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "capitulation_radar"
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "risk_regime"
 
 # Regime → R multiplier on AI-infra basket new adds.
@@ -45,6 +46,9 @@ R_MULTIPLIER = {
     "wedge": 0.6,
     "confirm": 0.4,
     "press": 0.0,
+    # CAPITULATION is the recovery state — selling exhausted, flip to convex
+    # long. New adds reopen at full size with a high-beta / convex tilt.
+    "capitulation": 1.0,
 }
 
 # Signal thresholds — kept here so tests and operators can see them in one place.
@@ -83,11 +87,14 @@ def classify_regime(
     wedge_rows: list[dict[str, Any]],
     confirmation: dict[str, Any],
     victims: list[dict[str, Any]],
+    capitulation: dict[str, Any] | None = None,
 ) -> RegimeDecision:
     """Pure classifier: bubble-hedge layers → discrete regime + R multiplier.
 
-    Severity order is PRESS > CONFIRM > WEDGE > HEDGE — the most severe
-    triggered state wins.
+    Precedence: CAPITULATION > PRESS > CONFIRM > WEDGE > HEDGE. CAPITULATION
+    is checked first — once selling exhaustion is confirmed (capitulation
+    radar ≥3/5) you stop pressing shorts, regardless of how broken the tape
+    looks. The capitulation signals themselves only exist post-crash.
     """
     tlt_20d = _wedge_value(wedge_rows, "TLT", "ret_20d_pct")
     hyg_20d = _wedge_value(wedge_rows, "HYG", "ret_20d_pct")
@@ -147,9 +154,27 @@ def classify_regime(
         "fear_extreme": fear_extreme,
         "victim_count": len(victims),
         "top_victim": (victims[0].get("symbol") if victims else None),
+        "capitulation_fired": (capitulation or {}).get("fired_count", 0),
+        "capitulation_triggered": bool((capitulation or {}).get("capitulation")),
     }
 
     top_victim = victims[0].get("symbol") if victims else "—"
+
+    # CAPITULATION — checked first. Selling exhaustion confirmed → stop
+    # pressing shorts, flip to convex long.
+    if capitulation and capitulation.get("capitulation"):
+        fired = capitulation.get("fired_count", 0)
+        names = "、".join(capitulation.get("fired_signals") or [])
+        return RegimeDecision(
+            state="capitulation",
+            r_multiplier=R_MULTIPLIER["capitulation"],
+            new_adds_allowed=True,
+            hedge_directive="停止 press shorts；回补空头；wash-out 确认后保留少量保险即可。",
+            victim_action="victim 名单转向：对最高 beta 的 wash-out 名字买 LEAPS call / call debit spread（凸性向上）。",
+            rationale=f"CAPITULATION：抄底雷达 {fired}/5 触发（{names}）。"
+            "停止做空，新加仓重开至 full size，basket 往高 beta 倾斜。",
+            signals=signals,
+        )
 
     if tape_broken:
         reason = (
@@ -224,16 +249,24 @@ def load_bubble_hedge(as_of: str, bubble_root: Path) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_capitulation(as_of: str, root: Path) -> dict[str, Any] | None:
+    path = root / as_of / "capitulation_radar.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
 def render_markdown(as_of: str, decision: RegimeDecision) -> str:
     state_label = {
         "hedge": "HEDGE（常驻基线）",
         "wedge": "WEDGE（楔子咬合）",
         "confirm": "CONFIRM（破位预警）",
         "press": "PRESS（确认压制）",
+        "capitulation": "CAPITULATION（抛售衰竭，翻多凸性）",
     }[decision.state]
     s = decision.signals
     lines = [
-        f"# 风控引擎 — Hedge/Wedge/Confirm/Press — {as_of}",
+        f"# 风控引擎 — Hedge/Wedge/Confirm/Press/Capitulation — {as_of}",
         "",
         f"## 当前状态：**{state_label}**",
         "",
@@ -258,15 +291,16 @@ def render_markdown(as_of: str, decision: RegimeDecision) -> str:
         f"| SMH 站上 EMA20 | {s['smh_above_ema20']} | near line(触发器) |",
         f"| SMH 站上 EMA50 | {s['smh_above_ema50']} | 趋势线(触发器) |",
         f"| Trendline break | {s['trendline_break']} | 破位确认 |",
+        f"| 抄底雷达 | {_fmt(s.get('capitulation_fired'))}/5 | ≥3=抛售衰竭/翻多 |",
         "",
         "派生标志: "
         + ", ".join(
             f"{k}={s[k]}"
             for k in ("wedge_biting", "move_wedge", "tape_soft", "tape_broken",
-                      "greed_extreme", "fear_extreme")
+                      "greed_extreme", "fear_extreme", "capitulation_triggered")
         ),
         "",
-        "状态转移顺序（最严重者胜）: PRESS > CONFIRM > WEDGE > HEDGE。",
+        "状态转移顺序: CAPITULATION > PRESS > CONFIRM > WEDGE > HEDGE。",
         "R 乘数只作用于 AI-infra basket 的**新加仓**；既有头寸由各自 risk plan 管理。",
     ]
     return "\n".join(lines) + "\n"
@@ -286,6 +320,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--as-of", default=None)
     parser.add_argument("--bubble-root", type=Path, default=DEFAULT_BUBBLE_ROOT)
+    parser.add_argument("--capitulation-root", type=Path, default=DEFAULT_CAPITULATION_ROOT)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     args = parser.parse_args()
 
@@ -302,10 +337,15 @@ def main() -> int:
         )
         return 2
 
+    # Capitulation radar is optional — absent on a normal day, the engine
+    # simply never reaches the CAPITULATION state.
+    capitulation = load_capitulation(as_of, args.capitulation_root)
+
     decision = classify_regime(
         bubble.get("wedge") or [],
         bubble.get("confirmation") or {},
         bubble.get("victims") or [],
+        capitulation=capitulation,
     )
 
     out_dir = args.output_root / as_of

@@ -57,6 +57,7 @@ QUANT_STACK_ROOT=/home/ivena/coding/quant-stack
 10 6 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.wedge_instruments_ingest
 14 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.bubble_hedge_radar
 16 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.victim_put_suggestions
+15 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.capitulation_radar
 17 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.risk_regime_engine
 7 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.options_tenor_radar
 8 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.options_anomaly_alerts
