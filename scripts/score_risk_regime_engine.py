@@ -53,6 +53,8 @@ HYG_CREDIT_STRESS_PCT = -1.0    # HYG 20d return at/below this = credit widening
 CORR_FLIP_THRESHOLD = -0.5      # SMH↔TLT 20d corr at/below this = rate-sensitivity on
 GREED_EXTREME = 75.0            # Fear & Greed at/above this = extreme greed
 FEAR_EXTREME = 30.0             # Fear & Greed at/below this = fear
+MOVE_CALM = 80.0                # MOVE below this = Treasury market calm / risk-on
+MOVE_VIX_RATES_STRESS = 6.0     # MOVE/VIX at/above this = rates vol dominates stress
 
 
 @dataclass(frozen=True)
@@ -96,11 +98,29 @@ def classify_regime(
     smh_above_ema20 = confirmation.get("smh_above_ema20")
     smh_above_ema50 = confirmation.get("smh_above_ema50")
     trendline_break = bool(confirmation.get("trendline_break"))
+    move_level = confirmation.get("move_level")
+    move_level = float(move_level) if move_level is not None else None
+    move_chg_20d = confirmation.get("move_chg_20d")
+    move_chg_20d = float(move_chg_20d) if move_chg_20d is not None else None
+    vix_level = confirmation.get("vix_level")
+    vix_level = float(vix_level) if vix_level is not None else None
+    move_vix_ratio = confirmation.get("move_vix_ratio")
+    move_vix_ratio = float(move_vix_ratio) if move_vix_ratio is not None else None
 
+    # MOVE is the most direct wedge gauge: Treasury implied vol. It bites
+    # before TLT price does. Two MOVE-based wedge triggers:
+    #   - MOVE >= 80 AND rising (20d) → bond vol leaving the calm zone
+    #   - MOVE/VIX >= 6 → rates vol dominates the cross-asset stress picture
+    move_wedge = (
+        (move_level is not None and move_level >= MOVE_CALM
+         and move_chg_20d is not None and move_chg_20d > 0.0)
+        or (move_vix_ratio is not None and move_vix_ratio >= MOVE_VIX_RATES_STRESS)
+    )
     wedge_biting = (
         (tlt_20d is not None and tlt_20d <= TLT_WEDGE_DRAWDOWN_PCT)
         or (corr is not None and corr <= CORR_FLIP_THRESHOLD)
         or (hyg_20d is not None and hyg_20d <= HYG_CREDIT_STRESS_PCT)
+        or move_wedge
     )
     tape_broken = (smh_above_ema50 is False) or trendline_break
     tape_soft = (smh_above_ema20 is False) and (smh_above_ema50 is True)
@@ -112,10 +132,15 @@ def classify_regime(
         "hyg_ret_20d_pct": hyg_20d,
         "smh_tlt_corr_20d": corr,
         "fear_greed_score": fg,
+        "move_level": move_level,
+        "move_chg_20d": move_chg_20d,
+        "vix_level": vix_level,
+        "move_vix_ratio": move_vix_ratio,
         "smh_above_ema20": smh_above_ema20,
         "smh_above_ema50": smh_above_ema50,
         "trendline_break": trendline_break,
         "wedge_biting": wedge_biting,
+        "move_wedge": move_wedge,
         "tape_broken": tape_broken,
         "tape_soft": tape_soft,
         "greed_extreme": greed_extreme,
@@ -163,6 +188,11 @@ def classify_regime(
             bits.append(f"SMH↔TLT corr {corr:+.2f}")
         if hyg_20d is not None and hyg_20d <= HYG_CREDIT_STRESS_PCT:
             bits.append(f"HYG 20d {hyg_20d:+.1f}%")
+        if move_wedge:
+            if move_vix_ratio is not None and move_vix_ratio >= MOVE_VIX_RATES_STRESS:
+                bits.append(f"MOVE/VIX {move_vix_ratio:.1f}(利率波动主导)")
+            else:
+                bits.append(f"MOVE {move_level:.0f}↑{move_chg_20d:+.0f}%(债市波动离开平静区)")
         return RegimeDecision(
             state="wedge",
             r_multiplier=R_MULTIPLIER["wedge"],
@@ -217,18 +247,23 @@ def render_markdown(as_of: str, decision: RegimeDecision) -> str:
         "",
         "| 信号 | 值 | 触发 |",
         "|---|---|---|",
+        f"| MOVE (美债波动) | {_fmt(s.get('move_level'))} | <80 平静 / ≥80 上行=楔子 |",
+        f"| MOVE 20d 变化 | {_fmt(s.get('move_chg_20d'), '%')} | 债市波动趋势 |",
+        f"| VIX (股市波动) | {_fmt(s.get('vix_level'))} | 股市情绪 |",
+        f"| MOVE/VIX 比 | {_fmt(s.get('move_vix_ratio'))} | 4-6 中性 / >6 利率主导 |",
         f"| TLT 20d 收益 | {_fmt(s['tlt_ret_20d_pct'], '%')} | rates wedge |",
         f"| HYG 20d 收益 | {_fmt(s['hyg_ret_20d_pct'], '%')} | credit 紧缩 |",
         f"| SMH↔TLT 20d 相关 | {_fmt(s['smh_tlt_corr_20d'])} | 相关性翻转 |",
         f"| Fear & Greed | {_fmt(s['fear_greed_score'])} | 情绪极值 |",
-        f"| SMH 站上 EMA20 | {s['smh_above_ema20']} | near line |",
-        f"| SMH 站上 EMA50 | {s['smh_above_ema50']} | 趋势线 |",
+        f"| SMH 站上 EMA20 | {s['smh_above_ema20']} | near line(触发器) |",
+        f"| SMH 站上 EMA50 | {s['smh_above_ema50']} | 趋势线(触发器) |",
         f"| Trendline break | {s['trendline_break']} | 破位确认 |",
         "",
         "派生标志: "
         + ", ".join(
             f"{k}={s[k]}"
-            for k in ("wedge_biting", "tape_soft", "tape_broken", "greed_extreme", "fear_extreme")
+            for k in ("wedge_biting", "move_wedge", "tape_soft", "tape_broken",
+                      "greed_extreme", "fear_extreme")
         ),
         "",
         "状态转移顺序（最严重者胜）: PRESS > CONFIRM > WEDGE > HEDGE。",

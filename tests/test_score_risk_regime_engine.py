@@ -38,6 +38,11 @@ def _confirm(**kw) -> dict:
         "smh_above_ema20": True,
         "smh_above_ema50": True,
         "trendline_break": False,
+        # Calm cross-asset volatility baseline (no MOVE-driven wedge).
+        "move_level": 70.0,
+        "move_chg_20d": -3.0,
+        "vix_level": 18.0,
+        "move_vix_ratio": 3.9,
     }
     base.update(kw)
     return base
@@ -122,10 +127,59 @@ class RegimeClassifierTests(unittest.TestCase):
         )
         self.assertEqual(d.state, "press")
 
+    def test_move_above_80_and_rising_triggers_wedge(self) -> None:
+        d = self.m.classify_regime(
+            _wedge(tlt=0.5),  # TLT calm
+            _confirm(move_level=92.0, move_chg_20d=14.0),
+            [],
+        )
+        self.assertEqual(d.state, "wedge")
+        self.assertTrue(d.signals["move_wedge"])
+        self.assertIn("MOVE", d.rationale)
+
+    def test_move_above_80_but_falling_does_not_trigger_wedge(self) -> None:
+        # MOVE elevated but declining → wedge easing, not biting.
+        d = self.m.classify_regime(
+            _wedge(tlt=0.5),
+            _confirm(move_level=92.0, move_chg_20d=-6.0),
+            [],
+        )
+        self.assertEqual(d.state, "hedge")
+        self.assertFalse(d.signals["move_wedge"])
+
+    def test_move_below_80_is_bond_calm(self) -> None:
+        d = self.m.classify_regime(
+            _wedge(tlt=0.5),
+            _confirm(move_level=79.0, move_chg_20d=5.0),
+            [],
+        )
+        self.assertEqual(d.state, "hedge")
+        self.assertFalse(d.signals["move_wedge"])
+
+    def test_move_vix_ratio_above_6_triggers_wedge(self) -> None:
+        # Rates vol dominates the cross-asset stress picture.
+        d = self.m.classify_regime(
+            _wedge(tlt=0.5),
+            _confirm(move_level=78.0, move_chg_20d=-1.0, move_vix_ratio=6.4),
+            [],
+        )
+        self.assertEqual(d.state, "wedge")
+        self.assertTrue(d.signals["move_wedge"])
+        self.assertIn("MOVE/VIX", d.rationale)
+
+    def test_missing_move_data_does_not_crash_or_trigger(self) -> None:
+        conf = _confirm()
+        for k in ("move_level", "move_chg_20d", "vix_level", "move_vix_ratio"):
+            conf.pop(k, None)
+        d = self.m.classify_regime(_wedge(tlt=0.5), conf, [])
+        self.assertEqual(d.state, "hedge")
+        self.assertFalse(d.signals["move_wedge"])
+
     def test_missing_signals_default_to_hedge(self) -> None:
         d = self.m.classify_regime([], {}, [])
         self.assertEqual(d.state, "hedge")
         self.assertEqual(d.r_multiplier, 1.0)
+        self.assertFalse(d.signals["move_wedge"])
 
 
 if __name__ == "__main__":

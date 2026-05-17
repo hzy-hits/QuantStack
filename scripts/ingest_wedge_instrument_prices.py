@@ -28,6 +28,9 @@ WEDGE_SYMBOLS = (
     "HYG", "JNK", "LQD",
     "XLF", "BMO", "RY", "TD", "BNS", "CM",
     "XHB", "ITB",
+    # ^MOVE = ICE BofA MOVE index (Treasury-implied volatility) — the most
+    # direct wedge gauge. ^VIX is already fetched by the main US pipeline.
+    "^MOVE",
 )
 
 

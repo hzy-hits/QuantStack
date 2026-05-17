@@ -3069,8 +3069,15 @@ def render_risk_regime_section(payload: dict[str, Any]) -> list[str]:
     sig = regime.get("signals") or {}
     if sig:
         lines.append(
-            "- 信号："
-            f"TLT20d={fmt_num(sig.get('tlt_ret_20d_pct'), 2)}% ｜ "
+            "- 波动信号："
+            f"MOVE={fmt_num(sig.get('move_level'), 1)}"
+            f"(20d {fmt_num(sig.get('move_chg_20d'), 1)}%) ｜ "
+            f"VIX={fmt_num(sig.get('vix_level'), 1)} ｜ "
+            f"MOVE/VIX={fmt_num(sig.get('move_vix_ratio'), 2)} ｜ "
+            f"TLT20d={fmt_num(sig.get('tlt_ret_20d_pct'), 2)}%"
+        )
+        lines.append(
+            "- 趋势信号："
             f"SMH↔TLT corr={fmt_num(sig.get('smh_tlt_corr_20d'), 2)} ｜ "
             f"F&G={fmt_num(sig.get('fear_greed_score'), 0)} ｜ "
             f"SMH>EMA50={sig.get('smh_above_ema50')} ｜ "

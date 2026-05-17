@@ -118,6 +118,12 @@ class ConfirmationState:
     fear_greed_score: float | None
     fear_greed_rating: str | None
     trendline_break: bool
+    # Cross-asset volatility — MOVE is the most direct wedge gauge (Treasury
+    # implied vol); VIX is equity vol; the ratio reads which side stress is on.
+    move_level: float | None = None
+    move_chg_20d: float | None = None
+    vix_level: float | None = None
+    move_vix_ratio: float | None = None
 
 
 def _load_ai_universe(path: Path) -> set[str]:
@@ -381,6 +387,18 @@ def build_confirmation_layer(con: duckdb.DuckDBPyConnection, as_of: date) -> Con
         was_above = any(r > e for r, e in zip(recent[:-2], ema_recent[:-2]))
         trendline_break = below_now and was_above
 
+    # Cross-asset volatility: MOVE (Treasury vol) + VIX (equity vol).
+    move_series = [c for _, c in _series(con, "^MOVE", as_of)]
+    vix_series = [c for _, c in _series(con, "^VIX", as_of)]
+    move_level = move_series[-1] if move_series else None
+    vix_level = vix_series[-1] if vix_series else None
+    move_chg_20d = None
+    if len(move_series) > 20 and move_series[-21]:
+        move_chg_20d = (move_series[-1] - move_series[-21]) / move_series[-21] * 100.0
+    move_vix_ratio = (
+        move_level / vix_level if (move_level and vix_level) else None
+    )
+
     return ConfirmationState(
         smh_close=round(smh_last, 2) if smh_last is not None else None,
         smh_ema20=round(smh_ema20, 2) if smh_ema20 is not None else None,
@@ -393,6 +411,10 @@ def build_confirmation_layer(con: duckdb.DuckDBPyConnection, as_of: date) -> Con
         fear_greed_score=fg_score,
         fear_greed_rating=fg_rating,
         trendline_break=trendline_break,
+        move_level=round(move_level, 2) if move_level is not None else None,
+        move_chg_20d=round(move_chg_20d, 2) if move_chg_20d is not None else None,
+        vix_level=round(vix_level, 2) if vix_level is not None else None,
+        move_vix_ratio=round(move_vix_ratio, 2) if move_vix_ratio is not None else None,
     )
 
 
