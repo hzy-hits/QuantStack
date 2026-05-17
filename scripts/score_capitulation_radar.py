@@ -114,11 +114,13 @@ def _sig_beta_leadership(beta_rows: list[tuple[float, float]]) -> dict[str, Any]
     low_ret = statistics.mean(r for _, r in low_beta)
     high_ret = statistics.mean(r for _, r in high_beta)
     spread = high_ret - low_ret
-    fired = spread >= BETA_LEADERSHIP_SPREAD
+    # Dash-for-trash = junk actually RALLYING — require the high-beta cohort
+    # to be positive, not merely "less negative" than defensives.
+    fired = spread >= BETA_LEADERSHIP_SPREAD and high_ret > 0.0
     return {
         "fired": fired,
         "detail": f"high-beta 5d {high_ret:+.1f}% vs low-beta {low_ret:+.1f}% "
-        f"(spread {spread:+.1f}pp, lead≥{BETA_LEADERSHIP_SPREAD:.1f})",
+        f"(spread {spread:+.1f}pp, lead≥{BETA_LEADERSHIP_SPREAD:.1f} & high>0)",
     }
 
 

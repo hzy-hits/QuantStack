@@ -44,6 +44,15 @@ class ConvexityClassifierTests(unittest.TestCase):
         # "covered call" contains "call" — must still resolve anti_convex.
         self.assertEqual(classify_convexity("covered call write"), "anti_convex")
 
+    def test_credit_structures_cannot_bypass_via_wording(self) -> None:
+        # Codex review P0: these all contain a convex token (put/call spread)
+        # but are credit / premium-selling structures — must be anti_convex.
+        for expr in ("bull put spread", "bear call spread", "credit put spread",
+                     "cash-secured put", "cash secured put", "short premium",
+                     "sell straddle", "sell strangle", "iron butterfly",
+                     "ratio spread", "信用价差", "备兑开仓"):
+            self.assertEqual(classify_convexity(expr), "anti_convex", expr)
+
     def test_label_is_human_readable(self) -> None:
         self.assertIn("凸", convexity_label("buy put"))
         self.assertIn("线性", convexity_label("buy_stock_position"))

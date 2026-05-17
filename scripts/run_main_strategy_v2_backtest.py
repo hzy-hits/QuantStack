@@ -5409,16 +5409,17 @@ def build_risk_regime(
     emailed report regardless of when score_risk_regime_engine.py last ran.
     """
     if not bubble_hedge:
-        return {
-            "state": "hedge",
-            "r_multiplier": 1.0,
-            "new_adds_allowed": True,
-            "hedge_directive": "—",
-            "victim_action": "—",
-            "rationale": "bubble_hedge 工件缺失，风控 gate 退化为 1.0x（不缩减）。",
-            "signals": {},
-            "artifact_missing": True,
-        }
+        # bubble_hedge missing → classify with empty wedge/confirmation, but
+        # still honour a present capitulation payload (a capitulation day must
+        # not be misreported as plain hedge just because bubble_hedge is late).
+        decision = classify_risk_regime([], {}, [], capitulation=capitulation)
+        out = decision.as_dict()
+        out["artifact_missing"] = True
+        if decision.state == "hedge":
+            out["rationale"] = (
+                "bubble_hedge 工件缺失，风控 gate 退化为 1.0x（不缩减）。"
+            )
+        return out
     decision = classify_risk_regime(
         bubble_hedge.get("wedge") or [],
         bubble_hedge.get("confirmation") or {},
@@ -8965,7 +8966,10 @@ def assert_convexity_discipline(payload: dict[str, Any]) -> None:
     for row in summary.get("actionable") or []:
         expressions.append(str(row.get("action") or ""))
     regime = payload.get("risk_regime") or {}
+    # hedge_directive AND victim_action both carry option instructions the
+    # report renders verbatim — both must clear the anti-convex guardrail.
     expressions.append(str(regime.get("hedge_directive") or ""))
+    expressions.append(str(regime.get("victim_action") or ""))
     assert_no_anticonvex(expressions)
 
 

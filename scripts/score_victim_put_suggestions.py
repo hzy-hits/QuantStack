@@ -60,8 +60,14 @@ def _fetch_puts(
     delta_high: float = TARGET_DELTA_HIGH,
     dte_low: int | None = None,
     dte_high: int | None = None,
+    prefer_long: bool = False,
 ) -> list[dict[str, Any]]:
-    """Query liquid OTM puts. dte filters are applied only when both set."""
+    """Query liquid OTM puts. dte filters are applied only when both set.
+
+    prefer_long=True orders longest-dated first — used by the fallback path,
+    which is meant to surface the longest available expiry when the 30-60d
+    primary window is empty.
+    """
     where = [
         "symbol = ?",
         "as_of = ?",
@@ -75,6 +81,7 @@ def _fetch_puts(
     if dte_low is not None and dte_high is not None:
         where.append("days_to_exp BETWEEN ? AND ?")
         params.extend([dte_low, dte_high])
+    dte_order = "days_to_exp DESC" if prefer_long else "days_to_exp"
     rows = con.execute(
         f"""
         SELECT contract_symbol, expiry, days_to_exp, strike, current_price,
@@ -82,7 +89,7 @@ def _fetch_puts(
                implied_volatility
         FROM options_chain_quotes
         WHERE {' AND '.join(where)}
-        ORDER BY days_to_exp, ABS(delta - ?), open_interest DESC
+        ORDER BY {dte_order}, ABS(delta - ?), open_interest DESC
         LIMIT 30
         """,
         params + [TARGET_DELTA_CENTER],
@@ -174,7 +181,8 @@ def _suggest_for_victim(
             }
         # widen to "anything DTE>=14" so we surface the longest expiry
         # available — operator can re-run once LEAPS land.
-        primary = _fetch_puts(con, symbol, as_of, dte_low=14, dte_high=max_dte)
+        primary = _fetch_puts(con, symbol, as_of, dte_low=14, dte_high=max_dte,
+                              prefer_long=True)
         used_window = f"14-{max_dte}d (fallback — primary window 30-60d empty)"
         if max_dte < TARGET_DTE_LOW:
             fallback_note = (

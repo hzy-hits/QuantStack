@@ -26,16 +26,28 @@ from __future__ import annotations
 from typing import Iterable
 
 # Markers are matched case-insensitively as substrings. Order: anti_convex
-# is checked first so an explicit "credit spread" / "covered call" is never
-# mislabelled convex by the "spread" / "call" token.
+# is checked FIRST so a phrase like "bull put spread" or "credit put spread"
+# (which also contains the convex token "put spread") still resolves
+# anti_convex. The anti list therefore must carry every credit-structure
+# phrasing — otherwise the guardrail is bypassable by wording.
 ANTI_CONVEX_MARKERS: tuple[str, ...] = (
+    # selling single options
     "sell put", "sell call", "short put", "short call", "sell_put", "sell_call",
-    "write call", "write put", "covered call", "naked option", "naked call",
-    "naked put", "short straddle", "short strangle", "short_straddle",
-    "credit spread", "iron condor", "short vol", "short volatility",
-    "short gamma", "sell option", "sell_option", "sell premium",
-    "卖期权", "卖出期权", "做空波动率", "做空波动", "卖看涨", "卖看跌",
-    "反凸", "杠杆窄幅", "杠杆做窄幅",
+    "write call", "write put", "write option", "naked option", "naked call",
+    "naked put", "sell option", "sell_option", "sell straddle", "sell strangle",
+    # credit / short-vol structures (catch every phrasing of a credit spread)
+    "credit spread", "credit put", "credit call", "bull put", "bear call",
+    "short straddle", "short strangle", "short_straddle", "short_strangle",
+    "iron condor", "iron butterfly", "ratio spread", "calendar sell",
+    # short volatility / premium selling
+    "short vol", "short volatility", "short gamma", "sell premium",
+    "short premium", "premium selling", "selling premium", "sell vol",
+    # covered / cash-secured (collect premium against held stock/cash)
+    "covered call", "covered_call", "cash-secured", "cash secured", "csp ",
+    # leverage into range
+    "杠杆窄幅", "杠杆做窄幅", "反凸",
+    "卖期权", "卖出期权", "卖出看涨", "卖出看跌", "做空波动率", "做空波动",
+    "卖看涨", "卖看跌", "备兑", "现金担保", "信用价差",
 )
 
 CONVEX_MARKERS: tuple[str, ...] = (

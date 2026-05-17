@@ -654,6 +654,22 @@ def send_report_email(
     return msg_ids
 
 
+def _resolve_sender(service, config_path: str) -> str:
+    """Build an RFC 2047-encoded From value from the account + config name.
+
+    Shared by every send path so a non-ASCII display name (黄振宇) never
+    leaks raw — see `_format_sender`.
+    """
+    account_addr = ""
+    try:
+        account_addr = (
+            service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("gmail_profile_lookup_failed", error=str(e))
+    return _format_sender(load_sender_name(config_path), account_addr or "me")
+
+
 def create_report_draft(
     report_path: Path | str,
     chart_paths: list[Path] | None = None,
@@ -662,15 +678,17 @@ def create_report_draft(
     bcc: list[str] | None = None,
     credentials_path: Path = CREDENTIALS_PATH,
     token_path: Path = TOKEN_PATH,
+    config_path: str = "config.yaml",
 ) -> str:
     """
     Create a Gmail draft with the report as styled HTML + inline charts.
     Returns the draft ID.
     """
     import socket
-    msg, _ = prepare_email(report_path, chart_paths, to, subject, bcc=bcc)
-
     service = _get_gmail_service(credentials_path, token_path)
+    sender = _resolve_sender(service, config_path)
+    msg, _ = prepare_email(report_path, chart_paths, to, subject, bcc=bcc, sender=sender)
+
     old_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(60)
     try:
@@ -691,15 +709,16 @@ def send_alert_email(
     body: str,
     credentials_path: Path = CREDENTIALS_PATH,
     token_path: Path = TOKEN_PATH,
+    config_path: str = "config.yaml",
 ) -> str:
     """Send a plain-text alert email (for pipeline failure notifications)."""
     import socket
 
+    service = _get_gmail_service(credentials_path, token_path)
     msg = MIMEText(body, "plain", "utf-8")
     msg["To"] = to
     msg["Subject"] = _encode_subject(subject)
-
-    service = _get_gmail_service(credentials_path, token_path)
+    msg["From"] = _resolve_sender(service, config_path)
     old_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(30)
     try:

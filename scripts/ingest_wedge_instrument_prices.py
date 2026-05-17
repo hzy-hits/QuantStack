@@ -52,41 +52,53 @@ def _ingest(us_db: Path, as_of: date, lookback_days: int = 365) -> int:
         )
         start = as_of - timedelta(days=lookback_days)
         summary: list[tuple[str, int]] = []
+        def _num(value) -> float | None:
+            # yfinance can emit NaN; normalise NaN/None → None so a malformed
+            # row never raises and aborts the remaining symbols.
+            try:
+                if value is None:
+                    return None
+                f = float(value)
+                return None if f != f else f  # NaN check
+            except (TypeError, ValueError):
+                return None
+
         for sym in WEDGE_SYMBOLS:
+            # One try per symbol — covers the fetch AND row conversion/upsert
+            # so a bad row from yfinance can't kill the rest of the book.
             try:
                 df = yf.Ticker(sym).history(
                     start=start.isoformat(),
                     end=(as_of + timedelta(days=1)).isoformat(),
                     auto_adjust=False,
                 )
-            except Exception as exc:  # noqa: BLE001
-                print(f"warn: {sym} fetch failed: {exc}", file=sys.stderr)
-                summary.append((sym, 0))
-                continue
-            if df.empty:
-                summary.append((sym, 0))
-                continue
-            inserted = 0
-            for ts, row in df.iterrows():
-                d = ts.date() if hasattr(ts, "date") else ts
-                if d > as_of:
+                if df.empty:
+                    summary.append((sym, 0))
                     continue
-                close = float(row["Close"]) if row["Close"] is not None else None
-                adj = float(row["Adj Close"]) if "Adj Close" in row and row["Adj Close"] is not None else close
-                con.execute(
-                    "INSERT OR REPLACE INTO prices_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    [
-                        sym, d.isoformat(),
-                        float(row["Open"]) if row["Open"] is not None else None,
-                        float(row["High"]) if row["High"] is not None else None,
-                        float(row["Low"]) if row["Low"] is not None else None,
-                        close,
-                        int(row["Volume"]) if row["Volume"] is not None else None,
-                        adj,
-                    ],
-                )
-                inserted += 1
-            summary.append((sym, inserted))
+                inserted = 0
+                for ts, row in df.iterrows():
+                    d = ts.date() if hasattr(ts, "date") else ts
+                    if d > as_of:
+                        continue
+                    close = _num(row.get("Close"))
+                    adj = _num(row.get("Adj Close")) if "Adj Close" in row else close
+                    vol = _num(row.get("Volume"))
+                    con.execute(
+                        "INSERT OR REPLACE INTO prices_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        [
+                            sym, d.isoformat(),
+                            _num(row.get("Open")), _num(row.get("High")),
+                            _num(row.get("Low")), close,
+                            int(vol) if vol is not None else None,
+                            adj if adj is not None else close,
+                        ],
+                    )
+                    inserted += 1
+                summary.append((sym, inserted))
+            except Exception as exc:  # noqa: BLE001
+                print(f"warn: {sym} ingest failed: {exc}", file=sys.stderr)
+                summary.append((sym, 0))
+                continue
     finally:
         con.close()
     msg = ", ".join(f"{s}={n}" for s, n in summary)
