@@ -137,6 +137,7 @@ def generate_report(as_of: str, start: str) -> None:
     for label, script in (
         ("bubble hedge radar", "score_bubble_hedge_radar.py"),
         ("capitulation radar", "score_capitulation_radar.py"),
+        ("capitulation convex radar", "score_capitulation_convex_radar.py"),
         ("risk regime engine", "score_risk_regime_engine.py"),
     ):
         try:

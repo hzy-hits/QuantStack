@@ -712,6 +712,28 @@ tasks:
     outputs:
       - reports/review_dashboard/capitulation_radar
 
+  research.capitulation_convex_radar:
+    # Upside mirror of victim_put — convex value buys (oversold + evidence-
+    # confirmed) every day, plus LEAPS-call suggestions for high-beta wash-out
+    # names when capitulation fires. Runs AFTER capitulation_radar (12:15).
+    group: research
+    schedule: "16 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/score_capitulation_convex_radar.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.capitulation_convex_radar.log
+    lock: ops/state/research.capitulation_convex_radar.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: us
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/capitulation_radar
+
   research.risk_regime_engine:
     # Hedge/Wedge/Confirm/Press/Capitulation regime classifier. Reads
     # bubble_hedge.json + capitulation_radar.json and emits a discrete state +
