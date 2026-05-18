@@ -17,9 +17,11 @@ Framework (operator essay, Hedge-Wedge-Confirm-Press):
             already biting. Pre-break.
             AI-infra new R: scaled hard (0.4x); freeze adds to stretched
             victims; prep the trim list.
-  PRESS   — confirmed break: SMH lost EMA50, or an explicit trendline break.
-            AI-infra new R: frozen (0.0x); activate victim puts; press the
-            specific shorts off the victim shortlist.
+  PRESS   — confirmed break: SMH sustained ≥3-day EMA50 loss, or an explicit
+            trendline break. AI-infra R: trimmed to a defensive core (0.35x)
+            — NOT a full liquidation. The AI basket V-recovers too hard for
+            0.0x to pay (backtested: 0.0x Sharpe 1.19 < 0.35x 1.50). Freeze
+            new adds; activate victim puts; press the victim shortlist.
 
 The engine reads `bubble_hedge.json` (single source of truth — never re-queries
 the DB) and writes `risk_regime.json` + `risk_regime.md`. The R multiplier is
@@ -45,7 +47,8 @@ R_MULTIPLIER = {
     "hedge": 1.0,
     "wedge": 0.6,
     "confirm": 0.4,
-    "press": 0.0,
+    "press": 0.35,  # defensive core, NOT full flat — the AI basket
+                    # V-recovers; 0.0x misses the bounce (backtested).
     # CAPITULATION is the recovery state — selling exhausted, flip to convex
     # long. New adds reopen at full size with a high-beta / convex tilt.
     "capitulation": 1.0,
@@ -211,7 +214,7 @@ def classify_regime(
             new_adds_allowed=False,
             hedge_directive="维持 wedge 头寸；趋势已确认破位，可压 specific victim shorts。",
             victim_action=f"启动 victim put：从 shortlist 头部 ({top_victim}) 开始挑被 wedge 拖下的标的。",
-            rationale=f"PRESS：{reason}。AI-infra 新加仓冻结，进入压制阶段。",
+            rationale=f"PRESS：{reason}。核心仓位减至 0.35x、冻结新加仓,进入压制阶段。",
             signals=signals,
         )
 

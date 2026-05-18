@@ -106,8 +106,15 @@ discrete daily state with a hard R multiplier on the AI-infra book:
 |---|---|---|---|
 | **HEDGE** | tape healthy, wedge not biting | `1.0x` | baseline; carry small SPX/HYG hedge |
 | **WEDGE** | rates up (TLT 20d ≤ -2%) / credit widening / SMH↔TLT corr ≤ -0.5 | `0.6x` | keep buying smaller; hold TBT / TLT put-spread |
-| **CONFIRM** | SMH lost EMA20 but holds EMA50, or extreme greed + wedge biting | `0.4x` | freeze adds to stretched names; prep trim list |
-| **PRESS** | SMH lost EMA50, or trendline break | `0.0x` | freeze new adds; press victim shorts |
+| **CONFIRM** | SMH lost EMA20 but holds EMA50, fresh 1-2 day EMA50 break, or extreme greed + wedge biting | `0.4x` | freeze adds to stretched names; prep trim list |
+| **PRESS** | SMH sustained ≥3-day EMA50 loss, or trendline break | `0.35x` | trim to a defensive core; freeze new adds; press victim shorts |
+
+> **PRESS is not a full liquidation.** The original framework said `0.0x`,
+> but the AI-infra basket V-recovers too hard for going flat to pay — a
+> 2024-06..2026-05 backtest put `0.0x` Sharpe at 1.19 vs `0.35x` at 1.50.
+> PRESS now holds a defensive `0.35x` core. PRESS also requires the EMA50
+> break to *hold ≥3 consecutive closes* — a 1-2 day dip is CONFIRM, not
+> PRESS, so a single-day cross can no longer whipsaw the book flat.
 
 - The **wedge** is the trend that kills the bubble (rates), not the bubble
   itself. You go long the wedge to protect the book.

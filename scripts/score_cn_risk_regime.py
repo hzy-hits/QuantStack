@@ -15,7 +15,8 @@ CN-native signals:
   wedge : US MOVE (kept — transmits to A-shares)
 
 States (precedence PRESS > CONFIRM > WEDGE > HEDGE):
-  PRESS   : 创业板 or 沪深300 below EMA50 — CN tape broken          → 0.0x
+  PRESS   : 创业板/沪深300 sustained ≥3-day EMA50 loss — tape broken → 0.35x
+            (defensive core, not full flat — see US engine backtest note)
   CONFIRM : 创业板 lost EMA20 (holds EMA50), OR 北向净流出 + 两融见顶 → 0.4x
   WEDGE   : 北向 20d 净流出, OR US MOVE wedge biting                → 0.6x
   HEDGE   : default                                               → 1.0x
@@ -146,7 +147,7 @@ def classify_cn_regime(signals: dict[str, Any]) -> RegimeDecision:
             state="press", r_multiplier=R_MULTIPLIER["press"], new_adds_allowed=False,
             hedge_directive="A股 tape 破位；冻结新加仓，减仓可用股指期货对冲。",
             victim_action="A股无 victim-put 层；破位后等企稳信号,不抄落刀。",
-            rationale=f"CN PRESS：{which}收于 EMA50 下,A股趋势确认破位。新加仓冻结。",
+            rationale=f"CN PRESS：{which}收于 EMA50 下,A股趋势确认破位。核心仓位减至 0.35x、冻结新加仓。",
             signals=sig,
         )
     if tape_breaking or tape_soft or (flow_out and margin_derisk):

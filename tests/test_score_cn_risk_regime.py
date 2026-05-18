@@ -46,7 +46,7 @@ class CnRegimeTests(unittest.TestCase):
     def test_gem_below_ema50_is_press(self) -> None:
         d = self.m.classify_cn_regime(_sig(gem_above_ema50=False, gem_above_ema20=False))
         self.assertEqual(d.state, "press")
-        self.assertEqual(d.r_multiplier, 0.0)
+        self.assertEqual(d.r_multiplier, 0.35)
         self.assertFalse(d.new_adds_allowed)
 
     def test_hs300_below_ema50_is_press(self) -> None:
@@ -97,7 +97,7 @@ class CnRegimeTests(unittest.TestCase):
             gem_above_ema50=False, gem_ema50_streak=-3, hs300_ema50_streak=8,
         ))
         self.assertEqual(d.state, "press")
-        self.assertEqual(d.r_multiplier, 0.0)
+        self.assertEqual(d.r_multiplier, 0.35)
 
     def test_hs300_three_day_break_confirms_press(self) -> None:
         d = self.m.classify_cn_regime(_sig(

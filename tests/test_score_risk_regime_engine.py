@@ -116,7 +116,7 @@ class RegimeClassifierTests(unittest.TestCase):
             [{"symbol": "AAOI"}],
         )
         self.assertEqual(d.state, "press")
-        self.assertEqual(d.r_multiplier, 0.0)
+        self.assertEqual(d.r_multiplier, 0.35)
         self.assertFalse(d.new_adds_allowed)
         self.assertIn("AAOI", d.victim_action)
 
@@ -248,7 +248,7 @@ class RegimeClassifierTests(unittest.TestCase):
             [{"symbol": "AAOI"}],
         )
         self.assertEqual(d.state, "press")
-        self.assertEqual(d.r_multiplier, 0.0)
+        self.assertEqual(d.r_multiplier, 0.35)
         self.assertTrue(d.signals["tape_broken"])
 
     def test_long_streak_above_ema50_is_hedge(self) -> None:
