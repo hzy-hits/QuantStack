@@ -403,3 +403,27 @@ Legend: . = tested weak, + = decent IC, ++ = strong IC, +++ = promoted, ! = stro
 - Experiments run: 16
 - OOS passed: 0/0
 - Passing factors: none
+
+## Session 20260515_140003_9fafac — CN
+- Timestamp: 2026-05-15 14:57
+- Experiments run: 24
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260515_145754_32e3a3 — US
+- Timestamp: 2026-05-15 15:53
+- Experiments run: 23
+- OOS passed: 1/1
+- Passing factors: repricing_absorption_60_40
+
+## Session 20260518_060002_cd0c45 — CN
+- Timestamp: 2026-05-18 06:56
+- Experiments run: 24
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260518_140003_036b53 — CN
+- Timestamp: 2026-05-18 14:56
+- Experiments run: 21
+- OOS passed: 0/0
+- Passing factors: none
