@@ -54,7 +54,10 @@ R_MULTIPLIER = {
 # Signal thresholds — kept here so tests and operators can see them in one place.
 TLT_WEDGE_DRAWDOWN_PCT = -2.0   # TLT 20d return at/below this = rates biting
 HYG_CREDIT_STRESS_PCT = -1.0    # HYG 20d return at/below this = credit widening
-CORR_FLIP_THRESHOLD = -0.5      # SMH↔TLT 20d corr at/below this = rate-sensitivity on
+CORR_FLIP_THRESHOLD = 0.5       # SMH↔TLT 20d corr at/above this = rates-dominated
+                                # regime. Stocks and bonds normally move OPPOSITE
+                                # (negative corr); when rates drive both they fall
+                                # together → positive corr = "bonds in the stonks".
 GREED_EXTREME = 75.0            # Fear & Greed at/above this = extreme greed
 FEAR_EXTREME = 30.0             # Fear & Greed at/below this = fear
 MOVE_CALM = 80.0                # MOVE below this = Treasury market calm / risk-on
@@ -125,7 +128,7 @@ def classify_regime(
     )
     wedge_biting = (
         (tlt_20d is not None and tlt_20d <= TLT_WEDGE_DRAWDOWN_PCT)
-        or (corr is not None and corr <= CORR_FLIP_THRESHOLD)
+        or (corr is not None and corr >= CORR_FLIP_THRESHOLD)
         or (hyg_20d is not None and hyg_20d <= HYG_CREDIT_STRESS_PCT)
         or move_wedge
     )
@@ -209,8 +212,8 @@ def classify_regime(
         bits = []
         if tlt_20d is not None and tlt_20d <= TLT_WEDGE_DRAWDOWN_PCT:
             bits.append(f"TLT 20d {tlt_20d:+.1f}%")
-        if corr is not None and corr <= CORR_FLIP_THRESHOLD:
-            bits.append(f"SMH↔TLT corr {corr:+.2f}")
+        if corr is not None and corr >= CORR_FLIP_THRESHOLD:
+            bits.append(f"SMH↔TLT corr {corr:+.2f}(同向=利率主导)")
         if hyg_20d is not None and hyg_20d <= HYG_CREDIT_STRESS_PCT:
             bits.append(f"HYG 20d {hyg_20d:+.1f}%")
         if move_wedge:

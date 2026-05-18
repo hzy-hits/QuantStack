@@ -100,7 +100,7 @@ class VictimRow:
     module: str
     px_vs_ema21_pct: float | None
     px_vs_ema50_pct: float | None
-    beta_vs_tlt_20d: float | None  # negative = long-duration sensitive
+    beta_vs_tlt_20d: float | None  # positive = rate-sensitive (moves with TLT)
     convex_score: float
     reasons: list[str]
 
@@ -301,8 +301,10 @@ def _victim_score(
     if px_vs_ema50 is not None and px_vs_ema50 > 25.0:
         score += 10
         reasons.append(f"stretched_ema50_{px_vs_ema50:+.0f}%")
-    # Negative beta to TLT = long-duration sensitive (rates up → stock down)
-    if beta_vs_tlt is not None and beta_vs_tlt < -0.3:
+    # Positive beta to TLT = rate-sensitive: when rates rise TLT falls AND the
+    # long-duration stock falls → they move together → positive beta. (A
+    # normal risk asset has NEGATIVE beta to TLT — the risk-on/off relation.)
+    if beta_vs_tlt is not None and beta_vs_tlt > 0.3:
         score += 10
         reasons.append(f"rate_sensitive_beta_tlt_{beta_vs_tlt:+.2f}")
     return round(score, 1), reasons
@@ -466,10 +468,10 @@ def derive_guidance(
     if confirm.trendline_break:
         notes.append("**Confirmation: SMH 出现 EMA50 trendline 破位** — 风险升级，操作员复核 victim 池。")
 
-    if confirm.ai_book_vs_tlt_corr_20d is not None and confirm.ai_book_vs_tlt_corr_20d <= -0.5:
+    if confirm.ai_book_vs_tlt_corr_20d is not None and confirm.ai_book_vs_tlt_corr_20d >= 0.5:
         notes.append(
             f"**Correlation flip** — SMH ↔ TLT 20d 相关 {confirm.ai_book_vs_tlt_corr_20d:+.2f}；"
-            "强负相关 = AI 对利率敏感性放大，wedge 直接生效。"
+            "强正相关 = AI 与债券同向（bonds in the stonks），利率主导,wedge 直接生效。"
         )
 
     if victims:
@@ -528,7 +530,7 @@ def render_markdown(
         "## B) Victim shortlist — AI universe 内的脆弱标的",
         "",
         "Convex-to-downside 评分（高分 = 更脆弱）。组合权重：",
-        "- evidence_pending +25 / counter_items≥3 +10 / convex_module +21 / stretched_ema21>15% +15 / stretched_ema50>25% +10 / rate_sensitive (β vs TLT < -0.3) +10",
+        "- evidence_pending +25 / counter_items≥3 +10 / convex_module +21 / stretched_ema21>15% +15 / stretched_ema50>25% +10 / rate_sensitive (β vs TLT > 0.3) +10",
         "",
         "| Symbol | Company | Depth | Module | Evidence | px vs EMA21 | px vs EMA50 | β vs TLT | Score | Reasons |",
         "|---|---|---|---|---|---:|---:|---:|---:|---|",

@@ -136,11 +136,24 @@ class AiInfraUniverseTests(unittest.TestCase):
                     {
                         "asset_pool": "美国资产池",
                         "market_country": "US",
+                        "ticker": "MRVL",
+                        "company": "Marvell",
+                        "bfs_depth": "D1-D3",
+                        "module": "Custom silicon",
+                        "current_pool": "候选池",
+                        # Pure 合理推论 head, no pending flag → production.
+                        "evidence_state": "合理推论: AI revenue mix is structural",
+                    },
+                    {
+                        "asset_pool": "美国资产池",
+                        "market_country": "US",
                         "ticker": "AVGO",
                         "company": "Broadcom",
                         "bfs_depth": "D1-D2",
                         "module": "Custom ASIC",
                         "current_pool": "核心池",
+                        # 合理推论 token present, but head still flags
+                        # 待原文核验 → research-only (codex P0 case).
                         "evidence_state": "合理推论+待原文核验: ASIC mix",
                     },
                     {
@@ -169,9 +182,10 @@ class AiInfraUniverseTests(unittest.TestCase):
             research = universe.records_by_symbol("US", root, pool="research")
             production = universe.records_by_symbol("US", root, pool="production")
 
-            self.assertEqual(set(research), {"NVDA", "AVGO", "AMD", "FOO"})
-            # Only 原文已证明 (NVDA) and 合理推论 (AVGO) clear the gate.
-            self.assertEqual(set(production), {"NVDA", "AVGO"})
+            self.assertEqual(set(research), {"NVDA", "MRVL", "AVGO", "AMD", "FOO"})
+            # 原文已证明 (NVDA) and pure 合理推论 (MRVL) clear the gate.
+            # AVGO's head still flags 待原文核验 → research-only.
+            self.assertEqual(set(production), {"NVDA", "MRVL"})
 
             # merge_with_universe_candidates threads pool param into the gate.
             rows, gate = universe.merge_with_universe_candidates(
@@ -182,7 +196,7 @@ class AiInfraUniverseTests(unittest.TestCase):
                 pool="production",
             )
             symbols = {row["symbol"] for row in rows}
-            self.assertEqual(symbols, {"NVDA", "AVGO"})
+            self.assertEqual(symbols, {"NVDA", "MRVL"})
             self.assertEqual(gate.pool, "production")
             # AMD candidate is dropped because it's not production-grade.
             self.assertIn("AMD", gate.excluded_symbols)

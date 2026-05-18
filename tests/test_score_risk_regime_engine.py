@@ -64,11 +64,21 @@ class RegimeClassifierTests(unittest.TestCase):
         self.assertEqual(d.r_multiplier, 0.6)
         self.assertTrue(d.new_adds_allowed)
 
-    def test_negative_corr_alone_triggers_wedge(self) -> None:
+    def test_positive_corr_alone_triggers_wedge(self) -> None:
+        # Stocks + bonds moving TOGETHER (positive corr) = rates-dominated
+        # regime = wedge biting ("bonds in the stonks").
+        d = self.m.classify_regime(
+            _wedge(tlt=0.1), _confirm(ai_book_vs_tlt_corr_20d=0.62), []
+        )
+        self.assertEqual(d.state, "wedge")
+
+    def test_negative_corr_is_the_normal_regime_not_wedge(self) -> None:
+        # Negative SMH↔TLT corr is the normal risk-on/off relationship —
+        # must NOT trigger the wedge.
         d = self.m.classify_regime(
             _wedge(tlt=0.1), _confirm(ai_book_vs_tlt_corr_20d=-0.62), []
         )
-        self.assertEqual(d.state, "wedge")
+        self.assertEqual(d.state, "hedge")
 
     def test_credit_stress_alone_triggers_wedge(self) -> None:
         d = self.m.classify_regime(_wedge(tlt=0.0, hyg=-1.5), _confirm(), [])

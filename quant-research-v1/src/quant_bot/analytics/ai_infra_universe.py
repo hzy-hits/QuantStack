@@ -113,18 +113,34 @@ def is_excluded_record(record: dict[str, Any]) -> bool:
     return "排除" in text or str(record.get("score_bucket") or "").lower() == "exclude"
 
 
+_EVIDENCE_PENDING_FLAGS = ("待原文核验", "待核验", "原文需核验", "证据不足")
+
+
 def is_production_grade(record: dict[str, Any]) -> bool:
     """Production pool gate.
 
-    A record is production-grade when evidence_state shows the BFS edge has
-    cleared the G0-G2 review (原文已证明 or 合理推论). Records still flagged
-    待原文核验 / 证据不足 / 原文需核验 only / unscored stay in the research
-    pool — they belong on the radar but cannot be executed.
+    Classification lives in the *head* of evidence_state — the part before
+    the first colon. The body after the colon is descriptive detail and may
+    mention sub-items still 待核验 even for a proven name.
+
+    - head contains 原文已证明 → production (source proven; sub-detail aside).
+    - head contains 合理推论 AND no pending flag → production.
+    - head still flags 待原文核验 / 原文需核验 / 证据不足 (e.g. the head
+      `合理推论+待原文核验`) → research pool only, NOT executable.
+
+    This veto closes the codex-review P0: `合理推论+待原文核验` names
+    (AVGO / MRVL / ORCL) must not leak into the production basket — the
+    pending-verification flag in the head wins over the 合理推论 token.
     """
     state = str(record.get("evidence_state") or "")
     if not state:
         return False
-    return "原文已证明" in state or "合理推论" in state
+    head = re.split(r"[:：]", state, maxsplit=1)[0]
+    if "原文已证明" in head:
+        return True
+    if any(flag in head for flag in _EVIDENCE_PENDING_FLAGS):
+        return False
+    return "合理推论" in head
 
 
 def market_symbols_for_record(record: dict[str, Any], market: str) -> list[str]:
