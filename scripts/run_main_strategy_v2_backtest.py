@@ -94,6 +94,9 @@ PORTFOLIO_VAR95_R_CAP = 1.00
 CN_BASKET_R_CAP = 1.20
 US_BASKET_R_CAP = 1.50
 SECTOR_R_CAP = 0.50
+# CN daily report surfaces only the top-N reranked A-share names (operator
+# directive 2026-05-18 — keep the A-share daily decision tight).
+CN_DAILY_TOP_N = 5
 CORR_CLUSTER_R_CAP = 0.75
 CORR_CLUSTER_THRESHOLD = 0.65
 CN_BETA_HEDGE_RATIO = hedge_lib.CN_BETA_HEDGE_RATIO
@@ -2937,6 +2940,13 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
             str(row.get("symbol") or ""),
         )
     )
+
+    # CN daily directive: surface only the top 5 reranked A-share names.
+    # The list is already conviction-sorted (size_r desc); keep the CN top 5,
+    # US untouched. Lower-ranked CN names drop off the daily actionable list.
+    cn_ranked = [r for r in actionable if str(r.get("market") or "").upper() == "CN"]
+    non_cn = [r for r in actionable if str(r.get("market") or "").upper() != "CN"]
+    actionable = cn_ranked[:CN_DAILY_TOP_N] + non_cn
 
     watch: list[dict[str, Any]] = []
     for market, lookup in (("CN", cn_lookup), ("US", us_lookup)):
