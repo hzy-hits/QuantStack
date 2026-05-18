@@ -1009,6 +1009,27 @@ tasks:
     outputs:
       - reports/review_dashboard/ai_infra_promotion_alpha
 
+  research.ai_infra_strategy_backtest:
+    # Weekly historical backtest of the risk-regime overlay — does scaling
+    # exposure by the regime beat naive always-hold and the benchmark?
+    # PIT-limited (basket fixed at today's pool). Weekly: it is an analysis
+    # run, not a daily-critical task.
+    group: research
+    schedule: "30 10 * * 6"
+    cwd: .
+    command:
+      - python3
+      - scripts/run_ai_infra_strategy_backtest.py
+    log: ops/logs/research.ai_infra_strategy_backtest.log
+    lock: ops/state/research.ai_infra_strategy_backtest.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/ai_infra_backtest
+
   us.watchdog.reboot:
     group: watchdog
     schedule: "@reboot"

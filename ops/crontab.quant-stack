@@ -72,6 +72,7 @@ QUANT_STACK_ROOT=/home/ivena/coding/quant-stack
 15 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ai_tape_cross_compare
 18 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.rebalance_history
 20 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.promotion_alpha_backtest
+30 10 * * 6 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ai_infra_strategy_backtest
 
 # -- Watchdog --
 @reboot cd $QUANT_STACK_ROOT && ops/run_task.sh us.watchdog.reboot
