@@ -50,8 +50,17 @@ AI_DIRECT_KW = (
 )
 AI_ADJACENT_KW = (
     "服务器", "云计算", "光通信", "光纤", "通信设备", "通信网络", "网络设备",
-    "pcb", "印制电路", "覆铜板", "连接器", "存储", "高端计算", "交换机",
-    "散热", "温控", "电源", "半导体", "芯片", "封装", "通信",
+    "pcb", "印制电路", "印刷电路", "覆铜板", "连接器", "存储", "高端计算", "交换机",
+    "散热", "温控", "电源", "半导体", "芯片", "封装", "封测", "通信",
+    # Semicap / DRAM supply chain — only unambiguous, semiconductor-specific
+    # segment terms. Deliberately NOT generic words like 检测设备 / 陶瓷材料 /
+    # 电子元器件 / 包材 — those do not prove a semiconductor segment from the
+    # disclosed name alone, so such rows honestly stay 待原文核验.
+    "刻蚀", "光刻", "薄膜沉积", "cvd", "pvd", "ald", "外延",
+    "电子工艺装备", "晶圆", "硅片", "单晶硅", "硅零部件", "硅电极",
+    "化学机械抛光", "cmp", "抛光液", "抛光垫", "涂胶显影",
+    "湿电子化学品", "超净高纯", "电子特种气体", "电子特气", "电子大宗气体",
+    "电子气体", "前驱体", "靶材", "量测", "量检测", "洁净室",
 )
 
 # Materiality thresholds (share of total disclosed product revenue).
