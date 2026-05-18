@@ -139,6 +139,7 @@ def generate_report(as_of: str, start: str) -> None:
         ("capitulation radar", "score_capitulation_radar.py"),
         ("capitulation convex radar", "score_capitulation_convex_radar.py"),
         ("risk regime engine", "score_risk_regime_engine.py"),
+        ("cn risk regime", "score_cn_risk_regime.py"),
     ):
         try:
             subprocess.run(

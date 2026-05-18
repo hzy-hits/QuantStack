@@ -3076,9 +3076,14 @@ def load_bubble_hedge_payload(as_of: str) -> dict[str, Any] | None:
         return None
 
 
-def render_risk_regime_section(payload: dict[str, Any]) -> list[str]:
-    """Render the Hedge/Wedge/Confirm/Press gate state — the hard R gate."""
-    regime = payload.get("risk_regime") or {}
+def render_risk_regime_section(payload: dict[str, Any], regime_key: str = "risk_regime") -> list[str]:
+    """Render the Hedge/Wedge/Confirm/Press gate state — the hard R gate.
+
+    regime_key="cn_risk_regime" renders the CN-native regime (创业板/北向/
+    两融 signals); the default renders the US regime (MOVE/VIX/SMH).
+    """
+    is_cn = "cn" in regime_key
+    regime = payload.get(regime_key) or {}
     state = str(regime.get("state") or "hedge")
     mult = float(regime.get("r_multiplier", 1.0))
     state_label = {
@@ -3086,11 +3091,16 @@ def render_risk_regime_section(payload: dict[str, Any]) -> list[str]:
         "wedge": "WEDGE — 楔子咬合",
         "confirm": "CONFIRM — 破位预警",
         "press": "PRESS — 确认压制",
+        "capitulation": "CAPITULATION — 抛售衰竭",
     }.get(state, state)
+    title = ("## CN 风控引擎 — A股 Hedge / Wedge / Confirm / Press（硬 gate）"
+             if is_cn else
+             "## 风控引擎 — Hedge / Wedge / Confirm / Press（硬 gate）")
+    book = "A股" if is_cn else "AI-infra"
     lines = [
-        "## 风控引擎 — Hedge / Wedge / Confirm / Press（硬 gate）",
+        title,
         "",
-        f"**当前状态：{state_label}** ｜ AI-infra 新加仓 R 乘数 `{mult:.2f}x`"
+        f"**当前状态：{state_label}** ｜ {book}新加仓 R 乘数 `{mult:.2f}x`"
         + ("（新加仓冻结）" if not regime.get("new_adds_allowed", True) else ""),
         "",
         f"- 判定：{regime.get('rationale') or '—'}",
@@ -3098,9 +3108,23 @@ def render_risk_regime_section(payload: dict[str, Any]) -> list[str]:
         f"- Victim 动作：{regime.get('victim_action') or '—'}",
     ]
     if regime.get("artifact_missing"):
-        lines.append("- ⚠️ bubble_hedge 工件缺失，gate 退化为 1.0x；运行 score_bubble_hedge_radar.py 修复。")
+        art = "cn_risk_regime" if is_cn else "bubble_hedge"
+        lines.append(f"- ⚠️ {art} 工件缺失，gate 退化为 1.0x。")
     sig = regime.get("signals") or {}
-    if sig:
+    if sig and is_cn:
+        lines.append(
+            "- A股信号："
+            f"创业板>EMA50={sig.get('gem_above_ema50')} ｜ "
+            f"创业板>EMA20={sig.get('gem_above_ema20')} ｜ "
+            f"沪深300>EMA50={sig.get('hs300_above_ema50')} ｜ "
+            f"北向20d={fmt_num(sig.get('north_20d_sum'), 0)} ｜ "
+            f"两融20d={fmt_num(sig.get('margin_chg_20d_pct'), 1)}%"
+        )
+        lines.append(
+            f"- 楔子层(共用)：美债 MOVE={fmt_num(sig.get('us_move_level'), 1)}"
+            f"(20d {fmt_num(sig.get('us_move_chg_20d'), 1)}%) — 经北向传导"
+        )
+    elif sig:
         lines.append(
             "- 波动信号："
             f"MOVE={fmt_num(sig.get('move_level'), 1)}"
@@ -5428,6 +5452,28 @@ def load_capitulation_payload(as_of: str) -> dict[str, Any] | None:
         return None
 
 
+CN_RISK_REGIME_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "cn_risk_regime"
+
+
+def load_cn_risk_regime_payload(as_of: str) -> dict[str, Any]:
+    """CN-native regime artifact (score_cn_risk_regime.py). Missing → hedge 1.0x."""
+    path = CN_RISK_REGIME_ROOT / as_of / "cn_risk_regime.json"
+    if not path.exists():
+        return {"state": "hedge", "r_multiplier": 1.0, "new_adds_allowed": True,
+                "hedge_directive": "—", "victim_action": "—",
+                "rationale": "cn_risk_regime 工件缺失，CN gate 退化为 1.0x。",
+                "signals": {}, "artifact_missing": True}
+    try:
+        out = json.loads(path.read_text(encoding="utf-8"))
+        out["artifact_missing"] = False
+        return out
+    except (OSError, json.JSONDecodeError):
+        return {"state": "hedge", "r_multiplier": 1.0, "new_adds_allowed": True,
+                "hedge_directive": "—", "victim_action": "—",
+                "rationale": "cn_risk_regime 工件损坏，CN gate 退化为 1.0x。",
+                "signals": {}, "artifact_missing": True}
+
+
 def build_risk_regime(
     bubble_hedge: dict[str, Any] | None,
     capitulation: dict[str, Any] | None = None,
@@ -5469,6 +5515,7 @@ def build_portfolio_risk_overlay(
     cn_db: Path,
     as_of: date,
     risk_regime: dict[str, Any] | None = None,
+    cn_risk_regime: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     us_guard = _guardrail_by_market(profit_guardrails, "US")
     cn_guard = _guardrail_by_market(profit_guardrails, "CN")
@@ -5594,19 +5641,25 @@ def build_portfolio_risk_overlay(
     _scale_overlay_rows(rows, cap=US_BASKET_R_CAP, market="US", reason="us_basket_cap_scaled")
     _scale_overlay_rows(rows, cap=PORTFOLIO_TOTAL_R_CAP, reason="total_portfolio_cap_scaled")
 
-    # Hedge/Wedge/Confirm/Press gate — scale the AI-infra book AFTER the basket
-    # caps. Applying it before the caps is wrong: the cap re-scaler normalises
-    # the basket back up to the cap and neutralises the gate. Applied here it
-    # is the final word on book size (caps define the max; the regime shrinks
-    # it). The whole production book is AI-infra under enforce_expand.
+    # Hedge/Wedge/Confirm/Press gate — scale the book AFTER the basket caps
+    # (the cap re-scaler would otherwise normalise the gate away). Each market
+    # is gated by its OWN regime: US rows by the US engine, CN rows by the
+    # CN-native engine (CN A-shares run their own tape/flow cycle — only the
+    # rates wedge is shared).
     regime_state = str((risk_regime or {}).get("state") or "hedge")
     regime_mult = float((risk_regime or {}).get("r_multiplier", 1.0))
-    if regime_mult != 1.0:
-        for row in rows:
-            row["base_r"] = float(row["base_r"]) * regime_mult
-            row["final_r"] = float(row["final_r"]) * regime_mult
+    cn_regime_state = str((cn_risk_regime or {}).get("state") or "hedge")
+    cn_regime_mult = float((cn_risk_regime or {}).get("r_multiplier", 1.0))
+    for row in rows:
+        is_cn = str(row.get("market") or "").upper() == "CN"
+        mult = cn_regime_mult if is_cn else regime_mult
+        state = cn_regime_state if is_cn else regime_state
+        if mult != 1.0:
+            row["base_r"] = float(row["base_r"]) * mult
+            row["final_r"] = float(row["final_r"]) * mult
             row["auto_eligible"] = row["final_r"] > 0.0
-            row["risk_reasons"].append(f"risk_regime_{regime_state}_x{regime_mult:.2f}")
+            label = "cn_risk_regime" if is_cn else "risk_regime"
+            row["risk_reasons"].append(f"{label}_{state}_x{mult:.2f}")
 
     # Sector caps.
     for market in ["CN", "US"]:
@@ -5767,6 +5820,8 @@ def build_portfolio_risk_overlay(
             "risk_attribution": risk_attribution,
             "risk_regime_state": regime_state,
             "risk_regime_multiplier": regime_mult,
+            "cn_risk_regime_state": cn_regime_state,
+            "cn_risk_regime_multiplier": cn_regime_mult,
         },
     }
 
@@ -7914,7 +7969,7 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     ]
     lines += render_market_action_table(actions)
     lines += render_market_selection_rationale(payload, actions, "CN")
-    lines += render_risk_regime_section(payload)
+    lines += render_risk_regime_section(payload, regime_key="cn_risk_regime")
     lines += render_ai_supercycle_evidence_section(payload, "CN", limit=10)
     lines += render_ai_supercycle_value_radar_section(payload, "CN", limit=8)
     lines += [
@@ -9126,6 +9181,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     bubble_hedge_payload = load_bubble_hedge_payload(as_of.isoformat())
     capitulation_payload = load_capitulation_payload(as_of.isoformat())
     risk_regime = build_risk_regime(bubble_hedge_payload, capitulation_payload)
+    cn_risk_regime = load_cn_risk_regime_payload(as_of.isoformat())
     portfolio_risk_overlay = build_portfolio_risk_overlay(
         us,
         cn,
@@ -9135,6 +9191,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         args.cn_db,
         as_of,
         risk_regime=risk_regime,
+        cn_risk_regime=cn_risk_regime,
     )
     option_shadow_ledger = build_option_shadow_ledger(args.us_db, start, as_of)
     us_calendar_focus = calendar_focus_symbols(
@@ -9227,6 +9284,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "options_tenor_signals": load_options_tenor_signals(as_of.isoformat()),
         "bubble_hedge": bubble_hedge_payload,
         "risk_regime": risk_regime,
+        "cn_risk_regime": cn_risk_regime,
         "promotion_contract": promotion_contract,
     }
     assert_promoted_execution_rows(payload)
@@ -9247,6 +9305,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         args.cn_db,
         as_of,
         risk_regime=risk_regime,
+        cn_risk_regime=cn_risk_regime,
     )
     payload["profit_readiness"] = build_profit_readiness(payload)
     payload["pipeline_requirements_audit"] = build_pipeline_requirements_audit(payload)

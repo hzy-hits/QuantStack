@@ -804,6 +804,30 @@ tasks:
     outputs:
       - reports/review_dashboard/risk_regime
 
+  research.cn_risk_regime:
+    # CN-native Hedge/Wedge/Confirm/Press — A-shares get their own tape/flow
+    # regime (创业板/沪深300 EMA + 北向 20d + 两融趋势), keeping the shared
+    # US MOVE wedge layer. Gates the CN basket separately from the US basket.
+    # Runs AFTER bubble_hedge_radar (12:14, for the MOVE layer), BEFORE
+    # main_strategy_v2 (12:25).
+    group: research
+    schedule: "18 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/score_cn_risk_regime.py
+      - --as-of
+      - "{cst_date}"
+    log: ops/logs/research.cn_risk_regime.log
+    lock: ops/state/research.cn_risk_regime.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: cn
+    session: research
+    owner: research_pipeline
+    outputs:
+      - reports/review_dashboard/cn_risk_regime
+
   research.options_tenor_radar:
     group: research
     schedule: "7 12 * * 1-5"
