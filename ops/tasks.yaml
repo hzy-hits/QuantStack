@@ -513,6 +513,29 @@ tasks:
     outputs:
       - reports/review_dashboard/ai_infra_source_review_readiness
 
+  research.cn_ai_evidence_verify:
+    # Verify CN AI-infra evidence from Tushare 主营业务构成 (fina_mainbz) —
+    # replaces auto-stamped 原文已证明 boilerplate with real disclosed
+    # segment-revenue evidence (or downgrades to 待原文核验 when no AI
+    # segment is disclosed). Runs AFTER ai_infra_promotion_plan (11:55) so it
+    # corrects any fresh auto-stamps, and BEFORE production_universe_refresh
+    # (12:07) / main_strategy_v2 (12:25).
+    group: research
+    schedule: "0 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/verify_cn_ai_evidence.py
+    log: ops/logs/research.cn_ai_evidence_verify.log
+    lock: ops/state/research.cn_ai_evidence_verify.lock
+    timeout_minutes: 20
+    sends_email: false
+    market: cn
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ai_infra/data/global_universe_v2.jsonl
+
   research.production_universe_refresh:
     # Derive the evidence-confirmed subset of the AI infra research universe
     # so the operator can see which names are eligible for the production

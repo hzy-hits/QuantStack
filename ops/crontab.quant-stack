@@ -48,6 +48,7 @@ QUANT_STACK_ROOT=/home/ivena/coding/quant-stack
 0 6 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.cn_flow_signals
 5 6 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.satellite_index_ingest
 6 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.source_review_readiness
+0 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.cn_ai_evidence_verify
 7 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.production_universe_refresh
 12 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ten_x_radar
 9 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.evidence_card_drafts
