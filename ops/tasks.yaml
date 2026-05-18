@@ -1030,6 +1030,29 @@ tasks:
     outputs:
       - reports/review_dashboard/ai_infra_backtest
 
+  research.universe_membership_snapshot:
+    # Daily point-in-time snapshot of AI-infra production-pool membership.
+    # Rebuilds the ledger from git history + the live working tree so every
+    # universe edit becomes a dated, immutable record. Runs late in the day,
+    # after the discovery / universe-refresh tasks, so it captures the day's
+    # final state. The strategy backtest reads this ledger to size each
+    # historical day's basket point-in-time instead of with today's pool.
+    group: research
+    schedule: "50 12 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/snapshot_universe_membership.py
+    log: ops/logs/research.universe_membership_snapshot.log
+    lock: ops/state/research.universe_membership_snapshot.lock
+    timeout_minutes: 10
+    sends_email: false
+    market: all
+    session: research
+    owner: research_pipeline
+    outputs:
+      - ai_infra/data/universe_membership_history.jsonl
+
   us.watchdog.reboot:
     group: watchdog
     schedule: "@reboot"

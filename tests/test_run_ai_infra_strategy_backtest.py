@@ -76,5 +76,64 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("数据不足", v)
 
 
+class MembershipLedgerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.m = _load_module()
+
+    def _snaps(self):
+        from datetime import date
+        return [
+            (date(2026, 1, 10), frozenset({"A", "B"})),
+            (date(2026, 2, 20), frozenset({"A", "C"})),
+        ]
+
+    def test_members_before_ledger_is_proxy_not_pit_clean(self) -> None:
+        from datetime import date
+        members, clean = self.m._members_on(self._snaps(), date(2025, 6, 1))
+        self.assertFalse(clean)              # pre-ledger → proxy
+        self.assertEqual(members, frozenset({"A", "C"}))  # latest snapshot
+
+    def test_members_on_snapshot_date_is_pit_clean(self) -> None:
+        from datetime import date
+        members, clean = self.m._members_on(self._snaps(), date(2026, 1, 10))
+        self.assertTrue(clean)
+        self.assertEqual(members, frozenset({"A", "B"}))
+
+    def test_members_between_snapshots_uses_earlier(self) -> None:
+        from datetime import date
+        members, clean = self.m._members_on(self._snaps(), date(2026, 2, 1))
+        self.assertTrue(clean)
+        self.assertEqual(members, frozenset({"A", "B"}))
+
+    def test_members_after_last_snapshot(self) -> None:
+        from datetime import date
+        members, clean = self.m._members_on(self._snaps(), date(2026, 5, 1))
+        self.assertTrue(clean)
+        self.assertEqual(members, frozenset({"A", "C"}))
+
+    def test_empty_ledger(self) -> None:
+        from datetime import date
+        members, clean = self.m._members_on([], date(2026, 1, 1))
+        self.assertEqual(members, frozenset())
+        self.assertFalse(clean)
+
+    def test_load_membership_parses_and_filters(self) -> None:
+        import tempfile
+        from pathlib import Path
+        content = (
+            "# header comment\n"
+            '{"snapshot_date":"2026-01-10","market":"US","pool":"production","symbols":["A","B"]}\n'
+            '{"snapshot_date":"2026-02-20","market":"US","pool":"production","symbols":["A","C"]}\n'
+            '{"snapshot_date":"2026-01-10","market":"CN","pool":"production","symbols":["X"]}\n'
+            '{"snapshot_date":"2026-01-10","market":"US","pool":"research","symbols":["Z"]}\n'
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "ledger.jsonl"
+            p.write_text(content, encoding="utf-8")
+            us = self.m._load_membership(p, "US")
+        self.assertEqual(len(us), 2)             # research row excluded
+        self.assertEqual(us[0][1], frozenset({"A", "B"}))
+
+
 if __name__ == "__main__":
     unittest.main()

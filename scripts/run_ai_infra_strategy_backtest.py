@@ -47,7 +47,44 @@ from quant_bot.analytics import ai_infra_universe  # noqa: E402
 DEFAULT_US_DB = STACK_ROOT / "quant-research-v1" / "data" / "quant.duckdb"
 DEFAULT_CN_DB = STACK_ROOT / "quant-research-cn" / "data" / "quant_cn.duckdb"
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "ai_infra_backtest"
+DEFAULT_LEDGER = STACK_ROOT / "ai_infra" / "data" / "universe_membership_history.jsonl"
 TRADING_DAYS = 252
+
+
+# ── point-in-time universe membership ────────────────────────────────────────
+
+def _load_membership(path: Path, market: str) -> list[tuple[date, frozenset[str]]]:
+    """Sorted [(snapshot_date, members)] for a market's production pool."""
+    snaps: list[tuple[date, frozenset[str]]] = []
+    if not path.exists():
+        return snaps
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        row = json.loads(line)
+        if row.get("market") == market and row.get("pool") == "production":
+            snaps.append((date.fromisoformat(row["snapshot_date"]),
+                          frozenset(row.get("symbols") or [])))
+    snaps.sort(key=lambda x: x[0])
+    return snaps
+
+
+def _members_on(snaps: list[tuple[date, frozenset[str]]], d: date) -> tuple[frozenset[str], bool]:
+    """(members, pit_clean) — production membership in effect on day d.
+
+    pit_clean=True  → an as-of snapshot exists (date <= d): real PIT.
+    pit_clean=False → d precedes the ledger; the latest snapshot is used as
+                      a survivorship-exposed proxy (same as the old fixed
+                      basket), and the day is reported as NOT PIT-clean.
+    """
+    chosen: frozenset[str] | None = None
+    for sd, members in snaps:
+        if sd <= d:
+            chosen = members
+    if chosen is not None:
+        return (chosen, True)
+    return (snaps[-1][1] if snaps else frozenset(), False)
 
 
 # ── return / equity math ─────────────────────────────────────────────────────
@@ -100,20 +137,37 @@ def _closes(con, symbol_col: str, table: str, symbol: str, start: date, end: dat
 
 
 def _basket_daily_returns(
-    con, table: str, symbol_col: str, names: list[str], dates: list[date]
-) -> list[float | None]:
-    """Equal-weight basket return per day — names present on both d-1 and d."""
-    series = {s: _closes(con, symbol_col, table, s, dates[0], dates[-1]) for s in names}
+    con, table: str, symbol_col: str,
+    snaps: list[tuple[date, frozenset[str]]], fallback: list[str], dates: list[date]
+) -> tuple[list[float | None], int]:
+    """Equal-weight basket return per day with point-in-time membership.
+
+    For each day the basket is the production-pool snapshot in effect that
+    day (`_members_on`). Days before the ledger starts use the latest
+    snapshot as a survivorship-exposed proxy — identical to the old
+    fixed-basket backtest — and are counted as NOT PIT-clean.
+
+    Returns (daily_returns, pit_clean_days).
+    """
+    universe = (sorted(set().union(*[m for _, m in snaps]))
+                if snaps else sorted(fallback))
+    series = {s: _closes(con, symbol_col, table, s, dates[0], dates[-1]) for s in universe}
     out: list[float | None] = [None]
+    pit_clean = 0
     for i in range(1, len(dates)):
         d, prev = dates[i], dates[i - 1]
+        if snaps:
+            members, clean = _members_on(snaps, d)
+        else:
+            members, clean = frozenset(fallback), True
+        pit_clean += int(clean)
         rets = []
-        for s in names:
+        for s in members:
             c = series.get(s, {})
             if d in c and prev in c and c[prev]:
                 rets.append(c[d] / c[prev] - 1.0)
         out.append(statistics.mean(rets) if rets else None)
-    return out
+    return out, pit_clean
 
 
 def _index_returns(closes: dict[date, float], dates: list[date]) -> list[float | None]:
@@ -238,19 +292,28 @@ def main() -> int:
     parser.add_argument("--us-db", type=Path, default=DEFAULT_US_DB)
     parser.add_argument("--cn-db", type=Path, default=DEFAULT_CN_DB)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--ledger", type=Path, default=DEFAULT_LEDGER)
     args = parser.parse_args()
     end = args.end or date.today()
 
     us_basket = sorted(ai_infra_universe.records_by_symbol("US", pool="production"))
     cn_basket = sorted(ai_infra_universe.records_by_symbol("CN", pool="production"))
+    us_snaps = _load_membership(args.ledger, "US")
+    cn_snaps = _load_membership(args.ledger, "CN")
+    ledger_dates = sorted({sd for sd, _ in us_snaps + cn_snaps})
     print(f"production basket — US {len(us_basket)} / CN {len(cn_basket)} "
-          f"(PIT-limited: fixed at today's pool)")
+          f"(today's pool); membership ledger: "
+          f"{len(ledger_dates)} snapshot(s) "
+          f"{ledger_dates[0] if ledger_dates else 'none'}..{ledger_dates[-1] if ledger_dates else 'none'}")
 
     result: dict[str, Any] = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "window": {"start": args.start.isoformat(), "end": end.isoformat()},
-        "pit_caveat": "Basket is today's production pool held fixed — the "
-                      "evidence gate / membership is NOT backtested point-in-time.",
+        "pit_caveat": "Membership is now read point-in-time from "
+                      "universe_membership_history.jsonl — the snapshot in "
+                      "effect each day. Days before the ledger starts fall "
+                      "back to the latest snapshot (survivorship-exposed "
+                      "proxy) and are reported via pit_clean_pct.",
         "fidelity_caveat": "No look-ahead: regime[d-1] sizes the d-1→d "
                            "return, all signals query date<=as_of. But "
                            "Fear & Greed snapshots only exist for recent "
@@ -267,7 +330,8 @@ def main() -> int:
         dates = sorted(d for d in smh if args.start <= d <= end)
         if len(dates) > 30:
             print(f"US backtest: {len(dates)} trading days, computing regime ...")
-            basket_ret = _basket_daily_returns(us_con, "prices_daily", "symbol", us_basket, dates)
+            basket_ret, pit_clean = _basket_daily_returns(
+                us_con, "prices_daily", "symbol", us_snaps, us_basket, dates)
             bench_ret = _index_returns(smh, dates)
             mults, states = [], []
             for d in dates:
@@ -275,6 +339,8 @@ def main() -> int:
                 mults.append(m)
                 states.append(s)
             result["us"] = _simulate(dates, basket_ret, mults, states, bench_ret)
+            result["us"]["pit_clean_days"] = pit_clean
+            result["us"]["pit_clean_pct"] = round(pit_clean / max(len(dates) - 1, 1) * 100, 2)
             result["us"]["verdict"] = _verdict(result["us"])
         else:
             result["us"] = {"error": "insufficient US history"}
@@ -289,7 +355,8 @@ def main() -> int:
         dates = sorted(d for d in hs300 if args.start <= d <= end)
         if len(dates) > 30:
             print(f"CN backtest: {len(dates)} trading days, computing regime ...")
-            basket_ret = _basket_daily_returns(cn_con, "prices", "ts_code", cn_basket, dates)
+            basket_ret, pit_clean = _basket_daily_returns(
+                cn_con, "prices", "ts_code", cn_snaps, cn_basket, dates)
             bench_ret = _index_returns(hs300, dates)
             mults, states = [], []
             for d in dates:
@@ -297,6 +364,8 @@ def main() -> int:
                 mults.append(m)
                 states.append(s)
             result["cn"] = _simulate(dates, basket_ret, mults, states, bench_ret)
+            result["cn"]["pit_clean_days"] = pit_clean
+            result["cn"]["pit_clean_pct"] = round(pit_clean / max(len(dates) - 1, 1) * 100, 2)
             result["cn"]["verdict"] = _verdict(result["cn"])
         else:
             result["cn"] = {"error": "insufficient CN history"}
@@ -351,6 +420,12 @@ def _render_md(result: dict[str, Any]) -> str:
         lines.append("")
         lines.append(f"- 平均仓位暴露(regime 乘数均值): {m.get('avg_exposure')}")
         lines.append(f"- regime 各状态天数: {m.get('regime_day_distribution')}")
+        if m.get("pit_clean_pct") is not None:
+            lines.append(
+                f"- PIT 成员覆盖: {m.get('pit_clean_pct')}% 的交易日有 as-of "
+                f"快照({m.get('pit_clean_days')} 天);其余用最新快照代理,"
+                "仍含幸存者偏差。"
+            )
         lines.append(f"- **判定**: {m.get('verdict')}")
         lines.append("")
     return "\n".join(lines) + "\n"
