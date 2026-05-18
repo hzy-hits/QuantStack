@@ -19,6 +19,7 @@ import json
 import math
 import statistics
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -42,6 +43,24 @@ from lib.convexity import assert_no_anticonvex, classify_convexity  # noqa: E402
 from score_risk_regime_engine import classify_regime as classify_risk_regime  # noqa: E402
 
 _CONVEXITY_SHORT = {"convex": "凸", "linear": "线性", "anti_convex": "反凸", "none": "-"}
+
+
+def _connect_ro(db_path, retries: int = 8, backoff: float = 20.0):
+    """Read-only DuckDB connect with retry on a transient writer lock.
+
+    The CN report reads quant_cn_report.duckdb while quant-cn's
+    review-backfill may briefly hold a write lock (DuckDB is single-writer
+    and a writer blocks cross-process readers). Retry rather than crash the
+    whole report; a pathological long lock still fails and retries next cron.
+    """
+    for attempt in range(retries):
+        try:
+            return duckdb.connect(str(db_path), read_only=True)
+        except duckdb.IOException as exc:
+            if "lock" not in str(exc).lower() or attempt == retries - 1:
+                raise
+            time.sleep(backoff)
+    raise RuntimeError(f"unreachable: _connect_ro({db_path})")
 from quant_bot.analytics import cn_observed_lifecycle_prob, cn_opportunity_ranker, us_opportunity_ranker  # noqa: E402
 from sleeves.cn_tape_leadership import (  # noqa: E402
     CN_TAPE_SLEEVE_ID,
@@ -557,7 +576,7 @@ def us_alpha_factory_sleeve_id(row: dict[str, Any]) -> str | None:
 def load_us_rows(db_path: Path, start: date, as_of: date) -> tuple[list[dict[str, Any]], str]:
     if not db_path.exists():
         return [], "missing"
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "report_decisions") or not table_exists(con, "report_outcomes"):
             return [], "missing report_decisions/report_outcomes"
@@ -593,7 +612,7 @@ def load_us_rows(db_path: Path, start: date, as_of: date) -> tuple[list[dict[str
 def load_us_current_rows(db_path: Path, as_of: date) -> tuple[list[dict[str, Any]], date | None, str]:
     if not db_path.exists():
         return [], None, "missing"
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "report_decisions"):
             return [], None, "missing report_decisions"
@@ -631,7 +650,7 @@ def load_us_current_rows(db_path: Path, as_of: date) -> tuple[list[dict[str, Any
 def load_us_options(db_path: Path, as_of: date) -> dict[str, dict[str, Any]]:
     if not db_path.exists():
         return {}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "options_alpha"):
             return {}
@@ -660,7 +679,7 @@ def load_us_options(db_path: Path, as_of: date) -> dict[str, dict[str, Any]]:
 def load_us_options_range(db_path: Path, start: date, as_of: date) -> dict[tuple[str, str], dict[str, Any]]:
     if not db_path.exists():
         return {}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "options_alpha"):
             return {}
@@ -715,7 +734,7 @@ def build_us_earnings_calendar(
     """Read the US earnings calendar for the final daily report."""
     if not db_path.exists():
         return {"status": "missing_db", "rows": []}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "earnings_calendar"):
             return {"status": "missing_table", "rows": []}
@@ -1017,7 +1036,7 @@ def summarize_us(
 def load_cn_strategy_rows(db_path: Path, start: date, as_of: date) -> tuple[list[dict[str, Any]], str]:
     if not db_path.exists():
         return [], "missing"
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "strategy_model_dataset"):
             return [], "missing strategy_model_dataset"
@@ -1053,7 +1072,7 @@ def load_cn_strategy_rows(db_path: Path, start: date, as_of: date) -> tuple[list
 def load_cn_current_rows(db_path: Path, as_of: date) -> tuple[list[dict[str, Any]], date | None, str]:
     if not db_path.exists():
         return [], None, "missing"
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "strategy_model_dataset"):
             return [], None, "missing strategy_model_dataset"
@@ -1138,7 +1157,7 @@ def build_cn_earnings_calendar(
     """Read the A-share disclosure calendar for the final daily report."""
     if not db_path.exists():
         return {"status": "missing_db", "rows": []}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "disclosure_date"):
             return {"status": "missing_table", "rows": []}
@@ -1835,7 +1854,7 @@ def load_cn_log_denoise_features(
     requested = {symbol for symbol in (symbols or []) if symbol}
     if not db_path.exists():
         return {}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "analytics"):
             rows = []
@@ -2269,7 +2288,7 @@ def summarize_cn(
 def summarize_limit_up(db_path: Path, start: date, as_of: date) -> dict[str, Any]:
     if not db_path.exists():
         return {"status": "missing", "performance": {}, "current": []}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "limit_up_model_predictions"):
             return {"status": "missing limit_up_model_predictions", "performance": {}, "current": []}
@@ -4750,7 +4769,7 @@ def _returns_from_closes(values: list[float]) -> list[float]:
 def load_us_sectors(db_path: Path, symbols: list[str], as_of: date) -> dict[str, str]:
     if not db_path.exists() or not symbols:
         return {}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "universe_constituents"):
             return {}
@@ -4778,7 +4797,7 @@ def load_us_sectors(db_path: Path, symbols: list[str], as_of: date) -> dict[str,
 def load_return_series(db_path: Path, market: str, symbols: list[str], as_of: date, lookback: int = 90) -> dict[str, list[float]]:
     if not db_path.exists() or not symbols:
         return {}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if market == "us":
             table, sym_col, date_col, close_col = "prices_daily", "symbol", "date", "close"
@@ -4849,7 +4868,7 @@ def _load_benchmark_closes(
         table, sym_col, date_col, close_col = "prices_daily", "symbol", "date", "close"
     else:
         table, sym_col, date_col, close_col = "prices", "ts_code", "trade_date", "close"
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, table):
             return {}
@@ -5249,7 +5268,7 @@ def load_cn_future_return_series(db_path: Path, symbols: Iterable[str], as_of: d
     clean_symbols = [str(symbol).upper() for symbol in symbols if symbol]
     if not db_path.exists() or not clean_symbols:
         return {}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "fut_daily"):
             return {}
@@ -5278,7 +5297,7 @@ def load_cn_future_return_series(db_path: Path, symbols: Iterable[str], as_of: d
 def load_cn_shadow_option_risk(db_path: Path, symbols: list[str], as_of: date) -> dict[str, dict[str, Any]]:
     if not db_path.exists() or not symbols:
         return {}
-    con = duckdb.connect(str(db_path), read_only=True)
+    con = _connect_ro(db_path)
     try:
         if not table_exists(con, "analytics"):
             return {}
