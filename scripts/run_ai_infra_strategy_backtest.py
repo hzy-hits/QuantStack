@@ -251,6 +251,12 @@ def main() -> int:
         "window": {"start": args.start.isoformat(), "end": end.isoformat()},
         "pit_caveat": "Basket is today's production pool held fixed — the "
                       "evidence gate / membership is NOT backtested point-in-time.",
+        "fidelity_caveat": "No look-ahead: regime[d-1] sizes the d-1→d "
+                           "return, all signals query date<=as_of. But "
+                           "Fear & Greed snapshots only exist for recent "
+                           "dates, so the greed-driven CONFIRM branch never "
+                           "fires historically — the overlay is modelled "
+                           "slightly LESS defensive than production.",
         "us_basket": us_basket, "cn_basket": cn_basket,
     }
 
@@ -318,6 +324,8 @@ def _render_md(result: dict[str, Any]) -> str:
         f"# AI-infra 策略回测 — risk-regime overlay — {w['start']}..{w['end']}",
         "",
         f"> PIT 局限：{result['pit_caveat']}",
+        "",
+        f"> 保真说明：{result.get('fidelity_caveat', '')}",
         "",
         "测试问题:risk-regime overlay(按状态缩放仓位)比无脑 always-hold 强吗?",
         "强 = 闸门有价值;不强 = 闸门太松/纯拖累。",
