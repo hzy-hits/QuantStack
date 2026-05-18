@@ -159,6 +159,8 @@ def _cn_regime_mult(cn_con, us_con, d: date) -> tuple[float, str]:
     signals = {
         "gem_above_ema20": gem["above_ema20"], "gem_above_ema50": gem["above_ema50"],
         "hs300_above_ema50": hs300["above_ema50"],
+        "gem_ema50_streak": gem.get("ema50_streak"),
+        "hs300_ema50_streak": hs300.get("ema50_streak"),
         "north_20d_sum": cnr._north_20d_sum(cn_con, d),
         "margin_chg_20d_pct": cnr._margin_trend(cn_con, d),
         "us_move_level": move_level, "us_move_chg_20d": move_chg,

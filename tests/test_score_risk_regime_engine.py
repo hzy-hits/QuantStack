@@ -218,6 +218,56 @@ class RegimeClassifierTests(unittest.TestCase):
         self.assertEqual(d.r_multiplier, 1.0)
         self.assertFalse(d.signals["move_wedge"])
 
+    # ── PRESS hysteresis (EMA50-break confirmation lag) ──────────────────
+
+    def test_one_day_below_ema50_is_confirm_not_press(self) -> None:
+        # Fresh 1-day break — must NOT whipsaw the basket to 0.0x.
+        d = self.m.classify_regime(
+            _wedge(tlt=0.0),
+            _confirm(smh_above_ema50=False, smh_above_ema20=False,
+                     smh_ema50_streak=-1),
+            [],
+        )
+        self.assertEqual(d.state, "confirm")
+        self.assertEqual(d.r_multiplier, 0.4)
+        self.assertTrue(d.signals["tape_breaking"])
+        self.assertFalse(d.signals["tape_broken"])
+
+    def test_two_days_below_ema50_is_still_confirm(self) -> None:
+        d = self.m.classify_regime(
+            _wedge(tlt=0.0),
+            _confirm(smh_above_ema50=False, smh_ema50_streak=-2),
+            [],
+        )
+        self.assertEqual(d.state, "confirm")
+
+    def test_three_days_below_ema50_confirms_press(self) -> None:
+        d = self.m.classify_regime(
+            _wedge(tlt=0.0),
+            _confirm(smh_above_ema50=False, smh_ema50_streak=-3),
+            [{"symbol": "AAOI"}],
+        )
+        self.assertEqual(d.state, "press")
+        self.assertEqual(d.r_multiplier, 0.0)
+        self.assertTrue(d.signals["tape_broken"])
+
+    def test_long_streak_above_ema50_is_hedge(self) -> None:
+        d = self.m.classify_regime(
+            _wedge(tlt=0.5), _confirm(smh_ema50_streak=12), [],
+        )
+        self.assertEqual(d.state, "hedge")
+
+    def test_trendline_break_still_presses_despite_short_streak(self) -> None:
+        # Explicit trendline break is a deliberate signal — not whipsaw —
+        # so it overrides the streak-confirmation lag.
+        d = self.m.classify_regime(
+            _wedge(tlt=0.0),
+            _confirm(smh_above_ema50=False, smh_ema50_streak=-1,
+                     trendline_break=True),
+            [],
+        )
+        self.assertEqual(d.state, "press")
+
 
 if __name__ == "__main__":
     unittest.main()

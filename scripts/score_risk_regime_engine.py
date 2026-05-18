@@ -58,6 +58,10 @@ CORR_FLIP_THRESHOLD = 0.5       # SMH↔TLT 20d corr at/above this = rates-domin
                                 # regime. Stocks and bonds normally move OPPOSITE
                                 # (negative corr); when rates drive both they fall
                                 # together → positive corr = "bonds in the stonks".
+PRESS_CONFIRM_DAYS = 3          # EMA50 break must hold this many consecutive
+                                # closes before PRESS fires. A 1-2 day dip is
+                                # a fresh, unconfirmed break → CONFIRM, not
+                                # PRESS — hysteresis that kills the whipsaw.
 GREED_EXTREME = 75.0            # Fear & Greed at/above this = extreme greed
 FEAR_EXTREME = 30.0             # Fear & Greed at/below this = fear
 MOVE_CALM = 80.0                # MOVE below this = Treasury market calm / risk-on
@@ -108,6 +112,8 @@ def classify_regime(
     smh_above_ema20 = confirmation.get("smh_above_ema20")
     smh_above_ema50 = confirmation.get("smh_above_ema50")
     trendline_break = bool(confirmation.get("trendline_break"))
+    ema50_streak = confirmation.get("smh_ema50_streak")
+    ema50_streak = int(ema50_streak) if ema50_streak is not None else None
     move_level = confirmation.get("move_level")
     move_level = float(move_level) if move_level is not None else None
     move_chg_20d = confirmation.get("move_chg_20d")
@@ -132,7 +138,17 @@ def classify_regime(
         or (hyg_20d is not None and hyg_20d <= HYG_CREDIT_STRESS_PCT)
         or move_wedge
     )
-    tape_broken = (smh_above_ema50 is False) or trendline_break
+    # PRESS hysteresis: when the EMA50 streak is available, PRESS only fires
+    # once the break is *sustained* for PRESS_CONFIRM_DAYS. A 1-2 day dip
+    # below EMA50 is a fresh, unconfirmed break → tape_breaking → CONFIRM
+    # (0.4x), not PRESS (0.0x). Legacy payloads without the streak fall back
+    # to the single-day bool.
+    if ema50_streak is not None:
+        tape_broken = (ema50_streak <= -PRESS_CONFIRM_DAYS) or trendline_break
+        tape_breaking = -PRESS_CONFIRM_DAYS < ema50_streak < 0
+    else:
+        tape_broken = (smh_above_ema50 is False) or trendline_break
+        tape_breaking = False
     tape_soft = (smh_above_ema20 is False) and (smh_above_ema50 is True)
     greed_extreme = fg is not None and fg >= GREED_EXTREME
     fear_extreme = fg is not None and fg <= FEAR_EXTREME
@@ -149,9 +165,11 @@ def classify_regime(
         "smh_above_ema20": smh_above_ema20,
         "smh_above_ema50": smh_above_ema50,
         "trendline_break": trendline_break,
+        "smh_ema50_streak": ema50_streak,
         "wedge_biting": wedge_biting,
         "move_wedge": move_wedge,
         "tape_broken": tape_broken,
+        "tape_breaking": tape_breaking,
         "tape_soft": tape_soft,
         "greed_extreme": greed_extreme,
         "fear_extreme": fear_extreme,
@@ -180,9 +198,13 @@ def classify_regime(
         )
 
     if tape_broken:
-        reason = (
-            "SMH 跌破 EMA50" if smh_above_ema50 is False else "SMH EMA50 trendline 破位"
-        )
+        if ema50_streak is not None and ema50_streak <= -PRESS_CONFIRM_DAYS:
+            reason = (f"SMH 连续 {abs(ema50_streak)} 日收于 EMA50 下"
+                      f"(≥{PRESS_CONFIRM_DAYS} 日确认破位)")
+        elif smh_above_ema50 is False:
+            reason = "SMH 跌破 EMA50"
+        else:
+            reason = "SMH EMA50 trendline 破位"
         return RegimeDecision(
             state="press",
             r_multiplier=R_MULTIPLIER["press"],
@@ -193,8 +215,11 @@ def classify_regime(
             signals=signals,
         )
 
-    if tape_soft or (greed_extreme and wedge_biting):
-        if tape_soft:
+    if tape_breaking or tape_soft or (greed_extreme and wedge_biting):
+        if tape_breaking:
+            reason = (f"SMH 跌破 EMA50 第 {abs(ema50_streak)} 日,未满 "
+                      f"{PRESS_CONFIRM_DAYS} 日确认(fresh break,先减码不清仓)")
+        elif tape_soft:
             reason = "SMH 失守 EMA20 但仍站 EMA50（near line 走软，未破位）"
         else:
             reason = f"Extreme Greed ({fg:.0f}/100) 叠加 wedge 生效"
@@ -293,14 +318,17 @@ def render_markdown(as_of: str, decision: RegimeDecision) -> str:
         f"| Fear & Greed | {_fmt(s['fear_greed_score'])} | 情绪极值 |",
         f"| SMH 站上 EMA20 | {s['smh_above_ema20']} | near line(触发器) |",
         f"| SMH 站上 EMA50 | {s['smh_above_ema50']} | 趋势线(触发器) |",
+        f"| EMA50 连续天数 | {s.get('smh_ema50_streak') if s.get('smh_ema50_streak') is not None else 'n/a'} | "
+        f"≤-{PRESS_CONFIRM_DAYS}=确认破位/PRESS; <0 但未满=CONFIRM |",
         f"| Trendline break | {s['trendline_break']} | 破位确认 |",
         f"| 抄底雷达 | {_fmt(s.get('capitulation_fired'))}/5 | ≥3=抛售衰竭/翻多 |",
         "",
         "派生标志: "
         + ", ".join(
             f"{k}={s[k]}"
-            for k in ("wedge_biting", "move_wedge", "tape_soft", "tape_broken",
-                      "greed_extreme", "fear_extreme", "capitulation_triggered")
+            for k in ("wedge_biting", "move_wedge", "tape_soft", "tape_breaking",
+                      "tape_broken", "greed_extreme", "fear_extreme",
+                      "capitulation_triggered")
         ),
         "",
         "状态转移顺序: CAPITULATION > PRESS > CONFIRM > WEDGE > HEDGE。",

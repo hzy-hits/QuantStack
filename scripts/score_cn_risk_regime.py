@@ -51,6 +51,9 @@ HS300_INDEX = "000300.SH"  # 沪深300 — broad-market breadth
 # Thresholds.
 MARGIN_DERISK_PCT = -2.0   # 两融余额 20d change at/below = leverage coming down
 US_MOVE_CALM = 80.0        # US MOVE at/above + rising = rates wedge transmitting
+CN_PRESS_CONFIRM_DAYS = 3  # EMA50 break must hold this many consecutive closes
+                           # before CN PRESS fires — hysteresis vs single-day
+                           # whipsaw. A 1-2 day dip is CONFIRM, not PRESS.
 
 
 def _ema(values: list[float], period: int) -> float | None:
@@ -63,17 +66,56 @@ def _ema(values: list[float], period: int) -> float | None:
     return e
 
 
+def _ema_series(values: list[float], period: int) -> list[float]:
+    if not values:
+        return []
+    k = 2.0 / (period + 1)
+    out = [values[0]]
+    for v in values[1:]:
+        out.append(v * k + out[-1] * (1 - k))
+    return out
+
+
+def _ema50_streak(closes: list[float]) -> int | None:
+    """Signed consecutive-day run of closes above(+)/below(-) EMA50."""
+    if len(closes) < 50:
+        return None
+    ema = _ema_series(closes, 50)
+    above = closes[-1] > ema[-1]
+    streak = 0
+    for i in range(len(closes) - 1, -1, -1):
+        if (closes[i] > ema[i]) == above:
+            streak += 1
+        else:
+            break
+    return streak if above else -streak
+
+
 def classify_cn_regime(signals: dict[str, Any]) -> RegimeDecision:
     """Pure classifier: CN tape/flow signals + US wedge → regime + R multiplier."""
     gem_e20 = signals.get("gem_above_ema20")
     gem_e50 = signals.get("gem_above_ema50")
     hs300_e50 = signals.get("hs300_above_ema50")
+    gem_streak = signals.get("gem_ema50_streak")
+    hs300_streak = signals.get("hs300_ema50_streak")
     north_20d = signals.get("north_20d_sum")
     margin_chg = signals.get("margin_chg_20d_pct")
     move_level = signals.get("us_move_level")
     move_chg = signals.get("us_move_chg_20d")
 
-    tape_broken = (gem_e50 is False) or (hs300_e50 is False)
+    # PRESS hysteresis: an EMA50 break must hold CN_PRESS_CONFIRM_DAYS before
+    # PRESS fires. A 1-2 day dip below EMA50 is a fresh break → tape_breaking
+    # → CONFIRM (0.4x), not PRESS (0.0x). Legacy signals without the streak
+    # fall back to the single-day bool.
+    if gem_streak is not None or hs300_streak is not None:
+        gs = gem_streak if gem_streak is not None else 1
+        hs = hs300_streak if hs300_streak is not None else 1
+        tape_broken = (gs <= -CN_PRESS_CONFIRM_DAYS) or (hs <= -CN_PRESS_CONFIRM_DAYS)
+        tape_breaking = ((-CN_PRESS_CONFIRM_DAYS < gs < 0)
+                         or (-CN_PRESS_CONFIRM_DAYS < hs < 0))
+    else:
+        tape_broken = (gem_e50 is False) or (hs300_e50 is False)
+        tape_breaking = False
     tape_soft = (gem_e20 is False) and (gem_e50 is True)
     flow_out = north_20d is not None and north_20d < 0.0
     margin_derisk = margin_chg is not None and margin_chg <= MARGIN_DERISK_PCT
@@ -85,24 +127,36 @@ def classify_cn_regime(signals: dict[str, Any]) -> RegimeDecision:
     sig = {
         "gem_above_ema20": gem_e20, "gem_above_ema50": gem_e50,
         "hs300_above_ema50": hs300_e50,
+        "gem_ema50_streak": gem_streak, "hs300_ema50_streak": hs300_streak,
         "north_20d_sum": north_20d, "margin_chg_20d_pct": margin_chg,
         "us_move_level": move_level, "us_move_chg_20d": move_chg,
-        "tape_broken": tape_broken, "tape_soft": tape_soft,
+        "tape_broken": tape_broken, "tape_breaking": tape_breaking,
+        "tape_soft": tape_soft,
         "flow_out": flow_out, "margin_derisk": margin_derisk, "us_wedge": us_wedge,
     }
 
     if tape_broken:
-        which = "创业板" if gem_e50 is False else "沪深300"
+        if gem_streak is not None and gem_streak <= -CN_PRESS_CONFIRM_DAYS:
+            which = f"创业板连续 {abs(gem_streak)} 日"
+        elif hs300_streak is not None and hs300_streak <= -CN_PRESS_CONFIRM_DAYS:
+            which = f"沪深300连续 {abs(hs300_streak)} 日"
+        else:
+            which = "创业板" if gem_e50 is False else "沪深300"
         return RegimeDecision(
             state="press", r_multiplier=R_MULTIPLIER["press"], new_adds_allowed=False,
             hedge_directive="A股 tape 破位；冻结新加仓，减仓可用股指期货对冲。",
             victim_action="A股无 victim-put 层；破位后等企稳信号,不抄落刀。",
-            rationale=f"CN PRESS：{which}跌破 EMA50,A股趋势破位。新加仓冻结。",
+            rationale=f"CN PRESS：{which}收于 EMA50 下,A股趋势确认破位。新加仓冻结。",
             signals=sig,
         )
-    if tape_soft or (flow_out and margin_derisk):
-        reason = ("创业板失守 EMA20(仍站 EMA50)" if tape_soft
-                  else "北向净流出叠加两融见顶回落")
+    if tape_breaking or tape_soft or (flow_out and margin_derisk):
+        if tape_breaking:
+            reason = (f"创业板/沪深300 跌破 EMA50 未满 {CN_PRESS_CONFIRM_DAYS} "
+                      "日确认(fresh break,先减码不清仓)")
+        elif tape_soft:
+            reason = "创业板失守 EMA20(仍站 EMA50)"
+        else:
+            reason = "北向净流出叠加两融见顶回落"
         return RegimeDecision(
             state="confirm", r_multiplier=R_MULTIPLIER["confirm"], new_adds_allowed=True,
             hedge_directive="减少新加仓；准备 trim;股指期货对冲 beta。",
@@ -170,7 +224,8 @@ def _margin_trend(con: duckdb.DuckDBPyConnection, as_of: date) -> float | None:
 def _tape_signals(con: duckdb.DuckDBPyConnection, ts_code: str, as_of: date) -> dict[str, Any]:
     closes = _index_closes(con, ts_code, as_of, 60)
     if len(closes) < 50:
-        return {"close": None, "above_ema20": None, "above_ema50": None}
+        return {"close": None, "above_ema20": None, "above_ema50": None,
+                "ema50_streak": None}
     last = closes[-1]
     ema20 = _ema(closes[-20:], 20)
     ema50 = _ema(closes, 50)
@@ -180,6 +235,7 @@ def _tape_signals(con: duckdb.DuckDBPyConnection, ts_code: str, as_of: date) -> 
         "ema50": round(ema50, 1) if ema50 else None,
         "above_ema20": (last > ema20) if ema20 else None,
         "above_ema50": (last > ema50) if ema50 else None,
+        "ema50_streak": _ema50_streak(closes),
     }
 
 
@@ -207,7 +263,9 @@ def build_cn_signals(cn_db: Path, as_of: date, bubble_root: Path) -> dict[str, A
     return {
         "gem_close": gem["close"], "gem_above_ema20": gem["above_ema20"],
         "gem_above_ema50": gem["above_ema50"],
+        "gem_ema50_streak": gem["ema50_streak"],
         "hs300_close": hs300["close"], "hs300_above_ema50": hs300["above_ema50"],
+        "hs300_ema50_streak": hs300["ema50_streak"],
         "north_20d_sum": round(north_20d, 1) if north_20d is not None else None,
         "margin_chg_20d_pct": round(margin_chg, 2) if margin_chg is not None else None,
         "us_move_level": move_level, "us_move_chg_20d": move_chg,
@@ -234,7 +292,11 @@ def render_markdown(as_of: str, decision: RegimeDecision) -> str:
         "|---|---|---|",
         f"| 创业板站上 EMA20 | {s.get('gem_above_ema20')} | A股 near line |",
         f"| 创业板站上 EMA50 | {s.get('gem_above_ema50')} | A股趋势线(触发器) |",
+        f"| 创业板 EMA50 连续天数 | {s.get('gem_ema50_streak')} | "
+        f"≤-{CN_PRESS_CONFIRM_DAYS}=确认破位/PRESS; <0 未满=CONFIRM |",
         f"| 沪深300站上 EMA50 | {s.get('hs300_above_ema50')} | 宽基趋势 |",
+        f"| 沪深300 EMA50 连续天数 | {s.get('hs300_ema50_streak')} | "
+        f"≤-{CN_PRESS_CONFIRM_DAYS}=确认破位 |",
         f"| 北向 20日净流入 | {s.get('north_20d_sum')} | <0=外资流出 |",
         f"| 两融余额 20日变化 | {s.get('margin_chg_20d_pct')}% | ≤-2%=去杠杆 |",
         f"| 美债 MOVE | {s.get('us_move_level')} | ≥80上行=楔子传导 |",

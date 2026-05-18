@@ -81,6 +81,36 @@ class CnRegimeTests(unittest.TestCase):
         self.assertEqual(d.state, "hedge")
         self.assertEqual(d.r_multiplier, 1.0)
 
+    # ── PRESS hysteresis (EMA50-break confirmation lag) ──────────────────
+
+    def test_one_day_below_ema50_is_confirm_not_press(self) -> None:
+        d = self.m.classify_cn_regime(_sig(
+            gem_above_ema50=False, gem_above_ema20=False,
+            gem_ema50_streak=-1, hs300_ema50_streak=8,
+        ))
+        self.assertEqual(d.state, "confirm")
+        self.assertEqual(d.r_multiplier, 0.4)
+        self.assertTrue(d.signals["tape_breaking"])
+
+    def test_three_days_below_ema50_confirms_press(self) -> None:
+        d = self.m.classify_cn_regime(_sig(
+            gem_above_ema50=False, gem_ema50_streak=-3, hs300_ema50_streak=8,
+        ))
+        self.assertEqual(d.state, "press")
+        self.assertEqual(d.r_multiplier, 0.0)
+
+    def test_hs300_three_day_break_confirms_press(self) -> None:
+        d = self.m.classify_cn_regime(_sig(
+            hs300_above_ema50=False, gem_ema50_streak=8, hs300_ema50_streak=-4,
+        ))
+        self.assertEqual(d.state, "press")
+
+    def test_long_streak_above_ema50_is_hedge(self) -> None:
+        d = self.m.classify_cn_regime(_sig(
+            gem_ema50_streak=15, hs300_ema50_streak=20,
+        ))
+        self.assertEqual(d.state, "hedge")
+
 
 if __name__ == "__main__":
     unittest.main()

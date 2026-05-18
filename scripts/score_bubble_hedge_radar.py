@@ -124,6 +124,10 @@ class ConfirmationState:
     move_chg_20d: float | None = None
     vix_level: float | None = None
     move_vix_ratio: float | None = None
+    # Signed run length of consecutive closes above(+)/below(-) EMA50.
+    # The risk-regime engine uses it for PRESS hysteresis — a 1-day dip
+    # below EMA50 must not whipsaw the basket to 0.0x.
+    smh_ema50_streak: int | None = None
 
 
 def _load_ai_universe(path: Path) -> set[str]:
@@ -238,6 +242,26 @@ def _ema(values: list[float], period: int) -> list[float]:
     for v in values[1:]:
         out.append(alpha * v + (1 - alpha) * out[-1])
     return out
+
+
+def _ema50_streak(closes: list[float], ema50: list[float]) -> int | None:
+    """Signed consecutive-day run of closes above(+)/below(-) EMA50.
+
+    +N = N consecutive closes above EMA50; -N = N below. The regime engine
+    needs this for PRESS hysteresis: confirm a break over several days
+    instead of flipping to 0.0x on a single-day EMA50 cross.
+    """
+    n = min(len(closes), len(ema50))
+    if n == 0:
+        return None
+    above = closes[-1] > ema50[-1]
+    streak = 0
+    for i in range(n - 1, -1, -1):
+        if (closes[i] > ema50[i]) == above:
+            streak += 1
+        else:
+            break
+    return streak if above else -streak
 
 
 def build_wedge_layer(con: duckdb.DuckDBPyConnection, as_of: date) -> list[WedgeRow]:
@@ -380,11 +404,14 @@ def build_confirmation_layer(con: duckdb.DuckDBPyConnection, as_of: date) -> Con
     corr_20 = _rolling_corr(smh_returns, tlt_returns, window=20)
     fg_score, fg_rating = _load_fear_greed(as_of)
 
+    smh_ema50_series = _ema(smh_closes, 50) if smh_closes else []
+    smh_ema50_streak = _ema50_streak(smh_closes, smh_ema50_series)
+
     trendline_break = False
     if smh_closes and smh_ema50 is not None:
         # Simple flag: 2-day close BELOW EMA50 after being above it
         recent = smh_closes[-5:]
-        ema_recent = _ema(smh_closes, 50)[-5:]
+        ema_recent = smh_ema50_series[-5:]
         below_now = recent[-1] < ema_recent[-1] if recent else False
         was_above = any(r > e for r, e in zip(recent[:-2], ema_recent[:-2]))
         trendline_break = below_now and was_above
@@ -417,6 +444,7 @@ def build_confirmation_layer(con: duckdb.DuckDBPyConnection, as_of: date) -> Con
         move_chg_20d=round(move_chg_20d, 2) if move_chg_20d is not None else None,
         vix_level=round(vix_level, 2) if vix_level is not None else None,
         move_vix_ratio=round(move_vix_ratio, 2) if move_vix_ratio is not None else None,
+        smh_ema50_streak=smh_ema50_streak,
     )
 
 
