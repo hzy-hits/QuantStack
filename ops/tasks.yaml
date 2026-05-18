@@ -450,6 +450,29 @@ tasks:
     outputs:
       - quant-research-cn/data/quant_cn_report.duckdb
 
+  research.cn_flow_signals:
+    # Repair the CN flow signals (龙虎榜 / 北向 / 沪深股通十大) direct from
+    # Tushare — the quant-research-cn Rust/AKShare fetch left top_list at 0
+    # rows and northbound near-empty (~26% of flow_score weight broken).
+    # Runs early so the data is in place before the CN analytics pass.
+    group: research
+    schedule: "0 6 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/ingest_cn_flow_signals.py
+      - --end
+      - "{cst_date}"
+    log: ops/logs/research.cn_flow_signals.log
+    lock: ops/state/research.cn_flow_signals.lock
+    timeout_minutes: 20
+    sends_email: false
+    market: cn
+    session: research
+    owner: research_pipeline
+    outputs:
+      - quant-research-cn/data/quant_cn.duckdb
+
   research.satellite_index_ingest:
     group: research
     schedule: "5 6 * * 1-5"
