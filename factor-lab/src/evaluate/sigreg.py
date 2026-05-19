@@ -93,8 +93,11 @@ def factor_diversity_score(
     n_factors = len(factor_names)
 
     if n_factors < 3:
+        # Degenerate case — keep the SAME keys as the normal return so
+        # callers (sigreg_report) can read n_total / mean_ep unconditionally.
         return {"diversity_score": 1.0, "n_effective": n_factors,
-                "cluster_warning": False, "details": {}}
+                "n_total": n_factors, "cluster_warning": False,
+                "mean_ep": 0.0, "details": {}}
 
     # Build matrix
     mat = np.full((len(all_syms), n_factors), np.nan)
@@ -112,8 +115,11 @@ def factor_diversity_score(
     mat = mat[mask]
 
     if len(mat) < 50:
+        # Degenerate case — keep the SAME keys as the normal return so
+        # callers (sigreg_report) can read n_total / mean_ep unconditionally.
         return {"diversity_score": 0.5, "n_effective": n_factors,
-                "cluster_warning": False, "details": {"error": "too few common stocks"}}
+                "n_total": n_factors, "cluster_warning": False,
+                "mean_ep": 0.0, "details": {"error": "too few common stocks"}}
 
     # Standardize each column
     mat = (mat - mat.mean(axis=0)) / (mat.std(axis=0) + 1e-12)
