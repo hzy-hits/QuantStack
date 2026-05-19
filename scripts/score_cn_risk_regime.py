@@ -29,7 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +41,7 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from score_risk_regime_engine import RegimeDecision, R_MULTIPLIER  # noqa: E402
+from lib.radar_io import resolve_as_of, write_radar_outputs  # noqa: E402
 
 DEFAULT_CN_DB = STACK_ROOT / "quant-research-cn" / "data" / "quant_cn.duckdb"
 DEFAULT_BUBBLE_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "bubble_hedge_radar"
@@ -315,9 +316,7 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     args = parser.parse_args()
 
-    cst = datetime.now(timezone(timedelta(hours=8)))
-    as_of_text = args.as_of or cst.date().isoformat()
-    as_of = date.fromisoformat(as_of_text)
+    as_of, as_of_text = resolve_as_of(args.as_of)
     if not args.cn_db.exists():
         print(f"error: CN db missing at {args.cn_db}", file=sys.stderr)
         return 2
@@ -325,8 +324,6 @@ def main() -> int:
     signals = build_cn_signals(args.cn_db, as_of, args.bubble_root)
     decision = classify_cn_regime(signals)
 
-    out_dir = args.output_root / as_of_text
-    out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "as_of": as_of_text,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -334,12 +331,9 @@ def main() -> int:
         **decision.as_dict(),
         "input_signals": signals,
     }
-    (out_dir / "cn_risk_regime.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str),
-        encoding="utf-8",
-    )
-    (out_dir / "cn_risk_regime.md").write_text(
-        render_markdown(as_of_text, decision), encoding="utf-8"
+    out_dir = write_radar_outputs(
+        args.output_root, as_of_text, "cn_risk_regime",
+        payload, render_markdown(as_of_text, decision),
     )
     print(f"CN risk regime: {decision.state.upper()} "
           f"(R x{decision.r_multiplier:.2f}) → {out_dir / 'cn_risk_regime.json'}")

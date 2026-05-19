@@ -20,14 +20,15 @@ flag as the 5th state (CAPITULATION) — stop pressing, flip to convex long.
 from __future__ import annotations
 
 import argparse
-import json
 import statistics
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import duckdb
+
+from lib.radar_io import resolve_as_of, write_radar_outputs
 
 STACK_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_US_DB = STACK_ROOT / "quant-research-v1" / "data" / "quant.duckdb"
@@ -274,9 +275,7 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     args = parser.parse_args()
 
-    cst = datetime.now(timezone(timedelta(hours=8)))
-    as_of_text = args.as_of or cst.date().isoformat()
-    as_of = date.fromisoformat(as_of_text)
+    as_of, as_of_text = resolve_as_of(args.as_of)
 
     if not args.us_db.exists():
         print(f"error: US db missing at {args.us_db}", file=sys.stderr)
@@ -294,19 +293,14 @@ def main() -> int:
         con.close()
 
     result = evaluate_capitulation(vix, oas, pc, spy_vol, beta_rows)
-    out_dir = args.output_root / as_of_text
-    out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "as_of": as_of_text,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         **result,
     }
-    (out_dir / "capitulation_radar.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str),
-        encoding="utf-8",
-    )
-    (out_dir / "capitulation_radar.md").write_text(
-        render_markdown(as_of_text, result), encoding="utf-8"
+    out_dir = write_radar_outputs(
+        args.output_root, as_of_text, "capitulation_radar",
+        payload, render_markdown(as_of_text, result),
     )
     print(
         f"capitulation radar: {result['fired_count']}/5 fired "

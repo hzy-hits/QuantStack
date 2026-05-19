@@ -25,11 +25,13 @@ import argparse
 import json
 import statistics
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import duckdb
+
+from lib.radar_io import resolve_as_of, write_radar_outputs
 
 STACK_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_US_DB = STACK_ROOT / "quant-research-v1" / "data" / "quant.duckdb"
@@ -276,9 +278,7 @@ def main() -> int:
                         help="How many top-beta names to scan for LEAPS calls.")
     args = parser.parse_args()
 
-    cst = datetime.now(timezone(timedelta(hours=8)))
-    as_of_text = args.as_of or cst.date().isoformat()
-    as_of = date.fromisoformat(as_of_text)
+    as_of, as_of_text = resolve_as_of(args.as_of)
     if not args.us_db.exists():
         print(f"error: US db missing at {args.us_db}", file=sys.stderr)
         return 2
@@ -306,8 +306,6 @@ def main() -> int:
     finally:
         con.close()
 
-    out_dir = args.radar_root / as_of_text
-    out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "as_of": as_of_text,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -316,11 +314,9 @@ def main() -> int:
         "convex_value_buys": value_buys,
         "capitulation_convex_calls": convex_calls,
     }
-    (out_dir / "convex_longs.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
-    )
-    (out_dir / "convex_longs.md").write_text(
-        render_markdown(as_of_text, payload), encoding="utf-8"
+    out_dir = write_radar_outputs(
+        args.radar_root, as_of_text, "convex_longs",
+        payload, render_markdown(as_of_text, payload),
     )
     print(
         f"capitulation convex radar: value_buys={len(value_buys)} "

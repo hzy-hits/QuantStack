@@ -33,9 +33,11 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass, asdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from lib.radar_io import resolve_as_of, write_radar_outputs
 
 STACK_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_BUBBLE_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "bubble_hedge_radar"
@@ -358,9 +360,7 @@ def main() -> int:
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     args = parser.parse_args()
 
-    cst = datetime.now(timezone(timedelta(hours=8)))
-    as_of = args.as_of or cst.date().isoformat()
-    date.fromisoformat(as_of)  # validate
+    _, as_of = resolve_as_of(args.as_of)
 
     bubble = load_bubble_hedge(as_of, args.bubble_root)
     if bubble is None:
@@ -382,19 +382,15 @@ def main() -> int:
         capitulation=capitulation,
     )
 
-    out_dir = args.output_root / as_of
-    out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
         "as_of": as_of,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "framework": "hedge_wedge_confirm_press",
         **decision.as_dict(),
     }
-    (out_dir / "risk_regime.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True, default=str),
-        encoding="utf-8",
+    out_dir = write_radar_outputs(
+        args.output_root, as_of, "risk_regime", payload, render_markdown(as_of, decision),
     )
-    (out_dir / "risk_regime.md").write_text(render_markdown(as_of, decision), encoding="utf-8")
     print(
         f"risk regime: {decision.state.upper()} "
         f"(R x{decision.r_multiplier:.2f}) → {out_dir / 'risk_regime.json'}"
