@@ -884,7 +884,21 @@ class FactorSession:
 
         print("Computing features...")
         features = _compute_basic_features(prices, self.cfg["sym_col"], self.cfg["date_col"])
-        print(f"  {len(features)} feature rows")
+        n_price_syms = prices[self.cfg["sym_col"]].nunique() if len(prices) else 0
+        n_feat_syms = features[self.cfg["sym_col"]].nunique() if len(features) else 0
+        print(f"  {len(features)} feature rows, {n_feat_syms}/{n_price_syms} symbols covered")
+        # Feature-starvation guard. _compute_basic_features silently drops any
+        # symbol with <60 days of history; if a universe of thin-history names
+        # comes in (as happened when the AI-infra universe landed and most CN
+        # symbols had ~45 price rows), every backtest degenerates to ~0.0 and
+        # the session looks like "all factors failed" rather than "no data".
+        # Make that loud instead of silent.
+        if n_price_syms and n_feat_syms < n_price_syms * 0.5:
+            msg = (f"FEATURE STARVATION: only {n_feat_syms}/{n_price_syms} symbols "
+                   "have >=60d history — factor metrics this session are degenerate "
+                   "(near-zero) and not trustworthy. Backfill prices first.")
+            logger.warning(msg)
+            print(f"  ⚠️  {msg}")
         print()
 
         # Load existing promoted factors so agent avoids rediscovery
