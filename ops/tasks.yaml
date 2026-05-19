@@ -1085,3 +1085,21 @@ tasks:
     owner: us_pipeline
     outputs:
       - quant-research-v1/logs/cron_watchdog_state.json
+
+  ops.catch_up:
+    # Catch-up runner for missed scheduled tasks. WSL2 suspends when idle and
+    # cron does not replay missed jobs on resume; this re-runs research /
+    # factor / autoresearch / paper tasks that were due earlier TODAY but
+    # never succeeded. Runs every 15 min, offset from us.watchdog.
+    group: watchdog
+    schedule: "5,20,35,50 * * * *"
+    cwd: .
+    command: ["python3", "ops/catch_up.py"]
+    log: ops/logs/ops.catch_up.log
+    lock: ops/state/ops.catch_up.lock
+    timeout_minutes: 240
+    sends_email: false
+    market: all
+    session: watchdog
+    owner: ops
+    outputs: []

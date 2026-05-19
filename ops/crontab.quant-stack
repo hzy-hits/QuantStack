@@ -78,3 +78,4 @@ QUANT_STACK_ROOT=/home/ivena/coding/quant-stack
 # -- Watchdog --
 @reboot cd $QUANT_STACK_ROOT && ops/run_task.sh us.watchdog.reboot
 12,27,42,57 * * * * cd $QUANT_STACK_ROOT && ops/run_task.sh us.watchdog
+5,20,35,50 * * * * cd $QUANT_STACK_ROOT && ops/run_task.sh ops.catch_up
