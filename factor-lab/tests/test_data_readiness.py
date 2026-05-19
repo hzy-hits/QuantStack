@@ -38,6 +38,24 @@ class DataReadinessTests(unittest.TestCase):
         self.assertEqual(latest, date(2026, 3, 31))
         self.assertEqual(expected, date(2026, 3, 31))
 
+    @patch("src.data_readiness.latest_trade_date", return_value=date(2026, 5, 15))
+    def test_monday_gap_tolerated_with_staleness(self, _latest):
+        # 2026-05-18 is a Monday; the freshest US close is Friday 05-15.
+        # With a staleness budget the Monday run is still ready.
+        ready, latest, expected = data_readiness.market_data_ready(
+            "us", expected_date=date(2026, 5, 18), max_staleness_days=5,
+        )
+        self.assertTrue(ready)
+        self.assertEqual(latest, date(2026, 5, 15))
+
+    @patch("src.data_readiness.latest_trade_date", return_value=date(2026, 5, 15))
+    def test_genuine_multi_day_outage_still_fails(self, _latest):
+        # Data 14 days stale is a real outage — staleness budget must not hide it.
+        ready, _latest_date, _expected = data_readiness.market_data_ready(
+            "us", expected_date=date(2026, 5, 29), max_staleness_days=5,
+        )
+        self.assertFalse(ready)
+
 
 if __name__ == "__main__":
     unittest.main()
