@@ -2787,6 +2787,18 @@ def _symbol_key(value: Any) -> str:
     return str(value or "").upper().strip()
 
 
+def _is_cn_main_board(symbol: Any) -> bool:
+    """True for CN main-board (主板) tickers only.
+
+    The daily actionable list is meant to be *operable* — main board has the
+    normal ±10% limit and needs no special account permission. STAR (科创板
+    688/689), ChiNext (创业板 300/301) and BSE (北交所 8xx/4xx) are excluded:
+    they may still sit in the universe / ranker, just not the daily top-5.
+    """
+    code = str(symbol or "").split(".")[0].strip()
+    return code.startswith(("600", "601", "603", "605", "000", "001", "002", "003"))
+
+
 def _ranker_lookup(payload: dict[str, Any], market: str) -> dict[str, dict[str, Any]]:
     key = "cn_opportunity_ranker" if market.upper() == "CN" else "us_opportunity_ranker"
     ranker = payload.get(key) or {}
@@ -2941,12 +2953,15 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
         )
     )
 
-    # CN daily directive: surface only the top 5 reranked A-share names.
-    # The list is already conviction-sorted (size_r desc); keep the CN top 5,
-    # US untouched. Lower-ranked CN names drop off the daily actionable list.
+    # CN daily directive: surface only the top 5 reranked A-share names, and
+    # only MAIN-BOARD (主板) names — STAR/ChiNext need account permission and
+    # run a ±20% limit, so they are not "可操作" for the daily list. The list
+    # is already conviction-sorted (size_r desc); STAR/ChiNext names stay in
+    # the ranker / watch views, they just drop off the daily actionable top-5.
     cn_ranked = [r for r in actionable if str(r.get("market") or "").upper() == "CN"]
     non_cn = [r for r in actionable if str(r.get("market") or "").upper() != "CN"]
-    actionable = cn_ranked[:CN_DAILY_TOP_N] + non_cn
+    cn_main = [r for r in cn_ranked if _is_cn_main_board(r.get("symbol"))]
+    actionable = cn_main[:CN_DAILY_TOP_N] + non_cn
 
     watch: list[dict[str, Any]] = []
     for market, lookup in (("CN", cn_lookup), ("US", us_lookup)):
