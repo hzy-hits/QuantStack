@@ -41,6 +41,7 @@ for p in (str(SCRIPT_DIR), str(QUANT_V1_SRC)):
 
 import score_bubble_hedge_radar as bh  # noqa: E402
 import score_cn_risk_regime as cnr  # noqa: E402
+import score_entry_setup as es  # noqa: E402
 from score_risk_regime_engine import classify_regime  # noqa: E402
 from quant_bot.analytics import ai_infra_universe  # noqa: E402
 
@@ -136,10 +137,28 @@ def _closes(con, symbol_col: str, table: str, symbol: str, start: date, end: dat
             for r in rows if r[1] is not None}
 
 
+def _member_setup_index(
+    close_map: dict[date, float], extended_pct: float
+) -> dict[date, Any]:
+    """date -> EntrySetup for one member, from its own close history."""
+    sdates = sorted(close_map)
+    closes = [close_map[d] for d in sdates]
+    if len(closes) < 50:
+        return {}
+    e20 = es.ema(closes, 20)
+    e50 = es.ema(closes, 50)
+    out: dict[date, Any] = {}
+    for j in range(49, len(sdates)):  # need >=50 closes for a real EMA50
+        out[sdates[j]] = es.classify_entry_setup(
+            closes[j], e20[j], e50[j], extended_pct=extended_pct)
+    return out
+
+
 def _basket_daily_returns(
     con, table: str, symbol_col: str,
-    snaps: list[tuple[date, frozenset[str]]], fallback: list[str], dates: list[date]
-) -> tuple[list[float | None], int]:
+    snaps: list[tuple[date, frozenset[str]]], fallback: list[str], dates: list[date],
+    setup_extended_pct: float = es.DEFAULT_EXTENDED_PCT,
+) -> tuple[list[float | None], int, list[float | None]]:
     """Equal-weight basket return per day with point-in-time membership.
 
     For each day the basket is the production-pool snapshot in effect that
@@ -147,12 +166,19 @@ def _basket_daily_returns(
     snapshot as a survivorship-exposed proxy — identical to the old
     fixed-basket backtest — and are counted as NOT PIT-clean.
 
-    Returns (daily_returns, pit_clean_days).
+    Also returns a *setup-gated* return series: each day only the members
+    that, as of the prior close, were in a real entry setup (`score_entry_setup`)
+    contribute. This isolates whether the entry-timing signal carries
+    information vs holding every member every day.
+
+    Returns (daily_returns, pit_clean_days, setup_gated_returns).
     """
     universe = (sorted(set().union(*[m for _, m in snaps]))
                 if snaps else sorted(fallback))
     series = {s: _closes(con, symbol_col, table, s, dates[0], dates[-1]) for s in universe}
+    setup_idx = {s: _member_setup_index(series[s], setup_extended_pct) for s in universe}
     out: list[float | None] = [None]
+    setup_out: list[float | None] = [None]
     pit_clean = 0
     for i in range(1, len(dates)):
         d, prev = dates[i], dates[i - 1]
@@ -161,13 +187,24 @@ def _basket_daily_returns(
         else:
             members, clean = frozenset(fallback), True
         pit_clean += int(clean)
-        rets = []
+        rets, setup_rets = [], []
         for s in members:
             c = series.get(s, {})
             if d in c and prev in c and c[prev]:
-                rets.append(c[d] / c[prev] - 1.0)
-        out.append(statistics.mean(rets) if rets else None)
-    return out, pit_clean
+                r = c[d] / c[prev] - 1.0
+                rets.append(r)
+                su = setup_idx.get(s, {}).get(prev)
+                if su is None or su.has_setup:  # no_data → fail-open
+                    setup_rets.append(r)
+        if rets:
+            out.append(statistics.mean(rets))
+            # no member in a setup → the gated basket sits in cash (0%),
+            # NOT a skipped day — that is the whole point of the gate.
+            setup_out.append(statistics.mean(setup_rets) if setup_rets else 0.0)
+        else:
+            out.append(None)
+            setup_out.append(None)
+    return out, pit_clean, setup_out
 
 
 def _index_returns(closes: dict[date, float], dates: list[date]) -> list[float | None]:
@@ -283,6 +320,25 @@ def _verdict(sim: dict[str, Any]) -> str:
             f"闸门(尤其 PRESS)过度防御/需重新调参({fact})。")
 
 
+def _setup_verdict(full: dict[str, Any], setup: dict[str, Any]) -> str:
+    """Does entering only names in a pullback setup beat holding everything?
+
+    Both legs are naive (no regime overlay) so this isolates the entry-
+    timing signal: setup-gated basket vs the full always-hold basket.
+    """
+    fs, ss = full.get("sharpe"), setup.get("sharpe")
+    if fs is None or ss is None:
+        return "数据不足,无法判定。"
+    fact = (f"setup-gated 夏普 {ss} vs 全篮子 {fs}; "
+            f"回撤 {setup.get('max_drawdown_pct')}% vs {full.get('max_drawdown_pct')}%")
+    if ss > fs + 0.05:
+        return f"进场 setup 闸门有信息量 —— 只在回调进场,风险调整收益更高({fact})。"
+    if ss >= fs - 0.05:
+        return f"进场 setup 闸门基本中性 —— 夏普持平,主要价值在少做交易({fact})。"
+    return ("进场 setup 闸门拖累夏普 —— 这批名字趋势性太强,"
+            f"等回调反而错过上涨({fact})。")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--start", type=lambda s: datetime.strptime(s, "%Y-%m-%d").date(),
@@ -330,7 +386,7 @@ def main() -> int:
         dates = sorted(d for d in smh if args.start <= d <= end)
         if len(dates) > 30:
             print(f"US backtest: {len(dates)} trading days, computing regime ...")
-            basket_ret, pit_clean = _basket_daily_returns(
+            basket_ret, pit_clean, setup_ret = _basket_daily_returns(
                 us_con, "prices_daily", "symbol", us_snaps, us_basket, dates)
             bench_ret = _index_returns(smh, dates)
             mults, states = [], []
@@ -341,6 +397,10 @@ def main() -> int:
             result["us"] = _simulate(dates, basket_ret, mults, states, bench_ret)
             result["us"]["pit_clean_days"] = pit_clean
             result["us"]["pit_clean_pct"] = round(pit_clean / max(len(dates) - 1, 1) * 100, 2)
+            result["us"]["setup_gated"] = _stats(
+                [setup_ret[i] for i in range(1, len(dates)) if basket_ret[i] is not None])
+            result["us"]["setup_verdict"] = _setup_verdict(
+                result["us"]["naive_always_hold"], result["us"]["setup_gated"])
             result["us"]["verdict"] = _verdict(result["us"])
         else:
             result["us"] = {"error": "insufficient US history"}
@@ -355,7 +415,7 @@ def main() -> int:
         dates = sorted(d for d in hs300 if args.start <= d <= end)
         if len(dates) > 30:
             print(f"CN backtest: {len(dates)} trading days, computing regime ...")
-            basket_ret, pit_clean = _basket_daily_returns(
+            basket_ret, pit_clean, setup_ret = _basket_daily_returns(
                 cn_con, "prices", "ts_code", cn_snaps, cn_basket, dates)
             bench_ret = _index_returns(hs300, dates)
             mults, states = [], []
@@ -366,6 +426,10 @@ def main() -> int:
             result["cn"] = _simulate(dates, basket_ret, mults, states, bench_ret)
             result["cn"]["pit_clean_days"] = pit_clean
             result["cn"]["pit_clean_pct"] = round(pit_clean / max(len(dates) - 1, 1) * 100, 2)
+            result["cn"]["setup_gated"] = _stats(
+                [setup_ret[i] for i in range(1, len(dates)) if basket_ret[i] is not None])
+            result["cn"]["setup_verdict"] = _setup_verdict(
+                result["cn"]["naive_always_hold"], result["cn"]["setup_gated"])
             result["cn"]["verdict"] = _verdict(result["cn"])
         else:
             result["cn"] = {"error": "insufficient CN history"}
@@ -411,6 +475,7 @@ def _render_md(result: dict[str, Any]) -> str:
         lines.append("|---|---:|---:|---:|---:|---:|")
         for key, name in (("gated_regime_overlay", "regime overlay(本策略)"),
                            ("naive_always_hold", "无脑 always-hold 篮子"),
+                           ("setup_gated", "进场setup闸门(只回调进)"),
                            ("benchmark", f"基准 {bench}")):
             s = m.get(key) or {}
             lines.append(
@@ -427,6 +492,8 @@ def _render_md(result: dict[str, Any]) -> str:
                 "仍含幸存者偏差。"
             )
         lines.append(f"- **判定**: {m.get('verdict')}")
+        if m.get("setup_verdict"):
+            lines.append(f"- **进场 setup 闸门**: {m.get('setup_verdict')}")
         lines.append("")
     return "\n".join(lines) + "\n"
 
