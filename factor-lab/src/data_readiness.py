@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import duckdb
@@ -57,14 +57,25 @@ def market_data_ready(
     market: str,
     *,
     expected_date: date | str | None = None,
+    max_staleness_days: int = 0,
 ) -> tuple[bool, date | None, date | None]:
+    """Is the market's data fresh enough?
+
+    `max_staleness_days` tolerates the latest data being up to N days older
+    than `expected` — this covers weekends, holidays and the Monday gap
+    (where the freshest US close is the prior Friday) without silently
+    accepting a genuine multi-day pipeline outage.
+    """
     latest = latest_trade_date(market)
     expected = _coerce_date(expected_date)
 
     if expected is None:
         expected = expected_us_data_date() if market == "us" else latest
 
-    ready = latest is not None and expected is not None and latest >= expected
+    ready = (
+        latest is not None and expected is not None
+        and latest >= expected - timedelta(days=max(max_staleness_days, 0))
+    )
     return ready, latest, expected
 
 
@@ -72,13 +83,24 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Check whether market data is fresh enough.")
     parser.add_argument("--market", choices=["cn", "us"], required=True)
     parser.add_argument("--expected-date", help="Required latest trade date (YYYY-MM-DD).")
+    parser.add_argument("--max-staleness-days", type=int, default=0,
+                        help="Tolerate the latest data being up to N days older "
+                             "than expected (covers weekends / holidays).")
+    parser.add_argument("--print-latest", action="store_true",
+                        help="On ready, print only the latest trade date (for scripts).")
     parser.add_argument("--quiet", action="store_true")
     args = parser.parse_args()
 
     ready, latest, expected = market_data_ready(
         args.market,
         expected_date=args.expected_date,
+        max_staleness_days=args.max_staleness_days,
     )
+
+    if args.print_latest:
+        if ready and latest is not None:
+            print(latest.isoformat())
+        return 0 if ready else 1
 
     if not args.quiet:
         if ready:

@@ -62,15 +62,20 @@ check_us_ready() {
         return 1
     fi
 
-    local fallback_date
-    fallback_date="$(TZ=America/New_York date -d 'yesterday' +%Y-%m-%d 2>/dev/null || true)"
-    if [[ -n "$fallback_date" && "$fallback_date" != "$US_EXPECTED_DATE" ]]; then
-        echo "US $US_EXPECTED_DATE not ready; trying latest completed US date $fallback_date"
-        if $PYTHON -m src.data_readiness --market us --expected-date "$fallback_date"; then
-            US_READY_DATE="$fallback_date"
-            export FACTOR_LAB_US_EXPECTED_DATE="$US_READY_DATE"
-            return 0
-        fi
+    # Fallback: accept the latest US trade day if it is within 5 days of the
+    # expected date. This covers weekends, holidays and the Monday gap — where
+    # the freshest US close is the prior Friday. The old fallback stepped back
+    # only one calendar day, so it skipped US autoresearch every Monday (and
+    # every day after a US holiday). A genuine multi-day outage still fails.
+    local latest_date
+    latest_date="$($PYTHON -m src.data_readiness --market us \
+        --expected-date "$US_EXPECTED_DATE" --max-staleness-days 5 --print-latest \
+        2>/dev/null || true)"
+    if [[ -n "$latest_date" ]]; then
+        echo "US $US_EXPECTED_DATE not ready; running on latest completed US date $latest_date"
+        US_READY_DATE="$latest_date"
+        export FACTOR_LAB_US_EXPECTED_DATE="$US_READY_DATE"
+        return 0
     fi
     return 1
 }
