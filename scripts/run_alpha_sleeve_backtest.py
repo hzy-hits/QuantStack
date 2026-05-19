@@ -24,7 +24,7 @@ STACK_ROOT = SCRIPT_DIR.parents[0]
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import run_main_strategy_v2_backtest as v2  # noqa: E402
+import generate_main_strategy_v2_report as v2  # noqa: E402
 from sleeves import build_sleeves  # noqa: E402
 from sleeves.base import Sleeve, daily_series, fmt_num, fmt_pct, pearson_corr  # noqa: E402
 from sleeves.factor_lab import FACTOR_LAB_CORR_BLOCK_THRESHOLD  # noqa: E402
@@ -528,7 +528,7 @@ def render_report(payload: dict[str, Any]) -> str:
         "",
         "```bash",
         f"python scripts/run_alpha_sleeve_backtest.py --date {payload['as_of']} --start {payload['start']}",
-        f"python scripts/run_main_strategy_v2_backtest.py --date {payload['as_of']} --start {payload['start']}",
+        f"python scripts/generate_main_strategy_v2_report.py --date {payload['as_of']} --start {payload['start']}",
         f"python scripts/run_cn_log_denoise_backtest.py --date {payload['as_of']} --start {payload['start']}",
         "```",
         "",

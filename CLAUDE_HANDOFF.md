@@ -108,7 +108,7 @@ ai_infra 原文研究 / BFS 发现
 | `quant-research-v1/` | 美股 producer，只在 AI universe 或已晋级 promotion output 内排序。 |
 | `quant-research-cn/` | A 股 producer，把海外 AI Infra 瓶颈映射到 A 股/港股。 |
 | `scripts/sleeves/` | US/CN/Factor Lab/promotions/portfolio hedge sleeve 逻辑。 |
-| `scripts/run_main_strategy_v2_backtest.py` | Main Strategy V2 report 和 AI specialist report rendering。 |
+| `scripts/generate_main_strategy_v2_report.py` | Main Strategy V2 report 和 AI specialist report rendering。 |
 | `scripts/send_production_decision_report.py` | 报告发送和 market/report heading 防串线。 |
 | `scripts/audit_production_basket_ai_universe.py` | 对最新 main_strategy_v2 报告做 AI universe 合规审计 (`production_basket` 必须 100% `ai_infra_universe=True`)；输出 basket / pool / depth 覆盖矩阵。 |
 | `scripts/score_source_review_readiness.py` | 读 `source_verification_queue_v1.csv`，按 G0-G4 gate 打分 → `reports/review_dashboard/ai_infra_source_review_readiness/<date>/source_review_readiness.{csv,md}`，tier ∈ {ready_for_promotion, evidence_partial, pending_human_review, blocked_by_counterevidence, g0_blocked, unscored}。 |
@@ -209,7 +209,7 @@ python3 scripts/verify_ai_supercycle_readiness.py --as-of 2026-05-13 --strict
 运行 Main Strategy V2 report：
 
 ```bash
-python3 scripts/run_main_strategy_v2_backtest.py --as-of 2026-05-13
+python3 scripts/generate_main_strategy_v2_report.py --as-of 2026-05-13
 ```
 
 核心 Python smoke tests：
@@ -413,7 +413,7 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 ## 已完成的下一步 (2026-05-13)
 
 1. `scripts/audit_production_basket_ai_universe.py` 加 `tests.test_audit_production_basket_ai_universe`，断言每个 production_basket 行 `ai_infra_universe=True`、`ai_infra_current_pool` 非空、`ai_infra_gate.contract=ai_infra_universe_only`。在 `quant-research-v1/tests/test_us_opportunity_ranker.py` 和 `test_cn_opportunity_ranker.py` 中加同样的 production_basket 断言。
-2. `scripts/run_main_strategy_v2_backtest.py`：
+2. `scripts/generate_main_strategy_v2_report.py`：
    - 新增 `build_source_review_calendar` / `render_source_review_calendar_section`，读取 `ai_infra/reports/source_verification_queue_v1.csv`，写入 `source_review_calendar.md`/`.json`，并在 US/CN/combined 三个报告里渲染。
    - 新增 `build_benchmark_attribution` / `render_benchmark_attribution_section`，对 US (SPY/QQQ/SMH/IWM/DIA) 和 CN (000300.SH/399006.SZ/399001.SZ/000001.SH) 输出 1D/5D/20D/60D/YTD 表，写入 `benchmark_attribution.md`/`.json`。
 3. `ops/tasks.yaml` 新增 `research.main_strategy_v2_report` (12:10 CST) 和 `research.production_basket_audit` (12:15 CST)。
@@ -502,7 +502,7 @@ AI Book vs Benchmark (CN, 1-name basket, 60d):
 ## 第二批已完成 (2026-05-13 续)
 
 1. `scripts/score_source_review_readiness.py` 落地 G0-G4 gate，按方法论给 source-verification queue 打 readiness tier；同一逻辑内联进 `build_source_review_calendar`，daily report 的 Source Review 表多了一列 Readiness。
-2. `scripts/run_main_strategy_v2_backtest.py` 新增 `build_satellite_pool_report` / `render_satellite_pool_report_section`：卫星资产池 50 个名字按 Taiwan/Japan/Korea/Europe/Israel 拆分、按 BFS depth 汇总、按 readiness tier 分类。落 `satellite_pool_report.{md,json}` 并进入 combined report。
+2. `scripts/generate_main_strategy_v2_report.py` 新增 `build_satellite_pool_report` / `render_satellite_pool_report_section`：卫星资产池 50 个名字按 Taiwan/Japan/Korea/Europe/Israel 拆分、按 BFS depth 汇总、按 readiness tier 分类。落 `satellite_pool_report.{md,json}` 并进入 combined report。
 3. `scripts/ingest_cn_index_prices.py` 用 AKShare 把 `000001.SH`/`399001.SZ`/`399006.SZ`/`000300.SH` 共 658 行 / 指数 补进 CN db；benchmark snapshot 不再有 missing rows。
 4. `scripts/ingest_satellite_index_prices.py` 用 yfinance 把 `^TWII`/`^N225`/`^KS11`/`^AEX` 与 `EWT/EWJ/EWY/EWN` ETF 镜像补进 US db；benchmark 章节新增 “Satellite Benchmark Snapshot” 表。
 5. `audit_production_basket_ai_universe.py` 输出 `by_current_pool` / `by_bfs_depth` 覆盖矩阵，供 ops cron 和 review packet 追踪 satellite vs core 的混合比例。

@@ -201,7 +201,7 @@ def emit_stable_alpha_bulletin(cfg: Settings, as_of: date) -> tuple[str, str]:
     """Run the cross-market stable-alpha gate before payload rendering."""
     project_root = Path(__file__).resolve().parents[1]
     stack_root = project_root.parent
-    script = stack_root / "scripts" / "run_strategy_backtest_report.py"
+    script = stack_root / "scripts" / "score_strategy_stability_gate.py"
     if not script.exists():
         return "skipped", f"missing gate script: {script}"
     cmd = [

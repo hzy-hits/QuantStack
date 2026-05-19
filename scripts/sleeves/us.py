@@ -7,7 +7,7 @@ from typing import Any
 
 import duckdb
 
-import run_main_strategy_v2_backtest as v2
+import generate_main_strategy_v2_report as v2
 
 from .base import Sleeve, make_sleeve, rows_as_dicts, table_exists
 from .us_theme_cluster import US_THEME_SLEEVE_ID, query_us_theme_cluster_returns

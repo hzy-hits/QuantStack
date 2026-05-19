@@ -10,7 +10,7 @@ from typing import Any
 
 import duckdb
 
-import run_main_strategy_v2_backtest as v2
+import generate_main_strategy_v2_report as v2
 
 
 @dataclass

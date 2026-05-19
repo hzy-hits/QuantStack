@@ -21,9 +21,9 @@ rules:
     tags: ["shared-library"]
   - pattern: "^scripts/run_alpha_sleeve_backtest\\.py"
     tags: ["alpha-factory", "backtest-report", "duckdb-output"]
-  - pattern: "^scripts/run_main_strategy_v2_backtest\\.py"
+  - pattern: "^scripts/generate_main_strategy_v2_report\\.py"
     tags: ["production-ranker", "portfolio-overlay", "fresh-entry-gate"]
-  - pattern: "^scripts/run_strategy_backtest_report\\.py"
+  - pattern: "^scripts/score_strategy_stability_gate\\.py"
     tags: ["backtest-report", "research-layer"]
   - pattern: "^quant-research-v1/src/quant_bot/analytics/.*ranker"
     tags: ["us-ranker", "production-ranker"]

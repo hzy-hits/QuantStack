@@ -12,11 +12,11 @@ import duckdb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STACK_ROOT = REPO_ROOT.parent
-SCRIPT_PATH = STACK_ROOT / "scripts" / "run_main_strategy_v2_backtest.py"
+SCRIPT_PATH = STACK_ROOT / "scripts" / "generate_main_strategy_v2_report.py"
 
 
 def _load_module():
-    spec = importlib.util.spec_from_file_location("run_main_strategy_v2_backtest", SCRIPT_PATH)
+    spec = importlib.util.spec_from_file_location("generate_main_strategy_v2_report", SCRIPT_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"unable to load module from {SCRIPT_PATH}")
     module = importlib.util.module_from_spec(spec)

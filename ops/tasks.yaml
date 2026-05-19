@@ -871,7 +871,7 @@ tasks:
     cwd: .
     command:
       - python3
-      - scripts/run_main_strategy_v2_backtest.py
+      - scripts/generate_main_strategy_v2_report.py
       - --date
       - "{cst_date}"
       - --ai-infra-mode

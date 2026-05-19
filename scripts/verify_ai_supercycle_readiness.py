@@ -587,7 +587,7 @@ def check_current_report(root: Path, as_of: str) -> ReadinessCheck:
             status="warn",
             summary=f"main strategy payload missing for {as_of}",
             evidence={"path": str(path)},
-            blockers=["run scripts/run_main_strategy_v2_backtest.py for this date"],
+            blockers=["run scripts/generate_main_strategy_v2_report.py for this date"],
         )
     payload = json.loads(path.read_text(encoding="utf-8"))
     ai_evidence = (

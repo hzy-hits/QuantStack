@@ -25,7 +25,7 @@ Framework (operator essay, Hedge-Wedge-Confirm-Press):
 
 The engine reads `bubble_hedge.json` (single source of truth — never re-queries
 the DB) and writes `risk_regime.json` + `risk_regime.md`. The R multiplier is
-consumed by run_main_strategy_v2_backtest.py when it sizes the AI-infra basket.
+consumed by generate_main_strategy_v2_report.py when it sizes the AI-infra basket.
 """
 from __future__ import annotations
 

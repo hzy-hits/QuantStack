@@ -7,15 +7,15 @@ import unittest
 from pathlib import Path
 
 STACK_ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_PATH = STACK_ROOT / "scripts" / "run_main_strategy_v2_backtest.py"
+SCRIPT_PATH = STACK_ROOT / "scripts" / "generate_main_strategy_v2_report.py"
 
 
 def _load_module():
-    if "run_main_strategy_v2_backtest" in sys.modules:
-        return sys.modules["run_main_strategy_v2_backtest"]
+    if "generate_main_strategy_v2_report" in sys.modules:
+        return sys.modules["generate_main_strategy_v2_report"]
     sys.path.insert(0, str(STACK_ROOT / "scripts"))
     spec = importlib.util.spec_from_file_location(
-        "run_main_strategy_v2_backtest", SCRIPT_PATH)
+        "generate_main_strategy_v2_report", SCRIPT_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     sys.modules[spec.name] = module

@@ -14,14 +14,14 @@ import duckdb
 REPO_ROOT = Path(__file__).resolve().parents[1]
 STACK_ROOT = REPO_ROOT.parent
 SRC_ROOT = REPO_ROOT / "src"
-SCRIPT_PATH = STACK_ROOT / "scripts" / "run_strategy_backtest_report.py"
+SCRIPT_PATH = STACK_ROOT / "scripts" / "score_strategy_stability_gate.py"
 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
 
 def _load_gate_module():
-    spec = importlib.util.spec_from_file_location("run_strategy_backtest_report", SCRIPT_PATH)
+    spec = importlib.util.spec_from_file_location("score_strategy_stability_gate", SCRIPT_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"unable to load module from {SCRIPT_PATH}")
     module = importlib.util.module_from_spec(spec)
@@ -997,7 +997,7 @@ class PipelineHookTests(unittest.TestCase):
         run_daily = (REPO_ROOT / "scripts" / "run_daily.py").read_text(encoding="utf-8")
 
         self.assertIn("def emit_stable_alpha_bulletin", run_daily)
-        self.assertIn("run_strategy_backtest_report.py", run_daily)
+        self.assertIn("score_strategy_stability_gate.py", run_daily)
         self.assertIn('"--lookback-days"', run_daily)
         self.assertIn('"60"', run_daily)
         self.assertIn("def emit_my_book_overlay", run_daily)
@@ -1021,7 +1021,7 @@ class PipelineHookTests(unittest.TestCase):
         self.assertIn("QUANT_STACK_BIN", daily_pipeline)
         self.assertNotIn("review-backfill --date-from", daily_pipeline)
         self.assertNotIn('quant-cn render --date "$DATE"', daily_pipeline)
-        self.assertNotIn("run_strategy_backtest_report.py", daily_pipeline)
+        self.assertNotIn("score_strategy_stability_gate.py", daily_pipeline)
         self.assertNotIn('cat "$FACTOR_TMP"', daily_pipeline)
 
     def test_delivery_mode_defaults_to_test_in_us_and_cn_wrappers(self) -> None:

@@ -224,7 +224,7 @@ python3 scripts/verify_ai_supercycle_readiness.py --as-of 2026-05-13 --strict
 运行 Main Strategy V2 report：
 
 ```bash
-python3 scripts/run_main_strategy_v2_backtest.py --as-of 2026-05-13
+python3 scripts/generate_main_strategy_v2_report.py --as-of 2026-05-13
 ```
 
 核心 Python smoke tests：

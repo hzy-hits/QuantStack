@@ -188,7 +188,7 @@ quant-stack/
 │   ├── quant-stack-cli       # root daily control plane
 │   └── quant-stack-py        # thin PyO3 bindings for tests/notebooks/legacy Python
 ├── scripts/
-│   └── run_strategy_backtest_report.py  # Python fallback/compat gate
+│   └── score_strategy_stability_gate.py  # Python fallback/compat gate
 ├── quant-research-v1/        # US producer, report, agents, delivery
 ├── quant-research-cn/        # A-share producer, report, agents, delivery
 └── factor-lab/               # research factor discovery

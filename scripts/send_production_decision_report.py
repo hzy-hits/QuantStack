@@ -100,7 +100,7 @@ def report_json_path(as_of: str) -> Path:
 
 
 def _renderer_module() -> Any:
-    path = STACK_ROOT / "scripts" / "run_main_strategy_v2_backtest.py"
+    path = STACK_ROOT / "scripts" / "generate_main_strategy_v2_report.py"
     spec = importlib.util.spec_from_file_location("main_strategy_v2_renderer", path)
     if spec is None or spec.loader is None:
         raise RuntimeError(f"cannot load report renderer: {path}")
@@ -150,14 +150,14 @@ def generate_report(as_of: str, start: str) -> None:
         except subprocess.CalledProcessError as exc:  # noqa: PERF203
             print(f"warn: {label} refresh failed ({exc}); report will use stale/default gate")
 
-    # Pin --ai-infra-mode explicitly. run_main_strategy_v2_backtest.py infers
+    # Pin --ai-infra-mode explicitly. generate_main_strategy_v2_report.py infers
     # enforce_expand only when default DBs are used; passing it here removes
     # the implicit dependency so the emailed report always carries the
     # AI-infra production basket (the whole point of the daily report).
     subprocess.run(
         [
             sys.executable,
-            str(STACK_ROOT / "scripts" / "run_main_strategy_v2_backtest.py"),
+            str(STACK_ROOT / "scripts" / "generate_main_strategy_v2_report.py"),
             "--date",
             as_of,
             "--start",
