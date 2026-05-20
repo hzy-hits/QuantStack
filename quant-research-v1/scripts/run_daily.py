@@ -115,11 +115,13 @@ def run_rust_fetcher(
     callers pass only the filtered candidates (~120) to avoid fetching
     news/earnings for the entire 500+ equity universe.
     """
-    binary = Path(__file__).parent.parent / "rust" / "target" / "release" / "quant-fetcher"
+    # quant-fetcher now lives in the root workspace (crates/quant-fetcher);
+    # build artifact at <repo-root>/target/release/quant-fetcher.
+    binary = Path(__file__).resolve().parents[2] / "target" / "release" / "quant-fetcher"
     if not binary.exists():
         raise FileNotFoundError(
             f"Rust binary not found: {binary}\n"
-            "Build it: cd rust && cargo build --release"
+            "Build it: cargo build --release --bin quant-fetcher"
         )
 
     # Filter out futures and indices (Finnhub doesn't cover them)

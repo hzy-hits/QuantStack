@@ -147,12 +147,12 @@ R-based 决策报告 → 写 `reports/review_dashboard/main_strategy_v2/{date}/{
 | 二进制 | 工程路径 | 构建命令 | 谁在用 |
 |---|---|---|---|
 | `./target/release/quant-stack` | `crates/quant-stack-cli/`(根 workspace) | `cargo build --release`(在仓根) | 主 orchestrator(所有 daily 入口) |
-| `quant-research-v1/rust/target/release/quant-fetcher` | `quant-research-v1/rust/`(独立 Cargo,**根 workspace 已 exclude**) | `cd quant-research-v1/rust && cargo build --release` | US 数据 fetcher(Finnhub/FRED/SEC/Polymarket),被 run_full.sh 等调用 |
+| `./target/release/quant-fetcher` | `crates/quant-fetcher/`(根 workspace,2026-05-20 从 `quant-research-v1/rust/` 合并进来) | `cargo build --release --bin quant-fetcher` | US 数据 fetcher(Finnhub/FRED/SEC/Polymarket),被 `run_daily.py` 调用 |
 | `factor-lab/rust-bootstrap/target/release/...` | `factor-lab/rust-bootstrap/`(独立 Cargo) | `cd factor-lab/rust-bootstrap && cargo build --release` | factor-lab 内部 |
 
-**改 Rust 要记住**:看文件路径前缀就知道 build 哪个工程。
-根 workspace 的 `Cargo.toml` 已经 exclude 了 quant-research-v1/rust 和
-factor-lab/rust-bootstrap,所以仓根 `cargo build` 不会编它们。
+**改 Rust 要记住**:`quant-stack` 和 `quant-fetcher` 都在根 workspace,
+仓根一次 `cargo build --release` 全编。只有 `factor-lab/rust-bootstrap`
+仍是独立 Cargo(根 workspace 已 exclude)。
 
 ---
 
@@ -231,11 +231,8 @@ ops/run_task.sh research.bubble_hedge_radar
 python3 ops/catch_up.py             # 实跑
 python3 ops/catch_up.py --dry-run   # 只看会跑啥
 
-# 重建 Rust orchestrator(改了 crates/* 后)
+# 重建 Rust 二进制(orchestrator + fetcher 都在根 workspace)
 cargo build --release
-
-# 重建 Rust fetcher(改了 quant-research-v1/rust/* 后)
-cd quant-research-v1/rust && cargo build --release
 
 # 手动跑日更报告(不发邮件,产物落 review_dashboard/main_strategy_v2/{date}/)
 python3 scripts/generate_main_strategy_v2_report.py --date 2026-05-20 --ai-infra-mode enforce_expand
@@ -272,8 +269,8 @@ python3 scripts/snapshot_universe_membership.py
   跑 `scripts/backfill_cn_prices.py`。
 - **DuckDB 文件锁** —— 同一 DB 一个写者。手动跑可能撞上正在跑的 cron task,
   报 `Conflicting lock`。等它跑完或读 `last_success` 状态。
-- **改 Rust 要记得 build 对的工程** —— 根 workspace 不含 quant-research-v1/rust,
-  改 fetcher 要 `cd` 进去 build。
+- **改 Rust** —— `quant-stack` 和 `quant-fetcher` 都在根 workspace,
+  仓根 `cargo build --release` 一次全编。仅 `factor-lab/rust-bootstrap` 独立。
 
 ---
 
@@ -292,8 +289,7 @@ python3 scripts/snapshot_universe_membership.py
 按价值/风险排序:
 
 1. **正式标记/删除 `run_daily.py`**(`# DEPRECATED — Rust quant-stack canonical`)。
-2. **合并 `quant-research-v1/rust` 进根 workspace** —— 减少"改 Rust 要 build 哪个"的混淆。~50 文件迁移,
-   要重写 `Cargo.toml` 依赖路径,不紧急。
+2. ~~**合并 `quant-research-v1/rust` 进根 workspace**~~ — 已完成(2026-05-20)。
 3. **`cn.precompute_alpha` 移进 Rust orchestrator** 或显式标注是预处理依赖。
 
 **不建议做的**:改 cron task 名字(纯装饰,破历史)、把 cwd 全统一成 `.`

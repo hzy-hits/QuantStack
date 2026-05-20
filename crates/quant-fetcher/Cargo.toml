@@ -1,0 +1,24 @@
+[package]
+name = "quant-fetcher"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "quant-fetcher"
+path = "src/main.rs"
+
+[dependencies]
+# Shared with the rest of the workspace.
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+duckdb.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+# Async HTTP — only this crate uses them right now, but declared via the
+# workspace table so future crates pin the same versions.
+tokio.workspace = true
+reqwest.workspace = true
+tokio-util.workspace = true
