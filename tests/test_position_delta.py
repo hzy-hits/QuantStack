@@ -1,7 +1,12 @@
-"""Tests for the held→target position delta hint in the daily report."""
+"""Tests for the held→target position delta hint + virtual holdings ledger.
+
+Virtual holdings are self-maintained: today's actionable sizes become
+tomorrow's "held" — the operator doesn't input positions by hand.
+"""
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -28,12 +33,10 @@ class PositionDeltaTests(unittest.TestCase):
         self.m = _load_module()
 
     def test_fresh_entry_no_decoration(self) -> None:
-        # No holding → Action stays clean (already says 买入).
         self.assertEqual(self.m.position_delta_text(0.0, 0.044), "")
         self.assertEqual(self.m.position_delta_text(None, 0.125), "")
 
     def test_trim_on_press_day(self) -> None:
-        # The canonical PRESS scenario: held 0.125 → target 0.044 (R=0.35x).
         text = self.m.position_delta_text(0.125, 0.044)
         self.assertIn("减", text)
         self.assertIn("-65%", text)
@@ -46,55 +49,73 @@ class PositionDeltaTests(unittest.TestCase):
         self.assertIn("+", text)
 
     def test_steady_when_essentially_equal(self) -> None:
-        text = self.m.position_delta_text(0.125, 0.126)   # < 0.005 delta
+        text = self.m.position_delta_text(0.125, 0.126)
         self.assertIn("持稳", text)
 
     def test_full_exit(self) -> None:
-        # target → 0 still produces a 减 hint (note: row would normally
-        # be filtered out of actionable before reaching here, but the
-        # function is defensive).
         text = self.m.position_delta_text(0.125, 0.0)
         self.assertIn("减", text)
         self.assertIn("-100%", text)
 
 
-class ManualHoldingsLoaderTests(unittest.TestCase):
+class VirtualHoldingsLedgerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.m = _load_module()
+        self._orig_path = self.m.VIRTUAL_HOLDINGS_PATH
+        self._tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        self._tmp.close()
+        self.m.VIRTUAL_HOLDINGS_PATH = Path(self._tmp.name)
+        Path(self._tmp.name).unlink()  # start absent
+
+    def tearDown(self) -> None:
+        self.m.VIRTUAL_HOLDINGS_PATH = self._orig_path
+        if Path(self._tmp.name).exists():
+            Path(self._tmp.name).unlink()
 
     def test_missing_file_returns_empty(self) -> None:
-        original = self.m.MANUAL_HOLDINGS_PATH
-        try:
-            self.m.MANUAL_HOLDINGS_PATH = Path("/tmp/__definitely_not_a_file__.yaml")
-            self.assertEqual(self.m._load_manual_holdings(), {"US": {}, "CN": {}})
-        finally:
-            self.m.MANUAL_HOLDINGS_PATH = original
+        self.assertEqual(self.m._load_virtual_holdings(), {"US": {}, "CN": {}})
 
-    def test_parses_us_and_cn_sections(self) -> None:
-        original = self.m.MANUAL_HOLDINGS_PATH
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-                f.write("us:\n  AMZN: 0.125\n  nvda: 0.05\ncn:\n  002518.SZ: 0.075\n")
-                tmp = f.name
-            self.m.MANUAL_HOLDINGS_PATH = Path(tmp)
-            h = self.m._load_manual_holdings()
-            self.assertEqual(h["US"]["AMZN"], 0.125)
-            self.assertEqual(h["US"]["NVDA"], 0.05)            # case-normalized
-            self.assertEqual(h["CN"]["002518.SZ"], 0.075)
-        finally:
-            self.m.MANUAL_HOLDINGS_PATH = original
+    def test_persist_then_load_roundtrip(self) -> None:
+        actionable = [
+            {"market": "US", "symbol": "AMZN", "size_r": 0.125},
+            {"market": "US", "symbol": "NVDA", "size_r": 0.044},
+            {"market": "CN", "symbol": "600183.SH", "size_r": 0.05},
+        ]
+        self.m._persist_virtual_holdings(actionable, {"US": {}, "CN": {}}, "2026-05-20")
+        loaded = self.m._load_virtual_holdings()
+        self.assertEqual(loaded["US"]["AMZN"], 0.125)
+        self.assertEqual(loaded["US"]["NVDA"], 0.044)
+        self.assertEqual(loaded["CN"]["600183.SH"], 0.05)
 
-    def test_malformed_yaml_returns_empty(self) -> None:
-        original = self.m.MANUAL_HOLDINGS_PATH
-        try:
-            with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-                f.write("us:\n  - this is a list, not a map\n")
-                tmp = f.name
-            self.m.MANUAL_HOLDINGS_PATH = Path(tmp)
-            h = self.m._load_manual_holdings()
-            self.assertEqual(h, {"US": {}, "CN": {}})         # safe degrade
-        finally:
-            self.m.MANUAL_HOLDINGS_PATH = original
+    def test_orphan_positions_persist(self) -> None:
+        # Yesterday held AMZN. Today's actionable doesn't include AMZN.
+        # The held should remain in the book.
+        prior = {"US": {"AMZN": 0.125}, "CN": {}}
+        self.m._persist_virtual_holdings(
+            [{"market": "US", "symbol": "NVDA", "size_r": 0.125}],
+            prior, "2026-05-20",
+        )
+        loaded = self.m._load_virtual_holdings()
+        self.assertEqual(loaded["US"]["AMZN"], 0.125)   # orphan kept
+        self.assertEqual(loaded["US"]["NVDA"], 0.125)   # new added
+
+    def test_historical_run_does_not_stomp_newer_state(self) -> None:
+        # Persist 2026-05-20 first; then re-run for 2026-05-15 must NOT
+        # overwrite the newer ledger.
+        self.m._persist_virtual_holdings(
+            [{"market": "US", "symbol": "AMZN", "size_r": 0.125}],
+            {"US": {}, "CN": {}}, "2026-05-20",
+        )
+        self.m._persist_virtual_holdings(
+            [{"market": "US", "symbol": "AMZN", "size_r": 0.044}],   # would overwrite
+            {"US": {}, "CN": {}}, "2026-05-15",                       # but date older
+        )
+        loaded = self.m._load_virtual_holdings()
+        self.assertEqual(loaded["US"]["AMZN"], 0.125)   # newer state preserved
+
+    def test_malformed_file_returns_empty(self) -> None:
+        Path(self._tmp.name).write_text("{ not valid json", encoding="utf-8")
+        self.assertEqual(self.m._load_virtual_holdings(), {"US": {}, "CN": {}})
 
 
 if __name__ == "__main__":

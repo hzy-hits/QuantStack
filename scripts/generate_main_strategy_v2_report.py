@@ -44,19 +44,22 @@ from score_risk_regime_engine import classify_regime as classify_risk_regime  # 
 
 _CONVEXITY_SHORT = {"convex": "凸", "linear": "线性", "anti_convex": "反凸", "none": "-"}
 
-# Operator-maintained holdings ledger. Used to render a held→target delta
-# in the Actionable table's Action column (PRESS day at R=0.35x should
-# show "trim from 0.125R to 0.044R" instead of just "buy 0.044R").
-MANUAL_HOLDINGS_PATH = STACK_ROOT / "ai_infra" / "data" / "manual_holdings.yaml"
+# Auto-maintained virtual holdings ledger. The operator does not feed
+# positions in — we simulate "what was held going into today" from
+# yesterday's actionable list (i.e. what the report told them to do).
+# Used to render a held→target delta in the Actionable table's Action
+# column so PRESS day (R=0.35x) shows "trim from 0.125R to 0.044R" and
+# not just the new target size.
+VIRTUAL_HOLDINGS_PATH = STACK_ROOT / "ai_infra" / "data" / "virtual_holdings.json"
 
 
-def _load_manual_holdings() -> dict[str, dict[str, float]]:
+def _load_virtual_holdings() -> dict[str, dict[str, float]]:
     """{"US": {sym: held_r}, "CN": {sym: held_r}}. Empty when file absent."""
-    if not MANUAL_HOLDINGS_PATH.exists():
+    if not VIRTUAL_HOLDINGS_PATH.exists():
         return {"US": {}, "CN": {}}
     try:
-        data = yaml.safe_load(MANUAL_HOLDINGS_PATH.read_text(encoding="utf-8")) or {}
-    except yaml.YAMLError:
+        data = json.loads(VIRTUAL_HOLDINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
         return {"US": {}, "CN": {}}
     out: dict[str, dict[str, float]] = {"US": {}, "CN": {}}
     for key in ("us", "cn"):
@@ -69,6 +72,52 @@ def _load_manual_holdings() -> dict[str, dict[str, float]]:
             except (TypeError, ValueError):
                 continue
     return out
+
+
+def _persist_virtual_holdings(
+    actionable: list[dict[str, Any]],
+    current_book: dict[str, dict[str, float]],
+    as_of: str | None,
+) -> None:
+    """Write today's actionable sizes back to the ledger.
+
+    Today's targets become tomorrow's "held". Symbols not in today's
+    actionable are KEPT at their previous held size (orphaned positions
+    persist until manually cleared in the JSON). The ledger's `as_of`
+    only moves forward — running the report for a historical date is a
+    no-op so old runs cannot stomp live state.
+    """
+    if not as_of:
+        return
+    try:
+        prior_as_of = (
+            json.loads(VIRTUAL_HOLDINGS_PATH.read_text(encoding="utf-8")).get("as_of")
+            if VIRTUAL_HOLDINGS_PATH.exists() else None
+        )
+    except (OSError, json.JSONDecodeError):
+        prior_as_of = None
+    if prior_as_of and prior_as_of > as_of:
+        return  # historical re-run; don't stomp newer state
+    book = {"US": dict(current_book.get("US") or {}),
+            "CN": dict(current_book.get("CN") or {})}
+    for row in actionable:
+        market = str(row.get("market") or "").upper()
+        if market not in ("US", "CN"):
+            continue
+        sym = _symbol_key(row.get("symbol"))
+        if not sym:
+            continue
+        try:
+            size = float(row.get("size_r") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        book[market][sym] = size
+    payload = {"as_of": as_of, "us": book["US"], "cn": book["CN"]}
+    VIRTUAL_HOLDINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    VIRTUAL_HOLDINGS_PATH.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
 
 
 def position_delta_text(held_r: float | None, target_r: float | None) -> str:
@@ -2915,7 +2964,7 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
 
     actionable: list[dict[str, Any]] = []
     us_trade_plan = payload.get("us_trade_plan") or {}
-    holdings = _load_manual_holdings()
+    holdings = _load_virtual_holdings()
     for row in overlay_rows:
         final_r = round_or_none(row.get("final_r"))
         if final_r is None or final_r <= 0.0:
@@ -3119,6 +3168,10 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
         "risk_attribution": (overlay.get("summary") or {}).get("risk_attribution"),
         "top_blocker": ((payload.get("pipeline_requirements_audit") or {}).get("summary") or {}).get("top_blocker"),
     }
+    # Today's actionable becomes tomorrow's virtual "held". Symbols not in
+    # today's list keep their prior held size (orphan positions persist
+    # until the operator clears them in virtual_holdings.json).
+    _persist_virtual_holdings(actionable, holdings, payload.get("as_of"))
     return {
         "as_of": payload.get("as_of"),
         "summary": summary,
