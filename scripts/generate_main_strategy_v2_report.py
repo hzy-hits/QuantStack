@@ -3211,10 +3211,32 @@ def render_bubble_hedge_section(payload: dict[str, Any], *, victim_top_n: int = 
     return lines
 
 
+def _latest_dated_subdir(root: Path, as_of: str) -> str | None:
+    """Latest YYYY-MM-DD subdir under root with name <= as_of, else None.
+
+    US options data lags 1 trading day (CBOE snapshot is the prior
+    session's close), so the radar's output dir is dated the latest US
+    trade day — not today's CST report date. Without this fallback the
+    daily report shows "n/a" for the options reads every morning.
+    """
+    if not root.exists():
+        return None
+    candidates = sorted(
+        d.name for d in root.iterdir()
+        if d.is_dir() and len(d.name) == 10 and d.name <= as_of
+    )
+    return candidates[-1] if candidates else None
+
+
 def load_options_anomaly_payload(as_of: str) -> list[dict[str, Any]]:
     path = OPTIONS_ANOMALY_ROOT / as_of / "options_anomaly.csv"
     if not path.exists():
-        return []
+        fallback = _latest_dated_subdir(OPTIONS_ANOMALY_ROOT, as_of)
+        if fallback is None:
+            return []
+        path = OPTIONS_ANOMALY_ROOT / fallback / "options_anomaly.csv"
+        if not path.exists():
+            return []
     with path.open("r", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
 
@@ -3222,7 +3244,12 @@ def load_options_anomaly_payload(as_of: str) -> list[dict[str, Any]]:
 def load_options_tenor_signals(as_of: str) -> list[dict[str, Any]]:
     path = OPTIONS_TENOR_ROOT / as_of / "options_tenor_signals.jsonl"
     if not path.exists():
-        return []
+        fallback = _latest_dated_subdir(OPTIONS_TENOR_ROOT, as_of)
+        if fallback is None:
+            return []
+        path = OPTIONS_TENOR_ROOT / fallback / "options_tenor_signals.jsonl"
+        if not path.exists():
+            return []
     out: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
         for line in handle:

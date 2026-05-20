@@ -212,7 +212,11 @@ def _fetch_cboe_single(symbol: str) -> Optional[dict]:
                 return None
             if resp.status_code == 429 and attempt < CBOE_MAX_RETRIES - 1:
                 delay = _cboe_retry_delay(resp, attempt)
-                log.warning(
+                # 429 with a remaining retry budget is a known-recoverable
+                # back-off, not a failure — keep at debug so it stops
+                # filling the daily log. A final-attempt 429 is handled
+                # elsewhere via the normal cboe_http_error path.
+                log.debug(
                     "cboe_rate_limited",
                     symbol=symbol,
                     attempt=attempt + 1,
@@ -674,9 +678,12 @@ def fetch_options_snapshot_with_quotes(
 
     if fetch_failures > 0:
         total = len(fetch_symbols)
-        log.warning("options_fetch_summary", total=total, failures=fetch_failures,
-                     source="cboe",
-                     success_rate=f"{(total - fetch_failures) / total * 100:.0f}%")
+        # Per-run summary line — useful, not alarming (a few CBOE fetches
+        # always fail on a 500+ symbol universe). Demote to info so it
+        # doesn't show up in error counts.
+        log.info("options_fetch_summary", total=total, failures=fetch_failures,
+                 source="cboe",
+                 success_rate=f"{(total - fetch_failures) / total * 100:.0f}%")
 
     def _to_df(records):
         if not records:
