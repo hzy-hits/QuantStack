@@ -44,6 +44,54 @@ from score_risk_regime_engine import classify_regime as classify_risk_regime  # 
 
 _CONVEXITY_SHORT = {"convex": "凸", "linear": "线性", "anti_convex": "反凸", "none": "-"}
 
+# Operator-maintained holdings ledger. Used to render a held→target delta
+# in the Actionable table's Action column (PRESS day at R=0.35x should
+# show "trim from 0.125R to 0.044R" instead of just "buy 0.044R").
+MANUAL_HOLDINGS_PATH = STACK_ROOT / "ai_infra" / "data" / "manual_holdings.yaml"
+
+
+def _load_manual_holdings() -> dict[str, dict[str, float]]:
+    """{"US": {sym: held_r}, "CN": {sym: held_r}}. Empty when file absent."""
+    if not MANUAL_HOLDINGS_PATH.exists():
+        return {"US": {}, "CN": {}}
+    try:
+        data = yaml.safe_load(MANUAL_HOLDINGS_PATH.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError:
+        return {"US": {}, "CN": {}}
+    out: dict[str, dict[str, float]] = {"US": {}, "CN": {}}
+    for key in ("us", "cn"):
+        section = data.get(key) or {}
+        if not isinstance(section, dict):
+            continue
+        for sym, val in section.items():
+            try:
+                out[key.upper()][str(sym).upper().strip()] = float(val)
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
+def position_delta_text(held_r: float | None, target_r: float | None) -> str:
+    """Short suffix for the Action cell: held→target hint.
+
+    Empty when no holding (fresh entry — Action already says 买入). For
+    held positions: 持稳 / 加 / 减 with the R delta + percent.
+    """
+    if held_r is None:
+        return ""
+    held = float(held_r)
+    target = float(target_r or 0.0)
+    if held <= 0.0:
+        return ""
+    delta = target - held
+    if abs(delta) < 0.005:
+        return f" · 持稳 {held:.3f}R"
+    pct = (delta / held) * 100.0 if held else 0.0
+    arrow = f"{held:.3f}→{target:.3f}"
+    if delta > 0:
+        return f" · 加 +{delta:.3f}R({pct:+.0f}%, {arrow})"
+    return f" · 减 {delta:.3f}R({pct:+.0f}%, {arrow})"
+
 
 def _connect_ro(db_path, retries: int = 8, backoff: float = 20.0):
     """Read-only DuckDB connect with retry on a transient writer lock.
@@ -2867,6 +2915,7 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
 
     actionable: list[dict[str, Any]] = []
     us_trade_plan = payload.get("us_trade_plan") or {}
+    holdings = _load_manual_holdings()
     for row in overlay_rows:
         final_r = round_or_none(row.get("final_r"))
         if final_r is None or final_r <= 0.0:
@@ -2925,6 +2974,8 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
             or row.get("evidence_state")
             or ""
         )
+        held_r = (holdings.get(market) or {}).get(symbol_key, 0.0)
+        delta_text = position_delta_text(held_r, final_r)
         actionable.append(
             {
                 "market": market,
@@ -2933,6 +2984,8 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
                 "action": action,
                 "convexity": classify_convexity(action),
                 "size_r": final_r,
+                "held_r": held_r,
+                "position_delta_text": delta_text,
                 "tier": tier,
                 "source": _row_source(row, ranked),
                 "entry": entry,
@@ -3703,9 +3756,10 @@ def render_production_decision_summary(payload: dict[str, Any]) -> list[str]:
     ]
     if actions:
         for row in actions[:14]:
+            action_text = str(row.get('action') or '-') + (row.get('position_delta_text') or '')
             lines.append(
                 f"| {row.get('market')} | {row.get('symbol')} | {row.get('name') or '-'} | "
-                f"{row.get('action')} | {fmt_r(row.get('size_r'))} | "
+                f"{action_text} | {fmt_r(row.get('size_r'))} | "
                 f"{row.get('hedge') or '-'} {fmt_num(row.get('hedge_notional_r'), 4)}R | {fmt_r(row.get('net_beta_r'))} | {row.get('tier')} | "
                 f"{clean_table_text(row.get('entry'), 70)} | {clean_table_text(row.get('risk_plan'), 100)} | "
                 f"{clean_table_text(row.get('trigger'), 120)} |"
@@ -7636,9 +7690,10 @@ def render_market_action_table(actions: list[dict[str, Any]]) -> list[str]:
         convexity = _CONVEXITY_SHORT.get(
             str(row.get("convexity") or classify_convexity(row.get("action"))), "-"
         )
+        action_cell = action_label(row.get('action')) + (row.get('position_delta_text') or '')
         lines.append(
             f"| {row.get('symbol')} {row.get('name') or ''} | "
-            f"{action_label(row.get('action'))} | {convexity} | {fmt_r(row.get('size_r'))} | "
+            f"{action_cell} | {convexity} | {fmt_r(row.get('size_r'))} | "
             f"{clean_table_text(row.get('entry'), 60)} | "
             f"{_evidence_state_for_action(row)} | "
             f"{clean_table_text(human_risk_plan(row.get('risk_plan')), 90)} | "
