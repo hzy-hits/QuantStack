@@ -3,7 +3,7 @@ mod storage;
 
 use clap::{Parser, Subcommand};
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 #[derive(Parser)]
 #[command(name = "quant-fetcher", about = "Rate-limited data fetcher for quant pipeline")]
@@ -120,7 +120,7 @@ async fn main() -> Result<()> {
                 // index_changes is a premium Finnhub endpoint — non-fatal if it fails
                 let n6 = match fetcher::finnhub::fetch_index_changes(&db, &finnhub_key).await {
                     Ok(n) => { info!("index_changes done rows={}", n); n }
-                    Err(e) => { warn!("index_changes skipped (premium endpoint?): {}", e); 0 }
+                    Err(e) => { debug!("index_changes skipped (premium endpoint?): {}", e); 0 }
                 };
                 n1 + n5 + n6
             };
