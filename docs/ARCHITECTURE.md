@@ -68,9 +68,12 @@ cn.morning       08:30 工作日             .                  quant-stack dail
 cn.evening       18:00 工作日             .                  quant-stack daily --markets cn --session evening
 ```
 
-**它做什么**:拉数据(via 内置或外部 fetcher)→ 读 `reports/review_dashboard/{component}/{date}/` 各组件产物 → 合成
-R-based 决策报告 → 写 `reports/review_dashboard/main_strategy_v2/{date}/{cn,us}_daily_report.md` → 发邮件(via
-`scripts/send_production_decision_report.py`)。
+**它做什么**:它是个**薄编排器/dispatcher**,把一个 7 步序列依次拉起来。
+**真正的重活在 Python**:US 第 [1/7] 步就是 subprocess 调
+`quant-research-v1/scripts/run_daily.py`(数据生产、payload 拼装),
+之后是 factor lab refresh、组件产物加载、`generate_main_strategy_v2_report.py`
+合成 R-based 决策报告、`send_production_decision_report.py` 发邮件等。
+Rust 这层管:顺序、超时、错误传播、状态写入、邮件投递。
 
 **为啥 `us.premarket` 的 cwd 是 `quant-research-v1` 而 `cn.morning` 是 `.`** —— 历史包袱。
 `run_full.sh` 还住在老 US 仓目录,但里面就是 `exec "$STACK_ROOT/target/release/quant-stack"`,完全等价。
@@ -276,11 +279,12 @@ python3 scripts/snapshot_universe_membership.py
 
 ## 12. 历史包袱(留着没废,但不影响主链)
 
-- `quant-research-v1/scripts/run_daily.py` —— Python 后备日更,**未在 cron**,
-  被 Rust orchestrator 取代。如果完全确认不被用可删,目前留着。
 - `scripts/run_alpha_sleeve_backtest.py` —— Alpha sleeve 工程的回测,
   休眠状态,绑着 `docs/ALPHA_SLEEVE_ENGINEERING_PLAN.md`。
 - 老的 `quant-research-v1/scripts/run_full.sh` —— 就是个 exec shell,只剩"找正确的 quant-stack 二进制"的逻辑。
+
+**注:`quant-research-v1/scripts/run_daily.py` 不是历史包袱** —— 它是 Rust
+orchestrator US 流水线的 [1/7] 数据生产步,活路径,不要删。
 
 ---
 
@@ -288,9 +292,14 @@ python3 scripts/snapshot_universe_membership.py
 
 按价值/风险排序:
 
-1. **正式标记/删除 `run_daily.py`**(`# DEPRECATED — Rust quant-stack canonical`)。
-2. ~~**合并 `quant-research-v1/rust` 进根 workspace**~~ — 已完成(2026-05-20)。
-3. **`cn.precompute_alpha` 移进 Rust orchestrator** 或显式标注是预处理依赖。
+1. ~~**正式标记/删除 `run_daily.py`**~~ — **不做**。复查发现它是 Rust orchestrator
+   US 流水线的 [1/7] 步(`crates/quant-stack-cli/src/{main,us_daily}.rs`),活的、必需。
+2. ~~**合并 `quant-research-v1/rust` 进根 workspace**~~ — 已完成(2026-05-20,`c853fcc`)。
+3. ~~**`cn.precompute_alpha` 移进 Rust orchestrator**~~ — **不做**。复查发现它是
+   独立 cron(07:20,只被 tasks.yaml 调),Rust orchestrator 不依赖它。
+   时间缓冲到 08:30 cn.morning 给它独立的超时/锁/日志,故障隔离更好。
+   只需在本文档**显式标注**:它是 CN 因子预处理,运行在 cn.morning 之前,
+   `factor_lab.duckdb` 的因子日特征由它写入。
 
 **不建议做的**:改 cron task 名字(纯装饰,破历史)、把 cwd 全统一成 `.`
 (动 N 个 sh)、把 factor-lab 物理合进主仓(独立研究节奏,保持边界对)。
