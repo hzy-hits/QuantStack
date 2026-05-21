@@ -8079,6 +8079,80 @@ def render_cn_left_side_watch_section(payload: dict[str, Any], *, limit: int = 1
     return lines
 
 
+US_MEAN_REVERSION_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_mean_reversion_radar"
+
+
+def render_us_left_side_section(payload: dict[str, Any], *, limit: int = 10) -> list[str]:
+    """Surface today's US mean-reversion candidates (left-side picks).
+
+    The us_mean_reversion_radar already runs daily and ranks top-100; it
+    just wasn't wired into the daily report. Filter to AI-infra universe
+    names that are AT OR BELOW EMA21 (actual pullback territory) and
+    show the deepest dips first. Even when 0 candidates today, the
+    section's existence tells the operator where left-side picks would
+    appear.
+    """
+    lines = [
+        "## US 左侧观察池 (超跌反弹候选)",
+        "",
+        "- 用法: 主线右侧动量之外的左侧机会;不进入 actionable R,仅观察",
+        "- 入池: AI universe 内 close ≤ EMA21,按 距 EMA21 越负 排序",
+        "",
+    ]
+    as_of = str(payload.get("as_of") or "")
+    fallback_date = _latest_dated_subdir(US_MEAN_REVERSION_ROOT, as_of) if as_of else None
+    if fallback_date is None:
+        lines += ["- mean-reversion radar 当日未产出", ""]
+        return lines
+    path = US_MEAN_REVERSION_ROOT / fallback_date / "mean_reversion_radar.csv"
+    if not path.exists():
+        lines += ["- mean-reversion radar 当日未产出", ""]
+        return lines
+
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    ai_rows = [r for r in rows if str(r.get("in_ai_universe") or "").lower() == "yes"]
+    pullback = []
+    for r in ai_rows:
+        try:
+            dist = float(r.get("dist_close_ema21_pct") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if dist <= 0.0:                # below or at EMA21
+            r["_dist_ema21"] = dist
+            pullback.append(r)
+
+    if not pullback:
+        lines += [
+            f"- 数据日 {fallback_date}: AI universe 内**没有名字站在 EMA21 下方**",
+            "  (整个篮子都在均线之上 → 今日无左侧机会,全篮子右侧)",
+            "",
+        ]
+        return lines
+
+    pullback.sort(key=lambda r: (
+        0 if str(r.get("is_mean_reversion_candidate") or "").lower() == "yes" else 1,
+        r["_dist_ema21"],
+    ))
+    lines += [
+        f"- 数据日: {fallback_date} | AI universe 跌破 EMA21 候选: {len(pullback)}",
+        "",
+        "| Symbol | Company | 5d | 20d | vs EMA21 | vs EMA50 | Cand? | Reason |",
+        "|---|---|---:|---:|---:|---:|:---:|---|",
+    ]
+    for r in pullback[:limit]:
+        cand = "✓" if str(r.get("is_mean_reversion_candidate") or "").lower() == "yes" else "-"
+        lines.append(
+            f"| {r.get('symbol','-')} | {clean_table_text(r.get('company_name','-'), 22)} | "
+            f"{r.get('ret_5d_pct','-')}% | {r.get('ret_20d_pct','-')}% | "
+            f"{r.get('dist_close_ema21_pct','-')}% | {r.get('dist_close_ema50_pct','-')}% | "
+            f"{cand} | {clean_table_text(r.get('reasons') or r.get('valuation_signal') or '-', 50)} |"
+        )
+    lines.append("")
+    return lines
+
+
 def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     as_of = payload["as_of"]
     actions = market_actions(payload, "CN")
@@ -8119,6 +8193,7 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     ]
     lines += render_market_action_table(actions)
     lines += render_market_selection_rationale(payload, actions, "CN")
+    lines += render_cn_left_side_watch_section(payload)
     lines += render_risk_regime_section(payload, regime_key="cn_risk_regime")
     lines += render_ai_supercycle_evidence_section(payload, "CN", limit=10)
     lines += render_ai_supercycle_value_radar_section(payload, "CN", limit=8)
@@ -8158,6 +8233,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     ]
     lines += render_market_action_table(actions)
     lines += render_market_selection_rationale(payload, actions, "US")
+    lines += render_us_left_side_section(payload)
     lines += render_risk_regime_section(payload)
     lines += render_fear_greed_section(payload)
     lines += render_options_anomaly_section(payload)
