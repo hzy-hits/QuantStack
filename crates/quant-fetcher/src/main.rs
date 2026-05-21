@@ -134,11 +134,11 @@ async fn main() -> Result<()> {
                     Ok(n) => { info!("filings done rows={}", n); n }
                     Err(e) => { warn!("filings fetch failed (non-fatal): {}", e); 0 }
                 };
-                let n4 = match fetcher::polymarket::fetch_markets(&db).await {
-                    Ok(n) => { info!("polymarket done rows={}", n); n }
-                    Err(e) => { warn!("polymarket fetch failed (non-fatal): {}", e); 0 }
-                };
-                n2 + n3 + n4
+                // Polymarket fetch retired from the `all` flow — its output was
+                // never read by the AI-infra report, see ARCHITECTURE.md / orphan
+                // compute audit (2026-05-21). Call `polymarket` subcommand
+                // explicitly if you want to revive it.
+                n2 + n3
             };
 
             let (finnhub_total, other_total) = tokio::join!(finnhub_fut, other_fut);

@@ -561,17 +561,37 @@ def main() -> None:
         )
         candidate_syms = [c["symbol"] for c in candidates]
 
-        # ── 5a. Rust fetcher — only for filtered candidates ──────────────
-        # Fetches news, earnings, FRED, SEC, Polymarket for ~120 candidates
-        # instead of the full 500+ equity universe. Non-fatal: stale data
-        # from previous runs is acceptable for report generation.
+        # ── 5a. Rust fetcher — only for AI-infra-relevant symbols ──────
+        # Was fetching news / SEC / earnings for the top-120 broad-market
+        # notables, but the AI-infra report only consumes news/filings for
+        # names in its own universe — the other ~115 fetches were thrown
+        # away. Switched to: AI-infra research pool ∪ small market-context
+        # set used by hedge / regime rendering. Polymarket is also dropped
+        # from the `all` Rust subcommand (separate change).
+        try:
+            ai_infra_us_research = list(
+                ai_infra_universe.records_by_symbol("US", pool="research")
+            )
+        except Exception as e:  # noqa: BLE001
+            log.warning("ai_infra_universe_load_failed", error=str(e))
+            ai_infra_us_research = []
+        context_syms = [
+            "SPY", "QQQ", "IWM", "DIA",                 # broad market
+            "SMH", "XLK", "XLF", "XLE", "XLY",           # sectors used by attribution
+            "TLT", "IEF", "HYG", "GLD",                  # rates / credit / commodity
+            "^VIX", "^MOVE",                              # vol gauges
+        ]
+        rust_fetch_syms = sorted(
+            set(ai_infra_us_research)
+            | {s for s in context_syms if "=" not in s}
+        )
         if not args.skip_rust:
             research_con.close()
             research_con = None
             try:
-                run_rust_fetcher(cfg, candidate_syms, args.init, research_db_path)
+                run_rust_fetcher(cfg, rust_fetch_syms, args.init, research_db_path)
                 research_con = connect_write(research_db_path)
-                log_run(research_con, run_id, "rust_fetch", "ok", len(candidate_syms))
+                log_run(research_con, run_id, "rust_fetch", "ok", len(rust_fetch_syms))
             except Exception as e:
                 log.warning("rust_fetcher_failed_nonfatal", error=str(e))
                 research_con = connect_write(research_db_path)
