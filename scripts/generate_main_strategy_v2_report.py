@@ -4122,6 +4122,43 @@ def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict
                 }
         except duckdb.Error:
             sentiment = {}
+        # IV rank: percentile of today's IV vs each symbol's last ≤252 trading
+        # days. Today the table only has ~52 distinct dates (CBOE collection
+        # started 2026-03-10), so the lookback caps at whatever exists; the
+        # output records n_obs so the operator knows the lookback depth.
+        iv_rank: dict[str, dict[str, Any]] = {}
+        try:
+            for row in con.execute(
+                f"WITH hist AS ("
+                f"  SELECT symbol, iv_ann FROM options_sentiment "
+                f"  WHERE symbol IN ({placeholders}) AND iv_ann IS NOT NULL "
+                f"    AND as_of <= ? AND as_of >= (CAST(? AS DATE) - INTERVAL 365 DAY)"
+                f") "
+                f"SELECT symbol, COUNT(*) AS n, MIN(iv_ann) AS mn, MAX(iv_ann) AS mx "
+                f"FROM hist GROUP BY symbol",
+                [*syms, effective_date, effective_date],
+            ).fetchall():
+                iv_rank[str(row[0]).upper()] = {
+                    "n_obs": int(row[1] or 0),
+                    "iv_min": float(row[2] or 0.0),
+                    "iv_max": float(row[3] or 0.0),
+                }
+            # Second pass: percent_rank of current IV among history.
+            for row in con.execute(
+                f"WITH hist AS ("
+                f"  SELECT symbol, as_of, iv_ann, "
+                f"    PERCENT_RANK() OVER (PARTITION BY symbol ORDER BY iv_ann) AS pr "
+                f"  FROM options_sentiment "
+                f"  WHERE symbol IN ({placeholders}) AND iv_ann IS NOT NULL "
+                f"    AND as_of <= ? AND as_of >= (CAST(? AS DATE) - INTERVAL 365 DAY)"
+                f") SELECT symbol, pr FROM hist WHERE as_of = ?",
+                [*syms, effective_date, effective_date, effective_date],
+            ).fetchall():
+                sym_u = str(row[0]).upper()
+                if sym_u in iv_rank:
+                    iv_rank[sym_u]["pct_rank"] = float(row[1]) if row[1] is not None else None
+        except duckdb.Error:
+            iv_rank = {}
         tenor_vol: dict[str, dict[str, float]] = {}
         try:
             for row in con.execute(
@@ -4194,6 +4231,10 @@ def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict
 
         if parts:
             out[sym] = {"verdict": " | ".join(parts), **sent}
+            rk = iv_rank.get(sym) or {}
+            if rk:
+                out[sym]["iv_rank_pct"] = (rk.get("pct_rank") or 0.0) * 100.0 if rk.get("pct_rank") is not None else None
+                out[sym]["iv_rank_n"] = rk.get("n_obs")
     return out
 
 
@@ -8198,12 +8239,28 @@ def render_us_left_side_section(payload: dict[str, Any], *, limit: int | None = 
 
 def _iv_action_hint(vrp: float | None, iv_ann: float | None, skew_z: float | None,
                     pcz: float | None, long_share: float, short_share: float,
-                    regime_state: str) -> str:
-    """Translate options readings into LEAPS / PMCC / wait language."""
+                    regime_state: str, iv_rank_pct: float | None = None) -> str:
+    """Translate options readings into LEAPS / PMCC / wait language.
+
+    iv_rank_pct overrides simpler VRP-only checks when available: an IV at the
+    20th percentile of its own past year is a strong LEAPS signal regardless
+    of VRP sign; an IV at the 80th percentile says "sell prem, don't buy".
+    """
     if iv_ann is None:
         return "—"
     iv_pct = iv_ann * 100
     panic_regime = regime_state in {"press", "capitulation"}
+    # IV-rank-first signals (when 1Y rank available)
+    if iv_rank_pct is not None:
+        if iv_rank_pct <= 20 and long_share >= 0.10:
+            if panic_regime:
+                return "🎯 LEAPS 黄金窗口(IV rank 低位+恐慌+久期长)"
+            return f"💎 LEAPS 强候选(IV rank {iv_rank_pct:.0f}%)"
+        if iv_rank_pct >= 80 and (skew_z is None or skew_z >= 0.5):
+            return f"⏸ 等回落(IV rank {iv_rank_pct:.0f}% 高位)"
+        if iv_rank_pct >= 70 and short_share >= 0.50:
+            return f"✂️ PMCC / 卖近端 prem(IV rank {iv_rank_pct:.0f}%)"
+    # VRP-based fallbacks (original logic)
     if vrp is not None and vrp <= -0.05 and long_share >= 0.10:
         if panic_regime and (skew_z is None or skew_z >= 0.5):
             return "🎯 LEAPS 黄金窗口(IV 便宜+恐慌+久期长)"
@@ -8239,36 +8296,51 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 25) -> list[
     regime_state = str((payload.get("risk_regime") or {}).get("state") or "hedge").lower()
 
     rows = []
+    max_n = 0
     for sym, v in verdicts.items():
         iv = round_or_none(v.get("iv_ann"))
         rv = round_or_none(v.get("rv_ann"))
         vrp = round_or_none(v.get("vrp"))
         pcz = round_or_none(v.get("pc_ratio_z"))
         skz = round_or_none(v.get("skew_z"))
+        iv_rk = round_or_none(v.get("iv_rank_pct"))
+        iv_n = v.get("iv_rank_n") or 0
+        if iv_n > max_n:
+            max_n = int(iv_n)
         verdict_txt = str(v.get("verdict") or "")
         long_share = 0.15 if "信仰久期长" in verdict_txt else (0.0 if "信仰久期短" in verdict_txt else 0.08)
         short_share = 0.70 if "信仰久期短" in verdict_txt else (0.0 if "信仰久期长" in verdict_txt else 0.40)
-        hint = _iv_action_hint(vrp, iv, skz, pcz, long_share, short_share, regime_state)
+        hint = _iv_action_hint(vrp, iv, skz, pcz, long_share, short_share, regime_state, iv_rank_pct=iv_rk)
         rows.append({
             "sym": sym, "iv": iv, "rv": rv, "vrp": vrp,
             "pcz": pcz, "skz": skz, "hint": hint,
-            "verdict": verdict_txt,
+            "verdict": verdict_txt, "iv_rk": iv_rk, "iv_n": iv_n,
         })
 
+    # Sort by IV rank ascending (low rank = cheap = LEAPS candidates first).
+    # Fall back to VRP if rank missing.
     rows.sort(key=lambda r: (
-        0 if r["iv"] is not None and r["vrp"] is not None else 1,
+        0 if r["iv_rk"] is not None else 1,
+        r["iv_rk"] if r["iv_rk"] is not None else 999.0,
         r["vrp"] if r["vrp"] is not None else 999.0,
     ))
 
     leaps_pick = [r for r in rows if "LEAPS" in r["hint"]]
     pmcc_pick = [r for r in rows if "PMCC" in r["hint"] or "卖方" in r["hint"]]
 
+    rank_label = f"IV rank (N≤{max_n}d)" if max_n > 0 else "IV rank (无历史)"
+    lookback_note = (
+        f"- IV rank lookback: 最近 {max_n} 个交易日(目标 252d;当前 options_sentiment 起始 2026-03-10,随时间逼近 1Y)"
+        if max_n > 0 else
+        "- IV rank: 历史不足,本次仅按 VRP 排序"
+    )
     lines = [
         "## US 期权 IV 视图 (LEAPS / PMCC 决策辅助)",
         "",
-        f"- 数据源: CBOE 延迟链 + options_sentiment(VRP = IV - HV30)",
-        f"- 当前 regime: **{regime_state}** | 排序: VRP 升序(最便宜的 IV 在前 → 最适合买 LEAPS)",
-        f"- 简表读法: VRP 越负越便宜;`call 偏多` + LEAPS 堆积 = 机构信仰长;`下行恐惧高` = put skew 抬升,谨慎追多",
+        f"- 数据源: CBOE 延迟链 + options_sentiment(VRP = IV² - HV30²,variance 空间)",
+        f"- 当前 regime: **{regime_state}** | 排序: IV rank 升序(最便宜在前 → 最适合买 LEAPS)",
+        lookback_note,
+        f"- 简表读法: IV rank ≤20% = 历史低位适合买 LEAPS;≥80% = 高位等回落 / 卖近端;`下行恐惧高` = put skew 抬升,谨慎追多",
         "",
     ]
     if leaps_pick:
@@ -8281,18 +8353,19 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 25) -> list[
         lines.append("")
 
     lines += [
-        "| Symbol | IV 30d | HV30 | VRP | PC z | Skew z | 行动建议 | Options 综述 |",
-        "|---|---:|---:|---:|---:|---:|---|---|",
+        f"| Symbol | IV 30d | HV30 | VRP | {rank_label} | PC z | Skew z | 行动建议 |",
+        "|---|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in rows[:limit]:
         iv_s = f"{r['iv']*100:.0f}%" if r["iv"] is not None else "-"
         rv_s = f"{r['rv']*100:.0f}%" if r["rv"] is not None else "-"
         vrp_s = f"{r['vrp']*100:+.1f}pp" if r["vrp"] is not None else "-"
+        rk_s = f"{r['iv_rk']:.0f}%" if r["iv_rk"] is not None else "-"
         pcz_s = f"{r['pcz']:+.1f}" if r["pcz"] is not None else "-"
         skz_s = f"{r['skz']:+.1f}" if r["skz"] is not None else "-"
         lines.append(
-            f"| {r['sym']} | {iv_s} | {rv_s} | {vrp_s} | {pcz_s} | {skz_s} | "
-            f"{r['hint']} | {clean_table_text(r['verdict'], 60)} |"
+            f"| {r['sym']} | {iv_s} | {rv_s} | {vrp_s} | {rk_s} | {pcz_s} | {skz_s} | "
+            f"{r['hint']} |"
         )
     lines.append("")
     return lines
@@ -9524,6 +9597,12 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     ranker_ai_infra_mode = getattr(args, "ai_infra_mode", None) or (
         "enforce_expand" if uses_default_data else "off"
     )
+    # Compute regime first so it can drive broad_signal weight inside the ranker.
+    bubble_hedge_payload = load_bubble_hedge_payload(as_of.isoformat())
+    capitulation_payload = load_capitulation_payload(as_of.isoformat())
+    risk_regime = build_risk_regime(bubble_hedge_payload, capitulation_payload)
+    cn_risk_regime = load_cn_risk_regime_payload(as_of.isoformat())
+    us_regime_state = str((risk_regime or {}).get("state") or "hedge").lower()
     us_ranker = us_opportunity_ranker.build_ranker_payload(
         as_of=as_of,
         candidates=us.get("current") or [],
@@ -9533,6 +9612,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         top=80,
         ai_infra_root=STACK_ROOT / "ai_infra",
         ai_infra_mode=ranker_ai_infra_mode,
+        regime_state=us_regime_state,
     )
     us["raw_current_count"] = len(us.get("current") or [])
     us["current"] = ranker_rows_as_current_rows("US", us_ranker)
@@ -9550,10 +9630,6 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     cn["current"] = ranker_rows_as_current_rows("CN", cn_ranker)
     profit_guardrails = build_profit_guardrails(us, cn, limit_up)
     strategy_direction = build_strategy_direction(us, cn, limit_up, profit_guardrails)
-    bubble_hedge_payload = load_bubble_hedge_payload(as_of.isoformat())
-    capitulation_payload = load_capitulation_payload(as_of.isoformat())
-    risk_regime = build_risk_regime(bubble_hedge_payload, capitulation_payload)
-    cn_risk_regime = load_cn_risk_regime_payload(as_of.isoformat())
     portfolio_risk_overlay = build_portfolio_risk_overlay(
         us,
         cn,

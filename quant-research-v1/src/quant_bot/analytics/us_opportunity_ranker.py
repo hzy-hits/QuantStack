@@ -323,28 +323,51 @@ def load_analysis_signals(
     return out
 
 
-def broad_signal_score(modules: dict[str, dict[str, Any]]) -> tuple[float, dict[str, float]]:
+# Regime-conditional internal weights for broad_signal sub-components.
+# Right-side (momentum + breakout + overnight) vs left-side (mean_reversion)
+# tilt matches REGIME_TILT_TABLE in generate_main_strategy_v2_report.py:
+#   hedge        right=85 left=15  (default momentum-tilted)
+#   wedge        right=70 left=30  (rates wedge — slight defense)
+#   confirm      right=50 left=50  (downside confirmed — balanced)
+#   press        right=30 left=70  (mean-reversion dominant)
+#   capitulation right=15 left=85  (panic → left-side LEAPS window)
+BROAD_REGIME_WEIGHTS: dict[str, dict[str, float]] = {
+    "hedge":        {"momentum": 0.45, "breakout": 0.30, "mean_reversion": 0.15, "overnight": 0.10},
+    "wedge":        {"momentum": 0.35, "breakout": 0.25, "mean_reversion": 0.30, "overnight": 0.10},
+    "confirm":      {"momentum": 0.25, "breakout": 0.15, "mean_reversion": 0.50, "overnight": 0.10},
+    "press":        {"momentum": 0.15, "breakout": 0.10, "mean_reversion": 0.70, "overnight": 0.05},
+    "capitulation": {"momentum": 0.08, "breakout": 0.05, "mean_reversion": 0.85, "overnight": 0.02},
+}
+
+
+def broad_signal_score(
+    modules: dict[str, dict[str, Any]],
+    *,
+    regime_state: str = "hedge",
+) -> tuple[float, dict[str, float]]:
     """Combine analysis_daily modules into a 0-1 conviction proxy.
 
-    Weights inside (sum to 1.0): momentum_risk 0.40, breakout 0.30,
-    mean_reversion 0.20 (bullish-only; bearish flips to headwind),
-    overnight_continuation 0.10. When no modules have data, returns
-    a neutral 0.5 so missing-data symbols neither help nor hurt.
+    Internal weights are now regime-conditional (BROAD_REGIME_WEIGHTS) so that
+    in panic / capitulation tape the mean_reversion sub-score dominates, while
+    in calm hedge tape the momentum_risk sub-score leads. When regime is
+    unknown the table falls back to the hedge row.
     """
-    breakdown: dict[str, float] = {}
+    state = str(regime_state or "hedge").lower()
+    weights = BROAD_REGIME_WEIGHTS.get(state) or BROAD_REGIME_WEIGHTS["hedge"]
+    breakdown: dict[str, float] = {"_regime_state": state}
     parts: list[tuple[float, float]] = []  # (weight, value)
     mom = modules.get("momentum_risk") or {}
     p_up = mom.get("p_upside")
     if isinstance(p_up, (int, float)):
         v = clamp(float(p_up))
         breakdown["momentum_p_upside"] = round(v * 100.0, 2)
-        parts.append((0.40, v))
+        parts.append((weights["momentum"], v))
     br = modules.get("breakout") or {}
     br_score = br.get("breakout_score")
     if isinstance(br_score, (int, float)):
         v = clamp(float(br_score))
         breakdown["breakout"] = round(v * 100.0, 2)
-        parts.append((0.30, v))
+        parts.append((weights["breakout"], v))
     mr = modules.get("mean_reversion") or {}
     mr_score = mr.get("reversion_score")
     if isinstance(mr_score, (int, float)):
@@ -352,16 +375,16 @@ def broad_signal_score(modules: dict[str, dict[str, Any]]) -> tuple[float, dict[
         direction = str(mr.get("reversion_direction") or "").lower()
         if direction.startswith("bullish"):
             breakdown["mean_reversion_bull"] = round(v * 100.0, 2)
-            parts.append((0.20, v))
+            parts.append((weights["mean_reversion"], v))
         else:
             breakdown["mean_reversion_bear_headwind"] = round(v * 100.0, 2)
-            parts.append((0.20, 1.0 - v))   # bearish MR = headwind, invert
+            parts.append((weights["mean_reversion"], 1.0 - v))   # bearish MR = headwind, invert
     oc = modules.get("overnight_continuation_alpha") or {}
     oc_pred = oc.get("p_continuation")
     if isinstance(oc_pred, (int, float)):
         v = clamp(float(oc_pred))
         breakdown["overnight_continuation"] = round(v * 100.0, 2)
-        parts.append((0.10, v))
+        parts.append((weights["overnight"], v))
     if not parts:
         return 0.5, breakdown
     weight_sum = sum(w for w, _ in parts)
@@ -683,7 +706,12 @@ def production_tier(rank: int, row: dict[str, Any], config: RankerConfig) -> tup
     return "active_watch", "prepare_order_but_wait_for_price", "0R default unless price confirms"
 
 
-def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG) -> list[dict[str, Any]]:
+def score_rows(
+    rows: list[dict[str, Any]],
+    config: RankerConfig = DEFAULT_CONFIG,
+    *,
+    regime_state: str = "hedge",
+) -> list[dict[str, Any]]:
     for row in rows:
         alpha_score = 1.0 if row.get("alpha_sleeve_id") in US_ALPHA_FACTORY_EXECUTION_SLEEVES else 0.15
         setup = setup_quality(row)
@@ -724,7 +752,7 @@ def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG
         # when broad_modules is absent (e.g. old tests), behavior unchanged.
         broad_modules = row.get("broad_modules")
         if broad_modules is not None:
-            broad, breakdown = broad_signal_score(broad_modules)
+            broad, breakdown = broad_signal_score(broad_modules, regime_state=regime_state)
             row["score_components"]["broad_signal"] = round(broad * 100.0, 2)
             row["score_components"]["broad_signal_breakdown"] = breakdown
             broad_weight = config.score_weights.get("broad_signal", 0.20)
@@ -919,6 +947,7 @@ def build_ranker_payload(
     config: RankerConfig = DEFAULT_CONFIG,
     ai_infra_root: Path | None = None,
     ai_infra_mode: str = "off",
+    regime_state: str = "hedge",
 ) -> dict[str, Any]:
     input_candidate_count = len(candidates)
     ai_infra_gate = None
@@ -957,6 +986,7 @@ def build_ranker_payload(
     ranked = score_rows(
         enrich_rows(candidates, options, prices, news, config, signals),
         config,
+        regime_state=regime_state,
     )
     public_rows = [public_row(row) for row in ranked]
     top_n = max(1, int(top or 30))
