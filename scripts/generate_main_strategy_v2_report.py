@@ -1528,7 +1528,7 @@ def render_ema_tape_overlay_markdown(overlay: dict[str, dict[str, Any]], as_of: 
         "",
         "- 数据源: AI universe + source-review queue tickers.",
         "- 排序: cross_state (bull → tangled → bear)，再按 EMA21 5d slope 降序。",
-        "- 用法: K-line 只是 tape/crowding/risk context；不能证明基本面或供应链关系。",
+        "- K-line 反映 tape / crowding / 风险情绪,看不到基本面和供应链 —— 不要拿它当证据。",
         "",
         "| Symbol | Market | As-of | Cross | Recent Cross | Slope 5d | Close vs EMA21 | Close vs EMA50 |",
         "|---|---|---|---|---|---:|---:|---:|",
@@ -1807,7 +1807,7 @@ def render_satellite_pool_report_section(payload: dict[str, Any], *, limit_per_r
         "",
         f"- 数据源: `{queue_path}`；状态: `{report.get('status') or 'unknown'}`；总数: {report.get('total_rows') or 0}",
         "- 范畴: 卫星资产池映射到 D1-D5 全球 AI infra 供应链；研究权重高，但需通过 IBKR/ADR 才能交易。",
-        "- 用法: 此表只回答“哪些卫星名字进入 source review 队列、当前 evidence 完整度”，不代表买入许可。",
+        "- 这张表只回答两件事:哪些卫星名字进了 source review 队列、现在 evidence 写到几成。它不是买入许可。",
         "",
     ]
 
@@ -2856,7 +2856,15 @@ def human_risk_plan(value: Any) -> str:
     }
     for old, new in replacements.items():
         text = text.replace(old, new)
-    return text
+    # Strip the redundant boilerplate that duplicates the explicit
+    # stop/target prices already printed earlier in the same string
+    # (e.g. "; plan entry=latest close; 止损=-6%; 目标=+10%; review …")
+    cut_markers = ("; plan entry=", "; entry=latest close", "; plan entry=latest close")
+    for marker in cut_markers:
+        idx = text.find(marker)
+        if idx != -1:
+            text = text[:idx]
+    return text.strip("; ").strip()
 
 
 def human_trigger_text(market: str, row: dict[str, Any]) -> str:
@@ -3731,7 +3739,7 @@ def render_fear_greed_section(payload: dict[str, Any]) -> list[str]:
         "",
         f"- 数据源: `{source}` (CNN 优先；失败回落到 VIX + SPY EMA50 + SPY 5d 三因子代理)",
         f"- 当前读数: **{score:.1f} / 100** → **{rating}**",
-        "- 用法: 这只是 *macro/crowding* 信号；不能促进任何 ticker 进 production candidate。AI book 仍是绝对主力。",
+        "- macro/crowding 层的信号 —— 用来读环境,不能因此把任何 ticker 推进 production candidate。AI book 才是主力。",
         "",
     ]
     if source == "cnn":
@@ -4050,7 +4058,7 @@ def history_reason(market: str, ranked: dict[str, Any], payload: dict[str, Any])
     metrics = ((payload.get("us") or {}).get("metrics") or {}).get("v2_stock_only_net") or {}
     return (
         f"历史: US stock bridge LCB80 {fmt_pct(metrics.get('lcb80_pct'))}, "
-        f"win {fmt_rate_pct(metrics.get('win_rate'))}; theme basket still requires daily follow-up"
+        f"win {fmt_rate_pct(metrics.get('win_rate'))}"
     )
 
 
@@ -4061,7 +4069,7 @@ def render_actionable_selection_rationale(payload: dict[str, Any], actions: list
         "",
         "### 入选三理由 / Selection Rationale",
         "",
-        "每个可交易标的必须同时交代交易方式和三条证据。右侧交易只追随强趋势/强板块；左侧交易只允许在价值或历史赔率也支持的超跌里出现。",
+        "每只可交易标的都要交代交易方式 + 三条证据。右侧只跟强趋势 / 强板块,左侧仅在价值或历史赔率也站得住的超跌里出现。",
         "",
         "| Market | Symbol | Style | Quant data | News/event | History/evidence |",
         "|---|---|---|---|---|---|",
@@ -4242,12 +4250,7 @@ def render_market_selection_rationale(payload: dict[str, Any], actions: list[dic
     market_actions = [row for row in actions if str(row.get("market") or "").upper() == market.upper()]
     if not market_actions:
         return []
-    lines = [
-        "## 逐票复核",
-        "",
-        "这一段只解释已经给 R 的票。每只票都按同一个顺序复核：先看量化是否站得住，再看新闻/事件有没有硬伤，最后看历史证据和退出纪律。",
-        "",
-    ]
+    lines = ["## 逐票复核", ""]
     verdicts = payload.get("options_verdicts") or {}
     for action in market_actions[:14]:
         ranked = actionable_ranked_row(payload, action)
@@ -4256,15 +4259,17 @@ def render_market_selection_rationale(payload: dict[str, Any], actions: list[dic
         style = trade_orientation(market.upper(), ranked)
         entry = clean_table_text(action.get("entry"), 80)
         risk = clean_table_text(human_risk_plan(action.get("risk_plan")), 110)
+        size_txt = fmt_r(action.get("size_r"))
         lines += [
-            f"- **{symbol}{name}**：{style}。{clean_table_text(quant_reason(market.upper(), ranked), 170)}。"
-            f"{clean_table_text(news_reason(market.upper(), ranked), 160)}。"
+            f"- **{symbol}{name}** — {style}。"
+            f"{clean_table_text(quant_reason(market.upper(), ranked), 170)};"
+            f"{clean_table_text(news_reason(market.upper(), ranked), 160)};"
             f"{clean_table_text(history_reason(market.upper(), ranked, payload), 170)}。"
-            f"交易上不追无限高，参考入口 `{entry}`，风控 `{risk}`，仓位 {fmt_r(action.get('size_r'))}。",
+            f"参考入口 `{entry}`,风控 `{risk}`,本期 {size_txt}。",
         ]
         verdict = (verdicts.get(str(symbol).upper()) or {}).get("verdict")
         if verdict:
-            lines.append(f"  - 期权读数：{verdict}")
+            lines.append(f"  - 期权侧:{verdict}")
     lines.append("")
     return lines
 
@@ -7603,12 +7608,15 @@ def render_ai_supercycle_value_radar_section(
     if market:
         rows = [row for row in rows if str(row.get("market") or "").upper() == market.upper()]
     title = "AI Supercycle 10x Value Radar" if not market else f"{market.upper()} AI Supercycle 10x Value Radar"
-    if market and market.upper() == "US":
-        note = "这是长期研究雷达，不是今日交易指令。排序偏向 AI 卡点层、公司级证据、小中市值可选性和增长/估值数据可用性；没有供应链证据的票只能进 research watch。"
-    elif market and market.upper() == "CN":
-        note = "这是长期研究雷达，不是今日交易指令。排序偏向 AI 卡点层、公司级证据、小中市值可选性和增长/估值数据可用性；只有 tape、没有公告/供应关系的票只能进 research watch。"
-    else:
-        note = "这是长期研究雷达，不是今日交易指令。排序偏向 AI 卡点层、公司级证据、小中市值可选性和增长/估值数据可用性；A股如果只有 tape，没有公告/供应关系，只能进 research watch。"
+    tail = {
+        "US": "没有供应链证据的票只能进 research watch。",
+        "CN": "只有 tape、没有公告/供应关系的票只能进 research watch。",
+    }.get((market or "").upper(),
+          "A 股若只有 tape、没有公告/供应关系,只能进 research watch。")
+    note = (
+        "长期研究雷达,不是当日交易指令。排序优先 AI 卡点层、公司级证据、小中市值可选性、"
+        f"以及增长/估值数据是否到位 —— {tail}"
+    )
     lines = [
         f"## {title}",
         "",
@@ -7840,7 +7848,7 @@ def render_earnings_calendar_section(payload: dict[str, Any], market: str, *, li
         "",
         f"- 窗口: {calendar.get('window') or '-'}；状态: `{calendar.get('status') or 'unknown'}`；"
         f"范围: `{calendar.get('scope') or 'unknown'}`（{calendar.get('focus_symbol_count') or 0} 个报告内代码）。",
-        "- 用法: 财报日期只作为催化剂/风险时钟；不能单独把 watch 升级成交易票。",
+        "- 财报日期是催化剂/风险时钟,不构成把 watch 升级成交易票的理由。",
         "",
     ]
     if market.upper() == "US":
@@ -7887,7 +7895,7 @@ def render_ai_book_attribution_section(payload: dict[str, Any], market: str) -> 
         f"## {title}",
         "",
         f"- 状态: `{book.get('status') or 'unknown'}`；equal-weight 篮子规模 {basket_size}；window 取 20d / 60d 滚动。",
-        "- 用法: 这只是日度收益对 benchmark 的回归 (alpha/beta/IR)，不代表风险归因；样本期短，仅作快速 sanity check。",
+        "- 日度收益对 benchmark 的回归(alpha/beta/IR),样本期短,只能当 sanity check —— 不是完整的风险归因。",
         "",
     ]
     if not rows:
@@ -7940,19 +7948,19 @@ def render_benchmark_attribution_section(payload: dict[str, Any], market: str, *
     if market.upper() == "US":
         title = "US Benchmark Snapshot"
         note = (
-            "用法: benchmark 是 macro/beta context 和归因基线，不能成为 production candidate。"
+            "benchmark 提供 macro/beta context 和归因基线,自身不会进 production candidate。"
             " 主要看 AI book 相对 SPY/QQQ/SMH 或对应指数的方向。"
         )
     elif market.upper() == "CN":
         title = "A股 Benchmark Snapshot"
         note = (
-            "用法: benchmark 仅作 macro/beta context 和归因基线，不能成为 production candidate。"
+            "benchmark 只做 macro/beta context 和归因基线,不进 production candidate。"
             " A股 attribution 主要看 AI book 相对 沪深300/创业板指/深成指/上证指数 的方向。"
         )
     else:
         title = "Satellite Benchmark Snapshot (TW/JP/KR/EU)"
         note = (
-            "用法: 卫星 benchmark 用于卫星资产池 (TSMC/HBM/CoWoS/ABF/AEX 设备) 的 macro context。"
+            "卫星 benchmark 覆盖 TSMC/HBM/CoWoS/ABF/AEX 设备这条卫星资产池,提供 macro context。"
             " ^TWII/^N225/^KS11/^AEX 是本地指数；EWT/EWJ/EWY/EWN 是 US-listed ETF 镜像。"
             " 不能作为 production candidate。"
         )
@@ -8020,7 +8028,7 @@ def render_source_review_calendar_section(
         f"- 数据源: `{queue_path}`；状态: `{calendar.get('status') or 'unknown'}`；"
         f"范围: `{calendar.get('scope') or 'unknown'}` (focus 命中 {calendar.get('focus_match_count') or 0} / {calendar.get('focus_symbol_count') or 0})。",
         f"- Readiness 分布: {summary_text}",
-        "- 用法: `ready_for_promotion` 表示 evidence card 模板写齐且 evidence_state 含「原文已证明」；其他 tier 仍需人工核验。没有 evidence card 不能晋级为 production candidate。",
+        "- `ready_for_promotion` 意味着 evidence card 模板写齐、evidence_state 含「原文已证明」;其他 tier 仍要人工核验。没有 evidence card 的名字不会晋级为 production candidate。",
         "",
         "| Tier | Ticker | Company | Depth | Module | Readiness | Tape (EMA21/50) | Market Context |",
         "|---|---|---|---|---|---|---|---|",
@@ -8078,9 +8086,12 @@ def render_regime_tilt_header(payload: dict[str, Any], *, regime_key: str = "ris
     mult = round_or_none(regime.get("r_multiplier"))
     tilt = regime_left_right_tilt(state)
     mult_txt = f"{mult:.2f}x" if mult is not None else "-"
+    state_zh = {
+        "hedge": "防守-基准", "wedge": "rates/credit 楔形",
+        "confirm": "下行确认", "press": "press 期", "capitulation": "panic 出清",
+    }.get(state, state)
     lines = [
-        f"- 📊 当前 regime: **{state}** (R 乘子 {mult_txt}) | 建议 sleeve tilt: 右侧 {tilt['right']}% / 左侧 {tilt['left']}%",
-        f"- 操作建议: {tilt['stance']}",
+        f"- 当前 tape:**{state_zh}** (R 乘子 {mult_txt});broad_signal 内部权重已切到 右 {tilt['right']}% / 左 {tilt['left']}%,{tilt['stance']}。",
     ]
     return lines, int(tilt["limit"])
 
@@ -8125,17 +8136,15 @@ def render_cn_left_side_watch_section(payload: dict[str, Any], *, limit: int | N
     tilt_lines, regime_limit = render_regime_tilt_header(payload, regime_key="cn_risk_regime")
     effective_limit = limit if limit is not None else regime_limit
     lines = [
-        "## A股左侧观察池 (oversold / 超跌 EV-positive)",
+        "## A 股左侧观察池",
         "",
-        "- 用法: 即便当前强势 tape regime 把左侧 sleeve 压到 0R，这里仍保留 EV-positive 超跌候选；操作员判断是否做左右混合配置。",
-        "- 入池条件: ranker 行的 `strategy_family=oversold_contrarian` 或 sleeve_id 以 `cn_oversold` 开头。",
+        "强 tape 期主线左侧 sleeve 会被压到 0R,这里保留所有 EV-positive 的超跌候选 —— 哪些进做左右混合,操作员自己判断。",
         *tilt_lines,
         "",
     ]
     if not rows:
         lines += [
-            "- 今日 CN producer 没有输出 `oversold_contrarian` 候选，左侧池为空。",
-            "- 如果连续多日为空，需要检查 producer 是否真的在生成左侧数据集 (`strategy_model_dataset`)。",
+            "今天 CN producer 没有 oversold_contrarian 候选,池子是空的。连续多日为空就要回头查 `strategy_model_dataset` 是不是真的在生成左侧数据。",
             "",
         ]
         return lines
@@ -8176,10 +8185,9 @@ def render_us_left_side_section(payload: dict[str, Any], *, limit: int | None = 
     tilt_lines, regime_limit = render_regime_tilt_header(payload, regime_key="risk_regime")
     effective_limit = limit if limit is not None else regime_limit
     lines = [
-        "## US 左侧观察池 (超跌反弹候选)",
+        "## US 左侧观察池",
         "",
-        "- 用法: 主线右侧动量之外的左侧机会;不进入 actionable R,仅观察",
-        "- 入池: AI universe 内 close ≤ EMA21,按 距 EMA21 越负 排序",
+        "右侧动量之外的超跌反弹候选:AI universe 里站在 EMA21 下方的名字,按下破幅度排序。这层不进 actionable R,仅作观察。",
         *tilt_lines,
         "",
     ]
@@ -8328,19 +8336,16 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 25) -> list[
     leaps_pick = [r for r in rows if "LEAPS" in r["hint"]]
     pmcc_pick = [r for r in rows if "PMCC" in r["hint"] or "卖方" in r["hint"]]
 
-    rank_label = f"IV rank (N≤{max_n}d)" if max_n > 0 else "IV rank (无历史)"
-    lookback_note = (
-        f"- IV rank lookback: 最近 {max_n} 个交易日(目标 252d;当前 options_sentiment 起始 2026-03-10,随时间逼近 1Y)"
-        if max_n > 0 else
-        "- IV rank: 历史不足,本次仅按 VRP 排序"
+    rank_phrase = (
+        f"IV rank lookback 现在是 {max_n} 个交易日(目标 252,CBOE 收集起点 2026-03-10,随时间逼近 1Y)"
+        if max_n > 0 else "IV rank 历史不足,本次仅按 VRP 排序"
     )
+    rank_label = f"IV rank (N≤{max_n}d)" if max_n > 0 else "IV rank"
     lines = [
-        "## US 期权 IV 视图 (LEAPS / PMCC 决策辅助)",
+        "## US 期权 IV 视图",
         "",
-        f"- 数据源: CBOE 延迟链 + options_sentiment(VRP = IV² - HV30²,variance 空间)",
-        f"- 当前 regime: **{regime_state}** | 排序: IV rank 升序(最便宜在前 → 最适合买 LEAPS)",
-        lookback_note,
-        f"- 简表读法: IV rank ≤20% = 历史低位适合买 LEAPS;≥80% = 高位等回落 / 卖近端;`下行恐惧高` = put skew 抬升,谨慎追多",
+        f"按 IV rank 升序排,最便宜的 IV 在前 —— 这一列决定 LEAPS 该不该买。",
+        f"{rank_phrase}。当前 tape **{regime_state}**;rank ≤20% 是历史低位(适合 LEAPS),≥80% 是高位(卖近端 prem 或等回落)。",
         "",
     ]
     if leaps_pick:
@@ -8376,10 +8381,11 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     actions = market_actions(payload, "CN")
     summary = ((payload.get("production_decision_summary") or {}).get("summary") or {})
     sector_rows = (payload.get("cn") or {}).get("sector_narrative_screen") or []
+    cn_r = fmt_r(summary.get('cn_r'))
     lines = [
         f"# A股量化日报 - {as_of}",
         "",
-        f"今天 A股这边，系统先看板块和资金，再落到个股。当前给出 {len(actions)} 个执行候选，合计 {fmt_r(summary.get('cn_r'))}。日常消费不进主线；AI infra、矿产/能源/重工优先。",
+        f"今天 A 股给出 {len(actions)} 个执行候选,合计 {cn_r}。选股顺序是板块和资金先行,再落到个股 —— AI infra、矿产/能源/重工是主线,日常消费这次不纳入。",
         "",
         "## 今天先看哪些板块",
         "",
@@ -8430,7 +8436,7 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
         f"- CN long R: {fmt_r(summary.get('cn_r'))}",
         f"- Beta hedge: {fmt_r(summary.get('beta_hedge_r'))}",
         f"- Net beta after hedge: {fmt_r(summary.get('net_beta_r'))}",
-        "- A股新闻通常滞后，报告只把新闻当风险标签；真正入选靠价格、成交、资金和板块联动。",
+        "- A 股新闻几乎都是滞后信号 —— 这里只把它当风险标签,真正决定入选的是价格、成交、资金和板块联动。",
         "",
     ]
     return "\n".join(lines).rstrip() + "\n"
@@ -8441,10 +8447,11 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     actions = market_actions(payload, "US")
     summary = ((payload.get("production_decision_summary") or {}).get("summary") or {})
     us = payload.get("us") or {}
+    us_r = fmt_r(summary.get('us_r'))
     lines = [
         f"# 美股量化日报 - {as_of}",
         "",
-        f"今天美股这边，系统按主题 basket 来看主线，不再把强主题票卡成纯 watch。当前给出 {len(actions)} 个股票执行候选，合计 {fmt_r(summary.get('us_r'))}。期权/flow 只作为股票决策证据，不是这份日报的交易标的。",
+        f"今天美股共 {len(actions)} 个执行候选,合计 {us_r}。主线按主题 basket 跑,强主题不再压成纯 watch。期权/flow 只用来为股票决策做交叉验证,不是这份报告的交易标的。",
         "",
         "## 可交易名单",
         "",
