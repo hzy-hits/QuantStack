@@ -278,6 +278,96 @@ def latest_options(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: da
     return {normalize_symbol(row.get("symbol")): row for row in rows}
 
 
+def load_analysis_signals(
+    con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Per-symbol per-module analysis_daily snapshot for as_of.
+
+    Returns {symbol: {module_name: {p_upside, p_downside, trend_prob, ...details}}}.
+    Used by score_rows to fold broad-market momentum / breakout / mean-reversion
+    signals into the AI-infra ranker's rank_score, so per-name conviction
+    actually varies day-to-day with price action.
+    """
+    if not symbols or not table_exists(con, "analysis_daily"):
+        return {}
+    # US data lags 1 trading day (postmarket fetches prior close), so on
+    # a fresh report-day analysis_daily often has nothing for as_of.
+    # Fall back to the latest available date <= as_of for this symbol set.
+    target_date = con.execute(
+        f"""
+        SELECT max(date) FROM analysis_daily
+        WHERE date <= CAST(? AS DATE) AND symbol IN ({placeholders(symbols)})
+        """,
+        [as_of.isoformat(), *symbols],
+    ).fetchone()[0]
+    if target_date is None:
+        return {}
+    rows = con.execute(
+        f"""
+        SELECT symbol, module_name, p_upside, p_downside, trend_prob, details
+        FROM analysis_daily
+        WHERE date = CAST(? AS DATE) AND symbol IN ({placeholders(symbols)})
+        """,
+        [target_date, *symbols],
+    ).fetchall()
+    out: dict[str, dict[str, dict[str, Any]]] = {}
+    for sym, module, p_up, p_down, trend, details_json in rows:
+        d = safe_json_loads(details_json) if details_json else {}
+        if p_up is not None:
+            d["p_upside"] = p_up
+        if p_down is not None:
+            d["p_downside"] = p_down
+        if trend is not None:
+            d["trend_prob"] = trend
+        out.setdefault(normalize_symbol(sym), {})[str(module or "")] = d
+    return out
+
+
+def broad_signal_score(modules: dict[str, dict[str, Any]]) -> tuple[float, dict[str, float]]:
+    """Combine analysis_daily modules into a 0-1 conviction proxy.
+
+    Weights inside (sum to 1.0): momentum_risk 0.40, breakout 0.30,
+    mean_reversion 0.20 (bullish-only; bearish flips to headwind),
+    overnight_continuation 0.10. When no modules have data, returns
+    a neutral 0.5 so missing-data symbols neither help nor hurt.
+    """
+    breakdown: dict[str, float] = {}
+    parts: list[tuple[float, float]] = []  # (weight, value)
+    mom = modules.get("momentum_risk") or {}
+    p_up = mom.get("p_upside")
+    if isinstance(p_up, (int, float)):
+        v = clamp(float(p_up))
+        breakdown["momentum_p_upside"] = round(v * 100.0, 2)
+        parts.append((0.40, v))
+    br = modules.get("breakout") or {}
+    br_score = br.get("breakout_score")
+    if isinstance(br_score, (int, float)):
+        v = clamp(float(br_score))
+        breakdown["breakout"] = round(v * 100.0, 2)
+        parts.append((0.30, v))
+    mr = modules.get("mean_reversion") or {}
+    mr_score = mr.get("reversion_score")
+    if isinstance(mr_score, (int, float)):
+        v = clamp(float(mr_score))
+        direction = str(mr.get("reversion_direction") or "").lower()
+        if direction.startswith("bullish"):
+            breakdown["mean_reversion_bull"] = round(v * 100.0, 2)
+            parts.append((0.20, v))
+        else:
+            breakdown["mean_reversion_bear_headwind"] = round(v * 100.0, 2)
+            parts.append((0.20, 1.0 - v))   # bearish MR = headwind, invert
+    oc = modules.get("overnight_continuation_alpha") or {}
+    oc_pred = oc.get("p_continuation")
+    if isinstance(oc_pred, (int, float)):
+        v = clamp(float(oc_pred))
+        breakdown["overnight_continuation"] = round(v * 100.0, 2)
+        parts.append((0.10, v))
+    if not parts:
+        return 0.5, breakdown
+    weight_sum = sum(w for w, _ in parts)
+    return (sum(w * v for w, v in parts) / weight_sum), breakdown
+
+
 def price_features(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date) -> dict[str, dict[str, Any]]:
     if not symbols or not table_exists(con, "prices_daily"):
         return {}
@@ -524,7 +614,9 @@ def enrich_rows(
     prices: dict[str, dict[str, Any]],
     news: dict[str, list[dict[str, Any]]],
     config: RankerConfig,
+    signals: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
+    signals = signals or {}
     rows: list[dict[str, Any]] = []
     for candidate in candidates:
         symbol = normalize_symbol(candidate.get("symbol"))
@@ -542,6 +634,10 @@ def enrich_rows(
             "flow_options_quality": option_score,
             "options_quality_reason": option_reason,
             "option_expression": (option_row or {}).get("expression") or candidate.get("option_expression"),
+            # broad_modules carries today's momentum_risk / breakout /
+            # mean_reversion details for this symbol. score_rows folds it
+            # into rank_score so per-name conviction varies with price.
+            "broad_modules": signals.get(symbol, {}),
         }
         combined.update(headline_risk(news.get(symbol) or [], config.headline, symbol))
         combined.update(ai_news_evidence(news.get(symbol) or [], str(combined.get("supercycle_layer") or ""), symbol))
@@ -620,6 +716,19 @@ def score_rows(rows: list[dict[str, Any]], config: RankerConfig = DEFAULT_CONFIG
             "risk_penalty": round(penalty * 100.0, 2),
             "headline_risk": round(headline * 100.0, 2),
         }
+        # Broad-market signal fold-in. analysis_daily already computes
+        # momentum_risk / breakout / mean_reversion daily for every name
+        # in the broad universe (incl. our AI-infra basket); read it,
+        # combine into a 0-1 conviction proxy, and rebalance raw so 20%
+        # of rank_score tracks today's price action. Backward-compat:
+        # when broad_modules is absent (e.g. old tests), behavior unchanged.
+        broad_modules = row.get("broad_modules")
+        if broad_modules is not None:
+            broad, breakdown = broad_signal_score(broad_modules)
+            row["score_components"]["broad_signal"] = round(broad * 100.0, 2)
+            row["score_components"]["broad_signal_breakdown"] = breakdown
+            broad_weight = config.score_weights.get("broad_signal", 0.20)
+            raw = raw * (1.0 - broad_weight) + broad_weight * broad
         row["rank_score"] = round(clamp(raw) * 100.0, 2)
     rows.sort(key=lambda row: (-(round_or_none(row.get("rank_score")) or 0.0), str(row.get("symbol") or "")))
     for idx, row in enumerate(rows, start=1):
@@ -835,15 +944,20 @@ def build_ranker_payload(
     options: dict[str, dict[str, Any]] = {}
     prices: dict[str, dict[str, Any]] = {}
     news: dict[str, list[dict[str, Any]]] = {}
+    signals: dict[str, dict[str, dict[str, Any]]] = {}
     if us_db.exists() and symbols:
         con = duckdb.connect(str(us_db), read_only=True)
         try:
             options = latest_options(con, symbols, as_of)
             prices = price_features(con, symbols, as_of)
             news = recent_news(con, symbols, as_of, config.headline)
+            signals = load_analysis_signals(con, symbols, as_of)
         finally:
             con.close()
-    ranked = score_rows(enrich_rows(candidates, options, prices, news, config), config)
+    ranked = score_rows(
+        enrich_rows(candidates, options, prices, news, config, signals),
+        config,
+    )
     public_rows = [public_row(row) for row in ranked]
     top_n = max(1, int(top or 30))
     return {

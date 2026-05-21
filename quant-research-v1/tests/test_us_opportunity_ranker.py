@@ -88,6 +88,39 @@ class UsOpportunityRankerTests(unittest.TestCase):
                 "production_basket must only contain ai_infra_universe members",
             )
 
+    def test_broad_signal_shifts_rank_score_when_modules_present(self) -> None:
+        # Same name evaluated three ways. broad_modules folds 20% of
+        # analysis_daily momentum/breakout/MR into rank_score, so the
+        # bullish day should rank higher than the bearish day, and both
+        # should differ from the no-broad-modules baseline.
+        base = {
+            "symbol": "AMZN",
+            "alpha_sleeve_id": "us_theme_cluster_momentum",
+            "rr_ratio": 2.0,
+            "expected_move_pct": 6.0,
+            "flow_options_quality": 70.0,
+            "supercycle_priority": 1,
+            "ai_evidence_score": 0.8,
+        }
+        baseline = ranker.score_rows([dict(base)])[0]
+        bull = ranker.score_rows([{**base, "broad_modules": {
+            "momentum_risk": {"p_upside": 0.75},
+            "breakout": {"breakout_score": 0.6},
+            "mean_reversion": {"reversion_score": 0.4, "reversion_direction": "bullish"},
+        }}])[0]
+        bear = ranker.score_rows([{**base, "broad_modules": {
+            "momentum_risk": {"p_upside": 0.20},
+            "breakout": {"breakout_score": 0.1},
+            "mean_reversion": {"reversion_score": 0.8, "reversion_direction": "bearish"},
+        }}])[0]
+        # No broad_modules → behaves like before (no broad_signal key).
+        self.assertNotIn("broad_signal", baseline["score_components"])
+        # With modules → score_components shows broad_signal + breakdown.
+        self.assertIn("broad_signal", bull["score_components"])
+        self.assertIn("broad_signal_breakdown", bull["score_components"])
+        # Bull > Bear on rank_score, by a meaningful margin.
+        self.assertGreater(bull["rank_score"], bear["rank_score"] + 5.0)
+
     def test_supercycle_priority_is_scored_and_public(self) -> None:
         rows = ranker.score_rows(
             [
