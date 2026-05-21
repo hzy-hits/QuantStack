@@ -4099,12 +4099,22 @@ def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict
     placeholders = ", ".join("?" for _ in syms)
     con = duckdb.connect(str(us_db), read_only=True)
     try:
+        effective_date = as_of.isoformat()
+        try:
+            latest_row = con.execute(
+                "SELECT MAX(as_of) FROM options_sentiment WHERE as_of <= ?",
+                [as_of.isoformat()],
+            ).fetchone()
+            if latest_row and latest_row[0]:
+                effective_date = str(latest_row[0])
+        except duckdb.Error:
+            pass
         sentiment: dict[str, dict[str, Any]] = {}
         try:
             for row in con.execute(
                 f"SELECT symbol, pc_ratio_z, skew_z, vrp, iv_ann, rv_ann "
                 f"FROM options_sentiment WHERE as_of = ? AND symbol IN ({placeholders})",
-                [as_of.isoformat(), *syms],
+                [effective_date, *syms],
             ).fetchall():
                 sentiment[str(row[0]).upper()] = {
                     "pc_ratio_z": row[1], "skew_z": row[2], "vrp": row[3],
@@ -4122,7 +4132,7 @@ def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict
                 f"FROM options_chain_quotes "
                 f"WHERE as_of = ? AND symbol IN ({placeholders}) AND volume IS NOT NULL "
                 f"GROUP BY symbol",
-                [as_of.isoformat(), *syms],
+                [effective_date, *syms],
             ).fetchall():
                 tenor_vol[str(row[0]).upper()] = {
                     "short": float(row[1] or 0.0),
@@ -8002,6 +8012,38 @@ def render_source_review_calendar_section(
     return lines
 
 
+REGIME_TILT_TABLE = {
+    "hedge":        {"right": 75, "left": 25, "limit": 8,  "stance": "右侧动量优先，左侧仅观察"},
+    "wedge":        {"right": 60, "left": 40, "limit": 12, "stance": "rates/credit 楔形，左右平衡"},
+    "confirm":      {"right": 40, "left": 60, "limit": 18, "stance": "下行确认，左侧候选权重抬升"},
+    "press":        {"right": 25, "left": 75, "limit": 24, "stance": "press 期，左侧 mean-reversion 主场"},
+    "capitulation": {"right": 15, "left": 85, "limit": 30, "stance": "panic 出清，左侧 LEAPS / oversold 黄金窗口"},
+}
+
+
+def regime_left_right_tilt(state: str | None) -> dict[str, Any]:
+    key = str(state or "hedge").strip().lower()
+    return REGIME_TILT_TABLE.get(key, REGIME_TILT_TABLE["hedge"])
+
+
+def render_regime_tilt_header(payload: dict[str, Any], *, regime_key: str = "risk_regime") -> tuple[list[str], int]:
+    """Return (markdown header lines, recommended left-side display limit).
+
+    The left-side observation pool reads the same regime label that drives R-multiplier
+    so the operator sees one consistent recommendation: 当下 regime → 建议 sleeve tilt.
+    """
+    regime = payload.get(regime_key) or {}
+    state = str(regime.get("state") or "hedge").lower()
+    mult = round_or_none(regime.get("r_multiplier"))
+    tilt = regime_left_right_tilt(state)
+    mult_txt = f"{mult:.2f}x" if mult is not None else "-"
+    lines = [
+        f"- 📊 当前 regime: **{state}** (R 乘子 {mult_txt}) | 建议 sleeve tilt: 右侧 {tilt['right']}% / 左侧 {tilt['left']}%",
+        f"- 操作建议: {tilt['stance']}",
+    ]
+    return lines, int(tilt["limit"])
+
+
 def cn_left_side_watch_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     """Return CN ranker rows that look like left-side (oversold/contrarian) ideas.
 
@@ -8037,13 +8079,16 @@ def cn_left_side_watch_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def render_cn_left_side_watch_section(payload: dict[str, Any], *, limit: int = 10) -> list[str]:
+def render_cn_left_side_watch_section(payload: dict[str, Any], *, limit: int | None = None) -> list[str]:
     rows = cn_left_side_watch_rows(payload)
+    tilt_lines, regime_limit = render_regime_tilt_header(payload, regime_key="cn_risk_regime")
+    effective_limit = limit if limit is not None else regime_limit
     lines = [
         "## A股左侧观察池 (oversold / 超跌 EV-positive)",
         "",
         "- 用法: 即便当前强势 tape regime 把左侧 sleeve 压到 0R，这里仍保留 EV-positive 超跌候选；操作员判断是否做左右混合配置。",
         "- 入池条件: ranker 行的 `strategy_family=oversold_contrarian` 或 sleeve_id 以 `cn_oversold` 开头。",
+        *tilt_lines,
         "",
     ]
     if not rows:
@@ -8057,7 +8102,7 @@ def render_cn_left_side_watch_section(payload: dict[str, Any], *, limit: int = 1
         "| Symbol | Name | EV LCB80 | 1D | 5D | Pool | State | Reason |",
         "|---|---|---:|---:|---:|---|---|---|",
     ]
-    for row in rows[:limit]:
+    for row in rows[:effective_limit]:
         ev = row.get("ev_lcb80_pct")
         lines.append(
             "| "
@@ -8082,21 +8127,19 @@ def render_cn_left_side_watch_section(payload: dict[str, Any], *, limit: int = 1
 US_MEAN_REVERSION_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_mean_reversion_radar"
 
 
-def render_us_left_side_section(payload: dict[str, Any], *, limit: int = 10) -> list[str]:
+def render_us_left_side_section(payload: dict[str, Any], *, limit: int | None = None) -> list[str]:
     """Surface today's US mean-reversion candidates (left-side picks).
 
-    The us_mean_reversion_radar already runs daily and ranks top-100; it
-    just wasn't wired into the daily report. Filter to AI-infra universe
-    names that are AT OR BELOW EMA21 (actual pullback territory) and
-    show the deepest dips first. Even when 0 candidates today, the
-    section's existence tells the operator where left-side picks would
-    appear.
+    Display limit auto-adjusts with risk_regime: hedge=8, capitulation=30.
     """
+    tilt_lines, regime_limit = render_regime_tilt_header(payload, regime_key="risk_regime")
+    effective_limit = limit if limit is not None else regime_limit
     lines = [
         "## US 左侧观察池 (超跌反弹候选)",
         "",
         "- 用法: 主线右侧动量之外的左侧机会;不进入 actionable R,仅观察",
         "- 入池: AI universe 内 close ≤ EMA21,按 距 EMA21 越负 排序",
+        *tilt_lines,
         "",
     ]
     as_of = str(payload.get("as_of") or "")
@@ -8141,13 +8184,115 @@ def render_us_left_side_section(payload: dict[str, Any], *, limit: int = 10) -> 
         "| Symbol | Company | 5d | 20d | vs EMA21 | vs EMA50 | Cand? | Reason |",
         "|---|---|---:|---:|---:|---:|:---:|---|",
     ]
-    for r in pullback[:limit]:
+    for r in pullback[:effective_limit]:
         cand = "✓" if str(r.get("is_mean_reversion_candidate") or "").lower() == "yes" else "-"
         lines.append(
             f"| {r.get('symbol','-')} | {clean_table_text(r.get('company_name','-'), 22)} | "
             f"{r.get('ret_5d_pct','-')}% | {r.get('ret_20d_pct','-')}% | "
             f"{r.get('dist_close_ema21_pct','-')}% | {r.get('dist_close_ema50_pct','-')}% | "
             f"{cand} | {clean_table_text(r.get('reasons') or r.get('valuation_signal') or '-', 50)} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _iv_action_hint(vrp: float | None, iv_ann: float | None, skew_z: float | None,
+                    pcz: float | None, long_share: float, short_share: float,
+                    regime_state: str) -> str:
+    """Translate options readings into LEAPS / PMCC / wait language."""
+    if iv_ann is None:
+        return "—"
+    iv_pct = iv_ann * 100
+    panic_regime = regime_state in {"press", "capitulation"}
+    if vrp is not None and vrp <= -0.05 and long_share >= 0.10:
+        if panic_regime and (skew_z is None or skew_z >= 0.5):
+            return "🎯 LEAPS 黄金窗口(IV 便宜+恐慌+久期长)"
+        return "💎 LEAPS 候选(IV<HV,远月堆积)"
+    if vrp is not None and vrp >= 0.05 and short_share >= 0.50:
+        return "✂️ PMCC / 卖近端 prem(IV 贵+短端火)"
+    if iv_pct >= 55 and (skew_z is None or skew_z >= 1.0):
+        return "⏸ 等回落(IV 高位+put skew 抬升)"
+    if vrp is not None and vrp <= -0.03:
+        return "🟢 IV 偏便宜,可考虑买方向"
+    if vrp is not None and vrp >= 0.05:
+        return "🔴 IV 偏贵,优先卖方"
+    return "观望"
+
+
+def render_iv_view_section(payload: dict[str, Any], *, limit: int = 25) -> list[str]:
+    """Per-stock IV / VRP / skew table with LEAPS-vs-PMCC-vs-wait hint.
+
+    Pulls from build_options_verdicts (payload["options_verdicts"]) which
+    is populated for every US trade-plan symbol from options_sentiment +
+    options_chain_quotes. Sorted by VRP ascending (cheapest IV first ->
+    best LEAPS candidates at top).
+    """
+    verdicts = payload.get("options_verdicts") or {}
+    if not verdicts:
+        return [
+            "## US 期权 IV 视图 (LEAPS / PMCC 决策辅助)",
+            "",
+            "- 今日 `options_verdicts` 为空(可能 CBOE 拉取失败或 trade_plan 为空)。",
+            "",
+        ]
+
+    regime_state = str((payload.get("risk_regime") or {}).get("state") or "hedge").lower()
+
+    rows = []
+    for sym, v in verdicts.items():
+        iv = round_or_none(v.get("iv_ann"))
+        rv = round_or_none(v.get("rv_ann"))
+        vrp = round_or_none(v.get("vrp"))
+        pcz = round_or_none(v.get("pc_ratio_z"))
+        skz = round_or_none(v.get("skew_z"))
+        verdict_txt = str(v.get("verdict") or "")
+        long_share = 0.15 if "信仰久期长" in verdict_txt else (0.0 if "信仰久期短" in verdict_txt else 0.08)
+        short_share = 0.70 if "信仰久期短" in verdict_txt else (0.0 if "信仰久期长" in verdict_txt else 0.40)
+        hint = _iv_action_hint(vrp, iv, skz, pcz, long_share, short_share, regime_state)
+        rows.append({
+            "sym": sym, "iv": iv, "rv": rv, "vrp": vrp,
+            "pcz": pcz, "skz": skz, "hint": hint,
+            "verdict": verdict_txt,
+        })
+
+    rows.sort(key=lambda r: (
+        0 if r["iv"] is not None and r["vrp"] is not None else 1,
+        r["vrp"] if r["vrp"] is not None else 999.0,
+    ))
+
+    leaps_pick = [r for r in rows if "LEAPS" in r["hint"]]
+    pmcc_pick = [r for r in rows if "PMCC" in r["hint"] or "卖方" in r["hint"]]
+
+    lines = [
+        "## US 期权 IV 视图 (LEAPS / PMCC 决策辅助)",
+        "",
+        f"- 数据源: CBOE 延迟链 + options_sentiment(VRP = IV - HV30)",
+        f"- 当前 regime: **{regime_state}** | 排序: VRP 升序(最便宜的 IV 在前 → 最适合买 LEAPS)",
+        f"- 简表读法: VRP 越负越便宜;`call 偏多` + LEAPS 堆积 = 机构信仰长;`下行恐惧高` = put skew 抬升,谨慎追多",
+        "",
+    ]
+    if leaps_pick:
+        names = " / ".join(r["sym"] for r in leaps_pick[:5])
+        lines.append(f"- 🎯 **LEAPS 候选 ({len(leaps_pick)})**: {names}")
+    if pmcc_pick:
+        names = " / ".join(r["sym"] for r in pmcc_pick[:5])
+        lines.append(f"- ✂️ **PMCC / 卖方候选 ({len(pmcc_pick)})**: {names}")
+    if leaps_pick or pmcc_pick:
+        lines.append("")
+
+    lines += [
+        "| Symbol | IV 30d | HV30 | VRP | PC z | Skew z | 行动建议 | Options 综述 |",
+        "|---|---:|---:|---:|---:|---:|---|---|",
+    ]
+    for r in rows[:limit]:
+        iv_s = f"{r['iv']*100:.0f}%" if r["iv"] is not None else "-"
+        rv_s = f"{r['rv']*100:.0f}%" if r["rv"] is not None else "-"
+        vrp_s = f"{r['vrp']*100:+.1f}pp" if r["vrp"] is not None else "-"
+        pcz_s = f"{r['pcz']:+.1f}" if r["pcz"] is not None else "-"
+        skz_s = f"{r['skz']:+.1f}" if r["skz"] is not None else "-"
+        lines.append(
+            f"| {r['sym']} | {iv_s} | {rv_s} | {vrp_s} | {pcz_s} | {skz_s} | "
+            f"{r['hint']} | {clean_table_text(r['verdict'], 60)} |"
         )
     lines.append("")
     return lines
@@ -8234,6 +8379,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     lines += render_market_action_table(actions)
     lines += render_market_selection_rationale(payload, actions, "US")
     lines += render_us_left_side_section(payload)
+    lines += render_iv_view_section(payload)
     lines += render_risk_regime_section(payload)
     lines += render_fear_greed_section(payload)
     lines += render_options_anomaly_section(payload)
