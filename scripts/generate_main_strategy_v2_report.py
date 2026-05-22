@@ -4088,6 +4088,61 @@ def render_actionable_selection_rationale(payload: dict[str, Any], actions: list
     return lines
 
 
+def build_cn_shadow_full(cn_db: Path, symbols: list[str], as_of: date) -> dict[str, dict[str, Any]]:
+    """Per-stock implied vol surface for A 股 — derived from ETF option curves.
+
+    A 股 has no individual-stock options, so quant-research-cn's shadow_full
+    module uses 50ETF/300ETF/创业板ETF option curves to back out a per-stock
+    proxy: ATM IV at 90d, 80% / 90% put prices, touch probability, skew.
+
+    Returns: {ticker: {"atm_iv_90d": pct, "touch_90_3m": prob_0_1,
+                       "skew_90_3m": float, "put_90_3m": price,
+                       "put_80_3m": price, "floor_1sigma": float}}
+    """
+    out: dict[str, dict[str, Any]] = {}
+    if not cn_db.exists() or not symbols:
+        return out
+    syms = sorted({str(s).upper() for s in symbols if s})
+    if not syms:
+        return out
+    placeholders = ", ".join("?" for _ in syms)
+    con = duckdb.connect(str(cn_db), read_only=True)
+    try:
+        # Find latest available shadow_full date ≤ as_of
+        latest = con.execute(
+            "SELECT MAX(as_of) FROM analytics WHERE module='shadow_full' AND as_of <= ?",
+            [as_of.isoformat()],
+        ).fetchone()
+        if not latest or not latest[0]:
+            return out
+        eff_date = str(latest[0])
+        rows = con.execute(
+            f"SELECT ts_code, metric, value, detail FROM analytics "
+            f"WHERE module='shadow_full' AND as_of = ? AND ts_code IN ({placeholders})",
+            [eff_date, *syms],
+        ).fetchall()
+        for ts, metric, value, detail in rows:
+            sym = str(ts).upper()
+            rec = out.setdefault(sym, {})
+            metric_key = str(metric).replace("shadow_", "").replace("_3m", "")
+            rec[metric_key] = float(value) if value is not None else None
+            if detail:
+                try:
+                    d = json.loads(detail)
+                    if "atm_iv_90d" in d and "atm_iv_90d" not in rec:
+                        rec["atm_iv_90d"] = d["atm_iv_90d"]
+                    if "downside_iv_90pct_put" in d:
+                        rec["iv_90pct_put"] = d["downside_iv_90pct_put"]
+                    if "downside_iv_80pct_put" in d:
+                        rec["iv_80pct_put"] = d["downside_iv_80pct_put"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        out["_effective_date"] = {"effective_date": eff_date}
+    finally:
+        con.close()
+    return out
+
+
 def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict[str, dict[str, Any]]:
     """Compact per-stock options read — what the options market already knows.
 
@@ -8376,6 +8431,108 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 25) -> list[
     return lines
 
 
+def _pick_probability_cn_stock(ranker_rows, shadow_by_sym):
+    """Best CN stock: rank + flow (informed+tushare) + narrative + shadow IV."""
+    cands = []
+    for r in ranker_rows[:25]:
+        sym = str(r.get("symbol") or "").upper()
+        rs = float(r.get("rank_score") or 0)
+        if rs < 60: continue
+        sc = r.get("score_components") or {}
+        inflow = float(r.get("informed_flow_score") or 0)
+        tushare = float(sc.get("tushare_flow") or 0)
+        narrative = float(r.get("narrative_fit_score") or sc.get("narrative_fit") or 0)
+        sh = shadow_by_sym.get(sym, {})
+        touch = sh.get("touch_90")   # 0-1 prob of touching -10% in 3m
+        # Lower touch = market doesn't price downside = bullish backdrop
+        touch_pen = ((touch or 0.5) * 25) if touch is not None else 12
+        score = rs * 0.5 + (inflow + tushare) * 0.12 + narrative * 0.15 - touch_pen
+        cands.append((score, sym, r, sh))
+    cands.sort(key=lambda x: -x[0])
+    return cands[:2]
+
+
+def render_cn_probability_picks_section(payload: dict[str, Any]) -> list[str]:
+    """🎲 A 股个股概率最优 + 隐含 vol surface (shadow_full)."""
+    rows = (payload.get("cn_opportunity_ranker") or {}).get("all_rows") or []
+    shadow = payload.get("cn_shadow_full") or {}
+    eff_date = (shadow.get("_effective_date") or {}).get("effective_date", "-")
+    picks = _pick_probability_cn_stock(rows, shadow)
+
+    lines = [
+        "## 🎲 A 股概率最优 (个股)",
+        "",
+        "A 股无个股期权,LEAPS / 0DTE 不适用。打分用:rank_score × 资金流(informed_flow + tushare_flow)× 题材匹配 × 隐含下行(shadow_full ETF 代理)。",
+        "",
+    ]
+    if not picks:
+        lines += ["- 今日 ranker 头部无满足概率最优阈值(rank ≥60)的名字。", ""]
+    else:
+        s, sym, r, sh = picks[0]
+        rs = r.get("rank_score") or 0
+        name = r.get("name") or "-"
+        sc = r.get("score_components") or {}
+        inflow = r.get("informed_flow_score") or 0
+        tushare = sc.get("tushare_flow") or 0
+        nar = r.get("narrative_fit_score") or sc.get("narrative_fit") or 0
+        atm_iv = sh.get("atm_iv_90d")
+        touch = sh.get("touch_90")
+        skew = sh.get("skew_90")
+        lines.append(f"### 🥇 个股 → **{sym} {name}**")
+        lines.append(f"- rank **{rs:.1f}**;informed_flow **{inflow:.0f}**;tushare_flow **{tushare:.0f}**;题材匹配 {nar:.0f}")
+        if atm_iv is not None:
+            t_s = f"{touch*100:.0f}%" if touch is not None else "-"
+            sk_s = f"{skew:+.2f}" if skew is not None else "-"
+            lines.append(f"- 隐含 vol(shadow_full ETF 代理): 90d ATM IV {atm_iv:.1f}%;3 个月触及 -10% 概率 **{t_s}**;skew {sk_s}")
+        else:
+            lines.append("- 隐含 vol 数据未覆盖该股(shadow_full 当日缺)")
+        if len(picks) > 1:
+            s2, sym2, r2, _ = picks[1]
+            lines.append(f"- 备选 **{sym2} {r2.get('name')}** rank {r2.get('rank_score'):.1f} / informed {r2.get('informed_flow_score'):.0f}")
+        rationale = []
+        if rs >= 70: rationale.append("rank ≥70 历史 5d hit rate 60%+")
+        if (inflow + tushare) >= 150: rationale.append("flow 双高 = 主力资金 + 龙虎榜联手")
+        if touch is not None and touch < 0.4: rationale.append(f"隐含下行触及概率 {touch*100:.0f}% < 50% 中性")
+        if rationale:
+            lines.append("- 概率论据:" + ";".join(rationale))
+        lines.append("- 仓位:0.3-0.5R(T+1 + 涨跌停,size 比美股小一档)")
+        lines.append("- 风控:跌破 EMA21 / 板块退潮 / 北向单日流出 ≥50 亿 任一触发减仓")
+        lines.append("")
+
+    # ---- Per-stock implied vol surface table (top 10) ----
+    lines += [
+        f"### 个股隐含 vol surface (shadow_full,as of {eff_date})",
+        "",
+        "ETF 期权曲线代理出的每只 A 股 3 个月隐含波动率 + 下行触及概率。**touch_90 ≥ 60%** = 市场在用 ETF put 大量定价下行,谨慎追多;**≤ 35%** = 下行担忧低,追多空间更大。",
+        "",
+        "| Symbol | Name | 90d ATM IV | -10% touch | skew | 解读 |",
+        "|---|---|---:|---:|---:|---|",
+    ]
+    shown = 0
+    for r in rows[:15]:
+        sym = str(r.get("symbol") or "").upper()
+        sh = shadow.get(sym) or {}
+        atm = sh.get("atm_iv_90d")
+        if atm is None: continue
+        tp = sh.get("touch_90")
+        sk = sh.get("skew_90")
+        if tp is not None and tp >= 0.6:
+            verdict = "⚠️ 下行已被大量定价"
+        elif tp is not None and tp <= 0.35:
+            verdict = "✓ 下行担忧低"
+        else:
+            verdict = "中性"
+        tp_s = f"{tp*100:.0f}%" if tp is not None else "-"
+        sk_s = f"{sk:+.2f}" if sk is not None else "-"
+        lines.append(f"| {sym} | {clean_table_text(r.get('name') or '-', 10)} | {atm:.1f}% | {tp_s} | {sk_s} | {verdict} |")
+        shown += 1
+        if shown >= 10: break
+    if shown == 0:
+        lines.append("| - | shadow_full 今天没有覆盖任何头部名字 | - | - | - | - |")
+    lines += ["", "---", ""]
+    return lines
+
+
 def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     as_of = payload["as_of"]
     actions = market_actions(payload, "CN")
@@ -8387,9 +8544,9 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
         "",
         f"今天 A 股给出 {len(actions)} 个执行候选,合计 {cn_r}。选股顺序是板块和资金先行,再落到个股 —— AI infra、矿产/能源/重工是主线,日常消费这次不纳入。",
         "",
-        "## 今天先看哪些板块",
-        "",
     ]
+    lines += render_cn_probability_picks_section(payload)
+    lines += ["## 今天先看哪些板块", ""]
     if sector_rows:
         lines += [
             "| Rank | 板块 | 叙事/层 | 5D | 1D | 广度 | 领涨数 | 资金/成交 |",
@@ -10000,6 +10157,13 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         for row in ((cn_ranker or {}).get("production_basket") or [])
         if row.get("symbol")
     ]
+    # For shadow_full we want a wider universe — top 25 of CN ranker
+    cn_shadow_symbols = sorted({
+        str(row.get("symbol") or "").upper()
+        for row in ((cn_ranker or {}).get("all_rows") or [])[:25]
+        if row.get("symbol")
+    })
+    cn_shadow_full = build_cn_shadow_full(args.cn_db, cn_shadow_symbols, as_of)
     benchmark_attribution = build_benchmark_attribution(
         args.us_db,
         args.cn_db,
@@ -10028,6 +10192,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "ema_tape_overlay": ema_overlay,
         "us_trade_plan": us_trade_plan,
         "options_verdicts": options_verdicts,
+        "cn_shadow_full": cn_shadow_full,
         "fear_greed": load_fear_greed_payload(as_of.isoformat()),
         "options_anomaly_rows": load_options_anomaly_payload(as_of.isoformat()),
         "options_tenor_signals": load_options_tenor_signals(as_of.isoformat()),
