@@ -8442,6 +8442,127 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def render_us_top10_daily_section(payload: dict[str, Any]) -> list[str]:
+    """6 高质量股票 + 4 LEAPS 异动 = 今日只关注这 10 条。
+
+    放在美股日报最顶部(intro 之后,可交易名单之前)。下面的完整可交易
+    名单 / 逐票复核 / IV 视图等保留作为深挖。
+    """
+    ranker_rows = (payload.get("us_opportunity_ranker") or {}).get("all_rows") or []
+    verdicts = payload.get("options_verdicts") or {}
+    tenor_signals = payload.get("options_tenor_signals") or []
+    actions = market_actions(payload, "US")
+    actionable_syms = {str(a.get("symbol") or "").upper() for a in actions}
+
+    lines: list[str] = ["## 🎯 Top 10 今日只看这些", ""]
+
+    # ---- 6 股票:rank_score 前 6 ----
+    top_stocks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for r in ranker_rows:
+        sym = str(r.get("symbol") or "").upper()
+        if not sym or sym in seen:
+            continue
+        top_stocks.append(r)
+        seen.add(sym)
+        if len(top_stocks) == 6:
+            break
+
+    lines += [
+        "### 🟢 值得买的 6 只(主线 right-side)",
+        "",
+        "| # | Symbol | rank_score | Sleeve | IV rank | 今天的位置 |",
+        "|---:|---|---:|---|---:|---|",
+    ]
+    for i, r in enumerate(ranker_rows[:6], 1):
+        sym = str(r.get("symbol") or "").upper()
+        v = verdicts.get(sym) or {}
+        iv_rk = round_or_none(v.get("iv_rank_pct"))
+        iv_s = f"{iv_rk:.0f}%" if iv_rk is not None else "-"
+        sleeve = (r.get("alpha_sleeve_id") or "-").replace("us_", "").replace("_", " ")
+        is_actionable = sym in actionable_syms
+        marker = "✓ 可买" if is_actionable else "观察"
+        # one-line context: tier + actionability + IV vibe
+        iv_note = ""
+        if iv_rk is not None:
+            if iv_rk <= 20:
+                iv_note = "IV 历史低位,LEAPS 也合算"
+            elif iv_rk >= 80:
+                iv_note = "IV 高位,买股别买期权"
+            else:
+                iv_note = "IV 中性"
+        else:
+            iv_note = "期权数据缺"
+        broad = (r.get("score_components") or {}).get("broad_signal")
+        broad_s = f"broad {broad:.0f}" if broad is not None else ""
+        ctx = f"{marker};{iv_note}" + (f";{broad_s}" if broad_s else "")
+        lines.append(
+            f"| {i} | **{sym}** | {r.get('rank_score', '-')} | {sleeve[:24]} | "
+            f"{iv_s} | {ctx} |"
+        )
+
+    # ---- 4 LEAPS 异动 ----
+    long_tenor = [
+        s for s in tenor_signals
+        if s.get("pattern") in {"insider_tilt_long_dated_calls", "bullish_conviction_stack"}
+    ]
+    long_tenor.sort(key=lambda s: -float(s.get("score") or 0.0))
+    leaps_picks: list[dict[str, Any]] = []
+    seen_l: set[str] = set()
+    for s in long_tenor:
+        sym = str(s.get("symbol") or "").upper()
+        if not sym or sym in seen_l:
+            continue
+        leaps_picks.append(s)
+        seen_l.add(sym)
+        if len(leaps_picks) == 4:
+            break
+
+    lines += [
+        "",
+        "### 🎯 4 个 LEAPS / 远月 OTM 异动",
+        "",
+        "| # | Symbol | Pattern | Score | IV rank | 异动证据 |",
+        "|---:|---|---|---:|---:|---|",
+    ]
+    pattern_zh = {
+        "insider_tilt_long_dated_calls": "内幕倾向(LEAPS call 堆)",
+        "bullish_conviction_stack": "多周期看涨堆积",
+    }
+    for i, s in enumerate(leaps_picks, 1):
+        sym = str(s.get("symbol") or "").upper()
+        v = verdicts.get(sym) or {}
+        iv_rk = round_or_none(v.get("iv_rank_pct"))
+        iv_s = f"{iv_rk:.0f}%" if iv_rk is not None else "-"
+        pat = pattern_zh.get(s.get("pattern"), s.get("pattern") or "-")
+        ev = s.get("evidence") or {}
+        if "tenors" in ev and "ratios" in ev:
+            ratios = ev.get("ratios") or []
+            tenors = ev.get("tenors") or []
+            ev_txt = " / ".join(
+                f"{t}={float(r):.1f}x" for t, r in zip(tenors, ratios)
+            )
+        else:
+            parts = [f"{k}={v}" for k, v in ev.items()]
+            ev_txt = "; ".join(parts)
+        score = float(s.get("score") or 0.0)
+        cross_action = " ⭐ 同时在 Top 6 股票" if sym in {str(t.get('symbol') or '').upper() for t in top_stocks} else ""
+        lines.append(
+            f"| {i} | **{sym}** | {pat} | {score:.1f} | {iv_s} | "
+            f"{clean_table_text(ev_txt, 60)}{cross_action} |"
+        )
+
+    if not leaps_picks and not top_stocks:
+        lines.append("- 今日 ranker + tenor 信号都为空。")
+
+    lines += [
+        "",
+        f"_完整 ranker 表、逐票复核、IV 视图、左侧观察池等深挖内容见下文 ↓_",
+        "",
+    ]
+    return lines
+
+
 def render_us_standalone_report(payload: dict[str, Any]) -> str:
     as_of = payload["as_of"]
     actions = market_actions(payload, "US")
@@ -8453,9 +8574,9 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
         "",
         f"今天美股共 {len(actions)} 个执行候选,合计 {us_r}。主线按主题 basket 跑,强主题不再压成纯 watch。期权/flow 只用来为股票决策做交叉验证,不是这份报告的交易标的。",
         "",
-        "## 可交易名单",
-        "",
     ]
+    lines += render_us_top10_daily_section(payload)
+    lines += ["## 可交易名单", ""]
     lines += render_market_action_table(actions)
     lines += render_market_selection_rationale(payload, actions, "US")
     lines += render_us_left_side_section(payload)
