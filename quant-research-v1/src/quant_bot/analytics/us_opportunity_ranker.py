@@ -463,7 +463,85 @@ def recent_news(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date,
     out: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         out.setdefault(normalize_symbol(row.get("symbol")), []).append(row)
+    # Enrich with news_scored if table exists (headline-agent output)
+    if table_exists(con, "news_scored"):
+        scored_rows = rows_as_dicts(
+            con,
+            f"""
+            SELECT symbol, url, subject_match, sentiment, severity, event_type,
+                   summary_zh, confidence
+            FROM news_scored
+            WHERE symbol IN ({placeholders(symbols)})
+            """,
+            list(symbols),
+        )
+        by_key: dict[tuple[str, str], dict[str, Any]] = {}
+        for sr in scored_rows:
+            by_key[(normalize_symbol(sr.get("symbol")), str(sr.get("url") or ""))] = {
+                "subject_match": sr.get("subject_match"),
+                "sentiment": sr.get("sentiment"),
+                "severity": sr.get("severity"),
+                "event_type": sr.get("event_type"),
+                "summary_zh": sr.get("summary_zh"),
+                "confidence": sr.get("confidence"),
+            }
+        for sym, items in out.items():
+            for item in items:
+                key = (sym, str(item.get("url") or ""))
+                if key in by_key:
+                    item["scored"] = by_key[key]
     return out
+
+
+def headline_risk_from_scored(items: list[dict[str, Any]], symbol: str) -> dict[str, Any] | None:
+    """Read headline-agent (DeepSeek) scored items if available.
+
+    Items here are news_items rows ENRICHED with a 'scored' subfield holding
+    {subject_match, sentiment, severity, event_type, summary_zh, confidence}
+    from the news_scored table. Falls back to keyword matching (caller) when
+    no scored data is present for any item.
+
+    Risk derivation:
+      - severity is the agent's own 0-1 score; max across subject-matched negative items.
+      - subject_match=False items contribute zero risk (they're not really about this symbol).
+      - sentiment='positive' items, even if subject-matched, contribute zero risk (UBS upgrade etc).
+      - sentiment='neutral' contributes 50% of severity.
+      - sentiment='negative' contributes full severity.
+    """
+    have_any_scored = any(item.get("scored") for item in items)
+    if not have_any_scored:
+        return None
+    risk = 0.0
+    flags: list[str] = []
+    latest_headline = ""
+    latest_date = None
+    sorted_items = sorted(
+        items, key=lambda i: as_iso(i.get("published_at")) or "", reverse=True
+    )
+    for item in sorted_items:
+        s = item.get("scored") or {}
+        if not latest_headline and s.get("subject_match"):
+            latest_headline = str(item.get("headline") or "")
+            latest_date = as_iso(item.get("published_at"))
+        if not s.get("subject_match"):
+            continue
+        sentiment = str(s.get("sentiment") or "neutral").lower()
+        severity = float(s.get("severity") or 0.0)
+        if sentiment == "positive":
+            continue  # positive subject-matched news = no risk contribution
+        contribution = severity if sentiment == "negative" else severity * 0.5
+        if contribution > risk:
+            risk = contribution
+        if severity >= 0.5 and sentiment != "positive":
+            ev_type = str(s.get("event_type") or "other")
+            flags.append(f"{sentiment}:{ev_type}")
+    return {
+        "headline_risk": round(risk, 4),
+        "headline_flags": sorted(set(flags)),
+        "latest_headline": latest_headline,
+        "latest_headline_date": latest_date,
+        "headline_source": "news_scored",
+    }
 
 
 def headline_risk(items: list[dict[str, Any]], config: NewsRiskConfig, symbol: str = "") -> dict[str, Any]:
@@ -709,7 +787,9 @@ def enrich_rows(
             # into rank_score so per-name conviction varies with price.
             "broad_modules": signals.get(symbol, {}),
         }
-        combined.update(headline_risk(news.get(symbol) or [], config.headline, symbol))
+        sym_news = news.get(symbol) or []
+        scored_risk = headline_risk_from_scored(sym_news, symbol)
+        combined.update(scored_risk if scored_risk is not None else headline_risk(sym_news, config.headline, symbol))
         combined.update(ai_news_evidence(news.get(symbol) or [], str(combined.get("supercycle_layer") or ""), symbol))
         rows.append(combined)
     return rows
