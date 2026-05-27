@@ -129,6 +129,19 @@ def action_label(value: Any) -> str:
     return ACTION_LABELS.get(text, text)
 
 
+_NARRATIVE_LABELS = {
+    "ai_infra": "AI基础设施",
+    "hard_assets_energy_heavy": "矿产/能源/重工",
+    "deprioritized_internet_software": "互联网/软件降优先级",
+    "excluded_consumer": "消费排除",
+    "neutral": "中性板块",
+}
+
+
+def narrative_label(value: Any) -> str:
+    return _NARRATIVE_LABELS.get(str(value or ""), str(value or "-"))
+
+
 def display_tenor_name(value: Any) -> str:
     """Map raw tenor key (weekly/monthly/...) to display label (LEAPS for long_dated)."""
     mapping = {
