@@ -13,6 +13,7 @@ import json
 import math
 import statistics
 import sys
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -314,20 +315,24 @@ def completed_cutoff(as_of: date, horizon_days: int) -> date:
     return as_of - timedelta(days=max(horizon_days, 0))
 
 
-def load_evaluated_trades(
+# Minimum fill count below which we suspect a partial DB read (cron race
+# condition between report_review's write and bulletin's read). Triggers a
+# single retry after a short sleep before declaring the data legitimately
+# empty. 50 is well below typical US production load (~5700 fills in 60d
+# window) but above noise so we don't retry just because the lookback is
+# short or it's the first day of a backfill.
+_MIN_FILLS_BEFORE_RETRY = 50
+_RACE_RETRY_SLEEP_SEC = 3.0
+
+
+def _attempt_load_rows(
     db_path: Path,
     market: str,
+    start: date,
+    cutoff: date,
     as_of: date,
-    lookback_days: int,
-    horizon_days: int,
-) -> tuple[list[dict[str, Any]], str]:
-    cutoff = completed_cutoff(as_of, horizon_days)
-    start = cutoff - timedelta(days=lookback_days)
-    evaluated_through = cutoff.isoformat()
-
-    if not db_path.exists():
-        return [], evaluated_through
-
+) -> list[dict[str, Any]]:
+    """One attempt: open conn, cascade through 5 load paths, close conn."""
     con = duckdb.connect(str(db_path), read_only=True)
     try:
         rows: list[dict[str, Any]] = []
@@ -358,10 +363,53 @@ def load_evaluated_trades(
             and table_exists(con, "report_outcomes")
         ):
             rows = load_report_outcome_rows(con, start, cutoff, as_of)
-        if not rows:
-            return [], evaluated_through
+        return rows
     finally:
         con.close()
+
+
+def load_evaluated_trades(
+    db_path: Path,
+    market: str,
+    as_of: date,
+    lookback_days: int,
+    horizon_days: int,
+) -> tuple[list[dict[str, Any]], str]:
+    cutoff = completed_cutoff(as_of, horizon_days)
+    start = cutoff - timedelta(days=lookback_days)
+    evaluated_through = cutoff.isoformat()
+
+    if not db_path.exists():
+        return [], evaluated_through
+
+    rows = _attempt_load_rows(db_path, market, start, cutoff, as_of)
+    fill_count = sum(1 for r in rows if is_fill(r))
+
+    # Defensive retry: if the read landed an unusually small fill count, the
+    # underlying DB may be mid-write from another pipeline step (eg
+    # report_review running 1s before alpha_bulletin in v1 daily cron). One
+    # retry after a short sleep covers the race without masking a genuinely
+    # empty dataset.
+    if fill_count < _MIN_FILLS_BEFORE_RETRY and market == "us":
+        print(
+            f"[load_evaluated_trades] suspect partial read "
+            f"(fills={fill_count} < {_MIN_FILLS_BEFORE_RETRY}); "
+            f"sleeping {_RACE_RETRY_SLEEP_SEC}s + retry once",
+            file=sys.stderr,
+        )
+        time.sleep(_RACE_RETRY_SLEEP_SEC)
+        retry_rows = _attempt_load_rows(db_path, market, start, cutoff, as_of)
+        retry_fills = sum(1 for r in retry_rows if is_fill(r))
+        if retry_fills > fill_count:
+            print(
+                f"[load_evaluated_trades] retry recovered "
+                f"fills={fill_count}→{retry_fills}",
+                file=sys.stderr,
+            )
+            rows = retry_rows
+
+    if not rows:
+        return [], evaluated_through
 
     for row in rows:
         row["market"] = market

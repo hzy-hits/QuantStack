@@ -26,9 +26,11 @@ Pipeline:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import date, datetime
 from pathlib import Path
@@ -199,8 +201,26 @@ def sync_review_ledgers_to_reports(cfg: Settings, as_of: date, session: str) -> 
     )
 
 
+def _read_us_ev_status(bulletin_path: Path) -> tuple[str | None, int]:
+    """Return (ev_status, us_policy_count) from emitted bulletin, or (None, 0)."""
+    try:
+        data = json.loads(bulletin_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None, 0
+    ev_us = ((data.get("ev_status") or {}).get("us") or "").lower() or None
+    us_pol = len((data.get("stability") or {}).get("us") or [])
+    return ev_us, us_pol
+
+
 def emit_stable_alpha_bulletin(cfg: Settings, as_of: date) -> tuple[str, str]:
-    """Run the cross-market stable-alpha gate before payload rendering."""
+    """Run the cross-market stable-alpha gate before payload rendering.
+
+    Verifies emitted bulletin's US ev_status and retries once on failure to
+    cover a DB-write race condition: report_review writes to the raw DB ~1s
+    before this step runs; bulletin's subprocess can land a partial snapshot
+    if filesystem flush hasn't completed, yielding 0 US policies and a stuck
+    ev_status='failed'. The retry waits 6s for the write to fully settle.
+    """
     project_root = Path(__file__).resolve().parents[1]
     stack_root = project_root.parent
     script = stack_root / "scripts" / "score_strategy_stability_gate.py"
@@ -220,17 +240,37 @@ def emit_stable_alpha_bulletin(cfg: Settings, as_of: date) -> tuple[str, str]:
         "--cn-db",
         str(stack_root / "quant-research-cn" / "data" / "quant_cn_report.duckdb"),
     ]
-    result = subprocess.run(
-        cmd,
-        cwd=stack_root,
-        text=True,
-        capture_output=True,
-        timeout=300,
-        check=False,
+    bulletin_path = (
+        stack_root / "reports" / "review_dashboard" / "strategy_backtest"
+        / as_of.isoformat() / "alpha_bulletin.json"
     )
+
+    def _run_once() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            cmd, cwd=stack_root, text=True, capture_output=True,
+            timeout=300, check=False,
+        )
+
+    result = _run_once()
+    retry_note = ""
+    if result.returncode == 0:
+        ev_us, us_pol = _read_us_ev_status(bulletin_path)
+        # Race detector: 0 US policies almost always means partial DB read
+        # (real data has 100+ candidates). ev_status='failed' alone can also
+        # be legitimate, so we use the policy count as the race signal.
+        if us_pol == 0 or (ev_us == "failed" and us_pol < 20):
+            time.sleep(6)
+            retry = _run_once()
+            ev_us2, us_pol2 = _read_us_ev_status(bulletin_path)
+            retry_note = (
+                f"\n[retry] race suspected; first={ev_us}/{us_pol}pols, "
+                f"second={ev_us2}/{us_pol2}pols"
+            )
+            result = retry
+
     detail = "\n".join(
         part.strip()
-        for part in [result.stdout, result.stderr]
+        for part in [result.stdout, result.stderr, retry_note]
         if part and part.strip()
     )
     if result.returncode != 0:
