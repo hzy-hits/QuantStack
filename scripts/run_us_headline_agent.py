@@ -46,36 +46,104 @@ DIGEST_DIR = ROOT / "ai_infra" / "reports"
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
 
-SYSTEM_PROMPT = """你是金融新闻结构化分类工具,只做提取,不做推理。
+SYSTEM_PROMPT = """你是金融新闻结构化分类工具。只从输入文本提取事实,**禁止任何推理 / 猜测 / 补全**。
 
 输入:一只股票的 symbol + 一篇新闻的 headline + summary。
 
-输出 JSON,严格按以下 schema:
+输出严格 JSON:
 {
   "subject_match": true | false,
   "sentiment": "positive" | "negative" | "neutral",
-  "severity": 0.0 - 1.0,
+  "severity": 0 | 1 | 2 | 3,
   "event_type": "earnings|m_and_a|regulatory|product|lawsuit|management|rating|partnership|investment_received|investment_made|macro|other",
-  "summary_zh": "≤30 字一句话",
-  "confidence": 0.0 - 1.0,
+  "summary_zh": "≤30 字,只能复述 headline/summary 字面信息",
   "nvda_investment": null | {
-    "invested_company": "公司名",
-    "ticker": "ticker if mentioned, else null",
-    "amount_usd": null | 数字(美元金额),
-    "percent_stake": null | 数字(0-100),
+    "invested_company": "公司名(必须在文本字面出现)",
+    "ticker": null | "字符串(只有当文本里明确出现 ticker 字母才填,否则 null)",
+    "amount_usd": null | 数字(只有当文本里有具体美元金额才填,不准从公司规模/常识推断),
+    "percent_stake": null | 数字(只有当文本里有百分比才填),
     "deal_type": "equity_stake | acquisition | strategic_investment | partnership | venture"
   }
 }
 
-字段规则:
-- subject_match: 当且仅当 symbol 是 headline **主语/主题**时 true。如果 symbol 只出现在多 ticker tag 列表(例如 "AAA, BBB, MU plummet" 这种)或比喻文中作为对比对象,则 false。
-- sentiment: 只看文本表面语气,不预测市场反应。
-- severity: 0=无关 0.3=普通新闻 0.6=值得关注 0.8=重大事件 1.0=巨大冲击(bankruptcy/fraud/SEC investigation 等);只在 subject_match=true 时才能 ≥0.5。
-- event_type 闭集选一。"investment_made" = 该 symbol 投资了别人;"investment_received" = 该 symbol 收到了投资。
-- nvda_investment: 仅当 headline 或 summary 明确提及 "NVIDIA invested / NVDA stake / Nvidia acquired" 类 NVDA 对外投资/入股/收购信息时填写。NVDA 自身的产品/收益新闻 → null。
+字段硬规则(违反即视为错误):
+- subject_match=true 当且仅当 symbol 是 headline 的主语/主题。multi-ticker 列表("AAA, BBB, X plummet")、比喻文(Burry warning 类)、提及但不讨论 → false。
+- severity 整数:0=无关; 1=普通新闻(rating/产品发布等); 2=值得关注(财报 beat/miss/大合同); 3=重大冲击(bankruptcy/fraud/SEC investigation/CEO 突然离职)。subject_match=false 时 severity 必须 = 0 或 1。
+- sentiment 只看 headline 字面情绪,不推测市场反应。
+- nvda_investment 防幻觉(严格):
+    * 仅当 headline 或 summary 字面出现 "Nvidia" 或 "NVDA" 同时出现 "invest|stake|acqui|fund|partner|deploy" 字眼时才填
+    * invested_company 必须是文本中字面出现的公司名,不准从 ticker/symbol/语境推断
+    * amount_usd 必须文本中字面有数字+货币单位,不准从市值/常识/惯例填
+    * 如果不能 100% 从字面验证,**必须填 null,不准猜**
+    * 当前新闻的 symbol 自己 ≠ 被投公司时才填(避免循环)
 
-不要解释、不要 markdown、只输出严格 JSON。
+不要解释、不要 markdown、只输出严格 JSON 对象。
 """
+
+
+def validate_scored(s: dict) -> dict | None:
+    """Schema validator — reject malformed LLM output instead of silent default.
+    Returns sanitized dict or None if too malformed to use."""
+    try:
+        out = {
+            "subject_match": bool(s.get("subject_match")),
+            "sentiment": s.get("sentiment") if s.get("sentiment") in ("positive", "negative", "neutral") else None,
+            "severity": s.get("severity") if isinstance(s.get("severity"), int) and 0 <= s["severity"] <= 3 else None,
+            "event_type": s.get("event_type"),
+            "summary_zh": str(s.get("summary_zh") or "")[:200],
+            "nvda_investment": s.get("nvda_investment"),
+        }
+        # accept severity 0/1/2/3 only — float 0-1 from old prompt would be rejected
+        if out["severity"] is None or out["sentiment"] is None:
+            return None
+        # enforce: subject_match=false implies severity ≤ 1
+        if not out["subject_match"] and out["severity"] > 1:
+            out["severity"] = 1
+        return out
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def validate_nvda_invest(nvda_inv: dict, headline: str, summary: str, source_symbol: str) -> dict | None:
+    """Server-side anti-hallucination check for NVDA investment claims.
+
+    Reject the claim unless:
+      - text literally mentions Nvidia/NVDA + an investment keyword
+      - invested_company name actually appears as substring in text
+      - amount, if claimed, has a digit+$ pattern in text
+    """
+    if not isinstance(nvda_inv, dict):
+        return None
+    text = f"{headline} {summary}".lower()
+    if "nvidia" not in text and "nvda" not in text:
+        return None
+    invest_kws = ("invest", "stake", "acqui", "fund", "partner", "deploy", "venture", "raise")
+    if not any(kw in text for kw in invest_kws):
+        return None
+    company = str(nvda_inv.get("invested_company") or "").strip()
+    if not company or len(company) < 2:
+        return None
+    # Reject Nvidia investing in itself — these are commentary articles
+    # ("Nvidia Doubled Down on Its Holding") where LLM misread the subject.
+    company_l = company.lower()
+    if company_l in {"nvidia", "nvda", "nvidia corp", "nvidia corporation", "nvidia inc"}:
+        return None
+    # invested_company must literally appear in source text (case-insensitive)
+    if company_l not in text:
+        return None
+    # disallow circular: source article is about the "invested" company being the same as the
+    # source symbol's company name (e.g. MRVL article extracting itself as invested by NVDA
+    # when text doesn't actually claim that)
+    if source_symbol.upper() == str(nvda_inv.get("ticker") or "").upper() and "nvidia" not in headline.lower():
+        # source is the supposed invested company itself + headline doesn't put Nvidia in it
+        # → likely hallucination triggered by ranking/preview article
+        return None
+    # amount sanity: if claimed, there must be a $ or "billion"/"million" in text
+    amt = nvda_inv.get("amount_usd")
+    if amt is not None:
+        if not any(token in text for token in ("$", "billion", "million", "亿", "万美元")):
+            nvda_inv["amount_usd"] = None  # demote unverified amount
+    return nvda_inv
 
 
 def load_deepseek_key() -> str:
@@ -87,6 +155,9 @@ def load_deepseek_key() -> str:
 
 
 def init_schemas(con: duckdb.DuckDBPyConnection) -> None:
+    """News-scored uses INT severity (0|1|2|3) + bool subject_match — no float
+    confidence (was no signal — 85% returned 0.9). Idempotent: ALTER existing
+    severity DOUBLE → SMALLINT if table predates this migration."""
     con.execute("""
         CREATE TABLE IF NOT EXISTS news_scored (
             symbol VARCHAR NOT NULL,
@@ -95,14 +166,19 @@ def init_schemas(con: duckdb.DuckDBPyConnection) -> None:
             headline VARCHAR,
             subject_match BOOLEAN,
             sentiment VARCHAR,
-            severity DOUBLE,
+            severity SMALLINT,
             event_type VARCHAR,
             summary_zh VARCHAR,
-            confidence DOUBLE,
             scored_at TIMESTAMP DEFAULT current_timestamp,
             PRIMARY KEY (symbol, url)
         )
     """)
+    # Migrate legacy DOUBLE severity → SMALLINT (round float to int bucket)
+    cols = {r[0]: r[1] for r in con.execute("DESCRIBE news_scored").fetchall()}
+    if cols.get("severity", "").upper() == "DOUBLE":
+        con.execute("ALTER TABLE news_scored ALTER severity TYPE SMALLINT USING CAST(severity * 3 AS SMALLINT)")
+    if "confidence" in cols:
+        con.execute("ALTER TABLE news_scored DROP COLUMN confidence")
     con.execute("""
         CREATE TABLE IF NOT EXISTS nvda_investments (
             announce_date DATE,
@@ -114,11 +190,14 @@ def init_schemas(con: duckdb.DuckDBPyConnection) -> None:
             headline VARCHAR,
             url VARCHAR,
             source VARCHAR,
-            confidence DOUBLE,
+            verified BOOLEAN DEFAULT FALSE,
             extracted_at TIMESTAMP DEFAULT current_timestamp,
             PRIMARY KEY (announce_date, invested_company, url)
         )
     """)
+    inv_cols = {r[0]: r[1] for r in con.execute("DESCRIBE nvda_investments").fetchall()}
+    if "verified" not in inv_cols:
+        con.execute("ALTER TABLE nvda_investments ADD COLUMN verified BOOLEAN DEFAULT FALSE")
 
 
 def classify(client_session: requests.Session, api_key: str, symbol: str,
@@ -175,22 +254,22 @@ def write_scored(con: duckdb.DuckDBPyConnection, row: dict, scored: dict) -> Non
     con.execute("""
         INSERT OR REPLACE INTO news_scored
         (symbol, url, published_at, headline, subject_match, sentiment,
-         severity, event_type, summary_zh, confidence, scored_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
+         severity, event_type, summary_zh, scored_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
     """, [
         row["symbol"], row["url"], row["published_at"], row["headline"],
-        bool(scored.get("subject_match")),
-        str(scored.get("sentiment") or "neutral"),
-        float(scored.get("severity") or 0.0),
+        scored["subject_match"],
+        scored["sentiment"],
+        scored["severity"],
         str(scored.get("event_type") or "other"),
-        str(scored.get("summary_zh") or "")[:300],
-        float(scored.get("confidence") or 0.0),
+        scored.get("summary_zh") or "",
     ])
 
 
 def write_nvda_investment(con: duckdb.DuckDBPyConnection, row: dict,
                           nvda_inv: dict) -> bool:
-    """Returns True if row was actually inserted (deduped by PK)."""
+    """Returns True if row was actually inserted (deduped by PK).
+    Caller MUST have validated nvda_inv via validate_nvda_invest() first."""
     company = str(nvda_inv.get("invested_company") or "").strip()
     if not company:
         return False
@@ -202,8 +281,8 @@ def write_nvda_investment(con: duckdb.DuckDBPyConnection, row: dict,
         con.execute("""
             INSERT OR REPLACE INTO nvda_investments
             (announce_date, invested_company, ticker, amount_usd, percent_stake,
-             deal_type, headline, url, source, confidence, extracted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, current_timestamp)
+             deal_type, headline, url, source, verified, extracted_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, TRUE, current_timestamp)
         """, [
             announce_date,
             company[:120],
@@ -214,7 +293,6 @@ def write_nvda_investment(con: duckdb.DuckDBPyConnection, row: dict,
             row["headline"][:300],
             row["url"],
             row.get("source") or "?",
-            0.8,
         ])
         return True
     except (duckdb.Error, TypeError, ValueError) as e:
@@ -236,21 +314,22 @@ def render_daily_digest(con: duckdb.DuckDBPyConnection, as_of: date) -> str:
         FROM news_scored
         WHERE CAST(published_at AS DATE) >= ?
           AND subject_match = TRUE
-          AND severity >= 0.5
+          AND severity >= 2
         ORDER BY severity DESC, published_at DESC
         LIMIT 20
     """, [(as_of - timedelta(days=1)).isoformat()]).fetchall()
     if rows:
-        lines += ["## 🔥 今日 high-severity 新闻 (subject_match)", "",
-                  "| Symbol | sev | sent | event | 中文摘要 | 标题 |",
-                  "|---|---:|:---:|:---:|---|---|"]
+        sev_label = {0: "无关", 1: "普通", 2: "值得关注", 3: "重大"}
+        lines += ["## 🔥 今日重大新闻 (subject_match, severity ≥ 2)", "",
+                  "| Symbol | severity | sent | event | 中文摘要 | 标题 |",
+                  "|---|:---:|:---:|:---:|---|---|"]
         for r in rows:
             sym, hl, sev, sent, ev, sm, _ = r
             emoji = {"positive": "🟢", "negative": "🔴", "neutral": "⚪"}.get(sent, "⚪")
-            lines.append(f"| **{sym}** | {sev:.2f} | {emoji} | {ev} | {sm or '-'} | {hl[:60]} |")
+            lines.append(f"| **{sym}** | {sev}({sev_label.get(sev,'?')}) | {emoji} | {ev} | {sm or '-'} | {hl[:60]} |")
         lines.append("")
     else:
-        lines += ["## 🔥 今日 high-severity 新闻", "- 没有 severity ≥ 0.5 的 subject_match 新闻。", ""]
+        lines += ["## 🔥 今日重大新闻", "- 没有 severity ≥ 2 的 subject_match 新闻。", ""]
 
     # 2. NVDA 投资追踪
     nvda_rows = con.execute("""
@@ -258,6 +337,7 @@ def render_daily_digest(con: duckdb.DuckDBPyConnection, as_of: date) -> str:
                percent_stake, deal_type, headline, url
         FROM nvda_investments
         WHERE announce_date >= ?
+          AND verified = TRUE
         ORDER BY announce_date DESC, amount_usd DESC NULLS LAST
         LIMIT 25
     """, [(as_of - timedelta(days=30)).isoformat()]).fetchall()
@@ -279,19 +359,19 @@ def render_daily_digest(con: duckdb.DuckDBPyConnection, as_of: date) -> str:
         SELECT symbol, COUNT(*) AS n,
                SUM(CASE WHEN sentiment='positive' THEN 1 ELSE 0 END) AS pos,
                SUM(CASE WHEN sentiment='negative' THEN 1 ELSE 0 END) AS neg,
-               AVG(severity) AS avg_sev
+               MAX(severity) AS max_sev
         FROM news_scored
         WHERE CAST(scored_at AS DATE) = ?
           AND subject_match = TRUE
         GROUP BY symbol HAVING n >= 1
-        ORDER BY avg_sev DESC, n DESC LIMIT 15
+        ORDER BY max_sev DESC, n DESC LIMIT 15
     """, [as_of.isoformat()]).fetchall()
     if cnt_today:
-        lines += ["## 📰 今日新打分股票(subject_match,按 avg severity)", "",
-                  "| Symbol | N | 🟢 | 🔴 | avg sev |",
+        lines += ["## 📰 今日新打分股票(subject_match,按 max severity)", "",
+                  "| Symbol | N | 🟢 | 🔴 | max sev |",
                   "|---|---:|---:|---:|---:|"]
         for r in cnt_today:
-            lines.append(f"| **{r[0]}** | {r[1]} | {r[2]} | {r[3]} | {r[4]:.2f} |")
+            lines.append(f"| **{r[0]}** | {r[1]} | {r[2]} | {r[3]} | {r[4]} |")
         lines.append("")
     return "\n".join(lines) + "\n"
 
@@ -322,21 +402,33 @@ def main() -> None:
         print("  nothing to score, regenerating digest only")
     else:
         session = requests.Session()
-        scored_n = nvda_n = 0
+        scored_n = invalid_n = nvda_n = nvda_rejected = 0
         for i, row in enumerate(rows, 1):
-            scored = classify(session, api_key, row["symbol"], row["headline"], row["summary"] or "")
-            if not scored:
+            raw = classify(session, api_key, row["symbol"], row["headline"], row["summary"] or "")
+            if not raw:
                 continue
-            write_scored(con, row, scored)
+            validated = validate_scored(raw)
+            if validated is None:
+                invalid_n += 1
+                continue
+            write_scored(con, row, validated)
             scored_n += 1
-            nvda_inv = scored.get("nvda_investment")
-            if nvda_inv:
-                if write_nvda_investment(con, row, nvda_inv):
-                    nvda_n += 1
+            nvda_inv_raw = raw.get("nvda_investment")
+            if nvda_inv_raw:
+                nvda_inv = validate_nvda_invest(
+                    nvda_inv_raw, row["headline"], row["summary"] or "", row["symbol"]
+                )
+                if nvda_inv is None:
+                    nvda_rejected += 1
+                else:
+                    if write_nvda_investment(con, row, nvda_inv):
+                        nvda_n += 1
             if i % 20 == 0:
-                print(f"  progress {i}/{len(rows)}: scored={scored_n} nvda_invest_hits={nvda_n}")
-            time.sleep(0.05)   # gentle rate limit
-        print(f"  done: scored={scored_n} / {len(rows)}, nvda_invest hits={nvda_n}")
+                print(f"  progress {i}/{len(rows)}: scored={scored_n} invalid={invalid_n} "
+                      f"nvda_hits={nvda_n} nvda_rejected_hallucinations={nvda_rejected}")
+            time.sleep(0.05)
+        print(f"  done: scored={scored_n}, invalid={invalid_n}, "
+              f"nvda_hits={nvda_n}, nvda_rejected_hallucinations={nvda_rejected}")
 
     DIGEST_DIR.mkdir(parents=True, exist_ok=True)
     digest = render_daily_digest(con, as_of)

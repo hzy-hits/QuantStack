@@ -501,16 +501,17 @@ def headline_risk_from_scored(items: list[dict[str, Any]], symbol: str) -> dict[
     from the news_scored table. Falls back to keyword matching (caller) when
     no scored data is present for any item.
 
-    Risk derivation:
-      - severity is the agent's own 0-1 score; max across subject-matched negative items.
-      - subject_match=False items contribute zero risk (they're not really about this symbol).
-      - sentiment='positive' items, even if subject-matched, contribute zero risk (UBS upgrade etc).
-      - sentiment='neutral' contributes 50% of severity.
-      - sentiment='negative' contributes full severity.
+    Risk derivation (severity 0-3 int bucket → 0-1 risk float):
+      - severity bucket: 0=irrelevant, 1=routine, 2=notable, 3=severe.
+      - Map: 0→0.0, 1→0.0(noise), 2→0.6, 3→0.9.
+      - subject_match=False items contribute zero risk.
+      - sentiment='positive' contributes zero risk.
+      - sentiment='neutral' × 0.5; sentiment='negative' × full.
     """
     have_any_scored = any(item.get("scored") for item in items)
     if not have_any_scored:
         return None
+    SEV_BUCKET = {0: 0.0, 1: 0.0, 2: 0.6, 3: 0.9}
     risk = 0.0
     flags: list[str] = []
     latest_headline = ""
@@ -526,13 +527,20 @@ def headline_risk_from_scored(items: list[dict[str, Any]], symbol: str) -> dict[
         if not s.get("subject_match"):
             continue
         sentiment = str(s.get("sentiment") or "neutral").lower()
-        severity = float(s.get("severity") or 0.0)
+        raw_sev = s.get("severity")
+        # Accept both int (new schema) and float (legacy rows) just in case
+        if isinstance(raw_sev, (int, float)):
+            sev_int = int(raw_sev) if raw_sev > 1.0 else int(round(float(raw_sev) * 3))
+            sev_int = max(0, min(3, sev_int))
+        else:
+            sev_int = 0
         if sentiment == "positive":
-            continue  # positive subject-matched news = no risk contribution
-        contribution = severity if sentiment == "negative" else severity * 0.5
+            continue
+        sev_value = SEV_BUCKET.get(sev_int, 0.0)
+        contribution = sev_value if sentiment == "negative" else sev_value * 0.5
         if contribution > risk:
             risk = contribution
-        if severity >= 0.5 and sentiment != "positive":
+        if sev_int >= 2:
             ev_type = str(s.get("event_type") or "other")
             flags.append(f"{sentiment}:{ev_type}")
     return {
