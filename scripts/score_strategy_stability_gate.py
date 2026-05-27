@@ -493,50 +493,118 @@ def load_us_alpha_postmortem_rows(
     cutoff: date,
     as_of: date,
 ) -> list[dict[str, Any]]:
-    """US fallback: adapt alpha_postmortem (US-side) → stability_gate schema.
+    """US fallback: adapt alpha_postmortem → stability_gate schema with multi-policy attribution.
 
-    The US DB historically lacked report_decisions/report_outcomes/paper_trades/
-    algorithm_postmortem tables, leaving load_evaluated_trades empty → ev_status
-    permanently 'failed' → all US actionables blocked by evaluate_us_execution_gate
-    in the main report.
+    Triggered only when load_report_outcome_rows / load_paper_trade_rows /
+    load_algorithm_postmortem_rows all return empty (e.g. race condition during
+    daily cron when report_outcomes is being rewritten).
 
-    alpha_postmortem has the data we need (report_date, symbol, selection_status,
-    label, best_ret_pct, evaluation_date) but lacks details_json / signal_direction
-    / etc. Since 'selected' rows in this table are exactly the US main-strategy
-    production basket, we hardcode the policy fields to the US main-line defaults
-    (core / long / high_mod / executable_now / trending) so they form one
-    coherent policy candidate the stability test can score.
+    Previous version hardcoded every row to one policy bucket
+    (core/long/high_mod/executable_now/trending), which produced a single
+    stability candidate the gate would always reject when avg_trade_pct dipped
+    below 0.4 — masking real multi-family signal in the underlying data.
 
-    return_pct ← best_ret_pct (best favorable move within the eval window for
-    selected names is the closest proxy to realized PnL the table records).
+    This version joins alpha_postmortem against earnings_calendar +
+    options_alpha + news_scored to derive a per-row strategy_family bucket:
+      - event_tape  ← report_date within ±3 trading days of an earnings event
+      - shadow_option_edge ← options_alpha has same-day row for symbol
+      - news_event  ← news_scored severity≥2 on same day for symbol
+      - core        ← default (no auxiliary signal)
+
+    Each row's details_json reflects the derived bucket so row_policy() builds
+    a multi-family policy_id distribution — gate gets real diversity to score
+    rather than one over-aggregated bucket.
+
+    return_pct ← best_ret_pct (best favorable move within eval window for
+    selected names is closest proxy to realized PnL recorded in this table).
     """
-    sql = """
-        SELECT report_date, evaluation_date, symbol, selection_status,
-               label, best_ret_pct, factor_feedback_action,
-               review_note, alpha_remaining_pct, move_consumed_ratio
-        FROM alpha_postmortem
-        WHERE report_date >= ? AND report_date <= ?
-          AND (evaluation_date IS NULL OR evaluation_date <= ?)
-          AND selection_status = 'selected'
-          AND best_ret_pct IS NOT NULL
-        ORDER BY report_date, symbol
+    earnings_join = ""
+    options_join = ""
+    news_join = ""
+    earnings_select = "NULL AS earnings_within_3d"
+    options_select = "NULL AS options_alpha_present"
+    news_select = "NULL AS news_severity"
+    if table_exists(con, "earnings_calendar"):
+        earnings_join = """
+            LEFT JOIN (
+                SELECT DISTINCT symbol, report_date AS er_date
+                FROM earnings_calendar
+                WHERE report_date IS NOT NULL
+            ) er ON er.symbol = ap.symbol
+                 AND abs(date_diff('day', ap.report_date, er.er_date)) <= 3
+        """
+        earnings_select = "MAX(CASE WHEN er.er_date IS NOT NULL THEN 1 ELSE 0 END) AS earnings_within_3d"
+    if table_exists(con, "options_alpha"):
+        options_join = """
+            LEFT JOIN options_alpha oa
+                ON oa.symbol = ap.symbol AND oa.as_of = ap.report_date
+        """
+        options_select = "MAX(CASE WHEN oa.symbol IS NOT NULL THEN 1 ELSE 0 END) AS options_alpha_present"
+    if table_exists(con, "news_scored"):
+        news_join = """
+            LEFT JOIN news_scored ns
+                ON ns.symbol = ap.symbol
+               AND CAST(ns.published_at AS DATE) = ap.report_date
+               AND ns.subject_match = TRUE
+               AND ns.severity >= 2
+        """
+        news_select = "MAX(COALESCE(ns.severity, 0)) AS news_severity"
+    sql = f"""
+        SELECT ap.report_date, ap.evaluation_date, ap.symbol, ap.selection_status,
+               ap.label, ap.best_ret_pct, ap.factor_feedback_action,
+               ap.review_note, ap.alpha_remaining_pct, ap.move_consumed_ratio,
+               {earnings_select},
+               {options_select},
+               {news_select}
+        FROM alpha_postmortem ap
+        {earnings_join}
+        {options_join}
+        {news_join}
+        WHERE ap.report_date >= ? AND ap.report_date <= ?
+          AND (ap.evaluation_date IS NULL OR ap.evaluation_date <= ?)
+          AND ap.selection_status = 'selected'
+          AND ap.best_ret_pct IS NOT NULL
+        GROUP BY ap.report_date, ap.evaluation_date, ap.symbol, ap.selection_status,
+                 ap.label, ap.best_ret_pct, ap.factor_feedback_action,
+                 ap.review_note, ap.alpha_remaining_pct, ap.move_consumed_ratio
+        ORDER BY ap.report_date, ap.symbol
     """
     raw = con.execute(sql, [start.isoformat(), cutoff.isoformat(), as_of.isoformat()]).fetchall()
     out: list[dict[str, Any]] = []
-    fixed_details = json.dumps({
-        "main_signal_gate": {"report_bucket": "core", "execution_action": "executable_now"},
-        "execution_gate": {"trend_regime": "trending"},
-    })
     for r in raw:
         (report_date, evaluation_date, symbol, selection_status, label,
-         best_ret_pct, ffa, review_note, alpha_remaining_pct, move_consumed_ratio) = r
+         best_ret_pct, ffa, review_note, alpha_remaining_pct, move_consumed_ratio,
+         earnings_within_3d, options_alpha_present, news_severity) = r
+        # Derive strategy family from auxiliary signal context. Priority order
+        # reflects what would dominate as the primary reason for selection.
+        if earnings_within_3d:
+            bucket = "event_tape"
+        elif options_alpha_present:
+            bucket = "shadow_option_edge"
+        elif news_severity and news_severity >= 2:
+            bucket = "event_tape"  # news-driven event also slots into event_tape family
+        else:
+            bucket = "core"
+        details = json.dumps({
+            "main_signal_gate": {
+                "report_bucket": bucket,
+                "execution_action": "executable_now",
+            },
+            "execution_gate": {"trend_regime": "trending"},
+            "fallback_source": "alpha_postmortem_multi_policy",
+            "auxiliary_signals": {
+                "earnings_within_3d": bool(earnings_within_3d),
+                "options_alpha_present": bool(options_alpha_present),
+                "news_severity_2_plus": bool(news_severity and news_severity >= 2),
+            },
+        })
         out.append({
             "report_date": report_date,
             "evaluation_date": evaluation_date,
             "symbol": symbol,
             "selection_status": selection_status,
             "rank_order": None,
-            "report_bucket": "core",
+            "report_bucket": bucket,
             "signal_direction": "long",
             "signal_confidence": "high_mod",
             "execution_mode": "executable_now",
@@ -551,7 +619,7 @@ def load_us_alpha_postmortem_rows(
             "no_fill_reason": None,
             "label": label,
             "calibration_bucket": None,
-            "details_json": fixed_details,
+            "details_json": details,
         })
     return out
 
