@@ -79,9 +79,14 @@ python3 -c "import importlib.util,sys; \
 
 | Sub-phase | 内容 | 状态 |
 |---|---|---|
-| **C.0** | `scripts/reports/us_daily.py` — `render_us_standalone_report` + 所有 US-only section import | TODO |
-| **C.1** | `scripts/reports/cn_daily.py` — `render_cn_standalone_report` + 所有 CN-only section import | TODO |
-| **C.2** | 主文件保留 `build_payload + main + run` + 共享逻辑,< 2000 行 | TODO |
+| **C.0** | `scripts/reports/us_daily.py` — `render_us_standalone_report` | ✅ 93ecac6 (74 行) |
+| **C.1** | `scripts/reports/cn_daily.py` — `render_cn_standalone_report` | ✅ 773d4e1 (63 行) |
+| **C.2a** | `scripts/reports/combined.py` — `render_report` | ✅ 07b39b4 (156 行) |
+| **C.2b** | `scripts/reports/factorlab.py` — `render_factorlab_brief` | ✅ e9cbffd (66 行) |
+
+**实际成果**:4 个 render entry 全部抽出,monolith 7585 → 7228 (-357 行,-4.7%)。
+
+**< 2000 行目标未达**:需要 Phase B.20+ 继续抽 ~50 个 `build_*` 函数(它们是 payload 构造逻辑,不是 render)。Phase C 范围本来就只覆盖 render 层。
 
 ---
 
