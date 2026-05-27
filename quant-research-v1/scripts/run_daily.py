@@ -215,11 +215,15 @@ def _read_us_ev_status(bulletin_path: Path) -> tuple[str | None, int]:
 def emit_stable_alpha_bulletin(cfg: Settings, as_of: date) -> tuple[str, str]:
     """Run the cross-market stable-alpha gate before payload rendering.
 
-    Verifies emitted bulletin's US ev_status and retries once on failure to
-    cover a DB-write race condition: report_review writes to the raw DB ~1s
-    before this step runs; bulletin's subprocess can land a partial snapshot
-    if filesystem flush hasn't completed, yielding 0 US policies and a stuck
-    ev_status='failed'. The retry waits 6s for the write to fully settle.
+    Race-defense (R3):
+      report_review writes 7800+ rows to raw quant.duckdb seconds before
+      this step. Even after raw_log_con.execute("CHECKPOINT") + .close()
+      in the parent, the read-only subprocess can land an outdated
+      snapshot — empirically the file becomes visibly consistent only
+      30-60s later (likely DuckDB metadata cache + OS page cache flush).
+      So before invoking the subprocess we force an OS-level dirty-page
+      flush via os.sync(), and on detected race we sleep 60s before the
+      single retry (was 6s; observed insufficient on 2026-05-28 cron).
     """
     project_root = Path(__file__).resolve().parents[1]
     stack_root = project_root.parent
@@ -245,6 +249,14 @@ def emit_stable_alpha_bulletin(cfg: Settings, as_of: date) -> tuple[str, str]:
         / as_of.isoformat() / "alpha_bulletin.json"
     )
 
+    # Force OS-level flush of dirty pages so the subprocess sees the latest
+    # quant.duckdb contents. Cheap (typically <500ms on SSD) compared to
+    # the cost of a stuck ev_status downstream.
+    try:
+        os.sync()
+    except OSError:
+        pass
+
     def _run_once() -> subprocess.CompletedProcess:
         return subprocess.run(
             cmd, cwd=stack_root, text=True, capture_output=True,
@@ -259,12 +271,19 @@ def emit_stable_alpha_bulletin(cfg: Settings, as_of: date) -> tuple[str, str]:
         # (real data has 100+ candidates). ev_status='failed' alone can also
         # be legitimate, so we use the policy count as the race signal.
         if us_pol == 0 or (ev_us == "failed" and us_pol < 20):
-            time.sleep(6)
+            # 60s sleep covers observed worst-case visibility delay on
+            # quant-stack (2026-05-28: 5-min lag w/o sync; ~30s with sync).
+            # Also re-sync before retry in case more dirty pages accumulated.
+            time.sleep(60)
+            try:
+                os.sync()
+            except OSError:
+                pass
             retry = _run_once()
             ev_us2, us_pol2 = _read_us_ev_status(bulletin_path)
             retry_note = (
                 f"\n[retry] race suspected; first={ev_us}/{us_pol}pols, "
-                f"second={ev_us2}/{us_pol2}pols"
+                f"second={ev_us2}/{us_pol2}pols (sleep=60s + os.sync)"
             )
             result = retry
 

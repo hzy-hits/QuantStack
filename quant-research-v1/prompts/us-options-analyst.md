@@ -57,14 +57,21 @@
 
 ## 输出格式(严格遵守)
 
-## 指数短端 hedging(ETF + cash index,DTE ≤ 7)
-| Symbol | DTE | type | strike | OTM% | volume | OI | v/OI | 含义 |
-|---|---:|:---:|---:|---:|---:|---:|---:|---|
-(最多 12 行,按 v/OI desc;ETF 与 cash 一起列。
-**ETF (SPY/QQQ/IWM/DIA)**:美式 / ETF 结算 / 一般税率;
-**Cash index (^SPX/^NDX/^XSP/^RUT)**:欧式 / 现金结算 / 1256 60-40 税 / **0DTE 每个交易日都有**(SPY 没有)。
-若同时有 ETF 和 cash index 在同一 strike 区出现 hedging,要写出来——这是机构 grade 的对冲信号,远比单纯 ETF 强。
-无则写"今日指数无短端 hedging 异动")
+## ETF 指数短端 hedging(SPY/QQQ/IWM/DIA,DTE ≤ 7,按 v/OI 排序)
+| Symbol | DTE | type | strike | OTM% | volume | OI | v/OI |
+|---|---:|:---:|---:|---:|---:|---:|---:|
+(最多 8 行,这是**零售 + 中型机构**的对冲信号,v/OI 高表示新开仓拥挤;无则写"今日 ETF 指数无短端异动")
+
+## 现金结算指数短端定位(^SPX/^NDX/^XSP/^XND/^MRUT/^RUT/^XEO,DTE ≤ 7,按绝对 volume 排序)
+| Symbol | DTE | type | strike | OTM% | volume | OI | v/OI |
+|---|---:|:---:|---:|---:|---:|---:|---:|
+(最多 10 行,这是**机构主导**的对冲/做市信号——OI 本身大所以 v/OI 自然低(10-50x 而非 ETF 的几百到几千),用绝对 volume 判断机构 conviction;无则写"今日现金指数无显著短端定位")
+
+## 跨 venue 共振分析(narrator 必填一句话)
+- 若 ETF 与现金指数**同侧同 strike 区**同时异动:写"全市场共识"(retail + institutional 同向)
+- 若仅 ETF 异动:写"零售/中型机构主导,可能噪音"
+- 若仅现金指数异动:写"机构隐蔽对冲,信号纯度更高"
+- 若 ETF 看跌 + 现金指数看涨(或反之):写"venue 分歧——大概率方向 = 现金指数"
 
 ## 个股短端异动(DTE ≤ 7,v/OI ≥ 50x)
 | Symbol | DTE | type | strike | OTM% | volume | OI | v/OI | catalyst(若有) |

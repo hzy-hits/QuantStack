@@ -224,11 +224,10 @@ def build_options_payload(art: dict[str, Any], as_of: str) -> str:
 
     out_parts: list[str] = []
 
-    # 1) Index short-DTE hedging — both ETFs (SPY/QQQ/IWM) and cash-settled
-    # indices (^SPX/^NDX/^XSP/^RUT) where the latter have daily expiries
-    # including 0DTE, much deeper institutional flow visibility.
+    # 1a) ETF index short-DTE — SPY/QQQ/IWM/DIA, rank by v/OI (retail-driven,
+    # surges show new-open hedging when v/OI explodes vs small base OI).
     try:
-        idx_rows = con.execute(
+        etf_rows = con.execute(
             """
             SELECT symbol, days_to_exp, expiry, option_type, strike, current_price,
                    volume, open_interest,
@@ -236,29 +235,64 @@ def build_options_payload(art: dict[str, Any], as_of: str) -> str:
                    mid
             FROM options_chain_quotes
             WHERE as_of = (SELECT MAX(as_of) FROM options_chain_quotes)
-              AND symbol IN ('SPY', 'QQQ', 'IWM', 'DIA',
-                              '^SPX', '^NDX', '^RUT', '^XEO',
-                              '^XSP', '^XND', '^MRUT')
+              AND symbol IN ('SPY', 'QQQ', 'IWM', 'DIA')
               AND days_to_exp BETWEEN 0 AND 7
               AND volume >= 5000
               AND open_interest >= 30
             ORDER BY (volume::DOUBLE / open_interest) DESC NULLS LAST
-            LIMIT 30
+            LIMIT 20
             """
         ).fetchall()
     except duckdb.Error as exc:
-        idx_rows = []
-        out_parts.append(f"[index query failed: {exc}]")
-    out_parts.append(f"## Index short-DTE hedging (SPY/QQQ/IWM ETF + ^SPX/^NDX/^XSP/^RUT cash, DTE 0-7, vol>=5000, v/OI>=30) — {len(idx_rows)} rows")
+        etf_rows = []
+        out_parts.append(f"[ETF index query failed: {exc}]")
+    out_parts.append(f"## Index ETF short-DTE (SPY/QQQ/IWM/DIA, DTE 0-7, vol>=5000, ranked by v/OI) — {len(etf_rows)} rows")
     out_parts.append("| symbol | DTE | expiry | type | strike | spot | OTM% | volume | OI | v/OI | mid |")
     out_parts.append("|---|---:|---|:---:|---:|---:|---:|---:|---:|---:|---:|")
-    for r in idx_rows[:15]:
+    for r in etf_rows[:12]:
         sym, dte, exp, otype, strike, spot, vol, oi, voi, mid = r
         otm_pct = ((strike - spot) / spot * 100) if spot else 0
         mid_s = f"{mid:.2f}" if mid is not None else "—"
         out_parts.append(
             f"| {sym} | {dte} | {exp} | {otype} | {strike:.2f} | {spot:.2f} | "
             f"{otm_pct:+.2f} | {vol:,} | {oi:,} | {voi:.1f} | {mid_s} |"
+        )
+
+    # 1b) Cash-settled index short-DTE — institutional-driven, much larger OI
+    # so v/OI runs 10-50x instead of 100-1000x. Rank by absolute volume to
+    # surface institutional positioning (won't be picked up by v/OI sort which
+    # is dominated by retail ETF flow).
+    try:
+        cash_rows = con.execute(
+            """
+            SELECT symbol, days_to_exp, expiry, option_type, strike, current_price,
+                   volume, open_interest,
+                   CASE WHEN open_interest > 0 THEN volume::DOUBLE/open_interest ELSE NULL END AS vol_oi,
+                   mid
+            FROM options_chain_quotes
+            WHERE as_of = (SELECT MAX(as_of) FROM options_chain_quotes)
+              AND symbol IN ('^SPX', '^NDX', '^RUT', '^XEO', '^XSP', '^XND', '^MRUT', '^VIX')
+              AND days_to_exp BETWEEN 0 AND 7
+              AND volume >= 1000
+            ORDER BY volume DESC NULLS LAST
+            LIMIT 30
+            """
+        ).fetchall()
+    except duckdb.Error as exc:
+        cash_rows = []
+        out_parts.append(f"[cash index query failed: {exc}]")
+    out_parts.append("")
+    out_parts.append(f"## Cash-settled index short-DTE (^SPX/^NDX/^XSP/^XND/^MRUT/^RUT/^XEO/^VIX, DTE 0-7, vol>=1000, ranked by volume) — {len(cash_rows)} rows")
+    out_parts.append("| symbol | DTE | expiry | type | strike | spot | OTM% | volume | OI | v/OI | mid |")
+    out_parts.append("|---|---:|---|:---:|---:|---:|---:|---:|---:|---:|---:|")
+    for r in cash_rows[:18]:
+        sym, dte, exp, otype, strike, spot, vol, oi, voi, mid = r
+        otm_pct = ((strike - spot) / spot * 100) if spot else 0
+        mid_s = f"{mid:.2f}" if mid is not None else "—"
+        voi_s = f"{voi:.1f}" if voi is not None else "—"
+        out_parts.append(
+            f"| {sym} | {dte} | {exp} | {otype} | {strike:.2f} | {spot:.2f} | "
+            f"{otm_pct:+.2f} | {vol:,} | {oi:,} | {voi_s} | {mid_s} |"
         )
 
     # 2) Per-symbol short-DTE anomalies (DTE ≤ 7, v/OI ≥ 50, exclude indices)

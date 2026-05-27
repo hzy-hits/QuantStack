@@ -93,12 +93,25 @@
 - 信号冲突 = news 与 Serenity 反向:必须裁决哪边更可信(看 prio / sev / 时效),写出立场)
 
 ## 今日期权定位
-(options 提取器输出的 5 类——指数 ETF 短端 hedging / 个股短端异动 / 中期 tenor / options_alpha 综合定向 / options_sentiment 极端定位。
-- 一段开头说今天指数 ETF (SPY+QQQ+IWM) 1DTE 整体 hedging 强度,**用绝对 volume 总和 + 主要 strike OTM 位置**来判断是隔夜 risk 定价、Fed catalyst 还是 monthly expiry 行情
-- 列出 2-3 个最值得注意的个股短端异动 ticker,**必须关联 catalyst**(earnings_calendar / news_scored severity≥2 / Serenity stance flip);找不到 catalyst 就写"无显性 catalyst,可能是机构定向博弈"
-- 列出 1-2 个 options_alpha 综合定向最强 + options_sentiment 同向的 ticker(确认信号),以及 1-2 个 alpha 与 sentiment 反向的 ticker(冲突信号——值得 narrator 注意)
-- **绝对禁止写**:具体 strike / 到期 / 合约代码 / "买 call"/"卖 put"/"建 spread" 这类执行指令
-- 期权数据只用来**辅助股票决策 + 风险预警**;narrator 看到 1DTE put 涌入 = 提示市场为隔夜 risk 定价,不是叫你做空)
+(options 提取器输出的 6 类——ETF 指数短端 / 现金结算指数短端 / 个股短端异动 / 中期 tenor / options_alpha 综合定向 / options_sentiment 极端定位。
+
+**必须分 4 段写**(无则那段写"无显著异动"):
+
+1. **ETF 指数段**:SPY/QQQ/IWM/DIA 1DTE 整体 hedging 强度,**用绝对 volume 总和 + 主要 strike OTM 位置**判断是隔夜 risk 定价、Fed catalyst 还是 monthly expiry 行情。
+
+2. **现金结算指数段**(必须独立成段,不要折叠进 ETF 段):列 ^SPX / ^NDX / ^XSP / ^XND / ^MRUT / ^RUT / ^XEO 的短端定位。**比较 ETF vs cash venue 的同向/异向 + 同 strike 区/不同 strike 区**。**关键规则:**
+   - 同向同 strike(SPY 750P + ^SPX 7500P 都拥挤)= 全市场共识,信号强
+   - 仅 ^SPX 异动(SPY 平静)= 机构隐蔽对冲,信号纯度高
+   - 仅 SPY 异动(^SPX 平静)= 零售情绪,噪音多
+   - ^SPX put 拥挤但 ^SPX call 也拥挤(对称)= **双向波动率交易,不是方向押注**(关键区分!)
+   - ^VIX 只引用 vol 水平作为 context,**绝不**列为交易候选
+
+3. **个股短端异动段**:2-3 个最值得注意的 ticker,**必须关联 catalyst**(earnings_calendar / news_scored severity≥2 / Serenity stance flip);找不到 catalyst 就写"无显性 catalyst,可能是机构定向博弈"。
+
+4. **alpha vs sentiment 跨源段**:1-2 个 options_alpha 综合定向最强 + options_sentiment 同向(确认信号),1-2 个 alpha 与 sentiment 反向(冲突——值得 narrator 注意)。
+
+**绝对禁止写**:具体 strike / 到期 / 合约代码 / "买 call"/"卖 put"/"建 spread" 这类执行指令。
+期权数据只用来**辅助股票决策 + 风险预警**;narrator 看到 1DTE put 涌入 = 提示市场为隔夜 risk 定价,不是叫你做空。)
 
 ## 交易地图
 
