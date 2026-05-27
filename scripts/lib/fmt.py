@@ -111,6 +111,24 @@ def report_safe_options_context(value: Any, limit: int = 120) -> str:
     return text[: limit - 3].rstrip() + "..."
 
 
+ACTION_LABELS = {
+    "buy_planned_entry": "计划买入",
+    "buy_pullback_or_intraday_confirmation": "回踩/盘中确认再买",
+    "buy_only_if_intraday_relative_strength_confirms": "只在盘中相对强度确认后买",
+    "buy_planned_entry_observed": "左侧计划买入",
+    "buy_pullback_observed": "左侧回踩买入",
+    "buy_stock_with_options_confirmation": "股票买入，期权/flow 确认",
+    "buy_stock_position": "股票买入",
+    "prepare_order_but_wait_for_price": "准备观察，等价格确认",
+    "rank_only_no_new_trade": "只观察，不开新仓",
+}
+
+
+def action_label(value: Any) -> str:
+    text = str(value or "-")
+    return ACTION_LABELS.get(text, text)
+
+
 def display_tenor_name(value: Any) -> str:
     """Map raw tenor key (weekly/monthly/...) to display label (LEAPS for long_dated)."""
     mapping = {
