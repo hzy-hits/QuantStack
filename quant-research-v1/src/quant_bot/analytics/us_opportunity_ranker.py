@@ -467,26 +467,73 @@ def recent_news(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date,
 
 
 def headline_risk(items: list[dict[str, Any]], config: NewsRiskConfig, symbol: str = "") -> dict[str, Any]:
-    risk = 0.0
+    """Compute symbol-level headline risk with two precision improvements:
+
+    1. Subject filter — severe/negative term must appear in the HEADLINE itself,
+       AND the symbol must be in the headline (not just the summary or article
+       body). This eliminates false positives from multi-ticker "tag list" articles
+       (e.g. "ZoomInfo, GoDaddy... Shares Plummet" tagging MU because of sector
+       grouping) and metaphor articles ("Burry's NVIDIA-Era Bloody Car Crash
+       Warning" mentioning MU in body).
+
+    2. Recency decay — if the most recent symbol-subject headline has NO negative
+       terms and is newer than the offending severe hit, decay the risk score.
+       Stale "bankruptcy" tags shouldn't outweigh fresh "UBS upgrade" news.
+    """
+    severe_risk = 0.0
+    negative_risk = 0.0
     flags: list[str] = []
     latest_headline = ""
     latest_date = None
-    for item in items:
+    severe_date: str | None = None
+    sorted_items = sorted(
+        items, key=lambda i: as_iso(i.get("published_at")) or "", reverse=True
+    )
+    for item in sorted_items:
         headline = str(item.get("headline") or "")
-        text = f"{headline} {item.get('summary') or ''}".lower()
-        if symbol and not symbol_alias_in_text(symbol, text):
+        summary = str(item.get("summary") or "")
+        headline_l = headline.lower()
+        full_text = f"{headline} {summary}".lower()
+        # Filter 1: symbol must appear somewhere in headline/summary at all
+        if symbol and not symbol_alias_in_text(symbol, full_text):
             continue
-        if not latest_headline and (not symbol or symbol_alias_in_text(symbol, headline.lower())):
+        # Track the most recent symbol-subject headline (symbol in headline)
+        is_subject = (not symbol) or symbol_alias_in_text(symbol, headline_l)
+        if is_subject and not latest_headline:
             latest_headline = headline
             latest_date = as_iso(item.get("published_at"))
-        severe_hits = [term for term in config.severe_terms if term_in_text(term, text)]
-        negative_hits = [term for term in config.negative_terms if term_in_text(term, text)]
-        if severe_hits:
-            risk = max(risk, 0.82)
-            flags.extend(severe_hits)
-        elif negative_hits:
-            risk = max(risk, 0.48)
-            flags.extend(negative_hits)
+        # Filter 2: only count severe/negative against symbol if it is the
+        # subject (symbol in headline) AND the negative term is in the headline.
+        # This rejects multi-ticker tag list articles and metaphor/body mentions.
+        if not is_subject:
+            continue
+        severe_in_headline = [
+            term for term in config.severe_terms if term_in_text(term, headline_l)
+        ]
+        negative_in_headline = [
+            term for term in config.negative_terms if term_in_text(term, headline_l)
+        ]
+        item_date = as_iso(item.get("published_at"))
+        if severe_in_headline:
+            severe_risk = max(severe_risk, 0.82)
+            flags.extend(severe_in_headline)
+            if severe_date is None:
+                severe_date = item_date
+        elif negative_in_headline:
+            negative_risk = max(negative_risk, 0.48)
+            flags.extend(negative_in_headline)
+    risk = max(severe_risk, negative_risk)
+    # Recency decay: if latest symbol-subject headline is clean AND newer
+    # than the severe hit, dampen the risk. Cap decay so risk stays ≥ 0.25 if
+    # a severe hit was ever recorded (don't fully clear, just downgrade).
+    if risk >= 0.6 and latest_headline and severe_date and latest_date:
+        latest_l = latest_headline.lower()
+        latest_clean = not (
+            any(term_in_text(t, latest_l) for t in config.severe_terms)
+            or any(term_in_text(t, latest_l) for t in config.negative_terms)
+        )
+        if latest_clean and latest_date > severe_date:
+            risk = max(0.25, risk - 0.4)
     return {
         "headline_risk": round(risk, 4),
         "headline_flags": sorted(set(flags)),
