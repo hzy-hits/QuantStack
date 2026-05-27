@@ -90,3 +90,37 @@ def fmt_rate_pct(value: Any) -> str:
 def symbol_key(value: Any) -> str:
     """Normalize a ticker symbol (uppercase, stripped). Was _symbol_key in main."""
     return str(value or "").upper().strip()
+
+
+def report_safe_options_context(value: Any, limit: int = 120) -> str:
+    """Strip option-pitching language (打法/指引/追入) from options context text."""
+    text = str(value or "-").replace("\n", " ").replace("|", "/").strip()
+    replacements = {
+        "打法:": "",
+        "打法：": "",
+        "指引：": "",
+        "指引:": "",
+        "加仓": "提高关注",
+        "小仓": "小样本关注",
+        "追入": "追高",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def display_tenor_name(value: Any) -> str:
+    """Map raw tenor key (weekly/monthly/...) to display label (LEAPS for long_dated)."""
+    mapping = {
+        "weekly": "weekly",
+        "biweekly": "biweekly",
+        "monthly": "monthly",
+        "quarterly": "quarterly",
+        "half_year": "half-year",
+        "leaps": "LEAPS",
+        "long_dated": "LEAPS",
+    }
+    text = str(value or "").strip()
+    return mapping.get(text.lower(), text or "-")

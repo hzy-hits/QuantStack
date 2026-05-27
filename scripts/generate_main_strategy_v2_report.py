@@ -2791,22 +2791,8 @@ def render_profit_guardrails(rows: list[dict[str, Any]]) -> list[str]:
 from lib.fmt import fmt_r, clean_table_text  # noqa: E402
 
 
-def report_safe_options_context(value: Any, limit: int = 120) -> str:
-    text = str(value or "-").replace("\n", " ").replace("|", "/").strip()
-    replacements = {
-        "打法:": "",
-        "打法：": "",
-        "指引：": "",
-        "指引:": "",
-        "加仓": "提高关注",
-        "小仓": "小样本关注",
-        "追入": "追高",
-    }
-    for old, new in replacements.items():
-        text = text.replace(old, new)
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3].rstrip() + "..."
+# report_safe_options_context moved to lib.fmt (Phase A.1 extension)
+from lib.fmt import report_safe_options_context  # noqa: E402
 
 
 ACTION_LABELS = {
@@ -3636,18 +3622,8 @@ def _format_option_float(value: Any, *, decimals: int = 0) -> str:
     return f"{parsed:,.{decimals}f}"
 
 
-def _display_tenor_name(value: Any) -> str:
-    mapping = {
-        "weekly": "weekly",
-        "biweekly": "biweekly",
-        "monthly": "monthly",
-        "quarterly": "quarterly",
-        "half_year": "half-year",
-        "leaps": "LEAPS",
-        "long_dated": "LEAPS",
-    }
-    text = str(value or "").strip()
-    return mapping.get(text.lower(), text or "-")
+# _display_tenor_name moved to lib.fmt as display_tenor_name (Phase A.1 extension)
+from lib.fmt import display_tenor_name as _display_tenor_name  # noqa: E402
 
 
 def _format_tenor_ratio_text(evidence: dict[str, Any], *, limit: int = 80) -> str:
@@ -8857,325 +8833,14 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _tenor_signals_by_sym(payload: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    out: dict[str, list[dict[str, Any]]] = {}
-    for s in (payload.get("options_tenor_signals") or []):
-        sym = str(s.get("symbol") or "").upper()
-        if sym:
-            out.setdefault(sym, []).append(s)
-    return out
-
-
-def _pick_probability_stock(ranker_rows, verdicts, tenor_by_sym):
-    """Highest rank_score among rows with tenor anomaly confluence."""
-    cands = []
-    for r in ranker_rows[:30]:
-        sym = str(r.get("symbol") or "").upper()
-        rs = float(r.get("rank_score") or 0)
-        if rs < 55: continue
-        ts = tenor_by_sym.get(sym, [])
-        tenor_score = max((float(t.get("score") or 0) for t in ts), default=0.0)
-        if tenor_score < 10: continue
-        v = verdicts.get(sym, {})
-        skz = round_or_none(v.get("skew_z"))
-        # composite: rank dominant, tenor confluence amplifies, penalize put-skew spike
-        score = rs * (1.0 + min(tenor_score, 200) / 250.0) - (max((skz or 0) - 1.5, 0) * 5)
-        cands.append((score, sym, r, v, ts, tenor_score))
-    cands.sort(key=lambda x: -x[0])
-    return cands[:2]
-
-
-def _pick_probability_leaps(ranker_rows, verdicts, tenor_by_sym):
-    """IV rank ≤25% + decent rank + not crowded (PC z > -1.5).
-
-    Bias toward AI-infra core sleeves and evidence-proven names so the context
-    aligns with the main strategy. Pure signal strength alone (for example,
-    long-dated call ratios in unrelated tickers) is not enough.
-    """
-    cands = []
-    for r in ranker_rows[:60]:
-        sym = str(r.get("symbol") or "").upper()
-        v = verdicts.get(sym, {})
-        iv_rk = round_or_none(v.get("iv_rank_pct"))
-        if iv_rk is None or iv_rk > 25: continue
-        rs = float(r.get("rank_score") or 0)
-        if rs < 50: continue   # higher floor — long-horizon context needs quant conviction
-        pcz = round_or_none(v.get("pc_ratio_z"))
-        if pcz is not None and pcz < -1.5: continue   # crowded retail call piling
-        ts = tenor_by_sym.get(sym, [])
-        leaps_ratio = 0.0
-        signal_score = 0.0
-        for t in ts:
-            if t.get("pattern") in {"insider_tilt_long_dated_calls", "bullish_conviction_stack"}:
-                ev = t.get("evidence") or {}
-                if "leaps" in (ev.get("tenors") or []):
-                    try:
-                        idx = ev["tenors"].index("leaps")
-                        leaps_ratio = max(leaps_ratio, float(ev["ratios"][idx]))
-                    except (ValueError, IndexError, KeyError):
-                        pass
-                signal_score = max(signal_score, float(t.get("score") or 0))
-        sleeve = str(r.get("alpha_sleeve_id") or "")
-        ai_infra_bonus = 12 if "ai_infra" in sleeve else 0
-        ev_state = str(r.get("ai_infra_evidence_state") or "")
-        ev_bonus = 10 if "原文已证明" in ev_state else 0
-        # rank dominant, IV cheapness adds, capped long-dated signal, AI-infra & evidence bias
-        score = (
-            rs * 0.6
-            + (25 - iv_rk) * 1.0
-            + min(leaps_ratio, 10) * 0.5
-            + min(signal_score, 40) * 0.15
-            + ai_infra_bonus
-            + ev_bonus
-        )
-        cands.append((score, sym, r, v, leaps_ratio or signal_score / 10.0, iv_rk))
-    cands.sort(key=lambda x: -x[0])
-    return cands[:2]
-
-
-def _pick_probability_short(ranker_rows, verdicts, tenor_by_sym):
-    """Highest absolute weekly far OTM call volume × ratio × cheap IV (gamma squeeze attack)."""
-    cands = []
-    for r in ranker_rows[:60]:
-        sym = str(r.get("symbol") or "").upper()
-        v = verdicts.get(sym, {})
-        iv_rk = round_or_none(v.get("iv_rank_pct"))
-        if iv_rk is not None and iv_rk > 50: continue   # don't attack from IV top
-        rs = float(r.get("rank_score") or 0)
-        if rs < 40: continue
-        for t in tenor_by_sym.get(sym, []):
-            if t.get("pattern") != "gamma_trap": continue
-            ev = t.get("evidence") or {}
-            w = float(ev.get("weekly_far_otm_call") or 0)
-            m = float(ev.get("monthly_far_otm_call") or 0) or 1
-            ratio = w / m
-            if w < 1000: continue   # need real flow
-            score = (w ** 0.5) * (1 + ratio / 100.0) - (iv_rk or 25) * 0.5 + rs * 0.3
-            cands.append((score, sym, r, v, w, m, ratio, iv_rk))
-            break
-    cands.sort(key=lambda x: -x[0])
-    return cands[:2]
-
-
-def render_us_probability_picks_section(payload: dict[str, Any]) -> list[str]:
-    """🎲 Production stock pick plus option-flow context.
-
-    The stock pick must be inside production_decision_summary.actionable. Options
-    signals are displayed only as timing/risk context and never carry a position
-    size unless a dedicated options production sleeve exists.
-    """
-    ranker_rows = (payload.get("us_opportunity_ranker") or {}).get("all_rows") or []
-    verdicts = payload.get("options_verdicts") or {}
-    tenor_by_sym = _tenor_signals_by_sym(payload)
-    regime_state = str((payload.get("risk_regime") or {}).get("state") or "hedge").lower()
-    actions = market_actions(payload, "US")
-    action_by_sym = {_symbol_key(row.get("symbol")): row for row in actions}
-    production_rows = [row for row in ranker_rows if _symbol_key(row.get("symbol")) in action_by_sym]
-    us_gate = ((payload.get("production_decision_summary") or {}).get("summary") or {}).get("us_execution_gate") or evaluate_us_execution_gate(payload)
-
-    stock = _pick_probability_stock(production_rows, verdicts, tenor_by_sym)
-    long_context = _pick_probability_leaps(production_rows, verdicts, tenor_by_sym)
-    short_context = _pick_probability_short(production_rows, verdicts, tenor_by_sym)
-
-    lines = ["## 🎲 今日概率最优",
-             "",
-             f"当前 regime **{regime_state}**。股票候选来自执行汇总；期权/flow 提供 timing、crowding 和风险定位。",
-             ""]
-    if not actions:
-        gate_text = us_gate.get("top_blocker") if isinstance(us_gate, dict) else None
-        lines.append(f"- 今日 US 执行仓位为 0R；概率最优仅保留观察结论。{gate_text or ''}".rstrip())
-        lines.append("")
-
-    # ---- Stock ----
-    if stock:
-        s, sym, r, v, ts, tsc = stock[0]
-        action_row = action_by_sym.get(sym) or {}
-        rk = r.get('rank_score')
-        iv = round_or_none(v.get('iv_rank_pct'))
-        iv_s = f"{iv:.0f}%" if iv is not None else "-"
-        skz = round_or_none(v.get('skew_z'))
-        lines.append(f"### 🥇 股票 → **{sym}**")
-        lines.append(f"- rank_score **{rk:.1f}**(US ranker {r.get('rank')});IV rank {iv_s};tenor 异动 score **{tsc:.0f}**")
-        if len(stock) > 1:
-            _, sym2, r2, v2, _, tsc2 = stock[1]
-            iv2 = round_or_none(v2.get('iv_rank_pct'))
-            iv2_s = f"{iv2:.0f}%" if iv2 is not None else "-"
-            lines.append(f"- 备选 **{sym2}** rank {r2.get('rank_score'):.1f} / IV rank {iv2_s} / tenor {tsc2:.0f}")
-        lines.append("- 概率论据:rank ≥65 在过去 12 个月类似 setup 5d hit rate ≈ 58-65%;tenor anomaly 同向 → MM 被迫 hedge,spot 推力外加")
-        lines.append(f"- 建议仓位:**{fmt_r(action_row.get('size_r'))}** (来自执行汇总)")
-        lines.append(f"- 风控:{action_row.get('risk_plan') or '按 Production Decision / trade plan 复核'}")
-        lines.append("")
-    elif actions:
-        lines.append("- 可交易名单里没有同时满足 rank + tenor confluence 的股票；不从 ranker 观察票硬拔。")
-        lines.append("")
-
-    # ---- Long-horizon options context ----
-    if long_context:
-        s, sym, r, v, leaps_t, iv_rk = long_context[0]
-        rk = r.get('rank_score')
-        pcz = round_or_none(v.get('pc_ratio_z'))
-        ev_state = "证(原文已证明)" if "原文已证明" in str(r.get("ai_infra_evidence_state") or "") else "推"
-        lines.append(f"### 远月 vol context(0R) → **{sym}**")
-        pcz_s = f"{pcz:+.1f}" if pcz is not None else "-"
-        lines.append(f"- rank **{rk:.1f}**;IV rank **{iv_rk:.0f}%** (52d 内分位);evidence={ev_state};PC z={pcz_s}")
-        if len(long_context) > 1:
-            _, sym2, r2, v2, lt2, iv2 = long_context[1]
-            lines.append(f"- 备选 **{sym2}** rank {r2.get('rank_score'):.1f} / IV rank {iv2:.0f}%(远月信号 {lt2:.1f})")
-        lines.append("- 解读:IV rank 低位 + LEAPS/远月 call 堆积说明方向成本和定位。")
-        lines.append("- Option context: 0R；若未来建立 options sleeve，再单独输出合约、delta、止损和回测。")
-        lines.append("")
-
-    # ---- Short-dated options context ----
-    if short_context:
-        s, sym, r, v, w, m, ratio, iv_rk = short_context[0]
-        rk = r.get('rank_score')
-        iv_s = f"{iv_rk:.0f}%" if iv_rk is not None else "-"
-        lines.append(f"### 短端 gamma context(0R) → **{sym}**")
-        lines.append(f"- weekly 远 OTM call **{int(w):,}** vs monthly {int(m):,}(**{ratio:.0f}x** ratio);IV rank {iv_s};rank {rk:.1f}")
-        if len(short_context) > 1:
-            _, sym2, r2, v2, w2, m2, ra2, iv2 = short_context[1]
-            iv2_s = f"{iv2:.0f}%" if iv2 is not None else "-"
-            lines.append(f"- 备选 **{sym2}** weekly {int(w2):,} / {ra2:.0f}x / IV rank {iv2_s} / rank {r2.get('rank_score'):.1f}")
-        lines.append("- 解读:短端 call wall 用作股票 timing / squeeze-risk 信号。")
-        lines.append("- Option context: 0R；暂无独立 options sleeve 合约建议。")
-        lines.append("")
-
-    lines.append("---")
-    lines.append("")
-    return lines
-
-
-# build_serenity_crosscheck + render_serenity_crosscheck_section extracted to
-# scripts/sections/serenity.py (Phase B.0 of REFACTOR_PLAN.md)
+# B.0: serenity (re-added — was accidentally removed during B.2/B.3 surgery)
 from sections.serenity import build_serenity_crosscheck, render_serenity_crosscheck_section  # noqa: E402
 
+# B.2: probability_picks moved to scripts/sections/probability_picks.py
+from sections.probability_picks import render_us_probability_picks_section  # noqa: E402
 
-def render_us_top10_daily_section(payload: dict[str, Any]) -> list[str]:
-    """Production stock focus plus option-flow context.
-
-    放在美股日报最顶部(intro 之后,可交易名单之前)。下面的完整可交易
-    名单 / 逐票复核 / IV 视图等保留作为深挖。
-    """
-    ranker_rows = (payload.get("us_opportunity_ranker") or {}).get("all_rows") or []
-    verdicts = payload.get("options_verdicts") or {}
-    tenor_signals = payload.get("options_tenor_signals") or []
-    actions = market_actions(payload, "US")
-    actionable_syms = {str(a.get("symbol") or "").upper() for a in actions}
-
-    lines: list[str] = ["## 🎯 今日只看这些", ""]
-
-    # ---- Production stocks only ----
-    ranker_by_sym = {_symbol_key(row.get("symbol")): row for row in ranker_rows}
-    top_stocks: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for action in actions:
-        sym = _symbol_key(action.get("symbol"))
-        if not sym or sym in seen:
-            continue
-        r = dict(ranker_by_sym.get(sym) or {})
-        r.setdefault("symbol", sym)
-        r["_production_size_r"] = action.get("size_r")
-        top_stocks.append(r)
-        seen.add(sym)
-        if len(top_stocks) == 6:
-            break
-
-    lines += [
-        "### 🟢 Production 股票",
-        "",
-        "| # | Symbol | rank_score | Sleeve | IV rank | 今天的位置 |",
-        "|---:|---|---:|---|---:|---|",
-    ]
-    if not top_stocks:
-        lines.append("| - | - | - | - | - | 今日股票执行为 0R；ranker 和期权定位保留观察 |")
-    for i, r in enumerate(top_stocks, 1):
-        sym = str(r.get("symbol") or "").upper()
-        v = verdicts.get(sym) or {}
-        iv_rk = round_or_none(v.get("iv_rank_pct"))
-        iv_s = f"{iv_rk:.0f}%" if iv_rk is not None else "-"
-        sleeve = (r.get("alpha_sleeve_id") or "-").replace("us_", "").replace("_", " ")
-        is_actionable = sym in actionable_syms
-        marker = "✓ 可买" if is_actionable else "观察"
-        # one-line context: tier + actionability + IV vibe
-        iv_note = ""
-        if iv_rk is not None:
-            if iv_rk <= 20:
-                iv_note = "IV 历史低位,只作方向成本 context"
-            elif iv_rk >= 80:
-                iv_note = "IV 高位,买股别买期权"
-            else:
-                iv_note = "IV 中性"
-        else:
-            iv_note = "期权数据缺"
-        broad = (r.get("score_components") or {}).get("broad_signal")
-        broad_s = f"broad {broad:.0f}" if broad is not None else ""
-        ctx = f"{marker};size {fmt_r(r.get('_production_size_r'))};{iv_note}" + (f";{broad_s}" if broad_s else "")
-        lines.append(
-            f"| {i} | **{sym}** | {r.get('rank_score', '-')} | {sleeve[:24]} | "
-            f"{iv_s} | {ctx} |"
-        )
-
-    # ---- 4 long-dated option-flow context rows ----
-    long_tenor = [
-        s for s in tenor_signals
-        if s.get("pattern") in {"insider_tilt_long_dated_calls", "bullish_conviction_stack"}
-    ]
-    long_tenor.sort(key=lambda s: -float(s.get("score") or 0.0))
-    leaps_picks: list[dict[str, Any]] = []
-    seen_l: set[str] = set()
-    for s in long_tenor:
-        sym = str(s.get("symbol") or "").upper()
-        if not sym or sym in seen_l:
-            continue
-        leaps_picks.append(s)
-        seen_l.add(sym)
-        if len(leaps_picks) == 4:
-            break
-
-    lines += [
-        "",
-        "### 🎯 远月 OTM 异动(0R context)",
-        "",
-        "| # | Symbol | Pattern | Score | IV rank | 异动证据 |",
-        "|---:|---|---|---:|---:|---|",
-    ]
-    pattern_zh = {
-        "insider_tilt_long_dated_calls": "远月 call 堆积",
-        "bullish_conviction_stack": "多周期看涨堆积",
-    }
-    for i, s in enumerate(leaps_picks, 1):
-        sym = str(s.get("symbol") or "").upper()
-        v = verdicts.get(sym) or {}
-        iv_rk = round_or_none(v.get("iv_rank_pct"))
-        iv_s = f"{iv_rk:.0f}%" if iv_rk is not None else "-"
-        pat = pattern_zh.get(s.get("pattern"), s.get("pattern") or "-")
-        ev = s.get("evidence") or {}
-        if "tenors" in ev and "ratios" in ev:
-            ratios = ev.get("ratios") or []
-            tenors = ev.get("tenors") or []
-            ev_txt = " / ".join(
-                f"{_display_tenor_name(t)}={float(r):.1f}x" for t, r in zip(tenors, ratios)
-            )
-        else:
-            parts = [f"{k}={v}" for k, v in ev.items()]
-            ev_txt = "; ".join(parts)
-        score = float(s.get("score") or 0.0)
-        cross_action = " ⭐ 同时在 Top 6 股票" if sym in {str(t.get('symbol') or '').upper() for t in top_stocks} else ""
-        lines.append(
-            f"| {i} | **{sym}** | {pat} | {score:.1f} | {iv_s} | "
-            f"{report_safe_options_context(ev_txt, 60)}{cross_action} |"
-        )
-
-    if not leaps_picks and not top_stocks:
-        lines.append("- 今日 ranker + tenor 信号都为空。")
-
-    lines += [
-        "",
-        f"_完整 ranker 表、逐票复核、IV 视图、左侧观察池等深挖内容见下文；本节期权异动为 0R context。_",
-        "",
-    ]
-    return lines
-
+# B.3: top10_daily moved to scripts/sections/top10_daily.py
+from sections.top10_daily import render_us_top10_daily_section  # noqa: E402
 
 def render_us_execution_gate_notice(payload: dict[str, Any]) -> list[str]:
     gate = ((payload.get("production_decision_summary") or {}).get("summary") or {}).get("us_execution_gate")
@@ -9216,8 +8881,12 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     ]
     lines += render_us_execution_gate_notice(payload)
     lines += render_realized_horizon_edge_section(payload, "US")
-    lines += render_us_probability_picks_section(payload)
-    lines += render_us_top10_daily_section(payload)
+    us_gate = (
+        ((payload.get("production_decision_summary") or {}).get("summary") or {}).get("us_execution_gate")
+        or evaluate_us_execution_gate(payload)
+    )
+    lines += render_us_probability_picks_section(payload, actions=actions, us_gate=us_gate)
+    lines += render_us_top10_daily_section(payload, actions=actions)
     lines += ["## 可交易名单", ""]
     lines += render_market_action_table(actions)
     lines += render_market_selection_rationale(payload, actions, "US")
