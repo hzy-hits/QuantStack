@@ -28,12 +28,14 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import requests
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CN_CONFIG = ROOT / "quant-research-cn" / "config.yaml"
 PROMPTS_DIR = ROOT / "quant-research-v1" / "prompts"
+US_DB = ROOT / "quant-research-v1" / "data" / "quant.duckdb"
 
 DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 DEEPSEEK_MODEL = "deepseek-chat"
@@ -113,6 +115,97 @@ def build_quant_payload(art: dict[str, Any]) -> str:
         "AI Supercycle Layer Attribution",
     ])
     return _join_payload_sections("QUANT PAYLOAD", sections)
+
+
+def build_news_payload(art: dict[str, Any], as_of: str) -> str:
+    """Build news payload by querying news_scored + serenity_picks DIRECTLY from DB.
+
+    Unlike other extractors that read sliced md sections, this one bypasses the
+    programmatic report filters so the agent sees raw DeepSeek-scored news + raw
+    Serenity stance snapshot.
+    """
+    if not US_DB.exists():
+        return _join_payload_sections("NEWS PAYLOAD", "[US DB not found: " + str(US_DB) + "]")
+    try:
+        con = duckdb.connect(str(US_DB), read_only=True)
+    except duckdb.IOException as exc:
+        return _join_payload_sections("NEWS PAYLOAD", f"[DB open failed: {exc}]")
+
+    out_parts: list[str] = []
+
+    # 1) News scored — last 48h, subject_match=true, severity >= 1
+    try:
+        news_rows = con.execute(
+            """
+            SELECT symbol, severity, sentiment, event_type, summary_zh,
+                   strftime(published_at, '%Y-%m-%d %H:%M') AS pub_str,
+                   headline
+            FROM news_scored
+            WHERE subject_match = true
+              AND severity >= 1
+              AND scored_at >= NOW() - INTERVAL '48 hours'
+            ORDER BY severity DESC, scored_at DESC
+            LIMIT 40
+            """
+        ).fetchall()
+    except duckdb.Error as exc:
+        news_rows = []
+        out_parts.append(f"[news_scored query failed: {exc}]")
+    out_parts.append(f"## news_scored (last 48h, subject_match=true, severity>=1) — {len(news_rows)} rows")
+    out_parts.append("| symbol | sev | sent | event_type | summary_zh | published | headline |")
+    out_parts.append("|---|---:|:---:|:---:|---|---|---|")
+    for r in news_rows[:25]:
+        sym, sev, sent, etype, summary, pub, headline = r
+        summary = (summary or "")[:80].replace("|", "/")
+        headline = (headline or "")[:80].replace("|", "/")
+        out_parts.append(f"| {sym} | {sev} | {sent} | {etype} | {summary} | {pub} | {headline} |")
+
+    # 2) Serenity picks — current snapshot, focus on view_change + priority
+    try:
+        sere_rows = con.execute(
+            """
+            SELECT ticker, stance, ai_chain_segment, priority_score,
+                   view_change, ret_1m, ret_6m
+            FROM serenity_picks
+            ORDER BY priority_score DESC
+            LIMIT 50
+            """
+        ).fetchall()
+    except duckdb.Error as exc:
+        sere_rows = []
+        out_parts.append(f"[serenity_picks query failed: {exc}]")
+    out_parts.append("")
+    out_parts.append(f"## serenity_picks (top by priority_score) — {len(sere_rows)} rows")
+    out_parts.append("| ticker | stance | segment | prio | change_type | prev→now | ret_1m | ret_6m |")
+    out_parts.append("|---|:---:|:---:|---:|:---:|---|---:|---:|")
+    for r in sere_rows[:30]:
+        tic, stance, seg, prio, vc_raw, r1m, r6m = r
+        change_type = "?"
+        prev_stance = ""
+        cur_stance = ""
+        if vc_raw:
+            try:
+                vc = vc_raw if isinstance(vc_raw, dict) else __import__("ast").literal_eval(vc_raw)
+                change_type = vc.get("change_type", "?")
+                prev_stance = vc.get("previous_stance", "")
+                cur_stance = vc.get("current_stance", "")
+            except (ValueError, SyntaxError):
+                pass
+        flip_str = f"{prev_stance}→{cur_stance}" if (prev_stance and cur_stance and prev_stance != cur_stance) else "—"
+        r1m_str = f"{r1m:+.1f}%" if r1m is not None else ""
+        r6m_str = f"{r6m:+.1f}%" if r6m is not None else ""
+        out_parts.append(f"| {tic} | {stance} | {seg} | {prio:.0f} | {change_type} | {flip_str} | {r1m_str} | {r6m_str} |")
+
+    # 3) Cross-ref hint: tickers appearing in BOTH sources today
+    news_syms = {r[0] for r in news_rows if r[1] >= 2}
+    sere_syms = {r[0] for r in sere_rows if r[3] >= 100}
+    overlap = sorted(news_syms & sere_syms)
+    out_parts.append("")
+    out_parts.append(f"## overlap hint (news sev>=2 ∩ serenity prio>=100): {len(overlap)} tickers")
+    out_parts.append(", ".join(overlap) if overlap else "[no overlap]")
+
+    con.close()
+    return _join_payload_sections("NEWS PAYLOAD", "\n".join(out_parts))
 
 
 def build_risk_payload(art: dict[str, Any]) -> str:
@@ -201,13 +294,14 @@ async def call_extractor_async(api_key: str, name: str, payload_text: str) -> tu
     return name, response or f"[{name} extractor failed]"
 
 
-async def run_extractors(api_key: str, art: dict[str, Any]) -> dict[str, str]:
-    """Run 4 extractors in parallel."""
+async def run_extractors(api_key: str, art: dict[str, Any], as_of: str) -> dict[str, str]:
+    """Run 5 extractors in parallel: macro / event / quant / risk / news."""
     payloads = {
         "macro": build_macro_payload(art),
         "event": build_event_payload(art),
         "quant": build_quant_payload(art),
         "risk": build_risk_payload(art),
+        "news": build_news_payload(art, as_of),
     }
     tasks = [
         call_extractor_async(api_key, name, payload)
@@ -227,6 +321,7 @@ def call_narrator(api_key: str, extractor_outputs: dict[str, str],
         f"### 事件提取\n{extractor_outputs.get('event', '[missing]')}\n\n"
         f"### 量化提取\n{extractor_outputs.get('quant', '[missing]')}\n\n"
         f"### 风险提取\n{extractor_outputs.get('risk', '[missing]')}\n\n"
+        f"### 新闻提取(DeepSeek 已打分 + Serenity 双源)\n{extractor_outputs.get('news', '[missing]')}\n\n"
         f"### Payload Digest(交叉验证用)\n{payload_digest}\n\n"
         f"### 任务\n请按 us-merge-agent.md 的输出格式,为日期 {as_of} 生成完整美股日报。"
     )
@@ -244,8 +339,8 @@ async def main_async(args) -> None:
     print(f"=== US narrator agent — {as_of} ===")
     print(f"  loaded {len(art)} artifacts; md size {len(art.get('_us_daily_report_md', ''))}")
 
-    print("  running 4 extractors in parallel...")
-    extractor_outputs = await run_extractors(api_key, art)
+    print("  running 5 extractors in parallel (macro/event/quant/risk/news)...")
+    extractor_outputs = await run_extractors(api_key, art, as_of)
     for name, out in extractor_outputs.items():
         print(f"    {name}: {len(out)} chars")
         if args.dump_extractors:
