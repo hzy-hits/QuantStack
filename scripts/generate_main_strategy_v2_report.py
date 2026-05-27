@@ -1484,74 +1484,9 @@ def build_ema_tape_overlay(
     return out
 
 
-def render_ema_tape_overlay_markdown(overlay: dict[str, dict[str, Any]], as_of: str) -> str:
-    """Render `payload["ema_tape_overlay"]` as a standalone tape sheet.
-
-    Sorted by cross_state (bull/tangled/bear), then by EMA21 5d slope desc so
-    the strongest "bull; rising" names sit at the top. The methodology limits
-    K-line to tape/crowding/risk; this artifact is for reviewer eyeballs, not
-    for evidence of supply-chain relationships.
-    """
-    rows: list[tuple[str, dict[str, Any]]] = []
-    for symbol, entry in overlay.items():
-        metrics = entry.get("metrics")
-        if not metrics:
-            continue
-        rows.append((symbol, entry))
-
-    cross_rank = {"bull": 0, "tangled": 1, "bear": 2}
-
-    def _slope(entry: dict[str, Any]) -> float:
-        return entry.get("metrics", {}).get("slope_21d_5d_pct") or 0.0
-
-    rows.sort(
-        key=lambda pair: (
-            cross_rank.get(pair[1]["metrics"].get("cross_state") or "tangled", 3),
-            -_slope(pair[1]),
-            pair[0],
-        )
-    )
-
-    lines: list[str] = [
-        f"# AI Infra EMA 21/50 Tape Overlay - {as_of}",
-        "",
-        "- 数据源: AI universe + source-review queue tickers.",
-        "- 排序: cross_state (bull → tangled → bear)，再按 EMA21 5d slope 降序。",
-        "- K-line 反映 tape / crowding / 风险情绪,看不到基本面和供应链 —— 不要拿它当证据。",
-        "",
-        "| Symbol | Market | As-of | Cross | Recent Cross | Slope 5d | Close vs EMA21 | Close vs EMA50 |",
-        "|---|---|---|---|---|---:|---:|---:|",
-    ]
-    if not rows:
-        lines += ["| - | - | - | - | - | - | - | - |", ""]
-        return "\n".join(lines) + "\n"
-    for symbol, entry in rows:
-        metrics = entry.get("metrics") or {}
-        cross = metrics.get("cross_state") or "-"
-        recent = metrics.get("recent_cross") or "-"
-        slope = metrics.get("slope_21d_5d_pct")
-        d21 = metrics.get("dist_close_ema21_pct")
-        d50 = metrics.get("dist_close_ema50_pct")
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    symbol,
-                    entry.get("market") or "-",
-                    metrics.get("as_of") or "-",
-                    cross,
-                    recent,
-                    fmt_pct(slope) if slope is not None else "-",
-                    fmt_pct(d21) if d21 is not None else "-",
-                    fmt_pct(d50) if d50 is not None else "-",
-                ]
-            )
-            + " |"
-        )
-    lines.append("")
-    return "\n".join(lines) + "\n"
-
-
+# B.17: ema_tape_overlay + cn_lifecycle → scripts/sections/{ema_tape,cn_lifecycle}.py
+from sections.ema_tape import render_ema_tape_overlay_markdown  # noqa: E402
+from sections.cn_lifecycle import render_cn_lifecycle_section  # noqa: E402
 def _ema_lookup(overlay: dict[str, dict[str, Any]] | None, ticker_field: str) -> dict[str, Any] | None:
     if not overlay:
         return None
@@ -2392,39 +2327,6 @@ from sections.tables import (  # noqa: E402
     render_limit_table, render_freshness_table, render_cn_lifecycle_table,
     render_market_watch_table,
 )
-def render_cn_lifecycle_section(cn: dict[str, Any]) -> list[str]:
-    lifecycle = cn.get("lifecycle") or {}
-    policy = lifecycle.get("policy") or {}
-    summary = lifecycle.get("summary") or {}
-    v2 = summary.get("v2_ev_positive") or {}
-    v2_dedup = summary.get("v2_ev_positive_dedup") or {}
-    all_rows = summary.get("all_oversold_diagnostic") or {}
-    all_dedup = summary.get("all_oversold_diagnostic_dedup") or {}
-    lines = [
-        "## A 股生命周期研究 / CN Lifecycle",
-        "",
-        "A 股主线现在优先 price-first tape leadership。`cn_tape_leadership_continuation` 是强市场主执行层；`cn_oversold_ev_positive` 和 `cn_observed_lifecycle_prob` 只在弱/震荡市场或具备相对强度时做 secondary。同一日期同一股票可能有多个 strategy_key 变体，去重口径按最高 EV LCB80 保留一条。",
-        "",
-        f"- Lifecycle state: `{policy.get('state') or '-'}`",
-        f"- Best bucket: `{policy.get('best_bucket') or '-'}`; bucket LCB80 {fmt_pct(policy.get('best_bucket_lcb80_pct'))}",
-        f"- Max hold: `T+{policy.get('max_hold_days') or '-'}`",
-        f"- V2 EV-positive: n `{v2.get('n', 0)}`, avg {fmt_pct(v2.get('avg_pct'))}, LCB80 {fmt_pct(v2.get('lcb80_pct'))}",
-        f"- V2 EV-positive dedup: n `{v2_dedup.get('n', 0)}`, avg {fmt_pct(v2_dedup.get('avg_pct'))}, LCB80 {fmt_pct(v2_dedup.get('lcb80_pct'))}",
-        f"- All oversold diagnostic: n `{all_rows.get('n', 0)}`, avg {fmt_pct(all_rows.get('avg_pct'))}, LCB80 {fmt_pct(all_rows.get('lcb80_pct'))}",
-        f"- All oversold diagnostic dedup: n `{all_dedup.get('n', 0)}`, avg {fmt_pct(all_dedup.get('avg_pct'))}, LCB80 {fmt_pct(all_dedup.get('lcb80_pct'))}",
-        f"- Exit rule: {policy.get('first_review')}; {policy.get('follow_through_rule')}; {policy.get('time_stop')}",
-        "- CN hold overlay: execution sleeve names get T+1 review, T+3 runner check, and T+5 max-hold review; non-sleeve rows stay rank-only.",
-        "",
-    ]
-    lines += render_cn_lifecycle_table(lifecycle.get("by_hold_bucket") or [], "EV-positive Hold Buckets")
-    lines += render_cn_lifecycle_table(lifecycle.get("by_hold_bucket_dedup") or [], "EV-positive Hold Buckets Deduped By Date/Symbol")
-    lines += render_cn_lifecycle_table(lifecycle.get("all_oversold_by_hold_bucket") or [], "All Oversold Diagnostic Hold Buckets")
-    lines += render_cn_lifecycle_table(lifecycle.get("all_oversold_by_hold_bucket_dedup") or [], "All Oversold Diagnostic Hold Buckets Deduped By Date/Symbol")
-    lines += render_cn_lifecycle_table(lifecycle.get("by_execution_mode") or [], "EV-positive By Execution Mode")
-    lines += render_cn_lifecycle_table(lifecycle.get("by_execution_mode_dedup") or [], "EV-positive By Execution Mode Deduped")
-    return lines
-
-
 def count_current_states(rows: list[dict[str, Any]]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for row in rows:
