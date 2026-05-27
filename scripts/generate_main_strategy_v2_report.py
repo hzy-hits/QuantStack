@@ -271,8 +271,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def parse_date(value: str) -> date:
-    return datetime.strptime(value, "%Y-%m-%d").date()
+# parse_date moved to lib.fmt (Phase A.1, imported below)
 
 
 def load_promotion_contract(promotion_db: Path | None, as_of: date) -> dict[str, Any]:
@@ -298,52 +297,10 @@ def is_promoted_pairs(rows: list[dict[str, Any]]) -> set[tuple[str, str]]:
     return out
 
 
-def as_iso(value: Any) -> str | None:
-    if value is None:
-        return None
-    if hasattr(value, "isoformat"):
-        return value.isoformat()
-    return str(value)[:10]
-
-
-def round_or_none(value: Any, digits: int = 6) -> float | None:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(parsed):
-        return None
-    return round(parsed, digits)
-
-
-def fmt_pct(value: Any, digits: int = 2) -> str:
-    parsed = round_or_none(value, digits)
-    if parsed is None:
-        return "-"
-    return f"{parsed:+.{digits}f}%"
-
-
-def fmt_num(value: Any, digits: int = 2) -> str:
-    parsed = round_or_none(value, digits)
-    if parsed is None:
-        return "-"
-    return f"{parsed:.{digits}f}"
-
-
-def fmt_bool(value: bool) -> str:
-    return "yes" if value else "no"
-
-
-def safe_json_loads(value: Any) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    if not value:
-        return {}
-    try:
-        parsed = json.loads(str(value))
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
+# Format helpers extracted to scripts/lib/fmt.py (Phase A.1)
+from lib.fmt import (  # noqa: E402
+    parse_date, as_iso, round_or_none, fmt_pct, fmt_num, fmt_bool, safe_json_loads,
+)
 
 
 # placeholders extracted to scripts/lib/db_helpers.py (Phase A.0)
@@ -2830,19 +2787,8 @@ def render_profit_guardrails(rows: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
-def fmt_r(value: Any) -> str:
-    parsed = round_or_none(value, 4)
-    if parsed is None:
-        return "-"
-    text = f"{parsed:.4f}".rstrip("0").rstrip(".")
-    return f"{text}R"
-
-
-def clean_table_text(value: Any, limit: int = 120) -> str:
-    text = str(value or "-").replace("\n", " ").replace("|", "/").strip()
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3].rstrip() + "..."
+# fmt_r + clean_table_text extracted to scripts/lib/fmt.py (Phase A.1)
+from lib.fmt import fmt_r, clean_table_text  # noqa: E402
 
 
 def report_safe_options_context(value: Any, limit: int = 120) -> str:
@@ -2931,17 +2877,9 @@ def human_trigger_text(market: str, row: dict[str, Any]) -> str:
     return trigger or "-"
 
 
-def fmt_rate_pct(value: Any) -> str:
-    parsed = round_or_none(value)
-    if parsed is None:
-        return "-"
-    if abs(parsed) <= 1.5:
-        parsed *= 100.0
-    return f"{parsed:+.2f}%"
-
-
-def _symbol_key(value: Any) -> str:
-    return str(value or "").upper().strip()
+# fmt_rate_pct + symbol_key extracted to scripts/lib/fmt.py (Phase A.1)
+from lib.fmt import fmt_rate_pct  # noqa: E402
+from lib.fmt import symbol_key as _symbol_key  # keep old name for backward compat  # noqa: E402
 
 
 def _is_cn_main_board(symbol: Any) -> bool:
