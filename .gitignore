@@ -23,6 +23,7 @@ data/*
 !data/ai_supply_chain_relationships_raw.example.csv
 logs/
 reports/
+!scripts/reports/
 __pycache__/
 *.py[cod]
 .venv/
