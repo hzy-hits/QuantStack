@@ -120,26 +120,8 @@ def _persist_virtual_holdings(
     )
 
 
-def position_delta_text(held_r: float | None, target_r: float | None) -> str:
-    """Short suffix for the Action cell: held→target hint.
-
-    Empty when no holding (fresh entry — Action already says 买入). For
-    held positions: 持稳 / 加 / 减 with the R delta + percent.
-    """
-    if held_r is None:
-        return ""
-    held = float(held_r)
-    target = float(target_r or 0.0)
-    if held <= 0.0:
-        return ""
-    delta = target - held
-    if abs(delta) < 0.005:
-        return f" · 持稳 {held:.3f}R"
-    pct = (delta / held) * 100.0 if held else 0.0
-    arrow = f"{held:.3f}→{target:.3f}"
-    if delta > 0:
-        return f" · 加 +{delta:.3f}R({pct:+.0f}%, {arrow})"
-    return f" · 减 {delta:.3f}R({pct:+.0f}%, {arrow})"
+# position_delta_text moved to lib/fmt.py (Phase B.19)
+from lib.fmt import position_delta_text  # noqa: E402
 
 
 # _connect_ro extracted to scripts/lib/db_helpers.py (Phase A.0)
