@@ -276,6 +276,37 @@ def emit_my_book_overlay(cfg: Settings, as_of: date) -> tuple[str, str]:
     return "ok", detail[-2000:]
 
 
+def emit_serenity_fetch(cfg: Settings, as_of: date) -> tuple[str, str]:
+    """Pull Serenity Analysis picks → serenity_picks table (US DB).
+
+    Also runs stance-flip detection (compares view_change.previous_stance vs
+    current_stance → writes any flips to serenity_stance_flips for later
+    backtest of post-flip 5d/10d returns).
+    """
+    project_root = Path(__file__).resolve().parents[1]
+    stack_root = project_root.parent
+    script = stack_root / "scripts" / "fetch_serenity_picks.py"
+    if not script.exists():
+        return "skipped", f"missing: {script}"
+    result = subprocess.run(
+        [sys.executable, str(script), "--date", as_of.isoformat()],
+        cwd=stack_root, text=True, capture_output=True, timeout=120, check=False,
+    )
+    detail_a = "\n".join(p.strip() for p in [result.stdout, result.stderr] if p and p.strip())
+    if result.returncode != 0:
+        return "error", detail_a[-1500:] or f"exit={result.returncode}"
+    # Then detect flips (writes serenity_stance_flips table)
+    flip_script = stack_root / "scripts" / "detect_serenity_flips.py"
+    if flip_script.exists():
+        flip_result = subprocess.run(
+            [sys.executable, str(flip_script), "--date", as_of.isoformat()],
+            cwd=stack_root, text=True, capture_output=True, timeout=60, check=False,
+        )
+        flip_detail = "\n".join(p.strip() for p in [flip_result.stdout, flip_result.stderr] if p and p.strip())
+        return "ok", (detail_a + "\n" + flip_detail)[-1500:]
+    return "ok", detail_a[-1500:]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Quant Research Bot — Probability Pipeline")
     parser.add_argument("--init", action="store_true")
@@ -901,6 +932,19 @@ def main() -> None:
                 bulletin_status,
                 1 if bulletin_status == "ok" else 0,
                 bulletin_detail,
+            )
+            raw_log_con.execute("CHECKPOINT")
+            raw_log_con.close()
+            raw_log_con = None
+            serenity_status, serenity_detail = emit_serenity_fetch(cfg, as_of)
+            raw_log_con = connect_write(cfg.raw_db_path_abs)
+            log_run(
+                raw_log_con,
+                run_id,
+                "serenity_fetch",
+                serenity_status,
+                1 if serenity_status == "ok" else 0,
+                serenity_detail,
             )
             if bulletin_status != "ok":
                 log.warning("alpha_bulletin_nonfatal", status=bulletin_status, detail=bulletin_detail)

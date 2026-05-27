@@ -9301,6 +9301,16 @@ def build_serenity_crosscheck(us_db: Path, as_of: date, ranker_rows: list[dict[s
         con.close()
     if not rows:
         return out
+    # Count accumulated flips for progress indicator
+    try:
+        con2 = _connect_ro(us_db)
+        if table_exists(con2, "serenity_stance_flips"):
+            out["flips_accumulated"] = con2.execute(
+                "SELECT COUNT(*) FROM serenity_stance_flips"
+            ).fetchone()[0]
+        con2.close()
+    except duckdb.Error:
+        pass
     serenity: dict[str, dict[str, Any]] = {}
     for r in rows:
         sym = (r[0] or "").upper()
@@ -9373,8 +9383,14 @@ def render_serenity_crosscheck_section(payload: dict[str, Any]) -> list[str]:
     lines += [
         f"- 数据来源:Serenity Analysis (analysissite.vercel.app),共 {sc['total_picks']} 票",
         f"- 拉取时间:{sc['fetched_at']}",
-        "",
     ]
+    flips_progress = sc.get("flips_accumulated")
+    if flips_progress is not None:
+        if flips_progress < 30:
+            lines.append(f"- Stance flips 累积进度:**{flips_progress} / 30** (够 30 个可跑 `backtest_serenity_flips.py`)")
+        else:
+            lines.append(f"- Stance flips 累积 **{flips_progress}** — 可运行 `python3 scripts/backtest_serenity_flips.py` 看 fwd 表现")
+    lines.append("")
     # 1. Stance flips
     flips = sc.get("stance_flips") or []
     if flips:
