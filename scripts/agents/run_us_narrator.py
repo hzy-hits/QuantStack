@@ -208,6 +208,165 @@ def build_news_payload(art: dict[str, Any], as_of: str) -> str:
     return _join_payload_sections("NEWS PAYLOAD", "\n".join(out_parts))
 
 
+def build_options_payload(art: dict[str, Any], as_of: str) -> str:
+    """Build options payload by querying chain quotes + sentiment + alpha DIRECTLY from DB.
+
+    Like news payload, bypasses the md slice path so the agent sees raw
+    short-DTE anomalies the programmatic report filters out (e.g. SPY/QQQ
+    1DTE put surge at 1000x v/OI).
+    """
+    if not US_DB.exists():
+        return _join_payload_sections("OPTIONS PAYLOAD", f"[US DB not found: {US_DB}]")
+    try:
+        con = duckdb.connect(str(US_DB), read_only=True)
+    except duckdb.IOException as exc:
+        return _join_payload_sections("OPTIONS PAYLOAD", f"[DB open failed: {exc}]")
+
+    out_parts: list[str] = []
+
+    # 1) Index ETF short-DTE hedging (SPY/QQQ/IWM, DTE ≤ 7, v/OI ≥ 30)
+    try:
+        idx_rows = con.execute(
+            """
+            SELECT symbol, days_to_exp, expiry, option_type, strike, current_price,
+                   volume, open_interest,
+                   CASE WHEN open_interest > 0 THEN volume::DOUBLE/open_interest ELSE NULL END AS vol_oi,
+                   mid
+            FROM options_chain_quotes
+            WHERE as_of = (SELECT MAX(as_of) FROM options_chain_quotes)
+              AND symbol IN ('SPY', 'QQQ', 'IWM')
+              AND days_to_exp BETWEEN 0 AND 7
+              AND volume >= 5000
+              AND open_interest >= 30
+            ORDER BY (volume::DOUBLE / open_interest) DESC NULLS LAST
+            LIMIT 25
+            """
+        ).fetchall()
+    except duckdb.Error as exc:
+        idx_rows = []
+        out_parts.append(f"[index ETF query failed: {exc}]")
+    out_parts.append(f"## SPY/QQQ/IWM short-DTE hedging (DTE 0-7, vol>=5000, v/OI>=30) — {len(idx_rows)} rows")
+    out_parts.append("| symbol | DTE | expiry | type | strike | spot | OTM% | volume | OI | v/OI | mid |")
+    out_parts.append("|---|---:|---|:---:|---:|---:|---:|---:|---:|---:|---:|")
+    for r in idx_rows[:15]:
+        sym, dte, exp, otype, strike, spot, vol, oi, voi, mid = r
+        otm_pct = ((strike - spot) / spot * 100) if spot else 0
+        mid_s = f"{mid:.2f}" if mid is not None else "—"
+        out_parts.append(
+            f"| {sym} | {dte} | {exp} | {otype} | {strike:.2f} | {spot:.2f} | "
+            f"{otm_pct:+.2f} | {vol:,} | {oi:,} | {voi:.1f} | {mid_s} |"
+        )
+
+    # 2) Per-symbol short-DTE anomalies (DTE ≤ 7, v/OI ≥ 50, exclude indices)
+    try:
+        sym_rows = con.execute(
+            """
+            SELECT symbol, days_to_exp, expiry, option_type, strike, current_price,
+                   volume, open_interest,
+                   CASE WHEN open_interest > 0 THEN volume::DOUBLE/open_interest ELSE NULL END AS vol_oi,
+                   mid
+            FROM options_chain_quotes
+            WHERE as_of = (SELECT MAX(as_of) FROM options_chain_quotes)
+              AND symbol NOT IN ('SPY', 'QQQ', 'IWM', 'GLD', 'SLV', 'TLT', 'USO', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XLB', 'XLRE', 'XLC')
+              AND days_to_exp BETWEEN 0 AND 7
+              AND volume >= 1000
+              AND open_interest >= 50
+              AND (volume::DOUBLE / open_interest) >= 30
+            ORDER BY (volume::DOUBLE / open_interest) DESC NULLS LAST
+            LIMIT 30
+            """
+        ).fetchall()
+    except duckdb.Error as exc:
+        sym_rows = []
+        out_parts.append(f"[symbol query failed: {exc}]")
+    out_parts.append("")
+    out_parts.append(f"## per-symbol short-DTE anomalies (DTE 0-7, vol>=1000, OI>=50, v/OI>=30) — {len(sym_rows)} rows")
+    out_parts.append("| symbol | DTE | expiry | type | strike | spot | OTM% | volume | OI | v/OI |")
+    out_parts.append("|---|---:|---|:---:|---:|---:|---:|---:|---:|---:|")
+    for r in sym_rows[:20]:
+        sym, dte, exp, otype, strike, spot, vol, oi, voi, mid = r
+        otm_pct = ((strike - spot) / spot * 100) if spot else 0
+        out_parts.append(
+            f"| {sym} | {dte} | {exp} | {otype} | {strike:.2f} | {spot:.2f} | "
+            f"{otm_pct:+.2f} | {vol:,} | {oi:,} | {voi:.1f} |"
+        )
+
+    # 3) options_alpha top directional_edge
+    try:
+        alpha_rows = con.execute(
+            """
+            SELECT symbol, directional_edge, vol_edge, vrp_edge, flow_edge,
+                   liquidity_gate, expression, reason
+            FROM options_alpha
+            WHERE as_of = (SELECT MAX(as_of) FROM options_alpha)
+              AND ABS(directional_edge) >= 0.5
+              AND liquidity_gate = 'pass'
+            ORDER BY ABS(directional_edge) DESC NULLS LAST
+            LIMIT 20
+            """
+        ).fetchall()
+    except duckdb.Error as exc:
+        alpha_rows = []
+        out_parts.append(f"[options_alpha query failed: {exc}]")
+    out_parts.append("")
+    out_parts.append(f"## options_alpha (|directional_edge|>=0.5, liq=pass) — {len(alpha_rows)} rows")
+    out_parts.append("| symbol | dir | vol | vrp | flow | expression | reason |")
+    out_parts.append("|---|---:|---:|---:|---:|:---:|---|")
+    for r in alpha_rows[:15]:
+        sym, de, ve, vre, fe, lg, expr, reason = r
+        reason_s = (reason or "")[:60].replace("|", "/")
+        out_parts.append(
+            f"| {sym} | {de:+.3f} | {ve or 0:+.3f} | {vre or 0:+.3f} | "
+            f"{fe or 0:+.3f} | {expr} | {reason_s} |"
+        )
+
+    # 4) options_sentiment extreme z-scores
+    try:
+        sent_rows = con.execute(
+            """
+            SELECT symbol, pc_ratio_z, pc_ratio_raw, skew_z, vrp_z, iv_ann, rv_ann
+            FROM options_sentiment
+            WHERE as_of = (SELECT MAX(as_of) FROM options_sentiment)
+              AND (ABS(pc_ratio_z) >= 3.0 OR ABS(skew_z) >= 3.0)
+            ORDER BY ABS(pc_ratio_z) + ABS(skew_z) DESC NULLS LAST
+            LIMIT 25
+            """
+        ).fetchall()
+    except duckdb.Error as exc:
+        sent_rows = []
+        out_parts.append(f"[options_sentiment query failed: {exc}]")
+    out_parts.append("")
+    out_parts.append(f"## options_sentiment extremes (|pc_z| or |skew_z| >= 3.0) — {len(sent_rows)} rows")
+    out_parts.append("| symbol | pc_z | pc_raw | skew_z | vrp_z | iv_ann | rv_ann |")
+    out_parts.append("|---|---:|---:|---:|---:|---:|---:|")
+    for r in sent_rows[:18]:
+        sym, pcz, pcr, skz, vrpz, iv, rv = r
+        out_parts.append(
+            f"| {sym} | {pcz:+.2f} | {pcr or 0:.2f} | {skz:+.2f} | "
+            f"{vrpz or 0:+.2f} | {iv or 0:.1f} | {rv or 0:.1f} |"
+        )
+
+    # 5) earnings catalyst overlay (next 7 days) for cross-reference
+    try:
+        er_rows = con.execute(
+            """
+            SELECT DISTINCT symbol, report_date::VARCHAR AS er_date
+            FROM earnings_calendar
+            WHERE report_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '7 days'
+            ORDER BY report_date, symbol
+            LIMIT 40
+            """
+        ).fetchall()
+    except duckdb.Error as exc:
+        er_rows = []
+    out_parts.append("")
+    out_parts.append(f"## upcoming earnings (next 7d) for catalyst cross-ref — {len(er_rows)} rows")
+    out_parts.append(", ".join(f"{r[0]}({r[1]})" for r in er_rows[:30]) or "[none]")
+
+    con.close()
+    return _join_payload_sections("OPTIONS PAYLOAD", "\n".join(out_parts))
+
+
 def build_risk_payload(art: dict[str, Any]) -> str:
     md = art.get("_us_daily_report_md", "")
     sections = _slice_md_sections(md, [
@@ -295,13 +454,14 @@ async def call_extractor_async(api_key: str, name: str, payload_text: str) -> tu
 
 
 async def run_extractors(api_key: str, art: dict[str, Any], as_of: str) -> dict[str, str]:
-    """Run 5 extractors in parallel: macro / event / quant / risk / news."""
+    """Run 6 extractors in parallel: macro / event / quant / risk / news / options."""
     payloads = {
         "macro": build_macro_payload(art),
         "event": build_event_payload(art),
         "quant": build_quant_payload(art),
         "risk": build_risk_payload(art),
         "news": build_news_payload(art, as_of),
+        "options": build_options_payload(art, as_of),
     }
     tasks = [
         call_extractor_async(api_key, name, payload)
@@ -322,6 +482,7 @@ def call_narrator(api_key: str, extractor_outputs: dict[str, str],
         f"### 量化提取\n{extractor_outputs.get('quant', '[missing]')}\n\n"
         f"### 风险提取\n{extractor_outputs.get('risk', '[missing]')}\n\n"
         f"### 新闻提取(DeepSeek 已打分 + Serenity 双源)\n{extractor_outputs.get('news', '[missing]')}\n\n"
+        f"### 期权提取(短端 hedging + 综合定向 + sentiment 极端)\n{extractor_outputs.get('options', '[missing]')}\n\n"
         f"### Payload Digest(交叉验证用)\n{payload_digest}\n\n"
         f"### 任务\n请按 us-merge-agent.md 的输出格式,为日期 {as_of} 生成完整美股日报。"
     )
@@ -339,7 +500,7 @@ async def main_async(args) -> None:
     print(f"=== US narrator agent — {as_of} ===")
     print(f"  loaded {len(art)} artifacts; md size {len(art.get('_us_daily_report_md', ''))}")
 
-    print("  running 5 extractors in parallel (macro/event/quant/risk/news)...")
+    print("  running 6 extractors in parallel (macro/event/quant/risk/news/options)...")
     extractor_outputs = await run_extractors(api_key, art, as_of)
     for name, out in extractor_outputs.items():
         print(f"    {name}: {len(out)} chars")

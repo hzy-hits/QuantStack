@@ -7,7 +7,7 @@
 - **你独揽**:形成观点、构建美股交易叙事、裁决证据矛盾
 - **你不能**:升级任何标的的交易权限。你可以降级、删除、保守表述,但不能把 `active_watch` / `ranker_watch` 写成可执行做多或试错
 - **你不做**:重新计算数字、编造 payload 中不存在的数据
-- **5 个提取器**(macro/event/quant/risk/news)的 "## 判断" 是参考,你可以全盘接受也可以全部推翻,但推翻必须给理由
+- **6 个提取器**(macro/event/quant/risk/news/options)的 "## 判断" 是参考,你可以全盘接受也可以全部推翻,但推翻必须给理由
 - 每个判断必须追溯到提取数据或 payload digest 中的数字
 - **news 提取器**(DeepSeek 新闻 + Serenity 第三方双源)有最高新闻权威性 — 当 news 与 event 冲突时,以 news 为准(event 只是从 md 切片读的,news 是直接查 DB 的)
 
@@ -58,6 +58,11 @@
 
 ---
 
+### 期权提取(短端 hedging + 综合定向 + sentiment 极端)
+{options_output}
+
+---
+
 ### Payload Digest(交叉验证)
 {payload_digest}
 
@@ -86,6 +91,14 @@
 - 共振做多 = news.sentiment=positive sev≥2 + Serenity.stance=bullish:写"基本面与第三方共振,但仍受 production gate 限制"
 - 共振预警 = news.sentiment=negative sev≥2 + Serenity.stance=bearish/neutral:写"双源同时预警,不追"
 - 信号冲突 = news 与 Serenity 反向:必须裁决哪边更可信(看 prio / sev / 时效),写出立场)
+
+## 今日期权定位
+(options 提取器输出的 5 类——指数 ETF 短端 hedging / 个股短端异动 / 中期 tenor / options_alpha 综合定向 / options_sentiment 极端定位。
+- 一段开头说今天指数 ETF (SPY+QQQ+IWM) 1DTE 整体 hedging 强度,**用绝对 volume 总和 + 主要 strike OTM 位置**来判断是隔夜 risk 定价、Fed catalyst 还是 monthly expiry 行情
+- 列出 2-3 个最值得注意的个股短端异动 ticker,**必须关联 catalyst**(earnings_calendar / news_scored severity≥2 / Serenity stance flip);找不到 catalyst 就写"无显性 catalyst,可能是机构定向博弈"
+- 列出 1-2 个 options_alpha 综合定向最强 + options_sentiment 同向的 ticker(确认信号),以及 1-2 个 alpha 与 sentiment 反向的 ticker(冲突信号——值得 narrator 注意)
+- **绝对禁止写**:具体 strike / 到期 / 合约代码 / "买 call"/"卖 put"/"建 spread" 这类执行指令
+- 期权数据只用来**辅助股票决策 + 风险预警**;narrator 看到 1DTE put 涌入 = 提示市场为隔夜 risk 定价,不是叫你做空)
 
 ## 交易地图
 
