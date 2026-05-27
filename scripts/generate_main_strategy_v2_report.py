@@ -142,22 +142,8 @@ def position_delta_text(held_r: float | None, target_r: float | None) -> str:
     return f" · 减 {delta:.3f}R({pct:+.0f}%, {arrow})"
 
 
-def _connect_ro(db_path, retries: int = 8, backoff: float = 20.0):
-    """Read-only DuckDB connect with retry on a transient writer lock.
-
-    The CN report reads quant_cn_report.duckdb while quant-cn's
-    review-backfill may briefly hold a write lock (DuckDB is single-writer
-    and a writer blocks cross-process readers). Retry rather than crash the
-    whole report; a pathological long lock still fails and retries next cron.
-    """
-    for attempt in range(retries):
-        try:
-            return duckdb.connect(str(db_path), read_only=True)
-        except duckdb.IOException as exc:
-            if "lock" not in str(exc).lower() or attempt == retries - 1:
-                raise
-            time.sleep(backoff)
-    raise RuntimeError(f"unreachable: _connect_ro({db_path})")
+# _connect_ro extracted to scripts/lib/db_helpers.py (Phase A.0)
+from lib.db_helpers import _connect_ro  # noqa: E402
 from quant_bot.analytics import cn_observed_lifecycle_prob, cn_opportunity_ranker, us_opportunity_ranker  # noqa: E402
 from sleeves.cn_tape_leadership import (  # noqa: E402
     CN_TAPE_SLEEVE_ID,
@@ -360,8 +346,8 @@ def safe_json_loads(value: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def placeholders(values: list[Any]) -> str:
-    return ",".join("?" for _ in values)
+# placeholders extracted to scripts/lib/db_helpers.py (Phase A.0)
+from lib.db_helpers import placeholders  # noqa: E402
 
 
 def nested_get(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
@@ -373,18 +359,8 @@ def nested_get(data: dict[str, Any], *keys: str, default: Any = None) -> Any:
     return default if cur is None else cur
 
 
-def table_exists(con: duckdb.DuckDBPyConnection, table: str) -> bool:
-    row = con.execute(
-        "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
-        [table],
-    ).fetchone()
-    return bool(row and row[0])
-
-
-def rows_as_dicts(con: duckdb.DuckDBPyConnection, sql: str, params: list[Any]) -> list[dict[str, Any]]:
-    cur = con.execute(sql, params)
-    names = [desc[0] for desc in cur.description]
-    return [dict(zip(names, row, strict=False)) for row in cur.fetchall()]
+# table_exists, rows_as_dicts extracted to scripts/lib/db_helpers.py (Phase A.0)
+from lib.db_helpers import table_exists, rows_as_dicts  # noqa: E402
 
 
 def latest_date_in_db(path: Path, specs: Iterable[tuple[str, str]]) -> date | None:
