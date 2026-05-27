@@ -59,18 +59,32 @@ OPTIONS_PROXY_MAP: dict[str, str] = {
 # (cdn.cboe.com/.../_SPX.json) rather than the regular symbol URL. The
 # yfinance / display layer uses ^ prefix (^SPX). This map normalizes:
 #   universe symbol  →  CBOE URL slug (without the leading underscore)
+#
+# Full cash-settled index family (all European, IRC 1256, no early
+# exercise, daily expiries; tradable per user):
+#   Large notional:  ^SPX (~$750k), ^NDX (~$600k), ^RUT (~$290k)
+#   Retail-sized:    ^XSP (1/10 SPX, ~$75k), ^XND (1/10 NDX, ~$30k),
+#                    ^MRUT (1/10 RUT, ~$29k)
+#   S&P 100 family:  ^XEO (European OEX, ~$372k; sister to American OEX)
+#   Vol reference:   ^VIX (NOT traded — used for market regime context only)
 CBOE_INDEX_SYMBOLS: dict[str, str] = {
-    "^SPX": "SPX",   # S&P 500 cash index (AM+PM settled, daily expiries, 0DTE)
-    "^NDX": "NDX",   # NASDAQ-100 cash index
-    "^XSP": "XSP",   # Mini-SPX (1/10th SPX, same notional as SPY but cash-settled, 1256 tax)
-    "^RUT": "RUT",   # Russell 2000 cash index
-    "^VIX": "VIX",   # CBOE Volatility Index (options on VIX itself, not UVXY)
+    "^SPX":  "SPX",   # S&P 500 cash index (daily expiries, 0DTE; ~$750k notional)
+    "^NDX":  "NDX",   # NASDAQ-100 cash index (~$600k notional)
+    "^XSP":  "XSP",   # Mini-SPX (1/10 SPX, ~$75k notional; SPY equivalent + 1256 tax)
+    "^RUT":  "RUT",   # Russell 2000 cash index (~$290k notional)
+    "^XND":  "XND",   # Mini-NDX (1/10 NDX, ~$30k notional; QQQ equivalent + 1256 tax)
+    "^MRUT": "MRUT",  # Micro-RUT (1/10 RUT, ~$29k notional; IWM equivalent + 1256 tax)
+    "^XEO":  "XEO",   # European OEX / S&P 100 (cash-settled European variant, ~$372k)
+    "^VIX":  "VIX",   # CBOE Volatility Index (REFERENCE ONLY — not for trading)
     # Allow bare symbol too for direct callers
-    "SPX": "SPX",
-    "NDX": "NDX",
-    "XSP": "XSP",
-    "RUT": "RUT",
-    "VIX": "VIX",
+    "SPX":  "SPX",
+    "NDX":  "NDX",
+    "XSP":  "XSP",
+    "RUT":  "RUT",
+    "XND":  "XND",
+    "MRUT": "MRUT",
+    "XEO":  "XEO",
+    "VIX":  "VIX",
 }
 
 CBOE_OPTIONS_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
@@ -297,10 +311,13 @@ def _cboe_to_dataframes(
     if not options:
         return {}
 
+    # CBOE contract codes use bare ticker (XND260526C00240000), not the
+    # universe-display caret form (^XND). Strip leading caret for parsing.
+    parse_ticker = ticker.lstrip("^")
     # Parse all options into records grouped by expiry
     by_expiry: dict[str, list[dict]] = {}
     for opt in options:
-        parsed = _parse_cboe_option_symbol(opt.get("option", ""), ticker)
+        parsed = _parse_cboe_option_symbol(opt.get("option", ""), parse_ticker)
         if not parsed:
             continue
         expiry = parsed["expiry"]

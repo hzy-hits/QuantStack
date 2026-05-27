@@ -236,7 +236,9 @@ def build_options_payload(art: dict[str, Any], as_of: str) -> str:
                    mid
             FROM options_chain_quotes
             WHERE as_of = (SELECT MAX(as_of) FROM options_chain_quotes)
-              AND symbol IN ('SPY', 'QQQ', 'IWM', '^SPX', '^NDX', '^XSP', '^RUT')
+              AND symbol IN ('SPY', 'QQQ', 'IWM', 'DIA',
+                              '^SPX', '^NDX', '^RUT', '^XEO',
+                              '^XSP', '^XND', '^MRUT')
               AND days_to_exp BETWEEN 0 AND 7
               AND volume >= 5000
               AND open_interest >= 30
@@ -269,8 +271,11 @@ def build_options_payload(art: dict[str, Any], as_of: str) -> str:
                    mid
             FROM options_chain_quotes
             WHERE as_of = (SELECT MAX(as_of) FROM options_chain_quotes)
-              AND symbol NOT IN ('SPY', 'QQQ', 'IWM', 'GLD', 'SLV', 'TLT', 'USO', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XLB', 'XLRE', 'XLC',
-                                 '^SPX', '^NDX', '^XSP', '^RUT', '^VIX', 'DIA')
+              AND symbol NOT IN ('SPY', 'QQQ', 'IWM', 'DIA',
+                                 'GLD', 'SLV', 'TLT', 'USO',
+                                 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XLB', 'XLRE', 'XLC',
+                                 '^SPX', '^NDX', '^RUT', '^XEO',
+                                 '^XSP', '^XND', '^MRUT', '^VIX')
               AND days_to_exp BETWEEN 0 AND 7
               AND volume >= 1000
               AND open_interest >= 50

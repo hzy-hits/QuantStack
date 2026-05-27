@@ -27,10 +27,19 @@
    - **monthly third-Friday**:更大 OI,机构 month-end 调仓
    - 不要把"DTE=2 → 临期"等同于"周内"——要看是 Friday 还是 daily expiry
 
-3. **ETF vs cash-settled 区别**(影响 narrator 写哪个名字):
-   - **SPY/QQQ/IWM/DIA = ETF 期权**:美式行权(早行权风险)、ETF 物理交割、普通税率、零售为主
-   - **^SPX/^NDX/^XSP/^RUT = cash-settled index 期权**:欧式(无早行权)、现金结算(无 assignment 风险)、IRC 1256 60/40 税(60% LTCG 哪怕 holding < 1y)、机构为主、信息密度高 4-7x(SPX 30,258 contracts vs SPY 4,354)
-   - 看到 ^SPX 1DTE put 大量异动 = **机构级**对冲;看到 SPY 同样异动 = 多含零售;两边一起看到 = 全市场共识
+3. **指数期权全谱**(narrator 必须正确分类):
+   - **ETF 期权(SPY/QQQ/IWM/DIA)**:美式行权(早行权风险)、ETF 物理交割、普通税率、零售为主
+   - **Cash index large notional(^SPX ~$750k / ^NDX ~$600k / ^RUT ~$290k / ^XEO ~$372k)**:欧式 + 现金结算 + IRC 1256 60/40 税 + 机构主导 + 链深(SPX 30k contracts vs SPY 4.5k = 6.7x)
+   - **Cash index mini variants(^XSP 1/10 SPX / ^XND 1/10 NDX / ^MRUT 1/10 RUT)**:同样的欧式 / 现金 / 1256 税优势,但 1/10 notional 让零售可碰
+     - ^XSP ≈ SPY 一手相同 notional 但有 1256 税
+     - ^XND ≈ QQQ 一手相同 notional 但有 1256 税
+     - ^MRUT ≈ IWM 一手相同 notional 但有 1256 税
+   - **^VIX**:**只是市场情绪参考,严禁列为交易候选**。narrator 看到 ^VIX 数字仅用来支持"市场整体 hedging 强弱"判断,不写 ^VIX 期权交易策略
+
+4. **跨大小账户共振信号**:
+   - SPY + ^XSP + ^SPX 同 strike 区 1DTE put 同时异动 = **零售 + 中型机构 + 大型机构**全市场共识
+   - 只 ^SPX 异动 + SPY 平静 = 纯机构对冲(隐蔽信号,价值更高)
+   - 只 SPY 异动 + ^SPX 平静 = 零售情绪(噪音多,不可靠)
 
 3. **options_alpha**:程序综合 directional_edge + vol_edge + vrp_edge + flow_edge,输出 expression(stock_long / call_spread / put_spread / wait)。这是定向 + 凸性 + 流向打分。
 

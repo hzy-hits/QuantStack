@@ -78,10 +78,19 @@ MANDATORY_INDEX_SYMBOLS = [
     # exercise, 0DTE coverage every weekday). Fetched via CBOE underscore
     # endpoint (_SPX.json etc.) per CBOE_INDEX_SYMBOLS mapping in
     # data_ingestion/options.py.
-    "^SPX",  # S&P 500 cash index (~7500 level, 30k+ option contracts)
-    "^NDX",  # NASDAQ-100 cash index
-    "^XSP",  # Mini-SPX (1/10 SPX notional, same as SPY but cash-settled)
-    "^RUT",  # Russell 2000 cash index
+    # Large notional (institutional / large accounts):
+    "^SPX",   # S&P 500 cash index (~$750k notional, 30k+ contracts, deepest chain)
+    "^NDX",   # NASDAQ-100 cash index (~$600k notional)
+    "^RUT",   # Russell 2000 cash index (~$290k notional)
+    "^XEO",   # European OEX / S&P 100 (~$372k notional)
+    # Retail-accessible mini variants (1/10 notional of parent index, same benefits):
+    "^XSP",   # Mini-SPX (~$75k notional, SPY-equivalent + cash + European + 1256 tax)
+    "^XND",   # Mini-NDX (~$30k notional, QQQ-equivalent + cash + European + 1256 tax)
+    "^MRUT",  # Micro-RUT (~$29k notional, IWM-equivalent + cash + European + 1256 tax)
+    # Market context only (NOT for trading):
+    # ^VIX → market regime / fear index. Options on VIX itself are highly
+    # specialized (vol-of-vol); we fetch them only for the VRP / IV context
+    # the analytics layer reads. Do not surface as trade candidates.
 ]
 
 VOLATILITY_SYMBOLS = [
