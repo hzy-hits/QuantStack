@@ -469,7 +469,7 @@ def recent_news(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date,
             con,
             f"""
             SELECT symbol, url, subject_match, sentiment, severity, event_type,
-                   summary_zh, confidence
+                   summary_zh
             FROM news_scored
             WHERE symbol IN ({placeholders(symbols)})
             """,
@@ -483,7 +483,6 @@ def recent_news(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: date,
                 "severity": sr.get("severity"),
                 "event_type": sr.get("event_type"),
                 "summary_zh": sr.get("summary_zh"),
-                "confidence": sr.get("confidence"),
             }
         for sym, items in out.items():
             for item in items:
