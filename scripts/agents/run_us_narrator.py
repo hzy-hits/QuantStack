@@ -224,7 +224,9 @@ def build_options_payload(art: dict[str, Any], as_of: str) -> str:
 
     out_parts: list[str] = []
 
-    # 1) Index ETF short-DTE hedging (SPY/QQQ/IWM, DTE ≤ 7, v/OI ≥ 30)
+    # 1) Index short-DTE hedging — both ETFs (SPY/QQQ/IWM) and cash-settled
+    # indices (^SPX/^NDX/^XSP/^RUT) where the latter have daily expiries
+    # including 0DTE, much deeper institutional flow visibility.
     try:
         idx_rows = con.execute(
             """
@@ -234,18 +236,18 @@ def build_options_payload(art: dict[str, Any], as_of: str) -> str:
                    mid
             FROM options_chain_quotes
             WHERE as_of = (SELECT MAX(as_of) FROM options_chain_quotes)
-              AND symbol IN ('SPY', 'QQQ', 'IWM')
+              AND symbol IN ('SPY', 'QQQ', 'IWM', '^SPX', '^NDX', '^XSP', '^RUT')
               AND days_to_exp BETWEEN 0 AND 7
               AND volume >= 5000
               AND open_interest >= 30
             ORDER BY (volume::DOUBLE / open_interest) DESC NULLS LAST
-            LIMIT 25
+            LIMIT 30
             """
         ).fetchall()
     except duckdb.Error as exc:
         idx_rows = []
-        out_parts.append(f"[index ETF query failed: {exc}]")
-    out_parts.append(f"## SPY/QQQ/IWM short-DTE hedging (DTE 0-7, vol>=5000, v/OI>=30) — {len(idx_rows)} rows")
+        out_parts.append(f"[index query failed: {exc}]")
+    out_parts.append(f"## Index short-DTE hedging (SPY/QQQ/IWM ETF + ^SPX/^NDX/^XSP/^RUT cash, DTE 0-7, vol>=5000, v/OI>=30) — {len(idx_rows)} rows")
     out_parts.append("| symbol | DTE | expiry | type | strike | spot | OTM% | volume | OI | v/OI | mid |")
     out_parts.append("|---|---:|---|:---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in idx_rows[:15]:
@@ -267,7 +269,8 @@ def build_options_payload(art: dict[str, Any], as_of: str) -> str:
                    mid
             FROM options_chain_quotes
             WHERE as_of = (SELECT MAX(as_of) FROM options_chain_quotes)
-              AND symbol NOT IN ('SPY', 'QQQ', 'IWM', 'GLD', 'SLV', 'TLT', 'USO', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XLB', 'XLRE', 'XLC')
+              AND symbol NOT IN ('SPY', 'QQQ', 'IWM', 'GLD', 'SLV', 'TLT', 'USO', 'XLK', 'XLF', 'XLE', 'XLV', 'XLI', 'XLY', 'XLP', 'XLU', 'XLB', 'XLRE', 'XLC',
+                                 '^SPX', '^NDX', '^XSP', '^RUT', '^VIX', 'DIA')
               AND days_to_exp BETWEEN 0 AND 7
               AND volume >= 1000
               AND open_interest >= 50

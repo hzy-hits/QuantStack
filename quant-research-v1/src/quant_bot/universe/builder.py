@@ -70,10 +70,18 @@ INTERNATIONAL_ETFS = [
 # ── Mandatory Tier 1 indices — always included regardless of config ────────────
 # These are required for the Agents.md market context contract
 MANDATORY_INDEX_SYMBOLS = [
-    "SPY",   # S&P 500 (primary benchmark)
-    "QQQ",   # Nasdaq 100
-    "IWM",   # Russell 2000 (small cap)
-    "DIA",   # Dow Jones Industrial Average
+    "SPY",   # S&P 500 (primary benchmark) — ETF, American, ordinary tax
+    "QQQ",   # Nasdaq 100 — ETF, American, ordinary tax
+    "IWM",   # Russell 2000 (small cap) — ETF, American, ordinary tax
+    "DIA",   # Dow Jones Industrial Average — ETF, American, ordinary tax
+    # Cash-settled index options (European, sec 1256 60/40 tax, no early
+    # exercise, 0DTE coverage every weekday). Fetched via CBOE underscore
+    # endpoint (_SPX.json etc.) per CBOE_INDEX_SYMBOLS mapping in
+    # data_ingestion/options.py.
+    "^SPX",  # S&P 500 cash index (~7500 level, 30k+ option contracts)
+    "^NDX",  # NASDAQ-100 cash index
+    "^XSP",  # Mini-SPX (1/10 SPX notional, same as SPY but cash-settled)
+    "^RUT",  # Russell 2000 cash index
 ]
 
 VOLATILITY_SYMBOLS = [

@@ -21,10 +21,16 @@
    - **个股**:1-7DTE call/put 涌入通常对应财报 / 催化剂 / 重大新闻
 
 2. **expiry 结构**:
-   - **daily expiry**(M/W/F):只有 SPY/QQQ/IWM + 10 个超大盘股有
-   - **weekly Friday**(214 个 sym 全覆盖)
-   - **monthly third-Friday**:更大 OI
+   - **0DTE**(cash index only):**^SPX/^NDX/^XSP/^RUT 每个交易日都有 0DTE**,SPY/QQQ/IWM 没有
+   - **daily expiry**(M/W/F):ETF 这边只有 SPY/QQQ/IWM + 10 个超大盘股有;cash index 全都有
+   - **weekly Friday**(ETF 214 sym + 全部 cash index)
+   - **monthly third-Friday**:更大 OI,机构 month-end 调仓
    - 不要把"DTE=2 → 临期"等同于"周内"——要看是 Friday 还是 daily expiry
+
+3. **ETF vs cash-settled 区别**(影响 narrator 写哪个名字):
+   - **SPY/QQQ/IWM/DIA = ETF 期权**:美式行权(早行权风险)、ETF 物理交割、普通税率、零售为主
+   - **^SPX/^NDX/^XSP/^RUT = cash-settled index 期权**:欧式(无早行权)、现金结算(无 assignment 风险)、IRC 1256 60/40 税(60% LTCG 哪怕 holding < 1y)、机构为主、信息密度高 4-7x(SPX 30,258 contracts vs SPY 4,354)
+   - 看到 ^SPX 1DTE put 大量异动 = **机构级**对冲;看到 SPY 同样异动 = 多含零售;两边一起看到 = 全市场共识
 
 3. **options_alpha**:程序综合 directional_edge + vol_edge + vrp_edge + flow_edge,输出 expression(stock_long / call_spread / put_spread / wait)。这是定向 + 凸性 + 流向打分。
 
@@ -42,10 +48,14 @@
 
 ## 输出格式(严格遵守)
 
-## 指数 ETF 短端 hedging(SPY/QQQ/IWM,DTE ≤ 7)
-| ETF | DTE | type | strike | OTM% | volume | OI | v/OI | 含义 |
+## 指数短端 hedging(ETF + cash index,DTE ≤ 7)
+| Symbol | DTE | type | strike | OTM% | volume | OI | v/OI | 含义 |
 |---|---:|:---:|---:|---:|---:|---:|---:|---|
-(最多 8 行,按 v/OI desc;无则写"今日指数 ETF 无短端 hedging 异动")
+(最多 12 行,按 v/OI desc;ETF 与 cash 一起列。
+**ETF (SPY/QQQ/IWM/DIA)**:美式 / ETF 结算 / 一般税率;
+**Cash index (^SPX/^NDX/^XSP/^RUT)**:欧式 / 现金结算 / 1256 60-40 税 / **0DTE 每个交易日都有**(SPY 没有)。
+若同时有 ETF 和 cash index 在同一 strike 区出现 hedging,要写出来——这是机构 grade 的对冲信号,远比单纯 ETF 强。
+无则写"今日指数无短端 hedging 异动")
 
 ## 个股短端异动(DTE ≤ 7,v/OI ≥ 50x)
 | Symbol | DTE | type | strike | OTM% | volume | OI | v/OI | catalyst(若有) |

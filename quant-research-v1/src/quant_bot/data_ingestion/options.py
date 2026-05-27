@@ -37,13 +37,40 @@ import structlog
 
 log = structlog.get_logger()
 
-# Proxy map: non-optionable symbols → their liquid ETF proxy
+# Proxy map: symbols that have NO options chain at all → use ETF proxy.
+# This is consumed by filtering/_options_loader.py and filtering/_ranking.py
+# to remap ineligible symbols to their liquid surrogate.
+#
+# Futures (CL=F / GC=F / SI=F / NG=F) genuinely have no equity options;
+# the proxy is the only way to model their option-flow context.
+#
+# NOTE: ^VIX used to proxy to UVXY because the fetcher rejected ^-prefix
+# symbols. Now CBOE_INDEX_SYMBOLS routes ^VIX → _VIX.json with real VIX
+# option data, so the proxy entry is removed. Same for ^SPX/^NDX/^XSP/^RUT
+# — they get direct chains and never appear in this proxy map.
 OPTIONS_PROXY_MAP: dict[str, str] = {
     "CL=F": "USO",
     "GC=F": "GLD",
     "SI=F": "SLV",
     "NG=F": "UNG",
-    "^VIX": "UVXY",
+}
+
+# CBOE indices use an underscore-prefix endpoint
+# (cdn.cboe.com/.../_SPX.json) rather than the regular symbol URL. The
+# yfinance / display layer uses ^ prefix (^SPX). This map normalizes:
+#   universe symbol  →  CBOE URL slug (without the leading underscore)
+CBOE_INDEX_SYMBOLS: dict[str, str] = {
+    "^SPX": "SPX",   # S&P 500 cash index (AM+PM settled, daily expiries, 0DTE)
+    "^NDX": "NDX",   # NASDAQ-100 cash index
+    "^XSP": "XSP",   # Mini-SPX (1/10th SPX, same notional as SPY but cash-settled, 1256 tax)
+    "^RUT": "RUT",   # Russell 2000 cash index
+    "^VIX": "VIX",   # CBOE Volatility Index (options on VIX itself, not UVXY)
+    # Allow bare symbol too for direct callers
+    "SPX": "SPX",
+    "NDX": "NDX",
+    "XSP": "XSP",
+    "RUT": "RUT",
+    "VIX": "VIX",
 }
 
 CBOE_OPTIONS_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{symbol}.json"
@@ -66,7 +93,11 @@ def is_options_eligible(symbol: str) -> bool:
     """True if symbol can have options fetched directly."""
     if "=" in symbol:   # futures: CL=F, GC=F, etc.
         return False
-    if symbol.startswith("^"):  # indices: ^VIX
+    if symbol in CBOE_INDEX_SYMBOLS:
+        # Cash-settled index options (SPX/NDX/XSP/RUT/VIX) reach CBOE via
+        # the underscore-prefix endpoint — _fetch_cboe_single handles routing.
+        return True
+    if symbol.startswith("^"):
         return False
     return True
 
@@ -119,9 +150,19 @@ def _first_float(opt: dict, *keys: str) -> Optional[float]:
 
 
 def _parse_cboe_option_symbol(opt_sym: str, ticker: str) -> Optional[dict]:
-    """Parse CBOE option symbol like AAPL260313C00262500 into components."""
-    # Strip the known ticker prefix for reliable parsing
-    rest = opt_sym[len(ticker):]
+    """Parse CBOE option symbol like AAPL260313C00262500 into components.
+
+    Index options use a weekly variant prefix (SPXW / NDXW / XSPW / RUTW)
+    instead of bare SPX / NDX / XSP / RUT. We detect this by checking if
+    `opt_sym` starts with `ticker + 'W'` before falling back to bare ticker.
+    """
+    # Strip the known ticker prefix for reliable parsing. Index options
+    # use ticker+'W' variants (e.g. SPXW260527C03000000 instead of
+    # SPX260527C03000000), so check the longer prefix first.
+    if opt_sym.startswith(ticker + "W") and len(opt_sym) >= len(ticker) + 1 + 15:
+        rest = opt_sym[len(ticker) + 1:]
+    else:
+        rest = opt_sym[len(ticker):]
     if len(rest) < 15:
         return None
     try:
@@ -199,8 +240,16 @@ def _fetch_cboe_single(symbol: str) -> Optional[dict]:
 
     - 403 = symbol has no options on CBOE (permanent) → blacklist, no retry
     - 429 = rate limit → retry with backoff
+
+    Cash-settled indices (SPX/NDX/XSP/RUT/VIX) use the underscore-prefix
+    endpoint (e.g. /options/_SPX.json) rather than the bare symbol path.
+    The bare-symbol path returns 403 for these.
     """
-    url = CBOE_OPTIONS_URL.format(symbol=symbol)
+    cboe_slug = CBOE_INDEX_SYMBOLS.get(symbol)
+    if cboe_slug:
+        url = CBOE_OPTIONS_URL.format(symbol=f"_{cboe_slug}")
+    else:
+        url = CBOE_OPTIONS_URL.format(symbol=symbol)
     for attempt in range(CBOE_MAX_RETRIES):
         try:
             _respect_cboe_rate_limit()
