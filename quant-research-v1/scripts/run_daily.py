@@ -307,6 +307,37 @@ def emit_serenity_fetch(cfg: Settings, as_of: date) -> tuple[str, str]:
     return "ok", detail_a[-1500:]
 
 
+def emit_us_narrator(cfg: Settings, as_of: date) -> tuple[str, str]:
+    """Run agent-narrator pipeline to generate us_daily_report_agent.md.
+
+    Pipeline (scripts/agents/run_us_narrator.py):
+      - Loads existing us_daily_report.md + JSON artifacts
+      - 4 extractors (macro/event/quant/risk) called in parallel via DeepSeek
+      - Narrator (DeepSeek) writes final 1500-2500 字 Chinese report
+      - Written to us_daily_report_agent.md (side-by-side with programmatic
+        us_daily_report.md until D.5 cutover)
+
+    Default: opt-in via US_USE_AGENT_NARRATOR=1 env var; otherwise skipped.
+    """
+    if os.environ.get("US_USE_AGENT_NARRATOR", "").lower() not in {"1", "true", "yes"}:
+        return "skipped", "US_USE_AGENT_NARRATOR env var not set"
+    project_root = Path(__file__).resolve().parents[1]
+    stack_root = project_root.parent
+    script = stack_root / "scripts" / "agents" / "run_us_narrator.py"
+    if not script.exists():
+        return "skipped", f"missing: {script}"
+    cmd = [sys.executable, str(script), "--date", as_of.isoformat()]
+    if os.environ.get("US_AGENT_NARRATOR_OVERWRITE", "").lower() in {"1", "true", "yes"}:
+        cmd.append("--overwrite")
+    result = subprocess.run(
+        cmd, cwd=stack_root, text=True, capture_output=True, timeout=300, check=False,
+    )
+    detail = "\n".join(p.strip() for p in [result.stdout, result.stderr] if p and p.strip())
+    if result.returncode != 0:
+        return "error", detail[-1500:] or f"exit={result.returncode}"
+    return "ok", detail[-1500:]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Quant Research Bot — Probability Pipeline")
     parser.add_argument("--init", action="store_true")
@@ -945,6 +976,22 @@ def main() -> None:
                 serenity_status,
                 1 if serenity_status == "ok" else 0,
                 serenity_detail,
+            )
+            # US agent narrator (Phase D) — opt-in via US_USE_AGENT_NARRATOR env.
+            # Must run AFTER main daily report (us_daily_report.md) is on disk
+            # since narrator reads it as payload digest.
+            raw_log_con.execute("CHECKPOINT")
+            raw_log_con.close()
+            raw_log_con = None
+            narrator_status, narrator_detail = emit_us_narrator(cfg, as_of)
+            raw_log_con = connect_write(cfg.raw_db_path_abs)
+            log_run(
+                raw_log_con,
+                run_id,
+                "us_agent_narrator",
+                narrator_status,
+                1 if narrator_status == "ok" else 0,
+                narrator_detail,
             )
             if bulletin_status != "ok":
                 log.warning("alpha_bulletin_nonfatal", status=bulletin_status, detail=bulletin_detail)
