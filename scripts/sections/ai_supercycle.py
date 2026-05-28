@@ -11,7 +11,7 @@ from typing import Any
 from lib.fmt import clean_table_text, fmt_num
 
 
-def render_ai_supercycle_evidence_section(payload: dict[str, Any], market: str | None = None, *, limit: int = 14) -> list[str]:
+def render_ai_supercycle_evidence_section(payload: dict[str, Any], market: str | None = None, *, limit: int = 3) -> list[str]:
     ledger = payload.get("ai_supercycle_evidence_ledger") or {}
     rows = ledger.get("rows") or []
     if market:
@@ -58,7 +58,7 @@ def render_ai_supercycle_evidence_section(payload: dict[str, Any], market: str |
     return lines
 
 
-def render_ai_supply_chain_relationships_section(payload: dict[str, Any], *, limit: int = 12) -> list[str]:
+def render_ai_supply_chain_relationships_section(payload: dict[str, Any], *, limit: int = 3) -> list[str]:
     ledger = payload.get("ai_supply_chain_relationships") or {}
     summary = ledger.get("summary") or {}
     rows = ledger.get("rows") or []
@@ -93,7 +93,7 @@ def render_ai_supercycle_value_radar_section(
     payload: dict[str, Any],
     market: str | None = None,
     *,
-    limit: int = 16,
+    limit: int = 3,
 ) -> list[str]:
     radar = payload.get("ai_supercycle_value_radar") or {}
     rows = radar.get("rows") or []

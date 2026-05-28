@@ -126,7 +126,7 @@ def render_cn_sector_narrative_section(payload: dict[str, Any]) -> list[str]:
     return lines
 
 
-def render_ai_lab_quality_index_section(payload: dict[str, Any], *, limit: int = 10) -> list[str]:
+def render_ai_lab_quality_index_section(payload: dict[str, Any], *, limit: int = 3) -> list[str]:
     index = payload.get("ai_lab_quality_index") or {}
     rows = index.get("rows") or []
     lines = [

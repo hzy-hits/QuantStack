@@ -49,6 +49,55 @@ def _m():
     return _main
 
 
+def _compute_resonance(payload: dict[str, Any]) -> dict[str, int]:
+    """Count how many independent signal sources reference each ticker.
+
+    Used to highlight cross-source resonance in the trimmed daily report:
+    tickers that show up in 3+ sources are usually the real signal vs noise.
+
+    Sources counted (de-duped per ticker):
+      1. Actionable (production basket)
+      2. Options anomaly (squeeze or pressure score)
+      3. Options tenor signals (gamma_trap / LEAPS stack)
+      4. Serenity 24h fresh mentions
+      5. Serenity overhead-warning shortlist
+      6. news_scored severity>=2 subject_match (DeepSeek-scored news)
+      7. Bubble hedge victim shortlist
+    """
+    counts: dict[str, int] = {}
+    def bump(sym: str | None) -> None:
+        if not sym:
+            return
+        k = str(sym).upper().strip()
+        if k:
+            counts[k] = counts.get(k, 0) + 1
+    # 1) production actionable
+    pds = (payload.get("production_decision_summary") or {}).get("actionable") or []
+    for a in pds:
+        if (a.get("market") or "").lower() == "us" or (a.get("region") or "").lower() == "us":
+            bump(a.get("symbol"))
+    # 2) options_anomaly_rows
+    for r in (payload.get("options_anomaly_rows") or [])[:30]:
+        bump(r.get("symbol"))
+    # 3) options_tenor_signals
+    for s in (payload.get("options_tenor_signals") or [])[:30]:
+        bump(s.get("symbol"))
+    # 4-5) serenity
+    sc = payload.get("serenity_crosscheck") or {}
+    for sym, _lm, _s in (sc.get("fresh_24h") or [])[:30]:
+        bump(sym)
+    for row in (sc.get("overhead_warnings") or [])[:30]:
+        bump(row[0] if isinstance(row, (list, tuple)) else row.get("symbol"))
+    # 6) news_scored from raw payload (programmatic carries it as us.news_scored sometimes)
+    for r in ((payload.get("us") or {}).get("news_scored_today") or [])[:50]:
+        if r.get("subject_match") and (r.get("severity") or 0) >= 2:
+            bump(r.get("symbol"))
+    # 7) bubble hedge victims
+    for v in ((payload.get("bubble_hedge") or {}).get("victims") or [])[:20]:
+        bump(v.get("symbol") if isinstance(v, dict) else v)
+    return counts
+
+
 def render_us_standalone_report(payload: dict[str, Any]) -> str:
     m = _m()
     as_of = payload["as_of"]
@@ -56,6 +105,14 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     summary = ((payload.get("production_decision_summary") or {}).get("summary") or {})
     us = payload.get("us") or {}
     us_r = fmt_r(summary.get('us_r'))
+    # Compute resonance once for cross-section preview line
+    resonance = _compute_resonance(payload)
+    top_resonance = sorted(resonance.items(), key=lambda kv: -kv[1])[:5]
+    resonance_line = (
+        "共振 (≥3 源): " + ", ".join(f"{s}({n})" for s, n in top_resonance if n >= 3)
+        if any(n >= 3 for _, n in top_resonance)
+        else "共振: 今日无跨源高一致信号"
+    )
     if actions:
         headline = (
             f"今天美股共 {len(actions)} 个执行候选,合计 {us_r}。主线按主题 basket 跑,强主题不再压成纯 watch。"
@@ -69,6 +126,8 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
         f"# 美股量化日报 - {as_of}",
         "",
         headline,
+        "",
+        f"> **{resonance_line}** — 这些 ticker 在多个独立信号源同时出现,优先关注。",
         "",
     ]
     lines += m.render_us_execution_gate_notice(payload)
@@ -100,11 +159,11 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
         "- 主题 basket 需要持续复核：如果广度收缩、期权/flow 退潮或新闻风险升高，股票 R 应该下调或退出。",
         "",
     ]
-    lines += render_ai_supercycle_evidence_section(payload, "US", limit=10)
-    lines += render_ai_supply_chain_relationships_section(payload, limit=8)
-    lines += m.render_ai_lab_quality_index_section(payload, limit=8)
-    lines += render_ai_supercycle_value_radar_section(payload, "US", limit=8)
-    lines += m.render_ai_supercycle_layer_attribution_section(payload, "US", limit=10)
+    lines += render_ai_supercycle_evidence_section(payload, "US", limit=3)
+    lines += render_ai_supply_chain_relationships_section(payload, limit=3)
+    lines += m.render_ai_lab_quality_index_section(payload, limit=3)
+    lines += render_ai_supercycle_value_radar_section(payload, "US", limit=3)
+    lines += m.render_ai_supercycle_layer_attribution_section(payload, "US", limit=3)
     lines += [
         "## 只观察或不碰",
         "",

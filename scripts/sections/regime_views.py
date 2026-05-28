@@ -80,7 +80,7 @@ def render_risk_regime_section(payload: dict[str, Any], regime_key: str = "risk_
     return lines
 
 
-def render_bubble_hedge_section(payload: dict[str, Any], *, victim_top_n: int = 8) -> list[str]:
+def render_bubble_hedge_section(payload: dict[str, Any], *, victim_top_n: int = 3) -> list[str]:
     bubble = payload.get("bubble_hedge") or {}
     if not bubble:
         return [

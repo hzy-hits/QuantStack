@@ -204,7 +204,7 @@ def _options_tenor_related_guidance(status: str, pattern: Any) -> str:
     return "outside report: research expansion"
 
 
-def render_options_tenor_section(payload: dict[str, Any], *, top_n: int = 12) -> list[str]:
+def render_options_tenor_section(payload: dict[str, Any], *, top_n: int = 3) -> list[str]:
     signals = payload.get("options_tenor_signals") or []
     lines = [
         "## US 期权定位 — weekly / LEAPS / put-call",
@@ -279,7 +279,7 @@ def render_options_tenor_section(payload: dict[str, Any], *, top_n: int = 12) ->
     return lines
 
 
-def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 8) -> list[str]:
+def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 3) -> list[str]:
     rows = payload.get("options_anomaly_rows") or []
     if not rows:
         return [

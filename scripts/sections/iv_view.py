@@ -213,7 +213,7 @@ def _iv_action_hint(vrp: float | None, iv_ann: float | None, skew_z: float | Non
     return "观望"
 
 
-def render_iv_view_section(payload: dict[str, Any], *, limit: int = 25) -> list[str]:
+def render_iv_view_section(payload: dict[str, Any], *, limit: int = 6) -> list[str]:
     """Per-stock IV / VRP / skew table with non-executable context hints."""
     verdicts = payload.get("options_verdicts") or {}
     if not verdicts:
@@ -270,10 +270,10 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 25) -> list[
         "",
     ]
     if cheap_vol_context:
-        names = " / ".join(r["sym"] for r in cheap_vol_context[:5])
+        names = " / ".join(r["sym"] for r in cheap_vol_context[:3])
         lines.append(f"- 🎯 **低 IV 方向 context ({len(cheap_vol_context)})**: {names}；0R")
     if expensive_vol_context:
-        names = " / ".join(r["sym"] for r in expensive_vol_context[:5])
+        names = " / ".join(r["sym"] for r in expensive_vol_context[:3])
         lines.append(f"- ✂️ **高 IV 风险 context ({len(expensive_vol_context)})**: {names}；偏风险提示")
     if cheap_vol_context or expensive_vol_context:
         lines.append("")

@@ -147,7 +147,7 @@ def render_serenity_crosscheck_section(payload: dict[str, Any]) -> list[str]:
         lines += [f"### ⚡ Stance 翻转 ({len(flips)})", "",
                   "| Symbol | prev → now | view 变化 | 累计 |",
                   "|---|:---:|---|---:|"]
-        for s in flips[:15]:
+        for s in flips[:3]:
             sym, ps, ns, pv, nv, ret = s
             arrow = f"{ps or '?'} → **{ns or '?'}**"
             v_arrow = f"{pv or '?'} → {nv or '?'}" if pv != nv else "—"
@@ -159,7 +159,7 @@ def render_serenity_crosscheck_section(payload: dict[str, Any]) -> list[str]:
         lines += [f"### 🕒 过去 24h 被 Serenity 提到 ({len(fresh)})", "",
                   "| Symbol | stance | priority | 累计 | 1w | segment |",
                   "|---|:---:|---:|---:|---:|:---:|"]
-        for sym, lm, s in fresh[:15]:
+        for sym, lm, s in fresh[:3]:
             ret_1w = f"{s.get('ret_1w', 0):+.1f}%" if s.get('ret_1w') is not None else "-"
             emoji = {"bullish":"🟢", "neutral":"⚪", "bearish":"🔴"}.get(s["stance"], "?")
             lines.append(
@@ -173,7 +173,7 @@ def render_serenity_crosscheck_section(payload: dict[str, Any]) -> list[str]:
         lines += [f"### ⚠️ 涨过头警报:我们 rank ≥ 70 但 Serenity 已转 neutral/bearish ({len(overhead)})", "",
                   "| Symbol | 我们 rank | Serenity | prio | 累计 | segment |",
                   "|---|---:|:---:|---:|---:|:---:|"]
-        for sym, rk, st, prio, ret, seg in overhead[:10]:
+        for sym, rk, st, prio, ret, seg in overhead[:3]:
             emoji = {"neutral":"⚪", "bearish":"🔴"}.get(st, "?")
             lines.append(f"| **{sym}** | {rk:.1f} | {emoji} {st} | {prio:.0f} | {ret:+.0f}% | {seg or '-'} |")
         lines.append("")
@@ -183,7 +183,7 @@ def render_serenity_crosscheck_section(payload: dict[str, Any]) -> list[str]:
         lines += [f"### 🔍 Serenity 高 prio bullish 但我们 rank < 50 ({len(underrated)})", "",
                   "| Symbol | 我们 rank | Serenity prio | 累计 | segment |",
                   "|---|---:|---:|---:|:---:|"]
-        for sym, rk, prio, ret, seg in underrated[:10]:
+        for sym, rk, prio, ret, seg in underrated[:3]:
             lines.append(f"| **{sym}** | {rk:.1f} | {prio:.0f} | {ret:+.0f}% | {seg or '-'} |")
         lines.append("")
     if not (flips or fresh or overhead or underrated):
