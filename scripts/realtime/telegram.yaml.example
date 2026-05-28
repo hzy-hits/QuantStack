@@ -1,0 +1,7 @@
+# Copy this file to telegram.yaml and fill in your bot creds.
+# Get bot_token from @BotFather on Telegram.
+# Get chat_id by visiting https://api.telegram.org/bot<BOT_TOKEN>/getUpdates
+# after sending your bot a message.
+
+bot_token: "123456:ABC-def..."
+chat_id: 1234567890
