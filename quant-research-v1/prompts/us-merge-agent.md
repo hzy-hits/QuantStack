@@ -99,11 +99,14 @@
 
 1. **ETF 指数段**:SPY/QQQ/IWM/DIA 1DTE 整体 hedging 强度,**用绝对 volume 总和 + 主要 strike OTM 位置**判断是隔夜 risk 定价、Fed catalyst 还是 monthly expiry 行情。
 
-2. **现金结算指数段**(必须独立成段,不要折叠进 ETF 段):列 ^SPX / ^NDX / ^XSP / ^XND / ^MRUT / ^RUT / ^XEO 的短端定位。**比较 ETF vs cash venue 的同向/异向 + 同 strike 区/不同 strike 区**。**关键规则:**
-   - 同向同 strike(SPY 750P + ^SPX 7500P 都拥挤)= 全市场共识,信号强
-   - 仅 ^SPX 异动(SPY 平静)= 机构隐蔽对冲,信号纯度高
-   - 仅 SPY 异动(^SPX 平静)= 零售情绪,噪音多
-   - ^SPX put 拥挤但 ^SPX call 也拥挤(对称)= **双向波动率交易,不是方向押注**(关键区分!)
+2. **现金结算指数段**(必须独立成段,不要折叠进 ETF 段):列 ^SPX / ^NDX / ^XSP / ^XND / ^MRUT / ^RUT / ^XEO 的短端定位。**比较 ETF vs cash venue 的同向/异向 + 同 strike 区/不同 strike 区**。
+
+   **裁决规则(用人话写,不要绕):**
+   - 同向同 strike(SPY 750P 和 ^SPX 7500P 都 v/OI 异常高)= 全市场共识,零售机构同向,信号最强
+   - 仅 ^SPX 异动(SPY 没有大动作)= **机构隐蔽对冲**,信号纯度最高 — 因为 SPX 只能机构玩
+   - **SPY 1DTE 出现极端虚值 call/put 的 lottery 仓位(权利金 < 0.30)但 ^SPX 无对应大单 = 零售彩票噪音,忽略**
+   - ^SPX put 拥挤同时 call 也拥挤(7520 同 strike 双向)= **机构在做 vol 交易,不是赌方向** — 含义是"明天会有 big move 但不知道哪边",narrator 必须翻译成"市场押注明天波动放大,准备好双边 stop"
+   - 当用"SPY 彩票化 vs ^SPX 双向博弈"对比时,**严禁说 SPY 平静** — SPY 是噪音不是平静,正确写法是"SPY 是零售投机噪音,^SPX 才是机构真信号"
    - ^VIX 只引用 vol 水平作为 context,**绝不**列为交易候选
 
 3. **个股短端异动段**:2-3 个最值得注意的 ticker,**必须关联 catalyst**(earnings_calendar / news_scored severity≥2 / Serenity stance flip);找不到 catalyst 就写"无显性 catalyst,可能是机构定向博弈"。
@@ -116,11 +119,35 @@
 ## 交易地图
 
 ### 做多
-每只 production_tier ∈ {top_stock_trade, secondary_stock_trade} 都要写:
-- 一句话逻辑(quant + news + 历史证据)
-- 入场参考价 + 风控线 + 目标观察区
-- 失效条件
-不得硬拔 active_watch。若 actionable=0,写"本期无可执行做多"。
+
+**严格分两层**(用 Payload Digest 顶部的"共振 (≥3 源)"line 判断):
+
+#### CORE pick(必须是 actionable list ∩ 共振 ≥ 3 源)
+**判断步骤(narrator 严格执行)**:
+1. 列出 production_decision_summary.actionable 的所有 US ticker(today's basket)
+2. 列出 Payload Digest 头部"共振 (≥3 源):"那行的所有 ticker
+3. **取交集**:既在 actionable 又共振≥3 的才是 CORE
+4. CORE 最多 5 个
+
+每个 CORE 必须写:
+- 一句话逻辑融合 quant + news + Serenity + options 至少 2 个源
+- 入场参考价 + 风控线(-6%)+ 目标观察区(+10%)
+- 失效条件 + 共振了哪几个源(明示)
+
+**严禁**:
+- 不在 actionable 但共振高的 ticker(比如 event_risk_watch 里的 DELL)拉进 CORE — 必须放到 ### 观望 段
+- 把 actionable 但 ranker_watch 状态的 ticker 写成 CORE
+
+#### Satellite(actionable list 但共振 < 3 源)
+**剩下的 actionable 标的合在一段写**:
+- "其余 N 只 production satellite:TICKER₁(共振 X 源)/ TICKER₂(共振 Y 源)/ ... — 主题分散仓位,各 0.0176R,跟随 basket 观察,无独立 conviction"
+- 每只一两个字带过,**不写**入场/止损/目标
+- 若某 satellite 共振 2 源但 options 端有冲突信号(比如多空异动并存),用一句话指出"X(共振 2 源但多空分歧,不升级)"
+
+#### 若 actionable=0
+写"本期无可执行做多",CORE 和 Satellite 段都写"无"。
+
+**共振 line 在哪**:Payload Digest 第 5 行,格式 `> **共振 (≥3 源): TICKER₁(N), TICKER₂(N), ...**`,数字 = 在多少独立信号源出现。如果你看不到这行说明 payload 异常,写"今日资讯源无共振信号"。
 
 ### 小仓试错
 只写 `top_probe` / `secondary_probe`。每只必须写"小仓试错,非正式执行",最大风险 0.25R/0.5R。
