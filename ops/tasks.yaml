@@ -39,6 +39,24 @@ tasks:
       - quant-research-v1/reports
       - quant-research-v1/logs
 
+  intraday.index_refresh:
+    group: us
+    # Asia/Shanghai 21:30-04:00 (EDT) or 22:30-05:00 (EST) = US 9:30-16:00 ET.
+    # Run every 30min during US trading hours (M-F US, so Mon-Sat in CST).
+    # Overlapping hour ranges intentionally cover both DST variants.
+    schedule: "*/30 21-23 * * 1-5,*/30 0-5 * * 2-6"
+    cwd: ""
+    command: ["python3", "scripts/intraday/refresh_index_chains.py"]
+    log: ops/logs/intraday.index_refresh.log
+    lock: ops/state/intraday.index_refresh.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: us
+    session: intraday
+    owner: us_pipeline
+    outputs:
+      - reports/intraday
+
   cn.precompute_alpha:
     group: cn
     schedule: "20 7 * * 1-5"
@@ -871,7 +889,7 @@ tasks:
     cwd: .
     command:
       - python3
-      - scripts/generate_main_strategy_v2_report.py
+      - scripts/run_main_strategy_v2_report_pipeline.py
       - --date
       - "{cst_date}"
       - --ai-infra-mode
@@ -892,6 +910,7 @@ tasks:
     owner: research_pipeline
     outputs:
       - reports/review_dashboard/main_strategy_v2
+      - reports/review_dashboard/main_strategy_v2_report_backtest
 
   research.production_basket_audit:
     group: research

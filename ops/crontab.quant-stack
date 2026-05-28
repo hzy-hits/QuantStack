@@ -11,6 +11,11 @@ QUANT_STACK_ROOT=/home/ivena/coding/quant-stack
 0 20 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh us.premarket
 0 5 * * 2-6 cd $QUANT_STACK_ROOT && ops/run_task.sh us.postmarket
 
+# -- US intraday index options (^SPX/^XSP/^RUT etc) --
+# Asia/Shanghai 21:30-04:00 = US EDT 9:30-16:00; alternate hours catch EST.
+*/30 21-23 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh intraday.index_refresh
+*/30 0-5 * * 2-6 cd $QUANT_STACK_ROOT && ops/run_task.sh intraday.index_refresh
+
 # -- CN Pipeline --
 20 7 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh cn.precompute_alpha
 30 8 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh cn.morning
