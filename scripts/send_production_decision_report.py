@@ -87,10 +87,23 @@ def _prod_recipient_count() -> int:
 
 
 def report_path(as_of: str, market: str = "all") -> Path:
+    """Resolve the markdown the email delivers.
+
+    For US the agent narrator output (us_daily_report_agent.md) is preferred
+    when it exists — it's a readable Chinese morning-note synthesis of 7
+    sections with cross-source resonance + narrative judgment, vs the
+    programmatic us_daily_report.md which is 25+ table sections of jargon
+    (production_tier / ev_status / trend_regime / VRP / PC z / skew z /
+    tenor anomaly / etc.) that's hard to scan in an email.
+    Falls back to programmatic when narrator hasn't run yet.
+    """
     base = STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2" / as_of
     if market == "cn":
         return base / "cn_daily_report.md"
     if market == "us":
+        agent = base / "us_daily_report_agent.md"
+        if agent.exists() and agent.stat().st_size > 0:
+            return agent
         return base / "us_daily_report.md"
     return base / "main_strategy_v2_backtest.md"
 
@@ -286,6 +299,48 @@ def load_headline(as_of: str, market: str) -> str:
     return summary.get("headline") or "-"
 
 
+def _ensure_us_narrator(as_of: str) -> None:
+    """Run the US agent narrator if today's agent output doesn't exist yet.
+
+    Idempotent: skips if us_daily_report_agent.md already exists and was
+    written today (mtime same as today's report dir). This avoids re-paying
+    the DeepSeek bill on cron retries / dry-run-then-prod sequences.
+    Skipped entirely when QUANT_DISABLE_US_NARRATOR=1.
+    """
+    if os.environ.get("QUANT_DISABLE_US_NARRATOR", "").lower() in {"1", "true", "yes"}:
+        return
+    agent_md = (
+        STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2"
+        / as_of / "us_daily_report_agent.md"
+    )
+    # Idempotent: re-use today's narrator output if fresh (today)
+    if agent_md.exists() and agent_md.stat().st_size > 0:
+        from datetime import date as _date, datetime as _dt
+        mtime = _dt.fromtimestamp(agent_md.stat().st_mtime).date()
+        if mtime == _date.fromisoformat(as_of):
+            return
+    narrator = STACK_ROOT / "scripts" / "agents" / "run_us_narrator.py"
+    if not narrator.exists():
+        return
+    try:
+        result = subprocess.run(
+            [sys.executable, str(narrator), "--date", as_of],
+            cwd=STACK_ROOT,
+            timeout=180,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            print(f"[narrator] non-fatal: exit={result.returncode} stderr={result.stderr[-200:]}")
+        else:
+            print(f"[narrator] {result.stdout.splitlines()[-1] if result.stdout else 'ok'}")
+    except subprocess.TimeoutExpired:
+        print("[narrator] timed out after 180s — falling back to programmatic report")
+    except OSError as e:
+        print(f"[narrator] launch failed: {e}")
+
+
 def main() -> None:
     args = parse_args()
     if args.delivery_mode == "prod" and args.market == "all" and not args.dry_run:
@@ -293,6 +348,10 @@ def main() -> None:
             "prod delivery requires --market cn or --market us; "
             "main_strategy_v2_backtest.md is an internal kitchen ticket, not an email report."
         )
+    # For US emails, ensure the agent narrator output exists so report_path()
+    # picks the readable narrative version rather than the 449-line table dump.
+    if args.market == "us" and not args.dry_run:
+        _ensure_us_narrator(args.date)
     path = report_path(args.date, args.market)
     subject = subject_for(args.date, args.session, args.market)
 
