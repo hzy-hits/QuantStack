@@ -3144,6 +3144,7 @@ def build_cn_shadow_full(cn_db: Path, symbols: list[str], as_of: date) -> dict[s
 # B.4: build_options_verdicts + _iv_action_hint + render_iv_view_section moved to
 # scripts/sections/iv_view.py
 from sections.iv_view import build_options_verdicts  # noqa: E402
+from sections.index_skew import build_index_skew  # noqa: E402
 def load_my_book_overlay(as_of: date) -> dict[str, Any]:
     path = STACK_ROOT / "reports" / "review_dashboard" / "my_book_overlay" / as_of.isoformat() / "my_book_overlay.json"
     if not path.exists():
@@ -6964,6 +6965,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     )
     us_trade_plan = build_us_stock_trade_plan(args.us_db, us_trade_plan_symbols, as_of)
     options_verdicts = build_options_verdicts(args.us_db, us_trade_plan_symbols, as_of)
+    index_skew = build_index_skew(args.us_db, as_of)
     cn_basket_symbols = [
         str(row.get("symbol") or "").upper()
         for row in ((cn_ranker or {}).get("production_basket") or [])
@@ -7007,6 +7009,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "report_action_backtest_summary": load_report_action_backtest_summary(as_of.isoformat()),
         "us_trade_plan": us_trade_plan,
         "options_verdicts": options_verdicts,
+        "index_skew": index_skew,
         "cn_shadow_full": cn_shadow_full,
         "market_regime_score": build_market_regime_score(args.us_db, as_of),
         "serenity_crosscheck": build_serenity_crosscheck(

@@ -99,6 +99,9 @@ def report_path(as_of: str, market: str = "all") -> Path:
     """
     base = STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2" / as_of
     if market == "cn":
+        agent = base / "cn_daily_report_agent.md"
+        if agent.exists() and agent.stat().st_size > 0:
+            return agent
         return base / "cn_daily_report.md"
     if market == "us":
         agent = base / "us_daily_report_agent.md"
@@ -299,46 +302,62 @@ def load_headline(as_of: str, market: str) -> str:
     return summary.get("headline") or "-"
 
 
-def _ensure_us_narrator(as_of: str) -> None:
-    """Run the US agent narrator if today's agent output doesn't exist yet.
+_NARRATOR_SPECS = {
+    "us": ("run_us_narrator.py", "us_daily_report_agent.md", "QUANT_DISABLE_US_NARRATOR"),
+    "cn": ("run_cn_narrator.py", "cn_daily_report_agent.md", "QUANT_DISABLE_CN_NARRATOR"),
+}
 
-    Idempotent: skips if us_daily_report_agent.md already exists and was
-    written today (mtime same as today's report dir). This avoids re-paying
-    the DeepSeek bill on cron retries / dry-run-then-prod sequences.
-    Skipped entirely when QUANT_DISABLE_US_NARRATOR=1.
+
+def _ensure_narrator(as_of: str, market: str) -> None:
+    """Run the codex/GPT-5.5 agent narrator for `market` if its agent output
+    isn't already fresh.
+
+    Idempotent: skips if <market>_daily_report_agent.md already exists and was
+    produced for this report date OR written today (covers same-day backfills).
+    This avoids re-paying the codex bill on cron retries / dry-run-then-prod
+    sequences and keeps the delivery step from tripping the email timeout.
+    Disabled per-market via QUANT_DISABLE_{US,CN}_NARRATOR=1.
     """
-    if os.environ.get("QUANT_DISABLE_US_NARRATOR", "").lower() in {"1", "true", "yes"}:
+    spec = _NARRATOR_SPECS.get(market)
+    if not spec:
+        return
+    script_name, agent_name, disable_env = spec
+    if os.environ.get(disable_env, "").lower() in {"1", "true", "yes"}:
         return
     agent_md = (
         STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2"
-        / as_of / "us_daily_report_agent.md"
+        / as_of / agent_name
     )
-    # Idempotent: re-use today's narrator output if fresh (today)
     if agent_md.exists() and agent_md.stat().st_size > 0:
         from datetime import date as _date, datetime as _dt
         mtime = _dt.fromtimestamp(agent_md.stat().st_mtime).date()
-        if mtime == _date.fromisoformat(as_of):
+        if mtime in {_date.fromisoformat(as_of), _date.today()}:
             return
-    narrator = STACK_ROOT / "scripts" / "agents" / "run_us_narrator.py"
+    narrator = STACK_ROOT / "scripts" / "agents" / script_name
     if not narrator.exists():
         return
+    timeout = int(os.environ.get(f"{market.upper()}_NARRATOR_TIMEOUT", "900"))
     try:
         result = subprocess.run(
             [sys.executable, str(narrator), "--date", as_of],
             cwd=STACK_ROOT,
-            timeout=180,
+            timeout=timeout,
             capture_output=True,
             text=True,
             check=False,
         )
         if result.returncode != 0:
-            print(f"[narrator] non-fatal: exit={result.returncode} stderr={result.stderr[-200:]}")
+            print(f"[narrator:{market}] non-fatal: exit={result.returncode} stderr={result.stderr[-200:]}")
         else:
-            print(f"[narrator] {result.stdout.splitlines()[-1] if result.stdout else 'ok'}")
+            print(f"[narrator:{market}] {result.stdout.splitlines()[-1] if result.stdout else 'ok'}")
     except subprocess.TimeoutExpired:
-        print("[narrator] timed out after 180s — falling back to programmatic report")
+        print(f"[narrator:{market}] timed out after {timeout}s — falling back to programmatic report")
     except OSError as e:
-        print(f"[narrator] launch failed: {e}")
+        print(f"[narrator:{market}] launch failed: {e}")
+
+
+def _ensure_us_narrator(as_of: str) -> None:
+    _ensure_narrator(as_of, "us")
 
 
 def main() -> None:
@@ -348,17 +367,22 @@ def main() -> None:
             "prod delivery requires --market cn or --market us; "
             "main_strategy_v2_backtest.md is an internal kitchen ticket, not an email report."
         )
-    # For US emails, ensure the agent narrator output exists so report_path()
-    # picks the readable narrative version rather than the 449-line table dump.
-    if args.market == "us" and not args.dry_run:
-        _ensure_us_narrator(args.date)
-    path = report_path(args.date, args.market)
     subject = subject_for(args.date, args.session, args.market)
 
     if args.dry_run:
-        print(f"Dry run: would generate {path}")
+        print(f"Dry run: would generate {report_path(args.date, args.market)}")
     elif not args.skip_generate:
         generate_report(args.date, args.start)
+
+    # For US/CN emails, ensure the codex agent narrator output exists so
+    # report_path() picks the readable narrative version rather than the
+    # programmatic table dump. Run AFTER generate so the programmatic
+    # <market>_daily_report.md (the narrator's input) is present. Idempotent,
+    # so the later --skip-generate delivery call reuses it instead of re-paying
+    # the slow codex bill under the short email timeout.
+    if args.market in {"us", "cn"} and not args.dry_run:
+        _ensure_narrator(args.date, args.market)
+    path = report_path(args.date, args.market)
 
     if not args.dry_run and not path.exists():
         if args.market in {"cn", "us"}:

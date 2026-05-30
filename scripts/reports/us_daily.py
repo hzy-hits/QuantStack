@@ -16,6 +16,7 @@ from typing import Any
 
 from lib.fmt import fmt_pct, fmt_r
 from sections.iv_view import render_iv_view_section
+from sections.index_skew import render_index_skew_section
 # render_us_left_side_section is a wrapper in main (injects
 # US_MEAN_REVERSION_ROOT); reach it via lazy proxy m.render_us_left_side_section.
 from sections.options_radar import (
@@ -143,6 +144,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     lines += render_market_selection_rationale(payload, actions, "US")
     lines += m.render_us_left_side_section(payload)
     lines += render_iv_view_section(payload)
+    lines += render_index_skew_section(payload)
     lines += render_risk_regime_section(payload)
     lines += render_fear_greed_section(payload)
     lines += render_market_regime_score_section(payload)

@@ -15,6 +15,12 @@ use tracing::{info, warn};
 
 const DATA_TIMEOUT_SECS: u64 = 3600;
 const EMAIL_TIMEOUT_SECS: u64 = 120;
+/// The render step generates the payload AND runs the codex/GPT-5.5 narrator
+/// (6 extractors + 1 merge), which is far slower than the legacy DeepSeek path.
+/// Give it a generous budget so it isn't killed mid-narration; the parent
+/// us.postmarket task allows 240 min. The pure delivery step keeps the short
+/// EMAIL_TIMEOUT (the narrator output is already cached by then).
+const NARRATIVE_TIMEOUT_SECS: u64 = 900;
 const LOCK_FILE: &str = "/tmp/quant-research-pipeline.lock";
 
 #[derive(Parser, Debug, Clone)]
@@ -574,8 +580,9 @@ fn run_daily_report_command(
     label: &str,
     skip_generate: bool,
     delivery_dry_run: bool,
+    timeout_secs: u64,
 ) -> Result<()> {
-    let mut cmd = timeout_command(EMAIL_TIMEOUT_SECS, &ctx.python_bin);
+    let mut cmd = timeout_command(timeout_secs, &ctx.python_bin);
     cmd.arg(
         ctx.stack_root
             .join("scripts/send_production_decision_report.py"),
@@ -609,14 +616,29 @@ fn run_daily_report_command(
 }
 
 fn render_replacement_report(ctx: &UsPipelineContext) -> Result<()> {
-    run_daily_report_command(ctx, "us final market report render", false, true)?;
+    // This call generates the payload and runs the slow codex narrator.
+    run_daily_report_command(
+        ctx,
+        "us final market report render",
+        false,
+        true,
+        NARRATIVE_TIMEOUT_SECS,
+    )?;
     cleanup_legacy_us_report_artifacts(ctx)
 }
 
 fn send_report(ctx: &UsPipelineContext) -> Result<()> {
     println!();
     println!("[7/7] Send US report");
-    run_daily_report_command(ctx, "us daily report delivery", true, ctx.delivery_dry_run)?;
+    // Narrator output is already cached from the render step; the short email
+    // timeout is fine here.
+    run_daily_report_command(
+        ctx,
+        "us daily report delivery",
+        true,
+        ctx.delivery_dry_run,
+        EMAIL_TIMEOUT_SECS,
+    )?;
     cleanup_legacy_us_report_artifacts(ctx)
 }
 

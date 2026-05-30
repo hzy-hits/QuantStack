@@ -29,22 +29,26 @@ from pathlib import Path
 from typing import Any
 
 import duckdb
-import requests
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from codex_backend import backend, call_llm, concurrency  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 CN_CONFIG = ROOT / "quant-research-cn" / "config.yaml"
 PROMPTS_DIR = ROOT / "quant-research-v1" / "prompts"
 US_DB = ROOT / "quant-research-v1" / "data" / "quant.duckdb"
 
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek-chat"
 
-
-def load_deepseek_key() -> str:
-    cfg = yaml.safe_load(CN_CONFIG.read_text(encoding="utf-8"))
-    key = (cfg.get("api") or {}).get("deepseek_key")
-    if not key:
+def load_deepseek_key() -> str | None:
+    """DeepSeek key — only needed as a fallback. Tolerant of absence so the
+    codex backend can run without a DeepSeek config."""
+    try:
+        cfg = yaml.safe_load(CN_CONFIG.read_text(encoding="utf-8"))
+        key = (cfg.get("api") or {}).get("deepseek_key")
+    except OSError:
+        key = None
+    if not key and backend() == "deepseek":
         raise SystemExit("DeepSeek key not found in quant-research-cn/config.yaml")
     return key
 
@@ -406,6 +410,27 @@ def build_options_payload(art: dict[str, Any], as_of: str) -> str:
     out_parts.append(", ".join(f"{r[0]}({r[1]})" for r in er_rows[:30]) or "[none]")
 
     con.close()
+
+    # Index-level skew term structure (^SPX/^NDX/SPY/QQQ/^XSP/^VIX), already
+    # computed into the main payload by generate_main_strategy_v2_report.py.
+    # Surfaces market-wide tail-risk pricing for the narrator's index read.
+    idx_skew = (art.get("main_strategy_v2_backtest") or {}).get("index_skew") or {}
+    if idx_skew:
+        out_parts.append("")
+        out_parts.append("## index-level skew term structure (front vs ~30d, OTM-put/call IV)")
+        for sym, rec in idx_skew.items():
+            fs, fd = rec.get("front_skew"), rec.get("front_dte")
+            ts, td = rec.get("term_skew"), rec.get("term_dte")
+            slope = rec.get("skew_slope")
+            skz = rec.get("skew_z")
+            if fs is None:
+                continue
+            line = (f"{sym}: front {fs:.2f}@{fd}d → ~30d {ts:.2f}@{td}d "
+                    f"(slope {slope:+.2f})")
+            if skz is not None:
+                line += f", skew_z {skz:+.2f}"
+            out_parts.append(line)
+
     return _join_payload_sections("OPTIONS PAYLOAD", "\n".join(out_parts))
 
 
@@ -446,34 +471,10 @@ def _join_payload_sections(label: str, sections: str) -> str:
     return f"# {label}\n\n{sections}"
 
 
-def call_deepseek(api_key: str, system: str, user: str, *,
-                  temperature: float = 0.2, max_tokens: int = 1500) -> str | None:
-    """Sync DeepSeek call. Returns content or None on error."""
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    try:
-        r = requests.post(
-            DEEPSEEK_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=120,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
-    except (requests.RequestException, KeyError, ValueError) as e:
-        print(f"  [warn] DeepSeek call failed: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
-        return None
-
-
-async def call_extractor_async(api_key: str, name: str, payload_text: str) -> tuple[str, str]:
-    """Async wrapper around sync requests call for parallel extractor invocation."""
+async def call_extractor_async(
+    sem: asyncio.Semaphore, api_key: str | None, name: str, payload_text: str
+) -> tuple[str, str]:
+    """Async wrapper routing to the configured backend (codex by default)."""
     prompt = load_prompt(name)
     # Substitute {payload_*} placeholder with actual payload
     placeholder = "{payload_" + name + "}" if name not in ("merge",) else None
@@ -488,14 +489,19 @@ async def call_extractor_async(api_key: str, name: str, payload_text: str) -> tu
         user_msg = payload_text
 
     loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(
-        None,
-        lambda: call_deepseek(api_key, system_msg, user_msg, temperature=0.1, max_tokens=1200),
-    )
+    async with sem:
+        response = await loop.run_in_executor(
+            None,
+            lambda: call_llm(
+                system_msg, user_msg,
+                label=f"extractor:{name}", deepseek_key=api_key,
+                temperature=0.1, max_tokens=1200,
+            ),
+        )
     return name, response or f"[{name} extractor failed]"
 
 
-async def run_extractors(api_key: str, art: dict[str, Any], as_of: str) -> dict[str, str]:
+async def run_extractors(api_key: str | None, art: dict[str, Any], as_of: str) -> dict[str, str]:
     """Run 6 extractors in parallel: macro / event / quant / risk / news / options."""
     payloads = {
         "macro": build_macro_payload(art),
@@ -505,15 +511,16 @@ async def run_extractors(api_key: str, art: dict[str, Any], as_of: str) -> dict[
         "news": build_news_payload(art, as_of),
         "options": build_options_payload(art, as_of),
     }
+    sem = asyncio.Semaphore(concurrency())
     tasks = [
-        call_extractor_async(api_key, name, payload)
+        call_extractor_async(sem, api_key, name, payload)
         for name, payload in payloads.items()
     ]
     results = await asyncio.gather(*tasks)
     return dict(results)
 
 
-def call_narrator(api_key: str, extractor_outputs: dict[str, str],
+def call_narrator(api_key: str | None, extractor_outputs: dict[str, str],
                   art: dict[str, Any], as_of: str) -> str | None:
     """Single narrator call — receives extractor outputs + payload digest."""
     prompt = load_prompt("merge")
@@ -528,7 +535,10 @@ def call_narrator(api_key: str, extractor_outputs: dict[str, str],
         f"### Payload Digest(交叉验证用)\n{payload_digest}\n\n"
         f"### 任务\n请按 us-merge-agent.md 的输出格式,为日期 {as_of} 生成完整美股日报。"
     )
-    return call_deepseek(api_key, prompt, user_msg, temperature=0.3, max_tokens=4500)
+    return call_llm(
+        prompt, user_msg, label="narrator:us",
+        deepseek_key=api_key, temperature=0.3, max_tokens=4500,
+    )
 
 
 async def main_async(args) -> None:
@@ -539,7 +549,7 @@ async def main_async(args) -> None:
 
     api_key = load_deepseek_key()
     art = load_payload_artifacts(report_dir)
-    print(f"=== US narrator agent — {as_of} ===")
+    print(f"=== US narrator agent — {as_of} (backend={backend()}, concurrency={concurrency()}) ===")
     print(f"  loaded {len(art)} artifacts; md size {len(art.get('_us_daily_report_md', ''))}")
 
     print("  running 6 extractors in parallel (macro/event/quant/risk/news/options)...")
