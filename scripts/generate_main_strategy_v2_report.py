@@ -5906,15 +5906,32 @@ def _evidence_state_for_action(row: dict[str, Any]) -> str:
     lacks source-review evidence and treat it as research-only sizing.
     """
     state = str(row.get("evidence_state") or row.get("ai_infra_evidence_state") or "").strip()
+    verif = str(row.get("ai_infra_verification_status") or row.get("verification_status") or "").strip()
+    # An entry can read "合理推论" (which passes the pool gate) yet still be a
+    # placeholder manual queue-unlock whose AI exposure was never source-verified
+    # (verification_status=pending_original_source_verification / evidence text
+    # like "操作员从 queue 批量补回 ... 解锁"). Don't let it masquerade as a clean
+    # pick — append a ⚠ so the table (and the narrator that reads it) treats it
+    # as research-grade, not source-confirmed.
+    pending = (
+        verif == "pending_original_source_verification"
+        or "queue 批量补回" in state
+        or "queue ingest" in state
+        or ("操作员" in state and "解锁" in state)
+    )
     if not state:
         return "unknown"
     if "原文已证明" in state:
-        return "原文已证明"
-    if "合理推论" in state:
-        return "合理推论"
-    if "待原文核验" in state or "待核验" in state:
-        return "待原文核验"
-    return state[:24]
+        base = "原文已证明"
+    elif "合理推论" in state:
+        base = "合理推论"
+    elif "待原文核验" in state or "待核验" in state:
+        base = "待原文核验"
+    else:
+        base = state[:24]
+    if pending and base not in {"待原文核验", "unknown"}:
+        return f"{base} ⚠待核验"
+    return base
 
 
 def render_market_action_table(actions: list[dict[str, Any]]) -> list[str]:

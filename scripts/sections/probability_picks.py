@@ -35,8 +35,16 @@ def _pick_probability_stock(ranker_rows, verdicts, tenor_by_sym):
         if tenor_score < 10: continue
         v = verdicts.get(sym, {})
         skz = round_or_none(v.get("skew_z"))
+        iv_rk = round_or_none(v.get("iv_rank_pct"))
         # composite: rank dominant, tenor confluence amplifies, penalize put-skew spike
         score = rs * (1.0 + min(tenor_score, 200) / 250.0) - (max((skz or 0) - 1.5, 0) * 5)
+        # IV-regime guard: never headline a name attacking from the IV top. A
+        # freshly-spiked IV (post-event vol blow-off, e.g. an earnings pop) is
+        # the worst entry for a "probability-optimal" call — the move is priced
+        # and vol crush works against you. Scale the penalty above the 80th pct
+        # (up to -30 at IV rank 100).
+        if iv_rk is not None and iv_rk >= 80:
+            score -= (iv_rk - 80) * 1.5
         cands.append((score, sym, r, v, ts, tenor_score))
     cands.sort(key=lambda x: -x[0])
     return cands[:2]
@@ -160,6 +168,19 @@ def render_us_probability_picks_section(
         skz = round_or_none(v.get('skew_z'))
         lines.append(f"### 🥇 股票 → **{sym}**")
         lines.append(f"- rank_score **{rk:.1f}**(US ranker {r.get('rank')});IV rank {iv_s};tenor 异动 score **{tsc:.0f}**")
+        # Selection is rank × tenor-confluence with an IV-top penalty — so the
+        # 🥇 is often NOT the raw rank #1. Surface the raw leader so the operator
+        # isn't confused when a higher-ranked name doesn't headline.
+        top_rank_sym = symbol_key(production_rows[0].get("symbol")) if production_rows else None
+        if top_rank_sym and symbol_key(sym) != top_rank_sym:
+            top = production_rows[0]
+            tv = verdicts.get(top_rank_sym, {})
+            tiv = round_or_none(tv.get("iv_rank_pct"))
+            tiv_s = f"{tiv:.0f}%" if tiv is not None else "-"
+            note = "无 tenor 共振" if not tenor_by_sym.get(top_rank_sym) else f"IV rank {tiv_s}(IV 高位降权)" if (tiv or 0) >= 80 else "tenor 共振弱"
+            lines.append(f"- 注:raw rank #1 是 **{top.get('symbol')}**(rank {top.get('rank_score'):.1f}),未夺🥇因 {note};🥇 取 rank×tenor 共振、并对 IV blow-off 降权")
+        if iv is not None and iv >= 80:
+            lines.append(f"- ⚠ 本🥇 IV rank {iv_s} 处高位(vol 已贵/事件后)——只做股票线性表达,别追期权")
         if len(stock) > 1:
             _, sym2, r2, v2, _, tsc2 = stock[1]
             iv2 = round_or_none(v2.get('iv_rank_pct'))
