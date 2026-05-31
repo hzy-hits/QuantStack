@@ -64,6 +64,8 @@ class OptionsVerdictTests(unittest.TestCase):
             verdict = out["MRVL"]["verdict"]
             self.assertIn("call 偏多", verdict)
             self.assertIn("IV 60%·贵", verdict)
+            self.assertIn("IV/HV 1.20x", verdict)
+            self.assertAlmostEqual(out["MRVL"]["iv_hv"], 1.2)
             self.assertIn("下行恐惧高", verdict)
             self.assertIn("信仰久期长", verdict)
 
@@ -81,6 +83,7 @@ class OptionsVerdictTests(unittest.TestCase):
             verdict = out["NVDA"]["verdict"]
             self.assertIn("put 偏空", verdict)
             self.assertIn("IV 35%·便宜", verdict)
+            self.assertIn("IV/HV 0.78x", verdict)
             self.assertIn("下行恐惧低", verdict)
             self.assertIn("信仰久期短", verdict)
 

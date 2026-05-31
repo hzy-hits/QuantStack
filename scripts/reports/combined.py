@@ -15,6 +15,7 @@ import importlib
 from typing import Any
 
 from lib.fmt import fmt_pct
+from sections.us_stock_decision_stack import render_us_stock_decision_stack_section
 
 _main = None
 
@@ -67,6 +68,7 @@ def render_report(payload: dict[str, Any]) -> str:
         "",
     ]
     lines += m.render_production_decision_summary(payload)
+    lines += render_us_stock_decision_stack_section(payload)
     lines += m.render_fear_greed_section(payload)
     lines += m.render_earnings_calendar_section(payload, "US", limit=18)
     lines += m.render_earnings_calendar_section(payload, "CN", limit=18)
@@ -125,6 +127,7 @@ def render_report(payload: dict[str, Any]) -> str:
         "",
     ]
     lines += m.render_us_opportunity_ranker_section(payload)
+    lines += m.render_gamma_spring_section(payload)
     lines += m.render_missed_alpha_radar(us.get("missed_alpha_radar") or [])
     lines += [
         "## 策略新鲜期 / Freshness",

@@ -1,4 +1,4 @@
-"""US 期权 IV 视图 — non-executable options context (Phase B.4).
+"""US 期权 IV/HV 视图 — non-executable options context (Phase B.4).
 
 Extracted from scripts/generate_main_strategy_v2_report.py — behavior
 preserved bit-for-bit. Per-stock IV / VRP / skew table with IV rank
@@ -25,7 +25,8 @@ def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict
     here. For each basket name we translate four readings into plain language:
 
     - positioning : pc_ratio_z (call-heavy vs put-heavy order flow)
-    - expected move : iv_ann, plus vrp (IV cheap or rich vs realised vol)
+    - expected move : iv_ann, rv_ann, IV/HV, plus vrp
+      (IV cheap or rich vs realised vol)
     - downside fear : skew_z (elevated put skew = crowd prices asymmetry)
     - conviction horizon : where chain volume sits (weekly = tactical,
       long-dated = structural positioning context)
@@ -135,6 +136,8 @@ def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict
             parts.append("定位中性")
 
         iv = round_or_none(sent.get("iv_ann"))
+        rv = round_or_none(sent.get("rv_ann"))
+        iv_hv = (iv / rv) if (iv is not None and rv is not None and rv > 0) else None
         vrp = round_or_none(sent.get("vrp"))
         if iv is not None:
             em = f"IV {iv * 100:.0f}%"
@@ -145,6 +148,8 @@ def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict
                     em += "·贵(IV>实际波动)"
                 else:
                     em += "·合理"
+            if iv_hv is not None:
+                em += f"·IV/HV {iv_hv:.2f}x"
             parts.append(em)
 
         skz = round_or_none(sent.get("skew_z"))
@@ -168,7 +173,7 @@ def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict
                 parts.append("信仰久期中")
 
         if parts:
-            out[sym] = {"verdict": " | ".join(parts), **sent}
+            out[sym] = {"verdict": " | ".join(parts), "iv_hv": iv_hv, **sent}
             rk = iv_rank.get(sym) or {}
             if rk:
                 out[sym]["iv_rank_pct"] = (rk.get("pct_rank") or 0.0) * 100.0 if rk.get("pct_rank") is not None else None
@@ -176,7 +181,8 @@ def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict
     return out
 
 
-def _iv_action_hint(vrp: float | None, iv_ann: float | None, skew_z: float | None,
+def _iv_action_hint(vrp: float | None, iv_ann: float | None, iv_hv: float | None,
+                    skew_z: float | None,
                     pcz: float | None, long_share: float, short_share: float,
                     regime_state: str, iv_rank_pct: float | None = None) -> str:
     """Translate options readings into non-executable context language.
@@ -198,6 +204,10 @@ def _iv_action_hint(vrp: float | None, iv_ann: float | None, skew_z: float | Non
             return f"⏸ 等回落(IV rank {iv_rank_pct:.0f}% 高位)"
         if iv_rank_pct >= 70 and short_share >= 0.50:
             return f"✂️ 高 IV context(IV rank {iv_rank_pct:.0f}%,不写卖方指令)"
+    if iv_hv is not None and iv_hv <= 0.90 and long_share >= 0.10:
+        return f"💎 方向成本低 context(IV/HV {iv_hv:.2f}x,0R)"
+    if iv_hv is not None and iv_hv >= 1.35 and (short_share >= 0.50 or (skew_z is not None and skew_z >= 0.5)):
+        return f"✂️ 高 IV/HV context(IV/HV {iv_hv:.2f}x,不写卖方指令)"
     if vrp is not None and vrp <= -0.05 and long_share >= 0.10:
         if panic_regime and (skew_z is None or skew_z >= 0.5):
             return "🎯 远月方向 context(IV 便宜+恐慌+久期长,0R)"
@@ -231,6 +241,9 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 6) -> list[s
     for sym, v in verdicts.items():
         iv = round_or_none(v.get("iv_ann"))
         rv = round_or_none(v.get("rv_ann"))
+        iv_hv = round_or_none(v.get("iv_hv"))
+        if iv_hv is None and iv is not None and rv is not None and rv > 0:
+            iv_hv = iv / rv
         vrp = round_or_none(v.get("vrp"))
         pcz = round_or_none(v.get("pc_ratio_z"))
         skz = round_or_none(v.get("skew_z"))
@@ -241,9 +254,9 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 6) -> list[s
         verdict_txt = str(v.get("verdict") or "")
         long_share = 0.15 if "信仰久期长" in verdict_txt else (0.0 if "信仰久期短" in verdict_txt else 0.08)
         short_share = 0.70 if "信仰久期短" in verdict_txt else (0.0 if "信仰久期长" in verdict_txt else 0.40)
-        hint = _iv_action_hint(vrp, iv, skz, pcz, long_share, short_share, regime_state, iv_rank_pct=iv_rk)
+        hint = _iv_action_hint(vrp, iv, iv_hv, skz, pcz, long_share, short_share, regime_state, iv_rank_pct=iv_rk)
         rows.append({
-            "sym": sym, "iv": iv, "rv": rv, "vrp": vrp,
+            "sym": sym, "iv": iv, "rv": rv, "iv_hv": iv_hv, "vrp": vrp,
             "pcz": pcz, "skz": skz, "hint": hint,
             "verdict": verdict_txt, "iv_rk": iv_rk, "iv_n": iv_n,
         })
@@ -254,8 +267,11 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 6) -> list[s
         r["vrp"] if r["vrp"] is not None else 999.0,
     ))
 
-    cheap_vol_context = [r for r in rows if "远月方向 context" in r["hint"]]
-    expensive_vol_context = [r for r in rows if "高 IV context" in r["hint"] or "卖方" in r["hint"]]
+    cheap_vol_context = [r for r in rows if "远月方向 context" in r["hint"] or "方向成本低" in r["hint"]]
+    expensive_vol_context = [
+        r for r in rows
+        if "高 IV" in r["hint"] or "卖方" in r["hint"] or "等回落" in r["hint"]
+    ]
 
     rank_phrase = (
         f"IV rank lookback 现在是 {max_n} 个交易日(目标 252,CBOE 收集起点 2026-03-10,随时间逼近 1Y)"
@@ -265,8 +281,8 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 6) -> list[s
     lines = [
         "## US 期权 IV 视图",
         "",
-        f"按 IV rank 升序排,最便宜的 IV 在前。用途是判断方向成本、crowding 和股票 timing。",
-        f"{rank_phrase}。当前 tape **{regime_state}**;rank ≤20% 是历史低位方向成本 context,≥80% 是高 IV 风险 context。",
+        f"按 IV rank 升序排,并显式给 IV/HV。用途是判断方向成本、crowding 和股票 timing。",
+        f"{rank_phrase}。当前 tape **{regime_state}**;rank ≤20% 或 IV/HV≤0.90 是低 IV context,rank≥80% 或 IV/HV≥1.35 是高 IV 风险 context。",
         "",
     ]
     if cheap_vol_context:
@@ -279,18 +295,19 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 6) -> list[s
         lines.append("")
 
     lines += [
-        f"| Symbol | IV 30d | HV30 | VRP | {rank_label} | PC z | Skew z | Context |",
-        "|---|---:|---:|---:|---:|---:|---:|---|",
+        f"| Symbol | IV 30d | HV30 | IV/HV | VRP | {rank_label} | PC z | Skew z | Context |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for r in rows[:limit]:
         iv_s = f"{r['iv']*100:.0f}%" if r["iv"] is not None else "-"
         rv_s = f"{r['rv']*100:.0f}%" if r["rv"] is not None else "-"
+        ivhv_s = f"{r['iv_hv']:.2f}x" if r["iv_hv"] is not None else "-"
         vrp_s = f"{r['vrp']*100:+.1f}pp" if r["vrp"] is not None else "-"
         rk_s = f"{r['iv_rk']:.0f}%" if r["iv_rk"] is not None else "-"
         pcz_s = f"{r['pcz']:+.1f}" if r["pcz"] is not None else "-"
         skz_s = f"{r['skz']:+.1f}" if r["skz"] is not None else "-"
         lines.append(
-            f"| {r['sym']} | {iv_s} | {rv_s} | {vrp_s} | {rk_s} | {pcz_s} | {skz_s} | "
+            f"| {r['sym']} | {iv_s} | {rv_s} | {ivhv_s} | {vrp_s} | {rk_s} | {pcz_s} | {skz_s} | "
             f"{r['hint']} |"
         )
     lines.append("")

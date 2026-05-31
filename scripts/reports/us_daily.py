@@ -15,6 +15,7 @@ import importlib
 from typing import Any
 
 from lib.fmt import fmt_pct, fmt_r
+from sections.gamma_spring import render_gamma_spring_section
 from sections.iv_view import render_iv_view_section
 from sections.index_skew import render_index_skew_section
 # render_us_left_side_section is a wrapper in main (injects
@@ -29,6 +30,7 @@ from sections.regime_views import render_fear_greed_section, render_risk_regime_
 from sections.serenity import render_serenity_crosscheck_section
 from sections.market_regime import render_market_regime_score_section
 from sections.top10_daily import render_us_top10_daily_section
+from sections.us_stock_decision_stack import render_us_stock_decision_stack_section
 from sections.audits_calendars import (
     render_earnings_calendar_section,
     render_source_review_calendar_section,
@@ -132,6 +134,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
         "",
     ]
     lines += m.render_us_execution_gate_notice(payload)
+    lines += render_us_stock_decision_stack_section(payload)
     lines += render_realized_horizon_edge_section(payload, "US")
     us_gate = (
         ((payload.get("production_decision_summary") or {}).get("summary") or {}).get("us_execution_gate")
@@ -144,6 +147,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     lines += render_market_selection_rationale(payload, actions, "US")
     lines += m.render_us_left_side_section(payload)
     lines += render_iv_view_section(payload)
+    lines += render_gamma_spring_section(payload)
     lines += render_index_skew_section(payload)
     lines += render_risk_regime_section(payload)
     lines += render_fear_greed_section(payload)
