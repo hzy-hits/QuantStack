@@ -78,7 +78,7 @@ class CNUnavailableSignalsReportTests(unittest.TestCase):
         self.assertNotIn("limit_up_radar", text)
         self.assertNotIn("9:25", text)
         self.assertNotIn("9:35", text)
-        self.assertIn("非 AI-infra broad-market 信号不生成 R，也不能阻拦 AI-infra sleeve", text)
+        self.assertIn("broad-market 信号只作为背景", text)
 
 
 if __name__ == "__main__":

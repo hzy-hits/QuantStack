@@ -40,7 +40,7 @@ class CnLeftSideWatchTests(unittest.TestCase):
         self.assertEqual(rows, [])
         section = "\n".join(self.module.render_cn_left_side_watch_section(payload))
         self.assertIn("左侧观察池", section)
-        self.assertIn("没有输出", section)
+        self.assertIn("池子是空的", section)
 
     def test_surfaces_oversold_contrarian_family(self) -> None:
         payload = {
