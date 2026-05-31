@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import duckdb
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 QUANT_V1_SRC = REPO_ROOT / "src"
@@ -22,6 +23,74 @@ def _write_ai_infra_universe(root: Path, rows: list[dict]) -> None:
 
 
 class UsOpportunityRankerTests(unittest.TestCase):
+    def test_gamma_v2_alpha_can_create_ai_universe_entry_candidate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            ai_root = root / "ai"
+            _write_ai_infra_universe(
+                ai_root,
+                [
+                    {
+                        "asset_pool": "美国资产池",
+                        "market_country": "US",
+                        "ticker": "ALPH",
+                        "company": "Alpha Compute",
+                        "bfs_depth": "D3",
+                        "module": "AI accelerator supply chain",
+                        "current_pool": "P0",
+                        "total_score": 90,
+                        "evidence_state": "原文已证明: AI accelerator supplier",
+                    }
+                ],
+            )
+            db = root / "us.duckdb"
+            con = duckdb.connect(str(db))
+            try:
+                con.execute(
+                    """
+                    CREATE TABLE options_chain_quotes (
+                        symbol VARCHAR,
+                        as_of DATE,
+                        days_to_exp INTEGER,
+                        current_price DOUBLE,
+                        contract_symbol VARCHAR,
+                        option_type VARCHAR,
+                        strike DOUBLE,
+                        volume BIGINT,
+                        open_interest BIGINT,
+                        implied_volatility DOUBLE,
+                        gamma DOUBLE
+                    )
+                    """
+                )
+                rows = [
+                    ("ALPH", "2026-05-28", 20, 99.0, "ALPHC100", "call", 100.0, 120, 5_000, 0.32, 0.05),
+                    ("ALPH", "2026-05-28", 20, 99.0, "ALPHP95", "put", 95.0, 80, 1_500, 0.36, 0.02),
+                    ("ALPH", "2026-05-29", 20, 101.0, "ALPHC100", "call", 100.0, 2_000, 12_000, 0.31, 0.05),
+                    ("ALPH", "2026-05-29", 20, 101.0, "ALPHC105", "call", 105.0, 1_000, 4_000, 0.33, 0.03),
+                    ("ALPH", "2026-05-29", 20, 101.0, "ALPHP95", "put", 95.0, 50, 1_000, 0.35, 0.02),
+                ]
+                con.executemany("INSERT INTO options_chain_quotes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+            finally:
+                con.close()
+
+            payload = ranker.build_ranker_payload(
+                as_of=ranker.date(2026, 5, 29),
+                candidates=[],
+                candidate_status="unit",
+                us_db=db,
+                top=10,
+                ai_infra_root=ai_root,
+                ai_infra_mode="enforce_expand",
+            )
+            row = payload["all_rows"][0]
+            self.assertEqual(row["symbol"], "ALPH")
+            self.assertEqual(row["alpha_sleeve_id"], ranker.US_GAMMA_V2_ALPHA_SLEEVE)
+            self.assertEqual(row["alpha_factory_role"], "gamma_v2_entry_alpha")
+            self.assertEqual(row["production_action"], "buy_stock_with_gamma_v2_entry")
+            self.assertTrue(row["gamma_v2_entry_signal"])
+            self.assertGreater(row["gamma_v2_alpha_score"], 64.0)
+
     def test_ai_infra_expand_uses_all_us_symbols_not_only_p0(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             ai_root = Path(tmpdir)

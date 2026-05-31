@@ -4,7 +4,7 @@
 
 ## 任务
 
-阅读下方期权 payload,按固定格式输出结构化提取(约 600 字,中文)。
+阅读下方期权 payload,按固定格式输出结构化提取。字数不限制,信息密度优先。
 
 ---
 
@@ -41,9 +41,13 @@
    - 只 ^SPX 异动 + SPY 平静 = 纯机构对冲(隐蔽信号,价值更高)
    - 只 SPY 异动 + ^SPX 平静 = 零售情绪(噪音多,不可靠)
 
-3. **options_alpha**:程序综合 directional_edge + vol_edge + vrp_edge + flow_edge,输出 expression(stock_long / call_spread / put_spread / wait)。这是定向 + 凸性 + 流向打分。
+5. **options_alpha**:程序综合 directional_edge + vol_edge + vrp_edge + flow_edge,输出 expression(stock_long / call_spread / put_spread / wait)。这是定向 + 凸性 + 流向打分。
 
-4. **options_sentiment**:每标的 PC ratio z-score + skew z-score 横截面排名。PC z ≥ 2.0σ 或 skew z ≤ -2.0σ = 极端定位。
+6. **options_sentiment**:每标的 PC ratio z-score + skew z-score 横截面排名。PC z ≥ 2.0σ 或 skew z ≤ -2.0σ = 极端定位。
+
+7. **IV/HV regime**:当前 IV 与 realized HV 的相对位置。生产策略使用健康带思路:IV/HV 过低可能是尾部事件未定价,过高可能是事件溢价/拥挤；0.90-1.35 更适合配合 trend 做股票 timing context。只能辅助股票 timing 和风险,不能写期权交易指令。
+
+8. **Gamma Spring v2 / 势能井买卖管理**:用 option gamma + OI 近似每 1% 标的移动的 GEX,并用 OI change、volume、put/call skew 形成 dealer pressure proxy,再看 spot 是否跨 gamma center / max wall。它是美股 `us_gamma_v2_alpha` 选股/入场主引擎之一,但 dealer 仓位不可直接观测,不能绕过 AI universe/source evidence,也不是期权交易建议。
 
 ## 规则
 
@@ -96,10 +100,25 @@
 - **极端 call 偏倾**(skew z ≥ +3σ):ticker 列表(最多 5)
 (每类无则写"无")
 
+## IV/HV 便宜/昂贵名单
+- **低 IV / 低 IV-HV**:最多 5 个 ticker,每个写 IV、HV、IV/HV、IV rank,并翻译成"方向成本低/可用作股票 timing context"。
+- **高 IV / 高 IV-HV**:最多 5 个 ticker,每个写 IV、HV、IV/HV、IV rank,并翻译成"事件溢价高/vol 已贵/股票线性风险控制优先"。
+- 严禁写"买 call / 卖 put / 做 spread";这只是 volatility context。
+
+## Gamma Spring v2 / 势能井买卖管理
+- 列 3-5 个最重要 ticker 的 state、gamma center、max wall、dealer pressure proxy、wall transition、gamma_v2_multiplier。
+- `PINNED_GAMMA_WELL`:写价格容易被拉回 center。
+- `NEGATIVE_GAMMA_ACCELERATOR`:写突破/跌破后容易放大。
+- `LOW_STIFFNESS`:写 gamma 约束弱,新闻/现货流主导。
+- `WALL_BREAK_DOWN` / `CENTER_CROSS_DOWN`:写收紧止损/不加仓。
+- `WALL_BREAK_UP` / positive dealer pressure:写突破后可持有观察,但不能写成期权买卖。
+- 不得把 gamma state 写成期权买卖建议；它可以决定股票入场优先级、风控、仓位上限和追价/回踩语言。
+
 ## 判断
 
-(恰好 3 句话,每句包含 1 个 payload 数字。
+(用清楚的几句话输出,每个核心判断包含 1 个 payload 数字。
 1. 今天指数 ETF 短端 hedging 整体强度如何(SPY+QQQ+IWM 1DTE put 总 v/OI ratio 或总 volume),意味着市场为什么定价(隔夜 risk / Fed catalyst / earnings)。
 2. 个股层面最值得 narrator 注意的 1 个短端异动是哪个 ticker + 什么 catalyst。
-3. options_alpha 综合最强的 1 个方向信号(多 or 空) + 与 options_sentiment 同向 / 反向。
+3. IV/HV 最极端的低 IV 和高 IV 各 1 个 ticker,说明它们对股票表达方式的影响。
+4. Gamma Spring v2 最强 dealer pressure 或 wall transition 的 1 个 ticker,说明它对追价/风控/仓位上限语言的影响。
 所有判断必须 ticker 级,不要"科技股期权偏多"这种空话。)

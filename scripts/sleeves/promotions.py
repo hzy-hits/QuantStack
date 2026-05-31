@@ -62,6 +62,19 @@ TREND_MAINLINE_PROMOTED_SLEEVES = [
             'price/volume and options/flow confirmation pass the sleeve query"}'
         ),
     },
+    {
+        "market": "us",
+        "sleeve_id": "us_gamma_v2_alpha",
+        "status": "promoted",
+        "gate_version": "operator_gamma_v2_alpha_v1",
+        "created_by": "operator_directive_2026_05_31",
+        "gates_snapshot_json": (
+            '{"contract":"Gamma Spring v2 can receive stock R as a US entry-alpha sleeve '
+            'inside the admitted AI universe after dealer-pressure proxy, wall transition, '
+            'source-evidence, headline-risk and portfolio-overlay checks pass; it is a stock '
+            'entry/management signal, not an option trade instruction"}'
+        ),
+    },
     # AI infra production-core sleeve: members of ai_infra/data/global_universe_v2.jsonl
     # whose evidence_state contains 原文已证明 / 合理推论 are operator-curated for
     # execution. The pool filter (ai_infra_universe.is_production_grade) is the

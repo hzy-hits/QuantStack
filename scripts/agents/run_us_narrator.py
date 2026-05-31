@@ -1,17 +1,16 @@
-"""US daily report agent narrator — 4 extractor + 1 narrator pipeline.
+"""US daily report Codex narrator — extractor + narrator pipeline.
 
 Phase D.2 of PHASE_D_PLAN.md.
 
-Architecture (mirrors quant-research-cn/src/main.rs agent flow):
+Architecture:
     payload (loaded from existing JSON artifacts)
        ↓
-    4 extractors in parallel (DeepSeek):
-      macro / event / quant / risk
+    6 Codex extractors in parallel:
+      macro / event / quant / risk / news / options
        ↓
-    narrator (DeepSeek) — receives 4 extractor outputs + payload digest
+    Codex narrator — receives extractor outputs + payload digest
        ↓
-    us_daily_report_agent.md (sibling to programmatic us_daily_report.md
-                              for side-by-side comparison until D.5)
+    us_daily_report_agent.md + us_daily_report_agent.md.meta.json
 
 Usage:
     python3 scripts/agents/run_us_narrator.py --date 2026-05-27
@@ -23,34 +22,59 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 import duckdb
-import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+SCRIPTS_DIR = Path(__file__).resolve().parents[1]
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 from codex_backend import backend, call_llm, concurrency  # noqa: E402
+from sections.gamma_spring import build_gamma_spring_snapshot, render_gamma_spring_section  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
-CN_CONFIG = ROOT / "quant-research-cn" / "config.yaml"
 PROMPTS_DIR = ROOT / "quant-research-v1" / "prompts"
 US_DB = ROOT / "quant-research-v1" / "data" / "quant.duckdb"
 
 
-def load_deepseek_key() -> str | None:
-    """DeepSeek key — only needed as a fallback. Tolerant of absence so the
-    codex backend can run without a DeepSeek config."""
-    try:
-        cfg = yaml.safe_load(CN_CONFIG.read_text(encoding="utf-8"))
-        key = (cfg.get("api") or {}).get("deepseek_key")
-    except OSError:
-        key = None
-    if not key and backend() == "deepseek":
-        raise SystemExit("DeepSeek key not found in quant-research-cn/config.yaml")
-    return key
+def final_style_guard(as_of: str) -> str:
+    return f"""
+## 最终写作覆盖（最高优先级）
+
+这份报告是发给人读的美股日报，不是多 agent 调试日志。最终输出必须按下面规则重写，而不是拼接提取器内容：
+
+- 第一行固定为 `# 美股量化日报 — {as_of}`。
+- 只写 6 个二级标题：`一句话`、`市场状态`、`今日交易清单`、`观察与风险`、`催化与复核`、`附注`。
+- 不出现这些词或痕迹：提取器、payload、digest、merge-agent、ranker、模型名、system prompt、user_msg、英文分层名。
+- 不直接输出内部字段名：`stable_alpha_gate`、`ev_status`、`production_decision_summary`、`actionable`、`execution_blocked_0r`、`active_watch`、`ranked_watch`。要翻译成人话，例如“稳定策略门禁未放行”“只观察，不执行”。
+- `今日交易清单` 必须先写正式执行名单；没有就只写“本期无可执行做多”。然后用短句分开写“小仓试错 / 观察 / 回避”，不要制造半执行清单。
+- 期权和新闻只能解释股票决策和风险，不给期权合约、strike、到期日或期权买卖指令。IV/HV 只写成“健康带/事件溢价高/波动过低或过高”的股票上下文；Gamma Spring v2 是 `us_gamma_v2_alpha` 选股/入场主引擎之一,但只能写成股票入场优先级、dealer pressure proxy、wall transition、仓位上限、收紧止损、不追高,不写成期权买卖建议。
+- 不限制字数。优先用短段落，每段只讲一个判断；信息不够就短，关键冲突多就写足。
+- 可以保留股票代码、R、beta、IV、VIX、P/C、EMA、SMH、SPY、QQQ 等必要缩写；其它机器状态一律翻译。
+"""
+
+
+def write_agent_report(report_dir: Path, out_name: str, narrative: str, as_of: str) -> Path:
+    out_path = report_dir / out_name
+    out_path.write_text(narrative, encoding="utf-8")
+    meta = {
+        "as_of": as_of,
+        "backend": backend(),
+        "model": os.environ.get("CODEX_MODEL", "gpt-5.5"),
+        "reasoning_effort": os.environ.get("CODEX_REASONING_EFFORT", "high"),
+        "generated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "script": Path(__file__).name,
+    }
+    out_path.with_name(out_path.name + ".meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return out_path
 
 
 def load_prompt(name: str) -> str:
@@ -125,8 +149,8 @@ def build_news_payload(art: dict[str, Any], as_of: str) -> str:
     """Build news payload by querying news_scored + serenity_picks DIRECTLY from DB.
 
     Unlike other extractors that read sliced md sections, this one bypasses the
-    programmatic report filters so the agent sees raw DeepSeek-scored news + raw
-    Serenity stance snapshot.
+    programmatic report filters so the agent sees raw scored news + external
+    research-source stance snapshots.
     """
     if not US_DB.exists():
         return _join_payload_sections("NEWS PAYLOAD", "[US DB not found: " + str(US_DB) + "]")
@@ -392,6 +416,113 @@ def build_options_payload(art: dict[str, Any], as_of: str) -> str:
             f"{vrpz or 0:+.2f} | {iv or 0:.1f} | {rv or 0:.1f} |"
         )
 
+    # 4b) IV/HV regime: current implied vol vs realized vol, plus current IV
+    # percentile inside the available options_sentiment history. This is a
+    # stock-timing / risk context, not an option trade recommendation.
+    try:
+        ivhv_rows = con.execute(
+            """
+            WITH latest AS (
+                SELECT MAX(as_of) AS d FROM options_sentiment
+            ),
+            hist AS (
+                SELECT
+                    symbol,
+                    as_of,
+                    iv_ann,
+                    PERCENT_RANK() OVER (PARTITION BY symbol ORDER BY iv_ann) AS iv_pr,
+                    COUNT(*) OVER (PARTITION BY symbol) AS hist_n
+                FROM options_sentiment
+                WHERE iv_ann IS NOT NULL
+                  AND as_of >= (SELECT d - INTERVAL '400 days' FROM latest)
+            ),
+            cur AS (
+                SELECT
+                    os.symbol,
+                    os.iv_ann,
+                    os.rv_ann,
+                    os.vrp,
+                    os.vrp_z,
+                    os.pc_ratio_z,
+                    os.skew_z,
+                    h.iv_pr,
+                    h.hist_n,
+                    os.iv_ann / NULLIF(os.rv_ann, 0) AS iv_hv
+                FROM options_sentiment os
+                JOIN latest ON os.as_of = latest.d
+                LEFT JOIN hist h ON h.symbol = os.symbol AND h.as_of = os.as_of
+                WHERE os.iv_ann IS NOT NULL
+                  AND os.rv_ann IS NOT NULL
+                  AND os.rv_ann > 0
+                  AND os.symbol NOT LIKE '^%'
+                  AND os.symbol NOT IN (
+                    'SPY','QQQ','IWM','DIA','GLD','SLV','TLT','USO',
+                    'XLK','XLF','XLE','XLV','XLI','XLY','XLP','XLU','XLB','XLRE','XLC'
+                  )
+            )
+            SELECT symbol, iv_ann, rv_ann, iv_hv, vrp, vrp_z, iv_pr, hist_n, pc_ratio_z, skew_z,
+                   CASE
+                       WHEN COALESCE(iv_pr, 0.5) <= 0.25 OR iv_hv <= 0.90 THEN 'low_iv'
+                       WHEN COALESCE(iv_pr, 0.5) >= 0.75 OR iv_hv >= 1.35 THEN 'high_iv'
+                       ELSE 'mid_iv'
+                   END AS bucket
+            FROM cur
+            WHERE COALESCE(hist_n, 0) >= 10
+              AND (
+                COALESCE(iv_pr, 0.5) <= 0.25 OR iv_hv <= 0.90
+                OR COALESCE(iv_pr, 0.5) >= 0.75 OR iv_hv >= 1.35
+              )
+            ORDER BY
+              CASE WHEN bucket = 'low_iv' THEN 0 ELSE 1 END,
+              CASE WHEN bucket = 'low_iv' THEN COALESCE(iv_pr, 0.5) END ASC NULLS LAST,
+              CASE WHEN bucket = 'low_iv' THEN iv_hv END ASC NULLS LAST,
+              CASE WHEN bucket = 'high_iv' THEN COALESCE(iv_pr, 0.5) END DESC NULLS LAST,
+              CASE WHEN bucket = 'high_iv' THEN iv_hv END DESC NULLS LAST
+            LIMIT 40
+            """
+        ).fetchall()
+    except duckdb.Error as exc:
+        ivhv_rows = []
+        out_parts.append(f"[IV/HV query failed: {exc}]")
+
+    def _pct(value: Any) -> str:
+        return f"{float(value) * 100:.1f}%" if value is not None else "—"
+
+    def _num(value: Any, digits: int = 2) -> str:
+        return f"{float(value):.{digits}f}" if value is not None else "—"
+
+    out_parts.append("")
+    out_parts.append("## IV/HV regime (current implied vol vs realized vol, equities only)")
+    out_parts.append("Low IV = IV rank ≤25% or IV/HV ≤0.90; High IV = IV rank ≥75% or IV/HV ≥1.35. Use as stock timing/risk context only.")
+    out_parts.append("")
+    low_rows = [r for r in ivhv_rows if r[10] == "low_iv"][:10]
+    high_rows = [r for r in ivhv_rows if r[10] == "high_iv"][:10]
+    out_parts.append("### Low IV / low IV-HV candidates")
+    out_parts.append("| symbol | IV | HV | IV/HV | IV rank | hist_n | VRP | pc_z | skew_z | context |")
+    out_parts.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+    if not low_rows:
+        out_parts.append("| — | — | — | — | — | — | — | — | — | no low-IV candidates |")
+    for r in low_rows:
+        sym, iv, rv, ivhv, vrp, vrpz, iv_pr, hist_n, pcz, skz, bucket = r
+        context = "direction cost low; stock signal can use cheaper optionality context, not an option trade"
+        out_parts.append(
+            f"| {sym} | {_pct(iv)} | {_pct(rv)} | {_num(ivhv)} | {_pct(iv_pr)} | "
+            f"{int(hist_n or 0)} | {_num(vrp, 3)} | {_num(pcz)} | {_num(skz)} | {context} |"
+        )
+    out_parts.append("")
+    out_parts.append("### High IV / high IV-HV candidates")
+    out_parts.append("| symbol | IV | HV | IV/HV | IV rank | hist_n | VRP | pc_z | skew_z | context |")
+    out_parts.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|")
+    if not high_rows:
+        out_parts.append("| — | — | — | — | — | — | — | — | — | no high-IV candidates |")
+    for r in high_rows:
+        sym, iv, rv, ivhv, vrp, vrpz, iv_pr, hist_n, pcz, skz, bucket = r
+        context = "event premium/crowding high; prefer stock linear risk control, avoid treating vol as cheap"
+        out_parts.append(
+            f"| {sym} | {_pct(iv)} | {_pct(rv)} | {_num(ivhv)} | {_pct(iv_pr)} | "
+            f"{int(hist_n or 0)} | {_num(vrp, 3)} | {_num(pcz)} | {_num(skz)} | {context} |"
+        )
+
     # 5) earnings catalyst overlay (next 7 days) for cross-reference
     try:
         er_rows = con.execute(
@@ -431,7 +562,40 @@ def build_options_payload(art: dict[str, Any], as_of: str) -> str:
                 line += f", skew_z {skz:+.2f}"
             out_parts.append(line)
 
+    try:
+        gamma_date = date.fromisoformat(as_of)
+    except ValueError:
+        gamma_date = date.today()
+    gamma_symbols = _gamma_spring_focus_symbols(art)
+    gamma_snapshot = build_gamma_spring_snapshot(US_DB, gamma_symbols, gamma_date)
+    gamma_lines = render_gamma_spring_section({"gamma_spring": gamma_snapshot}, limit=12)
+    if gamma_lines:
+        out_parts.append("")
+        out_parts.append("\n".join(gamma_lines))
+
     return _join_payload_sections("OPTIONS PAYLOAD", "\n".join(out_parts))
+
+
+def _gamma_spring_focus_symbols(art: dict[str, Any]) -> list[str]:
+    payload = art.get("main_strategy_v2_backtest") or {}
+    out = {"SPY", "QQQ", "SMH", "NVDA", "AMD", "MSFT", "AAPL", "TSLA"}
+
+    def add(sym: Any) -> None:
+        token = str(sym or "").upper().strip()
+        if token:
+            out.add(token)
+
+    for row in ((payload.get("production_decision_summary") or {}).get("actionable") or []):
+        if (row.get("market") or row.get("region") or "").lower() in {"us", "usa", ""}:
+            add(row.get("symbol"))
+    us_ranker = payload.get("us_opportunity_ranker") or {}
+    for row in (us_ranker.get("production_basket") or [])[:25]:
+        add(row.get("symbol"))
+    for row in (us_ranker.get("all_rows") or [])[:40]:
+        add(row.get("symbol"))
+    for row in ((payload.get("us") or {}).get("current") or [])[:40]:
+        add(row.get("symbol"))
+    return sorted(out)
 
 
 def build_risk_payload(art: dict[str, Any]) -> str:
@@ -472,7 +636,7 @@ def _join_payload_sections(label: str, sections: str) -> str:
 
 
 async def call_extractor_async(
-    sem: asyncio.Semaphore, api_key: str | None, name: str, payload_text: str
+    sem: asyncio.Semaphore, name: str, payload_text: str
 ) -> tuple[str, str]:
     """Async wrapper routing to the configured backend (codex by default)."""
     prompt = load_prompt(name)
@@ -494,14 +658,16 @@ async def call_extractor_async(
             None,
             lambda: call_llm(
                 system_msg, user_msg,
-                label=f"extractor:{name}", deepseek_key=api_key,
+                label=f"extractor:{name}",
                 temperature=0.1, max_tokens=1200,
             ),
         )
-    return name, response or f"[{name} extractor failed]"
+    if not response:
+        raise RuntimeError(f"US {name} extractor returned empty Codex output")
+    return name, response
 
 
-async def run_extractors(api_key: str | None, art: dict[str, Any], as_of: str) -> dict[str, str]:
+async def run_extractors(art: dict[str, Any], as_of: str) -> dict[str, str]:
     """Run 6 extractors in parallel: macro / event / quant / risk / news / options."""
     payloads = {
         "macro": build_macro_payload(art),
@@ -513,31 +679,31 @@ async def run_extractors(api_key: str | None, art: dict[str, Any], as_of: str) -
     }
     sem = asyncio.Semaphore(concurrency())
     tasks = [
-        call_extractor_async(sem, api_key, name, payload)
+        call_extractor_async(sem, name, payload)
         for name, payload in payloads.items()
     ]
     results = await asyncio.gather(*tasks)
     return dict(results)
 
 
-def call_narrator(api_key: str | None, extractor_outputs: dict[str, str],
+def call_narrator(extractor_outputs: dict[str, str],
                   art: dict[str, Any], as_of: str) -> str | None:
     """Single narrator call — receives extractor outputs + payload digest."""
-    prompt = load_prompt("merge")
+    prompt = load_prompt("merge") + "\n\n" + final_style_guard(as_of)
     payload_digest = art.get("_us_daily_report_md", "")[:30000]  # cap to avoid token blow-up
     user_msg = (
         f"### 宏观提取\n{extractor_outputs.get('macro', '[missing]')}\n\n"
         f"### 事件提取\n{extractor_outputs.get('event', '[missing]')}\n\n"
         f"### 量化提取\n{extractor_outputs.get('quant', '[missing]')}\n\n"
         f"### 风险提取\n{extractor_outputs.get('risk', '[missing]')}\n\n"
-        f"### 新闻提取(DeepSeek 已打分 + Serenity 双源)\n{extractor_outputs.get('news', '[missing]')}\n\n"
+        f"### 新闻提取\n{extractor_outputs.get('news', '[missing]')}\n\n"
         f"### 期权提取(短端 hedging + 综合定向 + sentiment 极端)\n{extractor_outputs.get('options', '[missing]')}\n\n"
         f"### Payload Digest(交叉验证用)\n{payload_digest}\n\n"
-        f"### 任务\n请按 us-merge-agent.md 的输出格式,为日期 {as_of} 生成完整美股日报。"
+        f"### 任务\n请按最终写作覆盖重写为日期 {as_of} 的完整美股日报。"
     )
     return call_llm(
         prompt, user_msg, label="narrator:us",
-        deepseek_key=api_key, temperature=0.3, max_tokens=4500,
+        temperature=0.3, max_tokens=2200,
     )
 
 
@@ -547,27 +713,24 @@ async def main_async(args) -> None:
     if not report_dir.exists():
         raise SystemExit(f"report dir missing: {report_dir}")
 
-    api_key = load_deepseek_key()
     art = load_payload_artifacts(report_dir)
     print(f"=== US narrator agent — {as_of} (backend={backend()}, concurrency={concurrency()}) ===")
     print(f"  loaded {len(art)} artifacts; md size {len(art.get('_us_daily_report_md', ''))}")
 
-    print("  running 6 extractors in parallel (macro/event/quant/risk/news/options)...")
-    extractor_outputs = await run_extractors(api_key, art, as_of)
+    print("  running 6 Codex extractors in parallel (macro/event/quant/risk/news/options)...")
+    extractor_outputs = await run_extractors(art, as_of)
     for name, out in extractor_outputs.items():
         print(f"    {name}: {len(out)} chars")
         if args.dump_extractors:
             (report_dir / f"_extractor_{name}.md").write_text(out, encoding="utf-8")
 
     print("  calling narrator...")
-    narrative = call_narrator(api_key, extractor_outputs, art, as_of)
+    narrative = call_narrator(extractor_outputs, art, as_of)
     if not narrative:
-        print("  narrator failed; not writing output")
-        return
+        raise SystemExit("US Codex narrator failed; not writing output")
 
     out_name = "us_daily_report.md" if args.overwrite else "us_daily_report_agent.md"
-    out_path = report_dir / out_name
-    out_path.write_text(narrative, encoding="utf-8")
+    out_path = write_agent_report(report_dir, out_name, narrative, as_of)
     print(f"  wrote {out_path} ({len(narrative)} chars)")
 
 

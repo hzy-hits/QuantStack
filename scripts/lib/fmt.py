@@ -140,6 +140,7 @@ ACTION_LABELS = {
     "buy_planned_entry_observed": "左侧计划买入",
     "buy_pullback_observed": "左侧回踩买入",
     "buy_stock_with_options_confirmation": "股票买入，期权/flow 确认",
+    "buy_stock_with_gamma_v2_entry": "股票买入，Gamma v2 入场",
     "buy_stock_position": "股票买入",
     "prepare_order_but_wait_for_price": "准备观察，等价格确认",
     "rank_only_no_new_trade": "只观察，不开新仓",

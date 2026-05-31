@@ -24,8 +24,10 @@ from quant_bot.analytics import ai_infra_universe
 STACK_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "us_opportunity_ranker"
 US_ALPHA_FACTORY_EXECUTION_SLEEVE = "us_v2_stock_probe"
+US_GAMMA_V2_ALPHA_SLEEVE = "us_gamma_v2_alpha"
 US_ALPHA_FACTORY_EXECUTION_SLEEVES = {
     US_ALPHA_FACTORY_EXECUTION_SLEEVE,
+    US_GAMMA_V2_ALPHA_SLEEVE,
     "us_theme_cluster_momentum",
     ai_infra_universe.PRODUCTION_ALPHA_SLEEVE_ID,
 }
@@ -65,6 +67,7 @@ class RankerConfig:
     score_weights: dict[str, float] = field(
         default_factory=lambda: {
             "alpha_factory": 0.26,
+            "gamma_v2_alpha": 0.28,
             "setup_quality": 0.18,
             "flow_options_quality": 0.22,
             "price_quality": 0.18,
@@ -276,6 +279,205 @@ def latest_options(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: da
         [as_of.isoformat(), *symbols],
     )
     return {normalize_symbol(row.get("symbol")): row for row in rows}
+
+
+def _weighted_mean(items: list[tuple[float, float]]) -> float | None:
+    denom = sum(max(weight, 0.0) for _value, weight in items)
+    if denom <= 0:
+        return None
+    return sum(value * max(weight, 0.0) for value, weight in items) / denom
+
+
+def latest_gamma_v2_alpha(
+    con: duckdb.DuckDBPyConnection,
+    symbols: list[str],
+    as_of: date,
+    *,
+    max_dte: int = 45,
+) -> dict[str, dict[str, Any]]:
+    if not symbols or not table_exists(con, "options_chain_quotes"):
+        return {}
+    cols = table_columns(con, "options_chain_quotes")
+    required = {"symbol", "as_of", "current_price", "contract_symbol", "option_type", "strike", "gamma", "open_interest"}
+    if not required.issubset(cols):
+        return {}
+    volume_expr = "COALESCE(volume, 0)" if "volume" in cols else "0"
+    iv_expr = "implied_volatility" if "implied_volatility" in cols else "NULL"
+    dte_filter = "AND days_to_exp BETWEEN 1 AND ?" if "days_to_exp" in cols else ""
+    latest_date = con.execute(
+        f"""
+        SELECT MAX(as_of)
+        FROM options_chain_quotes
+        WHERE as_of <= CAST(? AS DATE)
+          AND symbol IN ({placeholders(symbols)})
+          {dte_filter}
+        """,
+        [as_of.isoformat(), *symbols, *([max_dte] if dte_filter else [])],
+    ).fetchone()[0]
+    if latest_date is None:
+        return {}
+    previous_date = con.execute(
+        f"""
+        SELECT MAX(as_of)
+        FROM options_chain_quotes
+        WHERE as_of < CAST(? AS DATE)
+          AND symbol IN ({placeholders(symbols)})
+          {dte_filter}
+        """,
+        [latest_date, *symbols, *([max_dte] if dte_filter else [])],
+    ).fetchone()[0]
+    params: list[Any] = [latest_date, *symbols]
+    if dte_filter:
+        params.append(max_dte)
+    rows = rows_as_dicts(
+        con,
+        f"""
+        SELECT symbol, current_price, contract_symbol, option_type, strike, gamma,
+               open_interest, {volume_expr} AS volume, {iv_expr} AS implied_volatility
+        FROM options_chain_quotes
+        WHERE as_of = CAST(? AS DATE)
+          AND symbol IN ({placeholders(symbols)})
+          {dte_filter}
+        """,
+        params,
+    )
+    prev_rows: list[dict[str, Any]] = []
+    if previous_date is not None:
+        prev_params: list[Any] = [previous_date, *symbols]
+        if dte_filter:
+            prev_params.append(max_dte)
+        prev_rows = rows_as_dicts(
+            con,
+            f"""
+            SELECT symbol, contract_symbol, open_interest
+            FROM options_chain_quotes
+            WHERE as_of = CAST(? AS DATE)
+              AND symbol IN ({placeholders(symbols)})
+              {dte_filter}
+            """,
+            prev_params,
+        )
+    prev_by_contract = {
+        (normalize_symbol(row.get("symbol")), str(row.get("contract_symbol") or "")): int(row.get("open_interest") or 0)
+        for row in prev_rows
+    }
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(normalize_symbol(row.get("symbol")), []).append(row)
+    out: dict[str, dict[str, Any]] = {}
+    for symbol, symbol_rows in grouped.items():
+        spots = [
+            round_or_none(row.get("current_price"))
+            for row in symbol_rows
+            if (round_or_none(row.get("current_price")) or 0.0) > 0
+        ]
+        if not spots:
+            continue
+        spot = sorted(spots)[len(spots) // 2]
+        if not spot or spot <= 0:
+            continue
+        by_strike: dict[float, dict[str, float]] = {}
+        total_abs = net = volume_signed = volume_abs = oi_change_signed = oi_change_abs = 0.0
+        put_skew_items: list[tuple[float, float]] = []
+        call_skew_items: list[tuple[float, float]] = []
+        for row in symbol_rows:
+            strike = round_or_none(row.get("strike"))
+            gamma = round_or_none(row.get("gamma"))
+            oi = int(row.get("open_interest") or 0)
+            if strike is None or strike <= 0 or gamma is None or gamma <= 0 or oi <= 0:
+                continue
+            option_type = str(row.get("option_type") or "").lower()
+            sign = 1.0 if option_type == "call" else -1.0
+            volume = int(row.get("volume") or 0)
+            gex_unit = gamma * 100.0 * spot * spot * 0.01
+            gex = gex_unit * oi
+            signed = sign * gex
+            total_abs += abs(gex)
+            net += signed
+            flow = gex_unit * max(volume, 0)
+            volume_signed += sign * flow
+            volume_abs += abs(flow)
+            bucket = by_strike.setdefault(strike, {"signed": 0.0, "abs": 0.0})
+            bucket["signed"] += signed
+            bucket["abs"] += abs(gex)
+            prev_oi = prev_by_contract.get((symbol, str(row.get("contract_symbol") or "")))
+            if prev_oi is not None:
+                oi_change = oi - prev_oi
+                oi_change_signed += sign * oi_change * gex_unit
+                oi_change_abs += abs(oi_change) * gex_unit
+            iv = round_or_none(row.get("implied_volatility"))
+            moneyness = strike / spot
+            if iv and option_type == "put" and 0.90 <= moneyness <= 0.98:
+                put_skew_items.append((iv, max(oi, volume, 1.0)))
+            if iv and option_type == "call" and 1.02 <= moneyness <= 1.10:
+                call_skew_items.append((iv, max(oi, volume, 1.0)))
+        if total_abs <= 0 or not by_strike:
+            continue
+        center = sum(strike * value["abs"] for strike, value in by_strike.items()) / total_abs
+        max_wall = max(by_strike.items(), key=lambda item: item[1]["abs"])[0]
+        displacement = (spot - center) / center if center > 0 else 0.0
+        net_ratio = net / total_abs
+        oi_change_ratio = oi_change_signed / oi_change_abs if oi_change_abs > 0 else 0.0
+        volume_ratio = volume_signed / volume_abs if volume_abs > 0 else 0.0
+        put_skew = _weighted_mean(put_skew_items)
+        call_skew = _weighted_mean(call_skew_items)
+        skew_ratio = put_skew / call_skew if put_skew and call_skew and call_skew > 0 else None
+        skew_pressure = math.tanh(((skew_ratio or 1.05) - 1.05) / 0.20)
+        dealer_pressure = clamp(
+            0.55 * oi_change_ratio + 0.25 * volume_ratio - 0.25 * skew_pressure,
+            -1.0,
+            1.0,
+        )
+        wall_transition_score = 0.0
+        wall_transition = "NO_TRANSITION"
+        if center and spot > center:
+            wall_transition_score += 0.12
+        if spot > max_wall:
+            wall_transition_score += 0.18
+        if spot < center:
+            wall_transition_score -= 0.12
+        if spot < max_wall:
+            wall_transition_score -= 0.18
+        wall_transition_score = clamp(wall_transition_score, -1.0, 1.0)
+        if wall_transition_score >= 0.25:
+            wall_transition = "WALL_BREAK_UP"
+        elif wall_transition_score <= -0.25:
+            wall_transition = "WALL_BREAK_DOWN"
+        state_part = 0.62 if net_ratio >= 0.25 else 0.42 if net_ratio <= -0.25 else 0.52
+        dealer_part = clamp(0.5 + 0.5 * dealer_pressure)
+        wall_part = clamp(0.5 + wall_transition_score)
+        gamma_score = clamp(0.46 * dealer_part + 0.34 * wall_part + 0.20 * state_part)
+        do_not_chase = net_ratio >= 0.25 and displacement > 0.08
+        if do_not_chase:
+            gamma_score = min(gamma_score, 0.58)
+        entry_signal = (
+            gamma_score >= 0.64
+            and dealer_pressure >= -0.05
+            and wall_transition_score >= -0.05
+            and not do_not_chase
+        )
+        management_signal = (
+            "gamma_v2_entry_alpha" if entry_signal else
+            "do_not_chase_above_wall" if do_not_chase else
+            "reduce_or_tighten_stop" if wall_transition_score <= -0.25 else
+            "no_add_tighten_stop" if dealer_pressure <= -0.25 else
+            "hold_context_only"
+        )
+        out[symbol] = {
+            "gamma_v2_alpha_score": round(gamma_score * 100.0, 2),
+            "gamma_v2_entry_signal": entry_signal,
+            "gamma_v2_dealer_pressure_proxy": round(dealer_pressure, 4),
+            "gamma_v2_wall_transition": wall_transition,
+            "gamma_v2_wall_transition_score": round(wall_transition_score, 4),
+            "gamma_v2_net_gamma_ratio": round(net_ratio, 4),
+            "gamma_v2_displacement_pct": round(displacement, 4),
+            "gamma_v2_center": round(center, 4),
+            "gamma_v2_max_wall": round(max_wall, 4),
+            "gamma_v2_management_signal": management_signal,
+            "gamma_v2_effective_date": as_iso(latest_date),
+            "gamma_v2_previous_effective_date": as_iso(previous_date),
+        }
+    return out
 
 
 def load_analysis_signals(
@@ -766,6 +968,7 @@ def risk_penalty(row: dict[str, Any]) -> float:
 def enrich_rows(
     candidates: list[dict[str, Any]],
     options: dict[str, dict[str, Any]],
+    gamma_alpha: dict[str, dict[str, Any]],
     prices: dict[str, dict[str, Any]],
     news: dict[str, list[dict[str, Any]]],
     config: RankerConfig,
@@ -779,12 +982,21 @@ def enrich_rows(
             continue
         option_row = options.get(symbol)
         option_score, option_reason = option_quality(option_row)
+        gamma_row = gamma_alpha.get(symbol) or {}
+        alpha_sleeve_id = candidate.get("alpha_sleeve_id")
+        alpha_factory_role = candidate.get("alpha_factory_role") or ("execution_sleeve" if alpha_sleeve_id else "rank_only")
+        prior_alpha_sleeve_id = alpha_sleeve_id
+        if gamma_row.get("gamma_v2_entry_signal"):
+            alpha_sleeve_id = US_GAMMA_V2_ALPHA_SLEEVE
+            alpha_factory_role = "gamma_v2_entry_alpha"
         combined = {
             **(prices.get(symbol) or {}),
             **dict(candidate),
             "symbol": symbol,
-            "alpha_sleeve_id": candidate.get("alpha_sleeve_id"),
-            "alpha_factory_role": candidate.get("alpha_factory_role") or ("execution_sleeve" if candidate.get("alpha_sleeve_id") else "rank_only"),
+            **gamma_row,
+            "prior_alpha_sleeve_id": prior_alpha_sleeve_id,
+            "alpha_sleeve_id": alpha_sleeve_id,
+            "alpha_factory_role": alpha_factory_role,
             "options_quality": option_score,
             "flow_options_quality": option_score,
             "options_quality_reason": option_reason,
@@ -832,7 +1044,10 @@ def production_tier(rank: int, row: dict[str, Any], config: RankerConfig) -> tup
     if row.get("alpha_sleeve_id") not in US_ALPHA_FACTORY_EXECUTION_SLEEVES:
         return "ranked_watch", "rank_only_no_new_trade", "0R until Alpha Factory sleeve promotion"
     options_q = round_or_none(row.get("options_quality")) or 0.0
-    action = "buy_stock_with_options_confirmation" if options_q >= 65.0 else "buy_stock_position"
+    if row.get("alpha_sleeve_id") == US_GAMMA_V2_ALPHA_SLEEVE:
+        action = "buy_stock_with_gamma_v2_entry"
+    else:
+        action = "buy_stock_with_options_confirmation" if options_q >= 65.0 else "buy_stock_position"
     if rank <= config.top_probe_count:
         return "top_stock_trade", action, "0.50R/name; basket cap set by portfolio overlay"
     if rank <= config.secondary_probe_count:
@@ -848,6 +1063,7 @@ def score_rows(
 ) -> list[dict[str, Any]]:
     for row in rows:
         alpha_score = 1.0 if row.get("alpha_sleeve_id") in US_ALPHA_FACTORY_EXECUTION_SLEEVES else 0.15
+        gamma_alpha = clamp((round_or_none(row.get("gamma_v2_alpha_score")) or 30.0) / 100.0)
         setup = setup_quality(row)
         options_q = clamp((round_or_none(row.get("flow_options_quality")) or 50.0) / 100.0)
         price = price_quality(row)
@@ -858,6 +1074,7 @@ def score_rows(
         joint_signal = clamp(0.38 * price + 0.34 * options_q + 0.28 * setup)
         raw = (
             config.score_weights.get("alpha_factory", 0.0) * alpha_score
+            + config.score_weights.get("gamma_v2_alpha", 0.0) * gamma_alpha
             + config.score_weights.get("setup_quality", 0.0) * setup
             + config.score_weights.get("flow_options_quality", 0.0) * options_q
             + config.score_weights.get("price_quality", 0.0) * price
@@ -869,6 +1086,7 @@ def score_rows(
         row["joint_signal_score"] = round(joint_signal * 100.0, 2)
         row["score_components"] = {
             "alpha_factory": round(alpha_score * 100.0, 2),
+            "gamma_v2_alpha": round(gamma_alpha * 100.0, 2),
             "setup_quality": round(setup * 100.0, 2),
             "flow_options_quality": round(options_q * 100.0, 2),
             "price_quality": round(price * 100.0, 2),
@@ -913,6 +1131,7 @@ def public_row(row: dict[str, Any]) -> dict[str, Any]:
         "state",
         "policy",
         "alpha_sleeve_id",
+        "prior_alpha_sleeve_id",
         "alpha_factory_role",
         "entry",
         "stop",
@@ -924,6 +1143,18 @@ def public_row(row: dict[str, Any]) -> dict[str, Any]:
         "flow_options_quality",
         "options_quality_reason",
         "joint_signal_score",
+        "gamma_v2_alpha_score",
+        "gamma_v2_entry_signal",
+        "gamma_v2_dealer_pressure_proxy",
+        "gamma_v2_wall_transition",
+        "gamma_v2_wall_transition_score",
+        "gamma_v2_net_gamma_ratio",
+        "gamma_v2_displacement_pct",
+        "gamma_v2_center",
+        "gamma_v2_max_wall",
+        "gamma_v2_management_signal",
+        "gamma_v2_effective_date",
+        "gamma_v2_previous_effective_date",
         "trend_regime",
         "signal_confidence",
         "execution_mode",
@@ -1105,6 +1336,7 @@ def build_ranker_payload(
 
     symbols = sorted({normalize_symbol(row.get("symbol")) for row in candidates if normalize_symbol(row.get("symbol"))})
     options: dict[str, dict[str, Any]] = {}
+    gamma_alpha: dict[str, dict[str, Any]] = {}
     prices: dict[str, dict[str, Any]] = {}
     news: dict[str, list[dict[str, Any]]] = {}
     signals: dict[str, dict[str, dict[str, Any]]] = {}
@@ -1112,13 +1344,14 @@ def build_ranker_payload(
         con = duckdb.connect(str(us_db), read_only=True)
         try:
             options = latest_options(con, symbols, as_of)
+            gamma_alpha = latest_gamma_v2_alpha(con, symbols, as_of)
             prices = price_features(con, symbols, as_of)
             news = recent_news(con, symbols, as_of, config.headline)
             signals = load_analysis_signals(con, symbols, as_of)
         finally:
             con.close()
     ranked = score_rows(
-        enrich_rows(candidates, options, prices, news, config, signals),
+        enrich_rows(candidates, options, gamma_alpha, prices, news, config, signals),
         config,
         regime_state=regime_state,
     )
@@ -1142,6 +1375,7 @@ def build_ranker_payload(
         "notes": [
             "Candidate universe is the ai_infra BFS workbench when ai_infra_mode is active.",
             "Alpha Factory sleeve membership is the execution contract.",
+            "Gamma Spring v2 can create `us_gamma_v2_alpha` entry-alpha candidates inside the admitted AI universe.",
             "Options/flow quality controls expression choice, not legacy promotion.",
             "Headline/event risk forces 0R watch.",
         ],

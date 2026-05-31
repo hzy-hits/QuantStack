@@ -2670,6 +2670,11 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
     actionable: list[dict[str, Any]] = []
     blocked_execution: list[dict[str, Any]] = []
     us_trade_plan = payload.get("us_trade_plan") or {}
+    gamma_v2_lookup = {
+        _symbol_key(row.get("symbol")): row
+        for row in (payload.get("gamma_spring") or {}).get("rows") or []
+        if _symbol_key(row.get("symbol"))
+    }
     holdings = _load_virtual_holdings()
     for row in overlay_rows:
         final_r = round_or_none(row.get("final_r"))
@@ -2727,11 +2732,31 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
                     plan_suffix = f"; plan {trade_plan.get('rule')} ({trade_plan.get('latest_date')})"
                 elif not stop_value and not target_value:
                     plan_suffix = f"; plan blocker {trade_plan.get('rule')}"
+            ranked_gamma_score = round_or_none(ranked.get("gamma_v2_alpha_score"))
+            gamma_v2 = gamma_v2_lookup.get(symbol_key) or {}
+            gamma_suffix = ""
+            if ranked_gamma_score is not None:
+                gamma_suffix = (
+                    "; gamma_v2_alpha "
+                    f"{ranked.get('gamma_v2_management_signal') or '-'} "
+                    f"score={fmt_num(ranked_gamma_score)} "
+                    f"dealer={fmt_rate_pct(ranked.get('gamma_v2_dealer_pressure_proxy'))} "
+                    f"wall={ranked.get('gamma_v2_wall_transition') or '-'}"
+                )
+            elif gamma_v2:
+                gamma_suffix = (
+                    "; gamma_v2 "
+                    f"{gamma_v2.get('management_signal') or '-'} "
+                    f"dealer={fmt_rate_pct(gamma_v2.get('dealer_pressure_proxy'))} "
+                    f"wall={gamma_v2.get('wall_transition') or '-'} "
+                    f"mult={fmt_num(gamma_v2.get('gamma_v2_multiplier'))}"
+                )
             risk_plan = (
                 f"stop {fmt_num(stop_value)}; "
                 f"target {fmt_num(target_value)}; "
                 f"{ranked.get('time_exit') or row.get('time_exit') or US_DEFAULT_TIME_EXIT}"
                 f"{plan_suffix}"
+                f"{gamma_suffix}"
             )
         evidence_state = (
             ranked.get("ai_infra_evidence_state")
@@ -5962,6 +5987,7 @@ def render_market_action_table(actions: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+from sections.gamma_spring import build_gamma_spring_snapshot, render_gamma_spring_section  # noqa: E402
 from sections.iv_view import _iv_action_hint, render_iv_view_section  # noqa: E402
 
 # B.5: left-side sections moved to scripts/sections/left_side.py
@@ -6108,6 +6134,20 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
         )
         con.execute(
             """
+            CREATE TABLE IF NOT EXISTS us_gamma_spring (
+                as_of DATE, effective_date DATE, previous_effective_date DATE,
+                symbol VARCHAR, current_price DOUBLE, gamma_center DOUBLE,
+                max_gamma_wall DOUBLE, max_positive_wall DOUBLE,
+                max_negative_wall DOUBLE, net_gex DOUBLE,
+                dealer_pressure_proxy DOUBLE, dealer_pressure_bucket VARCHAR,
+                wall_transition VARCHAR, wall_transition_score DOUBLE,
+                gamma_v2_multiplier DOUBLE, management_signal VARCHAR,
+                state VARCHAR, payload_json VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS cn_lifecycle_research (
                 as_of DATE, scope VARCHAR, bucket_type VARCHAR, bucket VARCHAR,
                 n INTEGER, avg_pct DOUBLE, lcb80_pct DOUBLE,
@@ -6227,6 +6267,7 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
         con.execute("DELETE FROM option_shadow_ledger_legs WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM option_real_bid_ask_ledger WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM option_real_bid_ask_legs WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
+        con.execute("DELETE FROM us_gamma_spring WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM cn_lifecycle_research WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM profit_readiness WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM pipeline_requirements_audit WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
@@ -6398,6 +6439,34 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
                         json.dumps(leg, ensure_ascii=False, default=str),
                     ],
                 )
+        gamma_spring = payload.get("gamma_spring") or {}
+        for row in gamma_spring.get("rows") or []:
+            con.execute(
+                """
+                INSERT INTO us_gamma_spring
+                VALUES (CAST(? AS DATE), TRY_CAST(? AS DATE), TRY_CAST(? AS DATE), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    payload["as_of"],
+                    gamma_spring.get("effective_date"),
+                    gamma_spring.get("previous_effective_date"),
+                    row.get("symbol"),
+                    row.get("spot"),
+                    row.get("center_strike"),
+                    row.get("max_wall_strike"),
+                    row.get("max_positive_wall"),
+                    row.get("max_negative_wall"),
+                    row.get("net_gex_1pct"),
+                    row.get("dealer_pressure_proxy"),
+                    row.get("dealer_pressure_bucket"),
+                    row.get("wall_transition"),
+                    row.get("wall_transition_score"),
+                    row.get("gamma_v2_multiplier"),
+                    row.get("management_signal"),
+                    row.get("state"),
+                    json.dumps(row, ensure_ascii=False, default=str),
+                ],
+            )
         for row in (payload.get("ai_supercycle_evidence_ledger") or {}).get("rows") or []:
             con.execute(
                 """
@@ -6982,6 +7051,8 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     )
     us_trade_plan = build_us_stock_trade_plan(args.us_db, us_trade_plan_symbols, as_of)
     options_verdicts = build_options_verdicts(args.us_db, us_trade_plan_symbols, as_of)
+    gamma_spring_symbols = sorted({*us_trade_plan_symbols, "SPY", "QQQ", "SMH"})
+    gamma_spring = build_gamma_spring_snapshot(args.us_db, gamma_spring_symbols, as_of)
     index_skew = build_index_skew(args.us_db, as_of)
     cn_basket_symbols = [
         str(row.get("symbol") or "").upper()
@@ -7026,6 +7097,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "report_action_backtest_summary": load_report_action_backtest_summary(as_of.isoformat()),
         "us_trade_plan": us_trade_plan,
         "options_verdicts": options_verdicts,
+        "gamma_spring": gamma_spring,
         "index_skew": index_skew,
         "cn_shadow_full": cn_shadow_full,
         "market_regime_score": build_market_regime_score(args.us_db, as_of),
@@ -7092,6 +7164,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     (output_dir / "option_shadow_ledger.md").write_text(render_option_shadow_ledger(payload), encoding="utf-8")
     (output_dir / "option_shadow_ledger.json").write_text(
         json.dumps(payload.get("option_shadow_ledger") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    (output_dir / "gamma_spring.md").write_text(
+        "\n".join(render_gamma_spring_section(payload)),
+        encoding="utf-8",
+    )
+    (output_dir / "gamma_spring.json").write_text(
+        json.dumps(payload.get("gamma_spring") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
         encoding="utf-8",
     )
     (output_dir / "earnings_calendar.md").write_text(
