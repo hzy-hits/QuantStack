@@ -86,28 +86,37 @@ def _prod_recipient_count() -> int:
     return len(_list_config_recipients(_reporting_config().get("recipients")))
 
 
+def _main_strategy_report_dir(as_of: str) -> Path:
+    return STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2" / as_of
+
+
+def agent_report_path(as_of: str, market: str) -> Path:
+    base = _main_strategy_report_dir(as_of)
+    if market == "cn":
+        return base / "cn_daily_report_agent.md"
+    if market == "us":
+        return base / "us_daily_report_agent.md"
+    raise ValueError(f"agent report only supports cn/us, got {market!r}")
+
+
+def programmatic_report_path(as_of: str, market: str) -> Path:
+    base = _main_strategy_report_dir(as_of)
+    if market == "cn":
+        return base / "cn_daily_report.md"
+    if market == "us":
+        return base / "us_daily_report.md"
+    return base / "main_strategy_v2_backtest.md"
+
+
 def report_path(as_of: str, market: str = "all") -> Path:
     """Resolve the markdown the email delivers.
 
-    For US the agent narrator output (us_daily_report_agent.md) is preferred
-    when it exists — it's a readable Chinese morning-note synthesis of 7
-    sections with cross-source resonance + narrative judgment, vs the
-    programmatic us_daily_report.md which is 25+ table sections of jargon
-    (production_tier / ev_status / trend_regime / VRP / PC z / skew z /
-    tenor anomaly / etc.) that's hard to scan in an email.
-    Falls back to programmatic when narrator hasn't run yet.
+    US/CN delivery is Codex-agent-only. The programmatic markdown remains the
+    narrator input and debugging artifact, but it is no longer an email fallback.
     """
     base = STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2" / as_of
-    if market == "cn":
-        agent = base / "cn_daily_report_agent.md"
-        if agent.exists() and agent.stat().st_size > 0:
-            return agent
-        return base / "cn_daily_report.md"
-    if market == "us":
-        agent = base / "us_daily_report_agent.md"
-        if agent.exists() and agent.stat().st_size > 0:
-            return agent
-        return base / "us_daily_report.md"
+    if market in {"cn", "us"}:
+        return agent_report_path(as_of, market)
     return base / "main_strategy_v2_backtest.md"
 
 
@@ -138,7 +147,7 @@ def render_standalone_from_json(as_of: str, market: str) -> Path:
         text = renderer.render_cn_standalone_report(payload)
     else:
         text = renderer.render_us_standalone_report(payload)
-    path = report_path(as_of, market)
+    path = programmatic_report_path(as_of, market)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
@@ -308,34 +317,65 @@ _NARRATOR_SPECS = {
 }
 
 
-def _ensure_narrator(as_of: str, market: str) -> None:
-    """Run the codex/GPT-5.5 agent narrator for `market` if its agent output
-    isn't already fresh.
+def _truthy_env(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes"}
 
-    Idempotent: skips if <market>_daily_report_agent.md already exists and was
-    produced for this report date OR written today (covers same-day backfills).
-    This avoids re-paying the codex bill on cron retries / dry-run-then-prod
-    sequences and keeps the delivery step from tripping the email timeout.
-    Disabled per-market via QUANT_DISABLE_{US,CN}_NARRATOR=1.
+
+def _agent_meta_path(agent_md: Path) -> Path:
+    return agent_md.with_name(agent_md.name + ".meta.json")
+
+
+def _is_fresh_codex_agent_report(agent_md: Path, as_of: str) -> bool:
+    if not agent_md.exists() or agent_md.stat().st_size <= 0:
+        return False
+    meta_path = _agent_meta_path(agent_md)
+    if not meta_path.exists() or meta_path.stat().st_size <= 0:
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if meta.get("backend") != "codex" or meta.get("as_of") != as_of:
+        return False
+    from datetime import date as _date, datetime as _dt
+
+    mtime = _dt.fromtimestamp(agent_md.stat().st_mtime).date()
+    return mtime in {_date.fromisoformat(as_of), _date.today()}
+
+
+def _assert_codex_backend_env() -> None:
+    selected = (os.environ.get("QUANT_NARRATOR_BACKEND") or "codex").strip().lower()
+    if selected != "codex":
+        raise RuntimeError(
+            "US/CN report delivery is Codex-agent-only; "
+            f"QUANT_NARRATOR_BACKEND={selected!r} is not allowed."
+        )
+
+
+def _ensure_narrator(as_of: str, market: str) -> None:
+    """Run the Codex/GPT-5.5 agent narrator for `market` if needed.
+
+    Fail closed: US/CN delivery refuses to send unless the final markdown exists
+    and its sidecar metadata proves it came from the Codex narrator for `as_of`.
     """
     spec = _NARRATOR_SPECS.get(market)
     if not spec:
         return
+    _assert_codex_backend_env()
     script_name, agent_name, disable_env = spec
-    if os.environ.get(disable_env, "").lower() in {"1", "true", "yes"}:
-        return
+    if _truthy_env(disable_env):
+        raise RuntimeError(
+            f"{market} Codex narrator is disabled by {disable_env}; refusing to send a fallback report."
+        )
     agent_md = (
         STACK_ROOT / "reports" / "review_dashboard" / "main_strategy_v2"
         / as_of / agent_name
     )
-    if agent_md.exists() and agent_md.stat().st_size > 0:
-        from datetime import date as _date, datetime as _dt
-        mtime = _dt.fromtimestamp(agent_md.stat().st_mtime).date()
-        if mtime in {_date.fromisoformat(as_of), _date.today()}:
-            return
+    if _is_fresh_codex_agent_report(agent_md, as_of):
+        return
     narrator = STACK_ROOT / "scripts" / "agents" / script_name
     if not narrator.exists():
-        return
+        raise FileNotFoundError(f"{market} Codex narrator script missing: {narrator}")
     timeout = int(os.environ.get(f"{market.upper()}_NARRATOR_TIMEOUT", "900"))
     try:
         result = subprocess.run(
@@ -347,13 +387,17 @@ def _ensure_narrator(as_of: str, market: str) -> None:
             check=False,
         )
         if result.returncode != 0:
-            print(f"[narrator:{market}] non-fatal: exit={result.returncode} stderr={result.stderr[-200:]}")
-        else:
-            print(f"[narrator:{market}] {result.stdout.splitlines()[-1] if result.stdout else 'ok'}")
+            tail = ((result.stderr or "") + "\n" + (result.stdout or ""))[-1000:]
+            raise RuntimeError(f"{market} Codex narrator failed with exit={result.returncode}: {tail}")
+        print(f"[narrator:{market}] {result.stdout.splitlines()[-1] if result.stdout else 'ok'}")
     except subprocess.TimeoutExpired:
-        print(f"[narrator:{market}] timed out after {timeout}s — falling back to programmatic report")
+        raise TimeoutError(f"{market} Codex narrator timed out after {timeout}s; refusing fallback report")
     except OSError as e:
-        print(f"[narrator:{market}] launch failed: {e}")
+        raise RuntimeError(f"{market} Codex narrator launch failed: {e}") from e
+    if not _is_fresh_codex_agent_report(agent_md, as_of):
+        raise RuntimeError(
+            f"{market} Codex narrator did not produce a verified agent report: {agent_md}"
+        )
 
 
 def _ensure_us_narrator(as_of: str) -> None:
@@ -374,21 +418,15 @@ def main() -> None:
     elif not args.skip_generate:
         generate_report(args.date, args.start)
 
-    # For US/CN emails, ensure the codex agent narrator output exists so
-    # report_path() picks the readable narrative version rather than the
-    # programmatic table dump. Run AFTER generate so the programmatic
-    # <market>_daily_report.md (the narrator's input) is present. Idempotent,
-    # so the later --skip-generate delivery call reuses it instead of re-paying
-    # the slow codex bill under the short email timeout.
+    # For US/CN emails, ensure the Codex agent narrator output exists. Run AFTER
+    # generate so the programmatic <market>_daily_report.md narrator input is
+    # present. There is intentionally no programmatic markdown fallback here.
     if args.market in {"us", "cn"} and not args.dry_run:
         _ensure_narrator(args.date, args.market)
     path = report_path(args.date, args.market)
 
     if not args.dry_run and not path.exists():
-        if args.market in {"cn", "us"}:
-            path = render_standalone_from_json(args.date, args.market)
-        else:
-            raise FileNotFoundError(f"production decision report not found: {path}")
+        raise FileNotFoundError(f"production decision report not found: {path}")
     if not args.dry_run:
         validate_market_report_scope(path, args.market)
     effective_path = path

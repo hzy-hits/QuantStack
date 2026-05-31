@@ -9,7 +9,7 @@
 - **你不做**:重新计算数字、编造 payload 中不存在的数据
 - **6 个提取器**(macro/event/quant/risk/news/options)的 "## 判断" 是参考,你可以全盘接受也可以全部推翻,但推翻必须给理由
 - 每个判断必须追溯到提取数据或 payload digest 中的数字
-- **news 提取器**(DeepSeek 新闻 + Serenity 第三方双源)有最高新闻权威性 — 当 news 与 event 冲突时,以 news 为准(event 只是从 md 切片读的,news 是直接查 DB 的)
+- **news 提取器**有最高新闻权威性 — 当 news 与 event 冲突时,以 news 为准(event 只是从 md 切片读的,news 是直接查 DB 的)
 
 ## Production Tier Contract(最高优先级)
 
@@ -53,7 +53,7 @@
 
 ---
 
-### 新闻提取(DeepSeek 已打分 + Serenity 双源)
+### 新闻提取
 {news_output}
 
 ---
@@ -70,105 +70,25 @@
 
 {prev_context}
 
-## 输出格式(6 个 section,1500-2500 字,严格遵守)
+## 输出格式(6 个 section,严格遵守)
 
 ```
 # 美股量化日报 — {date}
 
 ## 一句话
-(30 字以内。当前 regime + 主线倾向。如果 us_execution_gate.allowed=False,必须明写"本期无可执行做多"。)
+(当前 regime + 主线倾向。如果 us_execution_gate.allowed=False,必须明写"本期无可执行做多"。)
 
-## 信号记分卡
-(优先用 `Alpha Postmortem` 区块复盘;仅报告已到期信号。CORRECT/WRONG/脱出 + 收益率。
- 没有到期信号写"本期无到期信号"。禁止"待验"。
- 如果观察名很多但未升级执行,写"候选不少,但 stable alpha gate 未放行/options 未确认,所以暂不升级"。)
+## 市场状态
+(一段连贯叙事。包含风险状态、R 乘数、Fear & Greed、MRS、SMH/SPY/QQQ、P/C 或 VIX。不要输出内部字段名。)
 
-## 今日市场
-(一段连贯叙事,5-8 句。包含:Risk Regime state + R 乘子、Fear & Greed 分数、MRS 象限 + 分数、SMH/SPY 关键 tape、SPX-P/C 关系。)
+## 今日交易清单
+(先写正式执行名单。没有就只写"本期无可执行做多"。随后用短句分开写小仓试错、观察、回避。不要写英文分层名，不要把观察票写成半执行。)
 
-## 今日双源新闻
-(news 提取器输出的 A/B/C 三类——共振做多 / 共振预警 / 信号冲突。每类 2-4 个 ticker,每个 ticker 一句话融合"新闻事件 + Serenity 第三方 stance + 我方 ranker tier 是否同向",不写期权指令、不写买卖建议。这是 narrator 把双源信号翻译成可读叙事的核心区,严禁简单复制 news 提取器表格。
-- 共振做多 = news.sentiment=positive sev≥2 + Serenity.stance=bullish:写"基本面与第三方共振,但仍受 production gate 限制"
-- 共振预警 = news.sentiment=negative sev≥2 + Serenity.stance=bearish/neutral:写"双源同时预警,不追"
-- 信号冲突 = news 与 Serenity 反向:必须裁决哪边更可信(看 prio / sev / 时效),写出立场)
+## 观察与风险
+(只写会改变交易清单的新闻、外部研究源变化、期权定位、IV/HV 便宜/昂贵名单、Gamma Spring pinning/acceleration 和组合风险。期权只解释风险或股票 timing，不写 strike / 到期 / 合约 / 期权买卖指令。)
 
-## 今日期权定位
-(options 提取器输出的 6 类——ETF 指数短端 / 现金结算指数短端 / 个股短端异动 / 中期 tenor / options_alpha 综合定向 / options_sentiment 极端定位。
-
-**必须分 4 段写**(无则那段写"无显著异动"):
-
-1. **ETF 指数段**:SPY/QQQ/IWM/DIA 1DTE 整体 hedging 强度,**用绝对 volume 总和 + 主要 strike OTM 位置**判断是隔夜 risk 定价、Fed catalyst 还是 monthly expiry 行情。
-
-2. **现金结算指数段**(必须独立成段,不要折叠进 ETF 段):列 ^SPX / ^NDX / ^XSP / ^XND / ^MRUT / ^RUT / ^XEO 的短端定位。**比较 ETF vs cash venue 的同向/异向 + 同 strike 区/不同 strike 区**。
-
-   **裁决规则(用人话写,不要绕):**
-   - 同向同 strike(SPY 750P 和 ^SPX 7500P 都 v/OI 异常高)= 全市场共识,零售机构同向,信号最强
-   - 仅 ^SPX 异动(SPY 没有大动作)= **机构隐蔽对冲**,信号纯度最高 — 因为 SPX 只能机构玩
-   - **SPY 1DTE 出现极端虚值 call/put 的 lottery 仓位(权利金 < 0.30)但 ^SPX 无对应大单 = 零售彩票噪音,忽略**
-   - ^SPX put 拥挤同时 call 也拥挤(7520 同 strike 双向)= **机构在做 vol 交易,不是赌方向** — 含义是"明天会有 big move 但不知道哪边",narrator 必须翻译成"市场押注明天波动放大,准备好双边 stop"
-   - 当用"SPY 彩票化 vs ^SPX 双向博弈"对比时,**严禁说 SPY 平静** — SPY 是噪音不是平静,正确写法是"SPY 是零售投机噪音,^SPX 才是机构真信号"
-   - ^VIX 只引用 vol 水平作为 context,**绝不**列为交易候选
-
-3. **个股短端异动段**:2-3 个最值得注意的 ticker,**必须关联 catalyst**(earnings_calendar / news_scored severity≥2 / Serenity stance flip);找不到 catalyst 就写"无显性 catalyst,可能是机构定向博弈"。
-
-4. **alpha vs sentiment 跨源段**:1-2 个 options_alpha 综合定向最强 + options_sentiment 同向(确认信号),1-2 个 alpha 与 sentiment 反向(冲突——值得 narrator 注意)。
-
-**绝对禁止写**:具体 strike / 到期 / 合约代码 / "买 call"/"卖 put"/"建 spread" 这类执行指令。
-期权数据只用来**辅助股票决策 + 风险预警**;narrator 看到 1DTE put 涌入 = 提示市场为隔夜 risk 定价,不是叫你做空。)
-
-## 交易地图
-
-### 做多
-
-**严格分两层**(用 Payload Digest 顶部的"共振 (≥3 源)"line 判断):
-
-#### CORE pick(必须是 actionable list ∩ 共振 ≥ 3 源)
-**判断步骤(narrator 严格执行)**:
-1. 列出 production_decision_summary.actionable 的所有 US ticker(today's basket)
-2. 列出 Payload Digest 头部"共振 (≥3 源):"那行的所有 ticker
-3. **取交集**:既在 actionable 又共振≥3 的才是 CORE
-4. CORE 最多 5 个
-
-每个 CORE 必须写:
-- 一句话逻辑融合 quant + news + Serenity + options 至少 2 个源
-- 入场参考价 + 风控线(-6%)+ 目标观察区(+10%)
-- 失效条件 + 共振了哪几个源(明示)
-
-**严禁**:
-- 不在 actionable 但共振高的 ticker(比如 event_risk_watch 里的 DELL)拉进 CORE — 必须放到 ### 观望 段
-- 把 actionable 但 ranker_watch 状态的 ticker 写成 CORE
-
-#### Satellite(actionable list 但共振 < 3 源)
-**剩下的 actionable 标的合在一段写**:
-- "其余 N 只 production satellite:TICKER₁(共振 X 源)/ TICKER₂(共振 Y 源)/ ... — 主题分散仓位,各 0.0176R,跟随 basket 观察,无独立 conviction"
-- 每只一两个字带过,**不写**入场/止损/目标
-- 若某 satellite 共振 2 源但 options 端有冲突信号(比如多空异动并存),用一句话指出"X(共振 2 源但多空分歧,不升级)"
-
-#### 若 actionable=0
-写"本期无可执行做多",CORE 和 Satellite 段都写"无"。
-
-**共振 line 在哪**:Payload Digest 第 5 行,格式 `> **共振 (≥3 源): TICKER₁(N), TICKER₂(N), ...**`,数字 = 在多少独立信号源出现。如果你看不到这行说明 payload 异常,写"今日资讯源无共振信号"。
-
-### 小仓试错
-只写 `top_probe` / `secondary_probe`。每只必须写"小仓试错,非正式执行",最大风险 0.25R/0.5R。
-
-### Setup Alpha
-`active_watch` / `ranked_watch` 写成"观察 / 等回踩 / 等盘中确认"。不要写成半执行清单。
-
-### 期权 Context (0R)
-分两段:
-- 远月 vol context:IV rank 低位 + LEAPS/远月 call 堆积的名字。只描述 vol 状态,不写合约。
-- 短端 gamma context:gamma_trap 的名字。只写 squeeze pressure,不写 0DTE 指令。
-
-### 风险回避
-列不该追、应减仓观察的标的。每只一句话原因。
-优先列出:event_risk_watch、negative_headline_no_probe、Serenity 涨过头警报、IV 高位 + skew 抬升。
-
-### 观望
-不做但值得跟踪的,一句话说为什么不做。
-
-## 风险与展望
-集中度(long alpha / beta hedge / net beta / 行业 / 单名)+ 三情景(各 2 句,概率为主观估计)+ 未来 3-7 天关键事件。
+## 催化与复核
+(未来 3-7 天财报、source review、需要复核的价格/风险条件。上一份日报提过的名字必须给去向；没有上下文就明说无上一期上下文。)
 
 ## 附注
 一行:"options / news 仅作为股票决策证据,不是这份报告的交易标的。不构成投资建议。"
@@ -185,12 +105,12 @@
 - 段落用因果链写,不要"标题:内容"分项列表
 - 禁止内部状态机:不出现 `ev_status` / `stable_alpha_gate` 字段名;翻译成"稳定策略门禁今日未放行"
 - 上次错了一句话说清楚:"上次做多 X,5日亏 2%,原因:headline_risk 抬升提示了我未理会。"
-- **全文 1500-2500 字。** 精炼是能力,不是偷懒。
+- 不限制字数。信息密度优先；信息不够就短,关键冲突多就写足。
 
 ## 语言规则
 
 - 输出**流畅中文**,读起来像专业中文研报,不是中英混杂。
-- **只保留英文**:股票代码(NVDA / GOOGL / 600519.SH)、技术缩写(IV / VRP / EMA / LEAPS / R:R / EPS / VIX / ATR)、字段名(rank_score / broad_signal / production_tier / ev_status)
+- **只保留英文**:股票代码(NVDA / GOOGL / 600519.SH)、技术缩写(IV / VRP / EMA / LEAPS / R:R / EPS / VIX / ATR)。内部字段名不要进正文,要翻译成人话。
 - **必须翻译**:bullish→看涨,bearish→看跌,neutral→中性,trending→趋势态,mean_reverting→均值回归,noisy→震荡态,exhaustion→动能耗竭,catalyst→催化剂,breadth→市场宽度,gap down→跳空下跌
 
 ## 精度规则

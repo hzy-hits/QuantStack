@@ -1,15 +1,9 @@
-"""Shared LLM backend for the US/CN daily-report narrators.
+"""Shared Codex backend for the US/CN daily-report narrators.
 
-Routes every narrator/extractor call to one of two backends:
-
-  - ``codex``  (default) — shells out to the local ``codex`` CLI running
-                GPT-5.5 with high reasoning effort. This is what the operator
-                actually wants driving the agent narrative ("有人味").
-  - ``deepseek`` — the legacy DeepSeek HTTP API, kept as an automatic
-                fallback so the production pipeline never goes dark if codex
-                is unavailable / not authenticated / times out.
-
-Select with env ``QUANT_NARRATOR_BACKEND`` (codex|deepseek, default codex).
+Every narrator/extractor call shells out to the local ``codex`` CLI running
+GPT-5.5 with high reasoning effort. Delivery is fail-closed: non-Codex
+backends and automatic LLM fallbacks are intentionally disabled for production
+reports.
 
 codex specifics (mirrors the proven invocation in
 ``quant-research-v1/scripts/run_agents.sh``):
@@ -20,7 +14,7 @@ The final agent message is read back from the ``-o`` file (clean text, no
 event chatter).
 
 env knobs:
-  QUANT_NARRATOR_BACKEND   codex | deepseek            (default codex)
+  QUANT_NARRATOR_BACKEND   codex only                  (default codex)
   CODEX_BIN                codex binary                (default "codex")
   CODEX_MODEL              model id                    (default "gpt-5.5")
   CODEX_REASONING_EFFORT   minimal|low|medium|high|xhigh (default "high")
@@ -34,16 +28,17 @@ import sys
 import tempfile
 from pathlib import Path
 
-import requests
-
 ROOT = Path(__file__).resolve().parents[2]
-
-DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
-DEEPSEEK_MODEL = "deepseek-chat"
 
 
 def backend() -> str:
-    return (os.environ.get("QUANT_NARRATOR_BACKEND") or "codex").strip().lower()
+    selected = (os.environ.get("QUANT_NARRATOR_BACKEND") or "codex").strip().lower()
+    if selected != "codex":
+        raise RuntimeError(
+            "Daily report narrators are Codex-agent-only; "
+            f"QUANT_NARRATOR_BACKEND={selected!r} is not allowed."
+        )
+    return "codex"
 
 
 def concurrency() -> int:
@@ -127,66 +122,23 @@ def call_codex(
             pass
 
 
-def call_deepseek(
-    api_key: str,
-    system: str,
-    user: str,
-    *,
-    temperature: float = 0.2,
-    max_tokens: int = 1500,
-) -> str | None:
-    """Sync DeepSeek call. Returns content or None on error."""
-    payload = {
-        "model": DEEPSEEK_MODEL,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
-    try:
-        r = requests.post(
-            DEEPSEEK_URL,
-            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=120,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
-    except (requests.RequestException, KeyError, ValueError) as e:
-        print(f"  [warn] DeepSeek call failed: {type(e).__name__}: {str(e)[:200]}", file=sys.stderr)
-        return None
-
-
 def call_llm(
     system: str,
     user: str,
     *,
     label: str = "llm",
-    deepseek_key: str | None = None,
     temperature: float = 0.3,
     max_tokens: int = 1500,
     timeout: int = 900,
 ) -> str | None:
-    """Backend-routed LLM call.
+    """Codex-only LLM call. Returns None on Codex failure; no LLM fallback.
 
-    codex (default): GPT-5.5 high. Falls back to DeepSeek on failure when a
-    deepseek_key is available. deepseek: legacy path.
+    `temperature` and `max_tokens` remain in the signature so older narrator
+    call sites do not need a noisy mechanical rewrite; they are ignored by the
+    Codex backend.
     """
-    if backend() == "deepseek":
-        if not deepseek_key:
-            print(f"  [warn] deepseek backend selected but no key for '{label}'", file=sys.stderr)
-            return None
-        return call_deepseek(deepseek_key, system, user, temperature=temperature, max_tokens=max_tokens)
-
-    result = call_codex(system, user, label=label, timeout=timeout)
-    if result:
-        return result
-    if deepseek_key:
-        print(f"  [warn] '{label}' codex empty; falling back to DeepSeek", file=sys.stderr)
-        return call_deepseek(deepseek_key, system, user, temperature=temperature, max_tokens=max_tokens)
-    return None
+    backend()
+    return call_codex(system, user, label=label, timeout=timeout)
 
 
 if __name__ == "__main__":  # smoke test

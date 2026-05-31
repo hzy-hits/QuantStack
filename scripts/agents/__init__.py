@@ -1,1 +1,1 @@
-"""Agent orchestrators (DeepSeek-based) for narrative generation."""
+"""Codex agent orchestrators for narrative generation."""

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+from datetime import date
 from pathlib import Path
 import tempfile
 import unittest
@@ -50,6 +52,68 @@ class MarketReportScopeTest(unittest.TestCase):
         with mock.patch("sys.argv", argv), self.assertRaises(SystemExit) as cm:
             module.main()
         self.assertIn("prod delivery requires --market cn or --market us", str(cm.exception))
+
+    def test_market_report_path_is_agent_only_for_us_cn(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmpdir, mock.patch.object(module, "STACK_ROOT", Path(tmpdir)):
+            self.assertEqual(
+                module.report_path("2026-05-31", "us"),
+                Path(tmpdir)
+                / "reports"
+                / "review_dashboard"
+                / "main_strategy_v2"
+                / "2026-05-31"
+                / "us_daily_report_agent.md",
+            )
+            self.assertEqual(
+                module.report_path("2026-05-31", "cn"),
+                Path(tmpdir)
+                / "reports"
+                / "review_dashboard"
+                / "main_strategy_v2"
+                / "2026-05-31"
+                / "cn_daily_report_agent.md",
+            )
+
+    def test_fresh_agent_report_requires_codex_metadata(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = Path(tmpdir) / "us_daily_report_agent.md"
+            as_of = date.today().isoformat()
+            report.write_text(f"# 美股量化日报 — {as_of}\n", encoding="utf-8")
+            self.assertFalse(module._is_fresh_codex_agent_report(report, as_of))
+            report.with_name(report.name + ".meta.json").write_text(
+                json.dumps({"as_of": as_of, "backend": "codex"}),
+                encoding="utf-8",
+            )
+            self.assertTrue(module._is_fresh_codex_agent_report(report, as_of))
+
+    def test_disabled_narrator_refuses_fallback_delivery(self) -> None:
+        module = load_module()
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch.object(module, "STACK_ROOT", Path(tmpdir)),
+            mock.patch.dict(
+                "os.environ",
+                {"QUANT_DISABLE_US_NARRATOR": "1", "QUANT_NARRATOR_BACKEND": "codex"},
+                clear=False,
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "refusing to send a fallback report"):
+                module._ensure_narrator("2026-05-31", "us")
+
+    def test_successful_narrator_must_write_verified_agent_report(self) -> None:
+        module = load_module()
+        with (
+            tempfile.TemporaryDirectory() as tmpdir,
+            mock.patch.object(module, "STACK_ROOT", Path(tmpdir)),
+            mock.patch.dict("os.environ", {"QUANT_NARRATOR_BACKEND": "codex"}, clear=False),
+        ):
+            narrator = Path(tmpdir) / "scripts" / "agents" / "run_us_narrator.py"
+            narrator.parent.mkdir(parents=True, exist_ok=True)
+            narrator.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "did not produce a verified agent report"):
+                module._ensure_narrator("2026-05-31", "us")
 
 
 if __name__ == "__main__":
