@@ -46,15 +46,21 @@ def final_style_guard(as_of: str) -> str:
     return f"""
 ## 最终写作覆盖（最高优先级）
 
-这份报告是发给人读的美股日报，不是多 agent 调试日志。最终输出必须按下面规则重写，而不是拼接提取器内容：
+这份报告是发给人读的美股日报，不是多 agent 调试日志。最终输出必须是“Codex 结构化研报”：由你裁决和改写，但必须保留紧凑 Markdown 表格，不能写成整篇 plain text 散文。
 
 - 第一行固定为 `# 美股量化日报 — {as_of}`。
 - 只写 6 个二级标题：`一句话`、`市场状态`、`今日交易清单`、`观察与风险`、`催化与复核`、`附注`。
+- 全文至少包含 4 张 Markdown 表格，且表格必须使用 `|` 分隔列：
+  1. `今日交易清单` 内必须有 Production candidates 表，列为 `Symbol / Decision / Size / Entry / Risk / Hedge / Why`。
+  2. `观察与风险` 内必须有 Watch / 0R context 表，列为 `Symbol / Status / Reason / Next check`。
+  3. `观察与风险` 内必须有 IV/HV 表，列为 `Symbol / IV/HV / IV rank / Context / Action`。
+  4. `观察与风险` 内必须有 Gamma v2 表，列为 `Symbol / Gamma state / Dealer proxy / Wall / Management`。
+- 如果某张表没有行，也要保留表头并写一行 `None | - | - | - | -`，不要把表格删掉。
 - 不出现这些词或痕迹：提取器、payload、digest、merge-agent、ranker、模型名、system prompt、user_msg、英文分层名。
 - 不直接输出内部字段名：`stable_alpha_gate`、`ev_status`、`production_decision_summary`、`actionable`、`execution_blocked_0r`、`active_watch`、`ranked_watch`。要翻译成人话，例如“稳定策略门禁未放行”“只观察，不执行”。
-- `今日交易清单` 必须先写正式执行名单；没有就只写“本期无可执行做多”。然后用短句分开写“小仓试错 / 观察 / 回避”，不要制造半执行清单。
+- `今日交易清单` 必须先给正式执行表；没有正式执行时，表格第一行写 `None` 并在表后写“本期无可执行做多”。随后用短句分开写“小仓试错 / 观察 / 回避”，不要制造半执行清单。
 - 期权和新闻只能解释股票决策和风险，不给期权合约、strike、到期日或期权买卖指令。IV/HV 只写成“健康带/事件溢价高/波动过低或过高”的股票上下文；Gamma Spring v2 是 `us_gamma_v2_alpha` 选股/入场主引擎之一,但只能写成股票入场优先级、dealer pressure proxy、wall transition、仓位上限、收紧止损、不追高,不写成期权买卖建议。
-- 不限制字数。优先用短段落，每段只讲一个判断；信息不够就短，关键冲突多就写足。
+- 不限制字数。表格承载事实，段落承载裁决；每张表后最多写 2-4 句解释，不要把表格内容重复写成散文。
 - 可以保留股票代码、R、beta、IV、VIX、P/C、EMA、SMH、SPY、QQQ 等必要缩写；其它机器状态一律翻译。
 """
 
