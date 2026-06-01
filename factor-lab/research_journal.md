@@ -433,3 +433,177 @@ Legend: . = tested weak, + = decent IC, ++ = strong IC, +++ = promoted, ! = stro
 - Experiments run: 24
 - OOS passed: 0/0
 - Passing factors: none
+
+## Session 20260519_140003_acf528 — CN
+- Timestamp: 2026-05-19 14:57
+- Experiments run: 22
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260519_145722_ca0682 — US
+- Timestamp: 2026-05-19 15:52
+- Experiments run: 19
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260520_062702_8909c7 — CN
+- Timestamp: 2026-05-20 07:23
+- Experiments run: 24
+- OOS passed: 0/3
+- Passing factors: none
+
+## Session 20260520_140002_6d34ae — CN
+- Timestamp: 2026-05-20 14:55
+- Experiments run: 20
+- OOS passed: 3/3
+- Passing factors: stable_float_flow_20, relvol_even_quiet_range_20, amount_floor_relvol_calm_20
+
+## Session 20260520_145535_a93654 — US
+- Timestamp: 2026-05-20 15:52
+- Experiments run: 21
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260521_062702_1a7736 — CN
+- Timestamp: 2026-05-21 07:23
+- Experiments run: 24
+- OOS passed: 0/1
+- Passing factors: none
+
+## Session 20260521_140002_d2b4fa — CN
+- Timestamp: 2026-05-21 14:55
+- Experiments run: 21
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260521_145506_3752da — US
+- Timestamp: 2026-05-21 15:51
+- Experiments run: 23
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260522_062703_274f5a — CN
+- Timestamp: 2026-05-22 07:22
+- Experiments run: 23
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260522_140003_ff19e4 — CN
+- Timestamp: 2026-05-22 14:55
+- Experiments run: 22
+- OOS passed: 0/2
+- Passing factors: none
+
+## Session 20260522_145542_6af8a8 — US
+- Timestamp: 2026-05-22 15:52
+- Experiments run: 20
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260525_062703_ae377b — CN
+- Timestamp: 2026-05-25 07:23
+- Experiments run: 21
+- OOS passed: 1/2
+- Passing factors: amount_absorb_pullback_10
+
+## Session 20260525_140003_622c66 — CN
+- Timestamp: 2026-05-25 14:56
+- Experiments run: 21
+- OOS passed: 1/2
+- Passing factors: amount_compress_pullback_10
+
+## Session 20260525_145628_de95a7 — US
+- Timestamp: 2026-05-25 15:52
+- Experiments run: 20
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260526_062702_4e1ae2 — CN
+- Timestamp: 2026-05-26 07:23
+- Experiments run: 22
+- OOS passed: 1/3
+- Passing factors: smooth_amount_pullback_5
+
+## Session 20260526_140002_5486d2 — CN
+- Timestamp: 2026-05-26 14:56
+- Experiments run: 24
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260526_145646_85da1a — US
+- Timestamp: 2026-05-26 15:52
+- Experiments run: 20
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260527_062702_76a84a — CN
+- Timestamp: 2026-05-27 07:23
+- Experiments run: 24
+- OOS passed: 1/1
+- Passing factors: pb_float_amount_absorption_20
+
+## Session 20260527_145728_69c641 — US
+- Timestamp: 2026-05-27 15:53
+- Experiments run: 20
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260527_155704_44d2b7 — CN
+- Timestamp: 2026-05-27 16:52
+- Experiments run: 17
+- OOS passed: 1/3
+- Passing factors: amount_stable_rebound_gap
+
+## Session 20260528_062703_a5bf9c — CN
+- Timestamp: 2026-05-28 07:22
+- Experiments run: 21
+- OOS passed: 2/3
+- Passing factors: stable_relvol_pullback_20, relvol_floor_rebound_gap
+
+## Session 20260528_140003_a6f06a — CN
+- Timestamp: 2026-05-28 14:56
+- Experiments run: 22
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260528_145623_b6f68a — US
+- Timestamp: 2026-05-28 15:53
+- Experiments run: 22
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260529_071202_4a3250 — CN
+- Timestamp: 2026-05-29 08:08
+- Experiments run: 23
+- OOS passed: 0/1
+- Passing factors: none
+
+## Session 20260529_140002_641f0b — CN
+- Timestamp: 2026-05-29 14:56
+- Experiments run: 21
+- OOS passed: 0/2
+- Passing factors: none
+
+## Session 20260529_145610_6bea3d — US
+- Timestamp: 2026-05-29 15:52
+- Experiments run: 25
+- OOS passed: 3/3
+- Passing factors: close_loc_relvol_accel_20, close_location_relvol_persist, reclaim_relvol_stepup_10_20
+
+## Session 20260601_062702_590033 — CN
+- Timestamp: 2026-06-01 07:24
+- Experiments run: 0
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260601_140001_9b0632 — CN
+- Timestamp: 2026-06-01 14:57
+- Experiments run: 22
+- OOS passed: 1/1
+- Passing factors: low_pb_flow_floor_20
+
+## Session 20260601_145718_cd2732 — US
+- Timestamp: 2026-06-01 15:53
+- Experiments run: 22
+- OOS passed: 2/2
+- Passing factors: reclaim_relvol_accel_10_20, reclaim_relvol_accel_20
