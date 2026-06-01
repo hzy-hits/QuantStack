@@ -113,6 +113,9 @@ research/report snapshots.
 
 Key tables:
 - `prices_daily` — OHLCV + adj_close, PK (symbol, date)
+- `market_quotes` — delayed pre/post-market quote snapshots, PK
+  (symbol, as_of, session, source). Used only as the live execution reference
+  for `overnight_gate`; it does not replace daily OHLCV research history.
 - `analysis_daily` — probability outputs, PK (symbol, date, module_name). `module_name` is `'momentum_risk'` or `'earnings_risk'`
 - `earnings_calendar` — EPS history + surprise %, PK (symbol, report_date)
 - `macro_daily` — FRED series, PK (date, series_id). Note: column is `series_id`, NOT `series_name`

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
+
+import duckdb
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -175,6 +179,95 @@ class OvernightContinuationAlphaTests(unittest.TestCase):
 
         self.assertEqual(scored["advice"], "continue")
         self.assertGreaterEqual(scored["entry_quality"], 0.56)
+
+
+class OvernightGateMarketQuoteTests(unittest.TestCase):
+    def _db(self) -> duckdb.DuckDBPyConnection:
+        con = duckdb.connect(":memory:")
+        con.execute(
+            """
+            CREATE TABLE prices_daily (
+                symbol VARCHAR, date DATE, open DOUBLE, high DOUBLE, low DOUBLE,
+                close DOUBLE, volume BIGINT, adj_close DOUBLE
+            );
+            CREATE TABLE analysis_daily (
+                symbol VARCHAR, date DATE, module_name VARCHAR,
+                trend_prob DOUBLE, p_upside DOUBLE, p_downside DOUBLE,
+                daily_risk_usd DOUBLE, expected_move_pct DOUBLE,
+                z_score DOUBLE, p_value_raw DOUBLE, p_value_bonf DOUBLE,
+                strength_bucket VARCHAR, regime VARCHAR, details VARCHAR
+            );
+            CREATE TABLE options_analysis (
+                symbol VARCHAR, as_of DATE, expiry VARCHAR, days_to_exp INTEGER,
+                current_price DOUBLE, range_68_low DOUBLE, range_68_high DOUBLE,
+                range_95_low DOUBLE, range_95_high DOUBLE, atm_iv DOUBLE,
+                iv_skew DOUBLE, put_call_vol_ratio DOUBLE, bias_signal VARCHAR,
+                liquidity_score VARCHAR, chain_width INTEGER, avg_spread_pct DOUBLE,
+                unusual_strikes VARCHAR
+            );
+            CREATE TABLE options_snapshot (
+                symbol VARCHAR, as_of DATE, expiry VARCHAR, days_to_exp INTEGER,
+                atm_iv DOUBLE, expected_move_pct DOUBLE, put_call_vol_ratio DOUBLE
+            );
+            CREATE TABLE market_quotes (
+                symbol VARCHAR, as_of DATE, session VARCHAR, quote_time TIMESTAMP,
+                regular_market_price DOUBLE, premarket_price DOUBLE,
+                postmarket_price DOUBLE, last_price DOUBLE, previous_close DOUBLE,
+                active_price DOUBLE, active_price_source VARCHAR, currency VARCHAR,
+                source VARCHAR, raw_json VARCHAR
+            );
+            """
+        )
+        return con
+
+    def test_premarket_quote_overrides_stale_options_reference(self) -> None:
+        from quant_bot.analytics.overnight_gate import run_overnight_gate
+
+        con = self._db()
+        as_of = date(2026, 6, 1)
+        con.execute(
+            "INSERT INTO prices_daily VALUES ('ABC', '2026-05-29', 100, 102, 98, 100, 1000000, 100)"
+        )
+        con.execute(
+            """
+            INSERT INTO analysis_daily VALUES
+            ('ABC', '2026-06-01', 'momentum_risk',
+             0.62, 0.60, 0.30, 3.0, NULL, NULL, NULL, NULL,
+             'strong', 'trending', '{}')
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO options_analysis VALUES
+            ('ABC', '2026-06-01', '2026-06-19', 18,
+             101, 94, 106, 88, 112, 0.40, 0.90, 0.60,
+             'bullish', 'good', 20, 0.03, NULL)
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO options_snapshot VALUES
+            ('ABC', '2026-06-01', '2026-06-19', 18, 40, 5.0, 0.60)
+            """
+        )
+        con.execute(
+            """
+            INSERT INTO market_quotes VALUES
+            ('ABC', '2026-06-01', 'pre', '2026-06-01 12:55:00',
+             100.5, 108.0, NULL, 108.0, 100.0, 108.0,
+             'premarket_price', 'USD', 'yfinance_yahoo_delayed', '{}')
+            """
+        )
+
+        df = run_overnight_gate(con, ["ABC"], as_of, session="pre")
+        row = df.to_dicts()[0]
+        details = json.loads(row["details"])
+
+        self.assertEqual(details["ref_price"], 108.0)
+        self.assertEqual(details["ref_price_source"], "market_quotes.premarket_price")
+        self.assertEqual(details["quote_session"], "pre")
+        self.assertAlmostEqual(details["gap_pct"], 8.0)
+        self.assertAlmostEqual(row["daily_risk_usd"], 8.0)
 
 
 if __name__ == "__main__":

@@ -81,10 +81,19 @@ def _price_momentum_table(item: dict) -> list[str]:
     elif gate:
         lines += [
             f"| Live reference price | ${_fmt_val(gate.get('ref_price'), 2)} |",
+            f"| Reference source | {gate.get('ref_price_source') or _DASH} |",
             f"| Overnight gap vs last close | {_fmt_pct(gate.get('gap_pct'), 2)} |",
             f"| Stretch vs implied move | {_fmt_val(gate.get('gap_vs_expected_move'), 2)}\u00d7 |",
             f"| Execution read | {_execution_phrase(gate.get('action'), headline_mode=headline_mode)} |",
         ]
+        if gate.get("premarket_price") is not None or gate.get("postmarket_price") is not None:
+            lines += [
+                (
+                    f"| Extended-hours quote | pre ${_fmt_val(gate.get('premarket_price'), 2)}"
+                    f" / post ${_fmt_val(gate.get('postmarket_price'), 2)}"
+                    f" ({gate.get('quote_source') or _DASH}) |"
+                ),
+            ]
     if overnight_alpha and report_session != "post":
         calibration = overnight_alpha.get("calibration") or {}
         interval = calibration.get("continuation_hit_rate_interval")

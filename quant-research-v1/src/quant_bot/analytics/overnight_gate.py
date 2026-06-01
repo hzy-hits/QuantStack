@@ -331,6 +331,46 @@ def _nearest_options_current(
         return None
 
 
+def _latest_market_quotes(
+    con: duckdb.DuckDBPyConnection,
+    as_of_str: str,
+    session: str,
+):
+    try:
+        return con.execute(
+            """
+            WITH ranked AS (
+                SELECT
+                    symbol,
+                    quote_time,
+                    regular_market_price,
+                    premarket_price,
+                    postmarket_price,
+                    last_price,
+                    previous_close,
+                    active_price,
+                    active_price_source,
+                    source,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY symbol
+                        ORDER BY quote_time DESC NULLS LAST, source ASC
+                    ) AS rn
+                FROM market_quotes
+                WHERE as_of = ?
+                  AND session = ?
+                  AND active_price IS NOT NULL
+                  AND active_price > 0
+            )
+            SELECT *
+            FROM ranked
+            WHERE rn = 1
+            """,
+            [as_of_str, session],
+        ).fetchdf()
+    except Exception:
+        return None
+
+
 def _historical_options_context(
     con: duckdb.DuckDBPyConnection,
     as_of_str: str,
@@ -393,6 +433,7 @@ def run_overnight_gate(
     con: duckdb.DuckDBPyConnection,
     symbols: list[str],
     as_of: date,
+    session: str = "post",
 ) -> pl.DataFrame:
     """
     Compute overnight execution gate for the supplied symbols.
@@ -467,6 +508,10 @@ def run_overnight_gate(
     cur_opts_df = _nearest_options_current(con, as_of_str)
     cur_opts_map = {r["symbol"]: r for _, r in cur_opts_df.iterrows()} if cur_opts_df is not None and not cur_opts_df.empty else {}
 
+    session_norm = "pre" if session in {"pre", "premarket", "morning"} else "post"
+    quote_df = _latest_market_quotes(con, as_of_str, session_norm)
+    quote_map = {r["symbol"]: r for _, r in quote_df.iterrows()} if quote_df is not None and not quote_df.empty else {}
+
     hist_opts_df = _historical_options_context(con, as_of_str, gate_params)
     hist_opts_map = {r["symbol"]: r for _, r in hist_opts_df.iterrows()} if hist_opts_df is not None and not hist_opts_df.empty else {}
 
@@ -485,14 +530,25 @@ def run_overnight_gate(
         sent = sent_map.get(sym)
         cur_opts = cur_opts_map.get(sym)
         hist_opts = hist_opts_map.get(sym)
+        quote = quote_map.get(sym)
         mom_row = mom if mom is not None else {}
         sent_row = sent if sent is not None else {}
         cur_opts_row = cur_opts if cur_opts is not None else {}
         hist_opts_row = hist_opts if hist_opts is not None else {}
+        quote_row = quote if quote is not None else {}
 
-        ref_price = _safe_float(cur_opts_row.get("current_price"))
+        quote_price = _safe_float(quote_row.get("active_price"))
+        ref_price_source = None
+        if quote_price and quote_price > 0:
+            ref_price = quote_price
+            ref_price_source = f"market_quotes.{quote_row.get('active_price_source') or 'active_price'}"
+        else:
+            ref_price = _safe_float(cur_opts_row.get("current_price"))
+            if ref_price and ref_price > 0:
+                ref_price_source = "options_analysis.current_price"
         if not ref_price or ref_price <= 0:
             ref_price = last_close
+            ref_price_source = "prices_daily.last_close"
 
         atr_usd = _safe_float(mom_row.get("daily_risk_usd")) or _safe_float(px.get("atr_14")) or 0.0
         atr_pct = (atr_usd / last_close * 100.0) if atr_usd and last_close > 0 else None
@@ -787,7 +843,15 @@ def run_overnight_gate(
 
         details = {
             "ref_price": round(ref_price, 4),
+            "ref_price_source": ref_price_source,
             "last_close": round(last_close, 4),
+            "quote_session": session_norm,
+            "quote_time": str(quote_row.get("quote_time")) if quote_row.get("quote_time") is not None else None,
+            "quote_source": quote_row.get("source"),
+            "premarket_price": round(_safe_float(quote_row.get("premarket_price")), 4) if _safe_float(quote_row.get("premarket_price")) is not None else None,
+            "postmarket_price": round(_safe_float(quote_row.get("postmarket_price")), 4) if _safe_float(quote_row.get("postmarket_price")) is not None else None,
+            "regular_market_price": round(_safe_float(quote_row.get("regular_market_price")), 4) if _safe_float(quote_row.get("regular_market_price")) is not None else None,
+            "quote_previous_close": round(_safe_float(quote_row.get("previous_close")), 4) if _safe_float(quote_row.get("previous_close")) is not None else None,
             "gap_pct": round(gap_pct, 3),
             "gap_vs_expected_move": round(gap_vs_expected_move, 3) if gap_vs_expected_move is not None else None,
             "gap_vs_atr": round(gap_vs_atr, 3) if gap_vs_atr is not None else None,

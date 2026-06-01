@@ -92,6 +92,9 @@ Main module families:
 - Price/risk: `momentum_risk.py`, `mean_reversion.py`, `breakout.py`,
   `covariance.py`, `pairs.py`, `granger.py`, `kalman_beta.py`,
   `event_study.py`.
+- Session quotes: `data_ingestion/market_quotes.py` writes delayed
+  pre-market/post-market quote snapshots into `market_quotes` for execution
+  timing only.
 - Options: `options_alpha.py`, `variance_premium.py`,
   `sentiment_ewma.py`.
 - Execution timing: `overnight_gate.py`,
@@ -125,8 +128,10 @@ Responsibilities:
 - Keep Factor Lab candidates visibly separated as research priors.
 
 Important guardrail: `overnight_gate` can downgrade a stale move to
-`wait_pullback` or `do_not_chase`; the report must not treat the prior close as
-the only entry reference.
+`wait_pullback` or `do_not_chase`; in pre/post sessions it should prefer
+`market_quotes.active_price` over stale option-chain/current-close references,
+then fall back to `options_analysis.current_price`, then daily close. The
+report must not treat the prior close as the only entry reference.
 
 ## A-share Producer: `quant-research-cn`
 
@@ -238,4 +243,3 @@ Shared report rule:
 
 - Options/shadow-options evidence belongs in `options_alpha` or risk sections
   unless the equity execution gate also supports a real stock ticket.
-

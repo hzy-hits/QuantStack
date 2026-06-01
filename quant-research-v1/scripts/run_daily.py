@@ -58,6 +58,7 @@ from quant_bot.data_ingestion.options import (
     upsert_options_chain_quotes,
     is_options_eligible, OPTIONS_PROXY_MAP,
 )
+from quant_bot.data_ingestion.market_quotes import fetch_and_store_market_quotes
 from quant_bot.analytics import ai_infra_universe
 from quant_bot.analytics.momentum_risk import run_momentum_risk, store_analysis
 from quant_bot.analytics.earnings_risk import run_earnings_risk
@@ -782,6 +783,19 @@ def main() -> None:
         n3 = upsert_options_chain_quotes(research_con, chain_quote_df)
         log_run(research_con, run_id, "options", "ok", n, f"snapshot={n} analysis={n2} chain_quotes={n3}")
 
+        log.info("step_market_quotes", session=session)
+        try:
+            quote_syms = sorted(
+                set(candidate_syms)
+                | set(ai_infra_option_syms)
+                | {"SPY", "QQQ", "SMH"}
+            )
+            n_quotes = fetch_and_store_market_quotes(research_con, quote_syms, as_of, session)
+            log_run(research_con, run_id, "market_quotes", "ok", n_quotes)
+        except Exception as e:
+            log.warning("market_quotes_failed_nonfatal", error=str(e))
+            log_run(research_con, run_id, "market_quotes", "error", 0, str(e))
+
         # ── 5c. Options sentiment signals (VRP + EWMA) ──────────────
         log.info("step_vrp")
         vrp_results = compute_vrp(research_con, all_symbols, as_of)
@@ -798,7 +812,7 @@ def main() -> None:
         log_run(research_con, run_id, "options_alpha", "ok", n_options_alpha)
 
         log.info("step_overnight_gate")
-        overnight_gate_df = run_overnight_gate(research_con, candidate_syms, as_of)
+        overnight_gate_df = run_overnight_gate(research_con, candidate_syms, as_of, session=session)
         n_overnight = store_overnight_gate(research_con, overnight_gate_df)
         log_run(research_con, run_id, "overnight_gate", "ok", n_overnight)
 

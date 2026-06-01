@@ -22,6 +22,27 @@ CREATE TABLE IF NOT EXISTS prices_daily (
     PRIMARY KEY (symbol, date)
 );
 
+-- Session quote snapshot for pre-market / post-market execution gates.
+-- This is not a bar series; it is a point-in-time reference used to decide
+-- whether the overnight move has already consumed the entry edge.
+CREATE TABLE IF NOT EXISTS market_quotes (
+    symbol                 VARCHAR NOT NULL,
+    as_of                  DATE    NOT NULL,
+    session                VARCHAR NOT NULL,
+    quote_time             TIMESTAMP,
+    regular_market_price   DOUBLE,
+    premarket_price        DOUBLE,
+    postmarket_price       DOUBLE,
+    last_price             DOUBLE,
+    previous_close         DOUBLE,
+    active_price           DOUBLE,
+    active_price_source    VARCHAR,
+    currency               VARCHAR,
+    source                 VARCHAR,
+    raw_json               VARCHAR,
+    PRIMARY KEY (symbol, as_of, session, source)
+);
+
 -- Earnings calendar and EPS surprise history
 CREATE TABLE IF NOT EXISTS earnings_calendar (
     symbol          VARCHAR NOT NULL,
