@@ -80,13 +80,25 @@ class MarketReportScopeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             report = Path(tmpdir) / "us_daily_report_agent.md"
             as_of = date.today().isoformat()
-            report.write_text(f"# 美股量化日报 — {as_of}\n", encoding="utf-8")
+            report.write_text(structured_us_report(as_of), encoding="utf-8")
             self.assertFalse(module._is_fresh_codex_agent_report(report, as_of))
             report.with_name(report.name + ".meta.json").write_text(
                 json.dumps({"as_of": as_of, "backend": "codex"}),
                 encoding="utf-8",
             )
             self.assertTrue(module._is_fresh_codex_agent_report(report, as_of))
+
+    def test_us_agent_report_requires_structured_tables(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = Path(tmpdir) / "us_daily_report_agent.md"
+            as_of = date.today().isoformat()
+            report.write_text(f"# 美股量化日报 — {as_of}\n\n## 一句话\n纯段落。\n", encoding="utf-8")
+            report.with_name(report.name + ".meta.json").write_text(
+                json.dumps({"as_of": as_of, "backend": "codex"}),
+                encoding="utf-8",
+            )
+            self.assertFalse(module._is_fresh_codex_agent_report(report, as_of))
 
     def test_disabled_narrator_refuses_fallback_delivery(self) -> None:
         module = load_module()
@@ -114,6 +126,47 @@ class MarketReportScopeTest(unittest.TestCase):
             narrator.write_text("import sys\nsys.exit(0)\n", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "did not produce a verified agent report"):
                 module._ensure_narrator("2026-05-31", "us")
+
+def structured_us_report(as_of: str) -> str:
+    table = (
+        "| Symbol | Decision | Size | Entry | Risk | Hedge | Why |\n"
+        "|---|---|---:|---|---|---|---|\n"
+        "| NVDA | Production long | 0.01R | 100 | stop 94 | SPY | Gamma + IV/HV |\n"
+    )
+    return f"""# 美股量化日报 — {as_of}
+
+## 一句话
+Production 候选保留,IV/HV 与 Gamma 共同约束。
+
+## 市场状态
+| Metric | Value |
+|---|---|
+| VIX | 15 |
+
+## 今日交易清单
+{table}
+
+## 观察与风险
+| Symbol | Status | Reason | Next check |
+|---|---|---|---|
+| AMD | watch | IV/HV high | next open |
+
+| Symbol | IV/HV | IV rank | Context | Action |
+|---|---:|---:|---|---|
+| NVDA | 1.0 | 50% | healthy | hold |
+
+| Symbol | Gamma state | Dealer proxy | Wall | Management |
+|---|---|---:|---|---|
+| NVDA | Gamma | +10% | wall | hold |
+
+## 催化与复核
+| Item | Date | Impact | Review |
+|---|---|---|---|
+| earnings | {as_of} | medium | review |
+
+## 附注
+options / news 仅作为股票决策证据,不是这份报告的交易标的。不构成投资建议。
+"""
 
 
 if __name__ == "__main__":

@@ -57,6 +57,7 @@ def final_style_guard(as_of: str) -> str:
   4. `观察与风险` 内必须有 Gamma v2 表，列为 `Symbol / Gamma state / Dealer proxy / Wall / Management`。
 - 如果某张表没有行，也要保留表头并写一行 `None | - | - | - | -`，不要把表格删掉。
 - 不出现这些词或痕迹：提取器、payload、digest、merge-agent、ranker、模型名、system prompt、user_msg、英文分层名。
+- 不使用 emoji 或装饰符号；最终报告只靠标题、紧凑表格和短段落组织信息。
 - 不直接输出内部字段名：`stable_alpha_gate`、`ev_status`、`production_decision_summary`、`actionable`、`execution_blocked_0r`、`active_watch`、`ranked_watch`。要翻译成人话，例如“稳定策略门禁未放行”“只观察，不执行”。
 - `今日交易清单` 必须先给正式执行表；没有正式执行时，表格第一行写 `None` 并在表后写“本期无可执行做多”。随后用短句分开写“小仓试错 / 观察 / 回避”，不要制造半执行清单。
 - 期权和新闻只能解释股票决策和风险，不给期权合约、strike、到期日或期权买卖指令。IV/HV 只写成“健康带/事件溢价高/波动过低或过高”的股票上下文；Gamma Spring v2 是 `us_gamma_v2_alpha` 选股/入场主引擎之一,但只能写成股票入场优先级、dealer pressure proxy、wall transition、仓位上限、收紧止损、不追高,不写成期权买卖建议。
@@ -641,6 +642,144 @@ def _join_payload_sections(label: str, sections: str) -> str:
     return f"# {label}\n\n{sections}"
 
 
+def _markdown_table_count(text: str) -> int:
+    lines = text.splitlines()
+    count = 0
+    for idx, line in enumerate(lines[:-1]):
+        cur = line.strip()
+        nxt = lines[idx + 1].strip()
+        if cur.startswith("|") and cur.endswith("|") and nxt.startswith("|") and set(nxt.replace("|", "").strip()) <= {"-", ":"}:
+            count += 1
+    return count
+
+
+def validate_structured_us_report(text: str, as_of: str) -> None:
+    required = [
+        f"# 美股量化日报 — {as_of}",
+        "## 一句话",
+        "## 市场状态",
+        "## 今日交易清单",
+        "## 观察与风险",
+        "## 催化与复核",
+        "## 附注",
+    ]
+    missing = [marker for marker in required if marker not in text]
+    if missing:
+        raise RuntimeError(f"US narrator output missing required sections: {missing}")
+    table_count = _markdown_table_count(text)
+    if table_count < 4:
+        raise RuntimeError(f"US narrator output has only {table_count} Markdown tables; expected >=4")
+    for marker in ["IV/HV", "Gamma", "Production"]:
+        if marker not in text:
+            raise RuntimeError(f"US narrator output missing required marker: {marker}")
+
+
+def _first_table(section: str, *, max_rows: int = 8) -> str:
+    lines = section.splitlines()
+    for idx, line in enumerate(lines):
+        if not line.strip().startswith("|"):
+            continue
+        table: list[str] = []
+        for raw in lines[idx:]:
+            if not raw.strip().startswith("|"):
+                break
+            table.append(raw)
+        if len(table) < 2:
+            continue
+        header = table[:2]
+        rows = table[2 : 2 + max_rows]
+        return "\n".join(header + rows)
+    return ""
+
+
+def _compact_section(section: str, *, max_lines: int = 16) -> str:
+    out: list[str] = []
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        out.append(line)
+        if len(out) >= max_lines:
+            break
+    return "\n".join(out)
+
+
+def build_layout_skeleton(art: dict[str, Any], as_of: str) -> str:
+    """Build a compact structured draft from the programmatic report.
+
+    The narrator still writes the final report, but this skeleton prevents the
+    final merge from flattening good tables into prose.
+    """
+    md = art.get("_us_daily_report_md", "")
+    market = "\n\n".join(
+        part
+        for part in [
+            _compact_section(_slice_md_sections(md, ["风控引擎"]), max_lines=10),
+            _compact_section(_slice_md_sections(md, ["恐惧贪婪"]), max_lines=10),
+            _compact_section(_slice_md_sections(md, ["SPX × P/C"]), max_lines=10),
+        ]
+        if part
+    )
+    prod_table = _first_table(_slice_md_sections(md, ["可交易名单"]), max_rows=10)
+    if not prod_table:
+        prod_table = "| Symbol | Decision | Size | Entry | Risk | Hedge | Why |\n|---|---|---:|---|---|---|---|\n| None | - | - | - | - | - | - |"
+    watch_table = _first_table(_slice_md_sections(md, ["远月 OTM"]), max_rows=6)
+    if not watch_table:
+        watch_table = _first_table(_slice_md_sections(md, ["US 左侧观察池"]), max_rows=6)
+    if not watch_table:
+        watch_table = "| Symbol | Status | Reason | Next check |\n|---|---|---|---|\n| None | - | - | - |"
+    iv_table = _first_table(_slice_md_sections(md, ["US 期权 IV 视图"]), max_rows=8)
+    if not iv_table:
+        iv_table = "| Symbol | IV/HV | IV rank | Context | Action |\n|---|---:|---:|---|---|\n| None | - | - | - | - |"
+    gamma_table = _first_table(_slice_md_sections(md, ["US Gamma Spring"]), max_rows=10)
+    if not gamma_table:
+        gamma_table = "| Symbol | Gamma state | Dealer proxy | Wall | Management |\n|---|---|---:|---|---|\n| None | - | - | - | - |"
+    catalyst = "\n\n".join(
+        part
+        for part in [
+            _compact_section(_slice_md_sections(md, ["财报日历", "美股财报"]), max_lines=14),
+            _compact_section(_slice_md_sections(md, ["Source Review", "source-review"]), max_lines=14),
+        ]
+        if part
+    )
+    return f"""
+# 美股量化日报 — {as_of}
+
+## 一句话
+用 1-2 句写 regime、执行 R、最大约束。
+
+## 市场状态
+用 3-5 句裁决，然后保留一张紧凑市场表。
+
+{market or "| Metric | Value |\n|---|---|\n| Market | no market skeleton |"}
+
+## 今日交易清单
+必须先给 Production candidates 表。优先从下表改写成列: Symbol / Decision / Size / Entry / Risk / Hedge / Why。
+
+{prod_table}
+
+## 观察与风险
+必须保留下面三类表，不要改成段落。
+
+### Watch / 0R context
+{watch_table}
+
+### IV/HV
+{iv_table}
+
+### Gamma v2
+{gamma_table}
+
+## 催化与复核
+必须给 Catalyst / review 表；若下面素材不是表格，整理成表格。
+
+{catalyst or "| Item | Date | Impact | Review |\n|---|---|---|---|\n| None | - | - | - |"}
+
+## 附注
+options / news 仅作为股票决策证据,不是这份报告的交易标的。不构成投资建议。
+""".strip()
+
+
 async def call_extractor_async(
     sem: asyncio.Semaphore, name: str, payload_text: str
 ) -> tuple[str, str]:
@@ -696,6 +835,7 @@ def call_narrator(extractor_outputs: dict[str, str],
                   art: dict[str, Any], as_of: str) -> str | None:
     """Single narrator call — receives extractor outputs + payload digest."""
     prompt = load_prompt("merge") + "\n\n" + final_style_guard(as_of)
+    layout_skeleton = build_layout_skeleton(art, as_of)
     payload_digest = art.get("_us_daily_report_md", "")[:30000]  # cap to avoid token blow-up
     user_msg = (
         f"### 宏观提取\n{extractor_outputs.get('macro', '[missing]')}\n\n"
@@ -704,13 +844,38 @@ def call_narrator(extractor_outputs: dict[str, str],
         f"### 风险提取\n{extractor_outputs.get('risk', '[missing]')}\n\n"
         f"### 新闻提取\n{extractor_outputs.get('news', '[missing]')}\n\n"
         f"### 期权提取(短端 hedging + 综合定向 + sentiment 极端)\n{extractor_outputs.get('options', '[missing]')}\n\n"
+        f"### 版式骨架（必须保留表格结构；你可以改写文字和裁决,但不能删表）\n{layout_skeleton}\n\n"
         f"### Payload Digest(交叉验证用)\n{payload_digest}\n\n"
         f"### 任务\n请按最终写作覆盖重写为日期 {as_of} 的完整美股日报。"
     )
-    return call_llm(
+    narrative = call_llm(
         prompt, user_msg, label="narrator:us",
-        temperature=0.3, max_tokens=2200,
+        temperature=0.2, max_tokens=4500,
     )
+    if not narrative:
+        return None
+    try:
+        validate_structured_us_report(narrative, as_of)
+        return narrative
+    except RuntimeError as exc:
+        repair_user_msg = (
+            f"上一版美股日报结构不合格: {exc}\n\n"
+            "请只修复结构和版式,保留事实,必须输出完整报告。"
+            "不要解释错误,不要输出检查过程。\n\n"
+            f"### 不合格上一版\n{narrative}\n\n"
+            f"### 必须保留的版式骨架\n{layout_skeleton}\n\n"
+            f"### 日期\n{as_of}"
+        )
+        repaired = call_llm(
+            prompt,
+            repair_user_msg,
+            label="narrator:us:repair",
+            temperature=0.1,
+            max_tokens=4500,
+        )
+        if repaired:
+            validate_structured_us_report(repaired, as_of)
+        return repaired
 
 
 async def main_async(args) -> None:

@@ -15,6 +15,12 @@ def test_us_narrator_guard_requires_structured_tables() -> None:
     assert "Watch / 0R context" in text
     assert "IV/HV 表" in text
     assert "Gamma v2 表" in text
+    assert "build_layout_skeleton" in text
+    assert "validate_structured_us_report" in text
+    assert "版式骨架" in text
+    assert "不使用 emoji" in text
+    assert "narrator:us:repair" in text
+    assert "max_tokens=4500" in text
 
 
 def test_us_merge_prompt_keeps_markdown_tables() -> None:

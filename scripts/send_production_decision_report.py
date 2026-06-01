@@ -325,6 +325,39 @@ def _agent_meta_path(agent_md: Path) -> Path:
     return agent_md.with_name(agent_md.name + ".meta.json")
 
 
+def _markdown_table_count(text: str) -> int:
+    lines = text.splitlines()
+    count = 0
+    for idx, line in enumerate(lines[:-1]):
+        cur = line.strip()
+        nxt = lines[idx + 1].strip()
+        if cur.startswith("|") and cur.endswith("|") and nxt.startswith("|") and set(nxt.replace("|", "").strip()) <= {"-", ":"}:
+            count += 1
+    return count
+
+
+def _is_structured_us_agent_report(agent_md: Path) -> bool:
+    try:
+        text = agent_md.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    required = [
+        "# 美股量化日报",
+        "## 一句话",
+        "## 市场状态",
+        "## 今日交易清单",
+        "## 观察与风险",
+        "## 催化与复核",
+        "## 附注",
+        "Production",
+        "IV/HV",
+        "Gamma",
+    ]
+    if any(marker not in text for marker in required):
+        return False
+    return _markdown_table_count(text) >= 4
+
+
 def _is_fresh_codex_agent_report(agent_md: Path, as_of: str) -> bool:
     if not agent_md.exists() or agent_md.stat().st_size <= 0:
         return False
@@ -340,7 +373,11 @@ def _is_fresh_codex_agent_report(agent_md: Path, as_of: str) -> bool:
     from datetime import date as _date, datetime as _dt
 
     mtime = _dt.fromtimestamp(agent_md.stat().st_mtime).date()
-    return mtime in {_date.fromisoformat(as_of), _date.today()}
+    if mtime not in {_date.fromisoformat(as_of), _date.today()}:
+        return False
+    if agent_md.name == "us_daily_report_agent.md" and not _is_structured_us_agent_report(agent_md):
+        return False
+    return True
 
 
 def _assert_codex_backend_env() -> None:
