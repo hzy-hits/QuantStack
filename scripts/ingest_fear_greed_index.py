@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -39,6 +40,15 @@ DEFAULT_US_DB = STACK_ROOT / "quant-research-v1" / "data" / "quant.duckdb"
 DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "fear_greed"
 CNN_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
 CACHE_TTL_SECONDS = 3_600
+CNN_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120 Safari/537.36"
+    ),
+    "Accept": "application/json, text/plain, */*",
+    "Referer": "https://www.cnn.com/markets/fear-and-greed",
+    "Origin": "https://www.cnn.com",
+}
 
 
 def _rating_for(score: float) -> str:
@@ -53,21 +63,7 @@ def _rating_for(score: float) -> str:
     return "Extreme Greed"
 
 
-def _try_cnn(timeout: int = 8) -> dict[str, Any] | None:
-    try:
-        req = urllib.request.Request(
-            CNN_URL,
-            headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-            },
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            payload = json.loads(response.read())
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
-        print(f"warn: CNN F&G fetch failed ({exc.__class__.__name__}: {exc}); falling back to proxy", file=sys.stderr)
-        return None
+def _parse_cnn_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
     f_and_g = payload.get("fear_and_greed") or {}
     score = f_and_g.get("score")
     if score is None:
@@ -97,6 +93,67 @@ def _try_cnn(timeout: int = 8) -> dict[str, Any] | None:
             )
         },
     }
+
+
+def _try_cnn_urllib(timeout: int = 8) -> tuple[dict[str, Any] | None, str | None]:
+    try:
+        req = urllib.request.Request(CNN_URL, headers=CNN_HEADERS)
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            payload = json.loads(response.read())
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError) as exc:
+        return None, f"urllib:{exc.__class__.__name__}: {exc}"
+    parsed = _parse_cnn_payload(payload)
+    if parsed is None:
+        return None, "urllib:missing fear_and_greed.score"
+    return parsed, None
+
+
+def _try_cnn_curl(timeout: int = 12) -> tuple[dict[str, Any] | None, str | None]:
+    cmd = [
+        "curl",
+        "-L",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        str(timeout),
+    ]
+    for key, value in CNN_HEADERS.items():
+        cmd.extend(["-H", f"{key}: {value}"])
+    cmd.append(CNN_URL)
+    try:
+        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, timeout=timeout + 2)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"curl:{exc.__class__.__name__}: {exc}"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        return None, f"curl:returncode={proc.returncode}: {detail[-1] if detail else 'no output'}"
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        snippet = proc.stdout.strip().replace("\n", " ")[:120]
+        return None, f"curl:JSONDecodeError: {exc}; body={snippet!r}"
+    parsed = _parse_cnn_payload(payload)
+    if parsed is None:
+        return None, "curl:missing fear_and_greed.score"
+    return parsed, None
+
+
+def _try_cnn(timeout: int = 8) -> dict[str, Any] | None:
+    errors: list[str] = []
+    data, error = _try_cnn_urllib(timeout=timeout)
+    if data is not None:
+        return data
+    if error:
+        errors.append(error)
+
+    data, error = _try_cnn_curl(timeout=max(timeout, 12))
+    if data is not None:
+        return data
+    if error:
+        errors.append(error)
+
+    print(f"warn: CNN F&G fetch failed ({' | '.join(errors)}); falling back to proxy", file=sys.stderr)
+    return None
 
 
 def _percentile(values: list[float], target: float) -> float | None:
@@ -195,6 +252,7 @@ def _compute_proxy(us_db: Path, as_of: date) -> dict[str, Any] | None:
     final_score = round((vix_score + spy_ema_score + spy_5d_score) / 3.0, 2)
     return {
         "source": "proxy",
+        "source_note": "CNN official feed unavailable; internal VIX/SPY proxy only.",
         "score": final_score,
         "rating": _rating_for(final_score),
         "previous_close": None,

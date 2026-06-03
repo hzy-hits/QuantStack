@@ -59,6 +59,7 @@ def final_style_guard(as_of: str) -> str:
 - 不出现这些词或痕迹：提取器、payload、digest、merge-agent、ranker、模型名、system prompt、user_msg、英文分层名。
 - 不使用 emoji 或装饰符号；最终报告只靠标题、紧凑表格和短段落组织信息。
 - 不直接输出内部字段名：`stable_alpha_gate`、`ev_status`、`production_decision_summary`、`actionable`、`execution_blocked_0r`、`active_watch`、`ranked_watch`。要翻译成人话，例如“稳定策略门禁未放行”“只观察，不执行”。
+- Fear/Greed 必须保留 source。source=proxy 时只能写 `Internal Fear/Greed proxy`，不得写成 `CNN Fear & Greed` 或 `CNN F&G`；source=cnn 时才可以写 CNN。
 - `今日交易清单` 必须先给正式执行表；没有正式执行时，表格第一行写 `None` 并在表后写“本期无可执行做多”。随后用短句分开写“小仓试错 / 观察 / 回避”，不要制造半执行清单。
 - 期权和新闻只能解释股票决策和风险，不给期权合约、strike、到期日或期权买卖指令。IV/HV 只写成“健康带/事件溢价高/波动过低或过高”的股票上下文；Gamma Spring v2 是 `us_gamma_v2_alpha` 选股/入场主引擎之一,但只能写成股票入场优先级、dealer pressure proxy、wall transition、仓位上限、收紧止损、不追高,不写成期权买卖建议。
 - 不限制字数。表格承载事实，段落承载裁决；每张表后最多写 2-4 句解释，不要把表格内容重复写成散文。

@@ -22,6 +22,7 @@
 - 数字必须照搬 payload,不可计算;缺失字段写 `[缺失]`
 - 不得把 MRS / regime 单独写成"市场转多/转空";只能写"当前tape状态 + 历史类似 setup 表现"
 - 不得把 fear_greed 极端读数当作单边方向裁决
+- 必须保留 fear_greed 的 source。source=proxy 时只能写 "Internal Fear/Greed proxy", 不得写成 "CNN Fear & Greed" 或 "CNN F&G"。
 - 不给交易建议,不做叙事,不预测方向
 - 禁用词:综合考量、谨慎乐观、值得关注、密切跟踪、不确定性较大、用法、操作建议、请注意、这只是
 - "## 判断" 三句话用因果链:**事实(payload 数字) → 含义(什么定价) → 限制**;不要 "需密切跟踪" 报告腔结尾
@@ -39,6 +40,7 @@
 - score: [0-100]
 - rating: [extreme fear|fear|neutral|greed|extreme greed]
 - source: [cnn|proxy]
+- label: [source=cnn 写 CNN Fear & Greed; source=proxy 写 Internal Fear/Greed proxy]
 - 子分量: [VIX percentile + SPY vs EMA50 + SPY 5d return + CNN momentum/strength/breadth/PC/safe-haven/junk]
 
 ## MRS (SPX × P/C 4 象限)

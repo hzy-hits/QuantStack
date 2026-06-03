@@ -140,15 +140,27 @@ def render_fear_greed_section(payload: dict[str, Any]) -> list[str]:
     rating = fg.get("rating") or "-"
     source = fg.get("source") or "?"
     components = fg.get("components") or {}
+    is_cnn = source == "cnn"
+    title = (
+        "## CNN Fear & Greed — 仅作 macro/crowding 上下文"
+        if is_cnn
+        else "## Internal Fear/Greed proxy — CNN 官方源不可用时的 macro/crowding 代理"
+    )
+    source_line = (
+        "- 数据源: `cnn` official feed"
+        if is_cnn
+        else "- 数据源: `proxy` (CNN official feed 未成功；使用 VIX + SPY EMA50 + SPY 5d 三因子代理)"
+    )
+    reading_label = "CNN 当前读数" if is_cnn else "内部 proxy 当前读数"
     lines = [
-        "## 恐惧贪婪 (Fear & Greed) — 仅作 macro/crowding 上下文",
+        title,
         "",
-        f"- 数据源: `{source}` (CNN 优先；失败回落到 VIX + SPY EMA50 + SPY 5d 三因子代理)",
-        f"- 当前读数: **{score:.1f} / 100** → **{rating}**",
+        source_line,
+        f"- {reading_label}: **{score:.1f} / 100** → **{rating}**",
         "- macro/crowding 层的信号用于读环境；ticker 执行状态仍以 AI book 和执行汇总为准。",
         "",
     ]
-    if source == "cnn":
+    if is_cnn:
         history = []
         for key, label in (
             ("previous_close", "前一日"),
