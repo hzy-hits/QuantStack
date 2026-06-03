@@ -8,7 +8,7 @@ reports.
 codex specifics (mirrors the proven invocation in
 ``quant-research-v1/scripts/run_agents.sh``):
     codex exec -m $CODEX_MODEL -c model_reasoning_effort="$EFFORT" \
-      --sandbox read-only --color never --skip-git-repo-check --ephemeral \
+      --sandbox $CODEX_NARRATOR_SANDBOX --color never --skip-git-repo-check --ephemeral \
       -C <root> -o <outfile> -   < prompt(on stdin)
 The final agent message is read back from the ``-o`` file (clean text, no
 event chatter).
@@ -18,6 +18,7 @@ env knobs:
   CODEX_BIN                codex binary                (default "codex")
   CODEX_MODEL              model id                    (default "gpt-5.5")
   CODEX_REASONING_EFFORT   minimal|low|medium|high|xhigh (default "high")
+  CODEX_NARRATOR_SANDBOX   codex exec sandbox          (default "workspace-write")
   NARRATOR_CONCURRENCY     max parallel codex execs    (default 3)
 """
 from __future__ import annotations
@@ -71,6 +72,7 @@ def call_codex(
     codex_bin = os.environ.get("CODEX_BIN", "codex")
     model = model or os.environ.get("CODEX_MODEL", "gpt-5.5")
     effort = effort or os.environ.get("CODEX_REASONING_EFFORT", "high")
+    sandbox = os.environ.get("CODEX_NARRATOR_SANDBOX", "workspace-write")
     prompt = f"{_CODEX_GUARD}{system}\n\n{user}"
 
     out_fd, out_path = tempfile.mkstemp(prefix="narrator_codex_", suffix=".md")
@@ -80,7 +82,7 @@ def call_codex(
             codex_bin, "exec",
             "-m", model,
             "-c", f'model_reasoning_effort="{effort}"',
-            "--sandbox", "read-only",
+            "--sandbox", sandbox,
             "--color", "never",
             "--skip-git-repo-check",
             "--ephemeral",
