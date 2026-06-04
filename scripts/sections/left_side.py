@@ -149,7 +149,13 @@ def render_us_left_side_section(
         "",
     ]
     as_of = str(payload.get("as_of") or "")
-    fallback_date = _latest_dated_subdir(us_mean_reversion_root, as_of) if as_of else None
+    us_status = payload.get("us_market_data_status") or {}
+    effective_as_of = (
+        str(us_status.get("effective_us_market_date") or "")
+        or str(us_status.get("prices_daily_latest_date") or "")
+        or as_of
+    )
+    fallback_date = _latest_dated_subdir(us_mean_reversion_root, effective_as_of) if effective_as_of else None
     if fallback_date is None:
         lines += ["- mean-reversion radar 当日未产出", ""]
         return lines

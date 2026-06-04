@@ -79,7 +79,7 @@
 (当前 regime + 主线倾向。如果 us_execution_gate.allowed=False,必须明写"本期无可执行做多"。)
 
 ## 市场状态
-(先给 3-5 句裁决，然后给一张紧凑表格。必须包含风险状态、R 乘数、Fear & Greed source、MRS、SMH/SPY/QQQ、P/C 或 VIX。不要输出内部字段名。若 source=proxy，必须写 `Internal Fear/Greed proxy`，不得写成 CNN Fear & Greed。)
+(先给 3-5 句裁决，然后给一张紧凑表格。必须包含风险状态、R 乘数、数据校准、Fear & Greed source、MRS、SMH/SPY/QQQ、P/C 或 VIX。数据校准必须写清报告标签日期、US 收盘价数据截至、US 候选/执行数据日期、期权/Gamma 有效日；若是 previous_session，必须明写“不是当日美股已收盘数据”。不要输出内部字段名。若 source=proxy，必须写 `Internal Fear/Greed proxy`，不得写成 CNN Fear & Greed。)
 
 ## 今日交易清单
 (必须先给 Production candidates Markdown 表：`Symbol / Decision / Size / Entry / Risk / Hedge / Why`。没有正式执行时也保留表头，第一行写 `None`，然后写"本期无可执行做多"。随后用短句分开写小仓试错、观察、回避。不要写英文分层名，不要把观察票写成半执行。)

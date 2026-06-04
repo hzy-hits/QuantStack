@@ -101,6 +101,51 @@ def _compute_resonance(payload: dict[str, Any]) -> dict[str, int]:
     return counts
 
 
+def render_us_data_calibration_section(payload: dict[str, Any]) -> list[str]:
+    """Show report label date separately from the actual US market data dates."""
+    status = payload.get("us_market_data_status") or {}
+    us = payload.get("us") or {}
+    gamma = payload.get("gamma_spring") or {}
+    fg = payload.get("fear_greed") or {}
+
+    report_date = payload.get("as_of") or "-"
+    latest_stock = status.get("prices_daily_latest_date") or us.get("current_date") or "-"
+    candidate_date = us.get("current_date") or "-"
+    state = status.get("state") or "-"
+    quote_bits = [
+        status.get("market_quotes_latest_as_of") or "-",
+        status.get("market_quotes_latest_session") or "-",
+    ]
+    quote_time = status.get("market_quotes_latest_quote_time")
+    if quote_time:
+        quote_bits.append(str(quote_time))
+    lines = [
+        "## 数据校准",
+        "",
+        "| Item | Value |",
+        "|---|---|",
+        f"| 报告标签日期 | {report_date} |",
+        f"| US 收盘价数据截至 | {latest_stock} |",
+        f"| US 候选/执行数据日期 | {candidate_date} |",
+        f"| US 数据状态 | {state} |",
+        f"| US 期权分析截至 | {status.get('options_analysis_latest_as_of') or '-'} |",
+        f"| US 期权链/Gamma 有效日 | {gamma.get('effective_date') or status.get('options_chain_latest_as_of') or '-'} |",
+        f"| US IV/HV 与 skew 情绪截至 | {status.get('options_sentiment_latest_as_of') or '-'} |",
+        f"| US 盘前/盘后 quote 最新 | {' / '.join(quote_bits)} |",
+        f"| Fear & Greed | {fg.get('source') or '-'} {fg.get('score') if fg.get('score') is not None else '-'} ({fg.get('rating') or '-'}) |",
+    ]
+    if status.get("is_previous_session"):
+        lines += [
+            "",
+            (
+                f"- 校准结论: 这是 `{report_date}` 的报告标签,但 US price/options/gamma 主体仍是 "
+                f"`{latest_stock}` 美股上一交易日数据；只能用于下一次开盘前评估,不能读成 `{report_date}` 已收盘结果。"
+            ),
+        ]
+    lines.append("")
+    return lines
+
+
 def render_us_standalone_report(payload: dict[str, Any]) -> str:
     m = _m()
     as_of = payload["as_of"]
@@ -133,6 +178,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
         f"> **{resonance_line}** — 这些 ticker 在多个独立信号源同时出现,优先关注。",
         "",
     ]
+    lines += render_us_data_calibration_section(payload)
     lines += m.render_us_execution_gate_notice(payload)
     lines += render_us_stock_decision_stack_section(payload)
     lines += render_realized_horizon_edge_section(payload, "US")

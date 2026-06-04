@@ -55,6 +55,7 @@ def final_style_guard(as_of: str) -> str:
   2. `观察与风险` 内必须有 Watch / 0R context 表，列为 `Symbol / Status / Reason / Next check`。
   3. `观察与风险` 内必须有 IV/HV 表，列为 `Symbol / IV/HV / IV rank / Context / Action`。
   4. `观察与风险` 内必须有 Gamma v2 表，列为 `Symbol / Gamma state / Dealer proxy / Wall / Management`。
+- `市场状态` 的表格必须包含数据校准行：报告标签日期、US 收盘价数据截至、US 候选/执行数据日期、期权/Gamma 有效日、Fear/Greed source。若 US 数据状态是 previous_session，必须明写“不是当日美股已收盘数据”。
 - 如果某张表没有行，也要保留表头并写一行 `None | - | - | - | -`，不要把表格删掉。
 - 不出现这些词或痕迹：提取器、payload、digest、merge-agent、ranker、模型名、system prompt、user_msg、英文分层名。
 - 不使用 emoji 或装饰符号；最终报告只靠标题、紧凑表格和短段落组织信息。

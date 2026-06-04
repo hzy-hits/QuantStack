@@ -15,6 +15,8 @@ def test_us_narrator_guard_requires_structured_tables() -> None:
     assert "Watch / 0R context" in text
     assert "IV/HV 表" in text
     assert "Gamma v2 表" in text
+    assert "数据校准行" in text
+    assert "不是当日美股已收盘数据" in text
     assert "build_layout_skeleton" in text
     assert "validate_structured_us_report" in text
     assert "版式骨架" in text
@@ -31,3 +33,5 @@ def test_us_merge_prompt_keeps_markdown_tables() -> None:
     assert "IV/HV 表" in text
     assert "Gamma v2 表" in text
     assert "结构化 Markdown 表格" in text
+    assert "数据校准" in text
+    assert "US 收盘价数据截至" in text

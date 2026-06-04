@@ -341,6 +341,12 @@ def build_us_market_data_status(db_path: Path, as_of: date) -> dict[str, Any]:
     status: dict[str, Any] = {
         "as_of": as_of.isoformat(),
         "prices_daily_latest_date": None,
+        "options_analysis_latest_as_of": None,
+        "options_chain_latest_as_of": None,
+        "options_sentiment_latest_as_of": None,
+        "market_quotes_latest_as_of": None,
+        "market_quotes_latest_session": None,
+        "market_quotes_latest_quote_time": None,
         "stock_data_current": None,
         "state": "unknown",
     }
@@ -354,9 +360,48 @@ def build_us_market_data_status(db_path: Path, as_of: date) -> dict[str, Any]:
             return status
         row = con.execute("SELECT MAX(date) FROM prices_daily WHERE close IS NOT NULL").fetchone()
         latest = parse_date(as_iso(row[0]) or "") if row and row[0] is not None else None
+        if table_exists(con, "options_analysis"):
+            row = con.execute(
+                "SELECT MAX(as_of) FROM options_analysis WHERE as_of <= CAST(? AS DATE)",
+                [as_of.isoformat()],
+            ).fetchone()
+            value = parse_date(as_iso(row[0]) or "") if row and row[0] is not None else None
+            status["options_analysis_latest_as_of"] = value.isoformat() if value else None
+        if table_exists(con, "options_chain_quotes"):
+            row = con.execute(
+                "SELECT MAX(as_of) FROM options_chain_quotes WHERE as_of <= CAST(? AS DATE)",
+                [as_of.isoformat()],
+            ).fetchone()
+            value = parse_date(as_iso(row[0]) or "") if row and row[0] is not None else None
+            status["options_chain_latest_as_of"] = value.isoformat() if value else None
+        if table_exists(con, "options_sentiment"):
+            row = con.execute(
+                "SELECT MAX(as_of) FROM options_sentiment WHERE as_of <= CAST(? AS DATE)",
+                [as_of.isoformat()],
+            ).fetchone()
+            value = parse_date(as_iso(row[0]) or "") if row and row[0] is not None else None
+            status["options_sentiment_latest_as_of"] = value.isoformat() if value else None
+        if table_exists(con, "market_quotes"):
+            row = con.execute(
+                """
+                SELECT as_of, session, quote_time
+                FROM market_quotes
+                WHERE as_of <= CAST(? AS DATE)
+                ORDER BY as_of DESC, quote_time DESC
+                LIMIT 1
+                """,
+                [as_of.isoformat()],
+            ).fetchone()
+            if row:
+                quote_as_of = parse_date(as_iso(row[0]) or "") if row[0] is not None else None
+                status["market_quotes_latest_as_of"] = quote_as_of.isoformat() if quote_as_of else None
+                status["market_quotes_latest_session"] = row[1]
+                status["market_quotes_latest_quote_time"] = as_iso(row[2])
     finally:
         con.close()
     status["prices_daily_latest_date"] = latest.isoformat() if latest else None
+    status["is_previous_session"] = bool(latest and latest < as_of)
+    status["effective_us_market_date"] = latest.isoformat() if latest else None
     # 5-day grace window: covers weekends + US market holidays + the CN-time
     # window where today's session hasn't opened yet (e.g. 8am 中国时间
     # looking at US market that closed yesterday EDT). Anything older than
