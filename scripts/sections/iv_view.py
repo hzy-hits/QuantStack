@@ -173,7 +173,13 @@ def build_options_verdicts(us_db: Path, symbols: list[str], as_of: date) -> dict
                 parts.append("信仰久期中")
 
         if parts:
-            out[sym] = {"verdict": " | ".join(parts), "iv_hv": iv_hv, **sent}
+            out[sym] = {
+                "verdict": " | ".join(parts),
+                "iv_hv": iv_hv,
+                "effective_date": effective_date,
+                "requested_date": as_of.isoformat(),
+                **sent,
+            }
             rk = iv_rank.get(sym) or {}
             if rk:
                 out[sym]["iv_rank_pct"] = (rk.get("pct_rank") or 0.0) * 100.0 if rk.get("pct_rank") is not None else None
@@ -235,6 +241,20 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 6) -> list[s
         ]
 
     regime_state = str((payload.get("risk_regime") or {}).get("state") or "hedge").lower()
+    effective_dates = sorted(
+        {
+            str(v.get("effective_date"))
+            for v in verdicts.values()
+            if isinstance(v, dict) and v.get("effective_date")
+        }
+    )
+    requested_dates = sorted(
+        {
+            str(v.get("requested_date"))
+            for v in verdicts.values()
+            if isinstance(v, dict) and v.get("requested_date")
+        }
+    )
 
     rows = []
     max_n = 0
@@ -283,6 +303,10 @@ def render_iv_view_section(payload: dict[str, Any], *, limit: int = 6) -> list[s
         "",
         f"按 IV rank 升序排,并显式给 IV/HV。用途是判断方向成本、crowding 和股票 timing。",
         f"{rank_phrase}。当前 tape **{regime_state}**;rank ≤20% 或 IV/HV≤0.90 是低 IV context,rank≥80% 或 IV/HV≥1.35 是高 IV 风险 context。",
+        (
+            f"数据校准: requested={requested_dates[-1] if requested_dates else payload.get('as_of') or '-'}, "
+            f"effective_options_sentiment={effective_dates[-1] if effective_dates else '-'}。"
+        ),
         "",
     ]
     if cheap_vol_context:

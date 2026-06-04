@@ -32,6 +32,12 @@ SATELLITE_US_ADRS: dict[str, str] = {
 # valid Alpha Factory sleeve. Tape / risk / news still decide the actual R
 # size — this only opens the door past the alpha-sleeve gate.
 PRODUCTION_ALPHA_SLEEVE_ID = "ai_infra_production_core"
+MARKET_CONTEXT_SYMBOLS = {
+    "SPY", "QQQ", "SMH", "DIA", "IWM",
+    "TLT", "IEF", "SHY",
+    "HYG", "LQD", "JNK",
+    "SOXX", "XLK", "VGT", "AIQ", "SOXQ", "KWEB",
+}
 
 
 @dataclass(frozen=True)
@@ -110,7 +116,18 @@ def is_excluded_record(record: dict[str, Any]) -> bool:
         str(record.get(key) or "")
         for key in ["current_pool", "score_bucket", "evidence_state", "counterevidence"]
     )
-    return "排除" in text or str(record.get("score_bucket") or "").lower() == "exclude"
+    symbols = set(split_tickers(record.get("ticker")))
+    company = str(record.get("company") or "").lower()
+    if symbols & MARKET_CONTEXT_SYMBOLS:
+        return True
+    if any(token in company for token in [" etf", "ishares", "corporate bond", "treasury"]):
+        return True
+    deny_markers = ("不可进生产池", "不生成 R", "不生成R", "off-BFS", "出 AI-infra mandate")
+    return (
+        "排除" in text
+        or str(record.get("score_bucket") or "").lower() == "exclude"
+        or any(marker in text for marker in deny_markers)
+    )
 
 
 _EVIDENCE_PENDING_FLAGS = ("待原文核验", "待核验", "原文需核验", "证据不足")

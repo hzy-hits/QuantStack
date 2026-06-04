@@ -13,6 +13,13 @@ from lib.fmt import (
     report_safe_options_context, symbol_key as _symbol_key,
 )
 
+MARKET_CONTEXT_SYMBOLS = {
+    "SPY", "QQQ", "SMH", "DIA", "IWM",
+    "TLT", "IEF", "SHY",
+    "HYG", "LQD", "JNK",
+    "SOXX", "XLK", "VGT", "AIQ", "SOXQ", "KWEB",
+}
+
 
 def _parse_float(value: Any) -> float | None:
     if value is None:
@@ -206,10 +213,17 @@ def _options_tenor_related_guidance(status: str, pattern: Any) -> str:
 
 def render_options_tenor_section(payload: dict[str, Any], *, top_n: int = 3) -> list[str]:
     signals = payload.get("options_tenor_signals") or []
+    source_dates = sorted({str(row.get("source_date")) for row in signals if row.get("source_date")})
+    requested_dates = sorted({str(row.get("requested_date")) for row in signals if row.get("requested_date")})
+    fallback_used = any(str(row.get("fallback_used")).lower() == "true" for row in signals)
     lines = [
         "## US 期权定位 — weekly / LEAPS / put-call",
         "",
         "- 数据源: `options_chain_quotes` 按 DTE 切桶 (weekly 0-9 / biweekly 10-21 / monthly 22-50 / quarterly 51-120 / half_year 121-220 / LEAPS 221+)。",
+        (
+            f"- 数据校准: requested={requested_dates[-1] if requested_dates else payload.get('as_of') or '-'}, "
+            f"source_date={source_dates[-1] if source_dates else '-'}, fallback_used={str(fallback_used).lower()}。"
+        ),
         "- 用途: 看短端 gamma、LEAPS/远月定位、跨 tenor 的 call/put 或 put/call 倾斜；本节是 0R option context。",
         "- 详细 per-ticker tenor 拆分见 `reports/review_dashboard/us_options_tenor_radar/<date>/options_tenor.md`。",
         "",
@@ -267,11 +281,16 @@ def render_options_tenor_section(payload: dict[str, Any], *, top_n: int = 3) -> 
     ]
     for row in sorted(by_symbol.values(), key=lambda r: -r["score"])[:top_n]:
         context = related_lookup.get(row["symbol"]) or {}
-        status = context.get("status") or "outside current report"
+        if row["symbol"] in MARKET_CONTEXT_SYMBOLS:
+            status = "macro/hedge context"
+            guidance = "macro/hedge only: no AI candidate / no R"
+        else:
+            status = context.get("status") or "outside current report"
+            guidance = _options_tenor_related_guidance(status, row["pattern"])
         lines.append(
             f"| {row['symbol']} | {row['pattern']} | {row['score']:.1f} | "
             f"{clean_table_text(status, 36)} | "
-            f"{clean_table_text(_options_tenor_related_guidance(status, row['pattern']), 64)} |"
+            f"{clean_table_text(guidance, 64)} |"
         )
     if not by_symbol:
         lines.append("| - | - | - | - | - |")
@@ -281,6 +300,9 @@ def render_options_tenor_section(payload: dict[str, Any], *, top_n: int = 3) -> 
 
 def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 3) -> list[str]:
     rows = payload.get("options_anomaly_rows") or []
+    source_dates = sorted({str(row.get("source_date")) for row in rows if row.get("source_date")})
+    requested_dates = sorted({str(row.get("requested_date")) for row in rows if row.get("requested_date")})
+    fallback_used = any(str(row.get("fallback_used")).lower() == "true" for row in rows)
     if not rows:
         return [
             "## US 期权异常 (far-OTM call/put) — tape/timing 用",
@@ -296,6 +318,10 @@ def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 3) -
         "## US 期权异常 — far-OTM call/put",
         "",
         "- 读法: call-heavy 看 short-squeeze / dealer hedge pressure；put-heavy 看 downside hedge / selling-pressure。",
+        (
+            f"- 数据校准: requested={requested_dates[-1] if requested_dates else payload.get('as_of') or '-'}, "
+            f"source_date={source_dates[-1] if source_dates else '-'}, fallback_used={str(fallback_used).lower()}。"
+        ),
         "- 表内 P/C raw 是 put volume / call volume；PC z 和 skew z 用来判断这次异动相对历史是否异常。",
         "- Execution: option flow 本节记为 0R context；股票 R 仍看上方可交易名单。",
         "",
@@ -392,9 +418,14 @@ def render_options_anomaly_section(payload: dict[str, Any], *, top_n: int = 3) -
     ]
     for row in related_rows:
         context = related_lookup.get(row["symbol"]) or {}
-        status = context.get("status") or "outside current report"
+        is_market_context = row["symbol"] in MARKET_CONTEXT_SYMBOLS
+        status = "macro/hedge context" if is_market_context else (context.get("status") or "outside current report")
         alert = f"S {row['squeeze_score']:,.0f} / P {row['pressure_score']:,.0f}"
-        guidance = _options_related_guidance(status, row["squeeze_score"], row["pressure_score"])
+        guidance = (
+            "macro/hedge only: no AI candidate / no R"
+            if is_market_context
+            else _options_related_guidance(status, row["squeeze_score"], row["pressure_score"])
+        )
         context_action = context.get("action") or ""
         action_text = (
             f"{context_action}; {guidance}"

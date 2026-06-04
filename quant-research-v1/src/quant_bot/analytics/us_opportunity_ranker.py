@@ -515,6 +515,7 @@ def load_analysis_signals(
     out: dict[str, dict[str, dict[str, Any]]] = {}
     for sym, module, p_up, p_down, trend, details_json in rows:
         d = safe_json_loads(details_json) if details_json else {}
+        d["analysis_signal_date"] = as_iso(target_date)
         if p_up is not None:
             d["p_upside"] = p_up
         if p_down is not None:
@@ -618,10 +619,13 @@ def price_features(con: duckdb.DuckDBPyConnection, symbols: list[str], as_of: da
         if not closes:
             continue
         latest = closes[-1]
+        price_as_of = as_iso(series[-1].get("date"))
         ret_5d = None if len(closes) < 6 or closes[-6] == 0 else (latest / closes[-6] - 1.0) * 100.0
         ret_20d = None if len(closes) < 21 or closes[-21] == 0 else (latest / closes[-21] - 1.0) * 100.0
         out[symbol] = {
-            "price_as_of": as_iso(series[-1].get("date")),
+            "price_as_of": price_as_of,
+            "price_requested_date": as_of.isoformat(),
+            "price_fallback_used": price_as_of != as_of.isoformat(),
             "close": round_or_none(latest, 4),
             "ret_5d_pct": round_or_none(ret_5d),
             "ret_20d_pct": round_or_none(ret_20d),
@@ -989,6 +993,14 @@ def enrich_rows(
         if gamma_row.get("gamma_v2_entry_signal"):
             alpha_sleeve_id = US_GAMMA_V2_ALPHA_SLEEVE
             alpha_factory_role = "gamma_v2_entry_alpha"
+        symbol_signals = signals.get(symbol, {})
+        signal_dates = sorted(
+            {
+                str(module.get("analysis_signal_date"))
+                for module in symbol_signals.values()
+                if isinstance(module, dict) and module.get("analysis_signal_date")
+            }
+        )
         combined = {
             **(prices.get(symbol) or {}),
             **dict(candidate),
@@ -999,12 +1011,14 @@ def enrich_rows(
             "alpha_factory_role": alpha_factory_role,
             "options_quality": option_score,
             "flow_options_quality": option_score,
+            "options_alpha_as_of": as_iso((option_row or {}).get("as_of")),
             "options_quality_reason": option_reason,
             "option_expression": (option_row or {}).get("expression") or candidate.get("option_expression"),
             # broad_modules carries today's momentum_risk / breakout /
             # mean_reversion details for this symbol. score_rows folds it
             # into rank_score so per-name conviction varies with price.
-            "broad_modules": signals.get(symbol, {}),
+            "analysis_signal_date": signal_dates[-1] if signal_dates else None,
+            "broad_modules": symbol_signals if symbol_signals else None,
         }
         sym_news = news.get(symbol) or []
         scored_risk = headline_risk_from_scored(sym_news, symbol)
@@ -1139,6 +1153,7 @@ def public_row(row: dict[str, Any]) -> dict[str, Any]:
         "rr_ratio",
         "expected_move_pct",
         "option_expression",
+        "options_alpha_as_of",
         "options_quality",
         "flow_options_quality",
         "options_quality_reason",
@@ -1193,8 +1208,14 @@ def public_row(row: dict[str, Any]) -> dict[str, Any]:
         "headline_flags",
         "latest_headline_date",
         "latest_headline",
+        "price_as_of",
+        "price_requested_date",
+        "price_fallback_used",
+        "analysis_signal_date",
+        "close",
         "ret_5d_pct",
         "ret_20d_pct",
+        "volume",
         "blockers",
         "reason",
         "score_components",

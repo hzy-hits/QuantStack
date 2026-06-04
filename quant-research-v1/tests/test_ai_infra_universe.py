@@ -208,6 +208,52 @@ class AiInfraUniverseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 universe.records_by_symbol("US", root, pool="bogus")
 
+    def test_market_context_and_off_bfs_rows_do_not_enter_ai_universe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            _write_universe(
+                root,
+                [
+                    {
+                        "asset_pool": "美国资产池",
+                        "market_country": "US",
+                        "ticker": "HYG",
+                        "company": "iShares iBoxx High Yield Corporate Bond ETF",
+                        "bfs_depth": "D4",
+                        "module": "credit context",
+                        "current_pool": "候选池",
+                        "evidence_state": "合理推论: credit conditions",
+                    },
+                    {
+                        "asset_pool": "美国资产池",
+                        "market_country": "US",
+                        "ticker": "BA",
+                        "company": "Boeing",
+                        "bfs_depth": "—(off-BFS)",
+                        "module": "民航",
+                        "current_pool": "候选池",
+                        "evidence_state": "合理推论: policy rotation",
+                        "counterevidence": "出 AI-infra mandate;不可进生产池;不生成 R",
+                    },
+                    {
+                        "asset_pool": "美国资产池",
+                        "market_country": "US",
+                        "ticker": "COHR",
+                        "company": "Coherent",
+                        "bfs_depth": "D2-D3",
+                        "module": "AI optics",
+                        "current_pool": "候选池",
+                        "evidence_state": "合理推论: datacom AI mix",
+                    },
+                ],
+            )
+
+            by_symbol = universe.records_by_symbol("US", root, pool="research")
+
+            self.assertIn("COHR", by_symbol)
+            self.assertNotIn("HYG", by_symbol)
+            self.assertNotIn("BA", by_symbol)
+
 
 if __name__ == "__main__":
     unittest.main()

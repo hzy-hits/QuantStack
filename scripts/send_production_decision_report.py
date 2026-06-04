@@ -135,6 +135,17 @@ def _renderer_module() -> Any:
     return module
 
 
+def _validator_module() -> Any:
+    path = STACK_ROOT / "scripts" / "validate_main_strategy_v2_reports.py"
+    spec = importlib.util.spec_from_file_location("main_strategy_v2_validator", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load report validator: {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def render_standalone_from_json(as_of: str, market: str) -> Path:
     if market not in {"cn", "us"}:
         raise ValueError(f"standalone rendering only supports cn/us, got {market!r}")
@@ -358,6 +369,22 @@ def _is_structured_us_agent_report(agent_md: Path) -> bool:
     return _markdown_table_count(text) >= 4
 
 
+def _agent_report_matches_payload(agent_md: Path) -> bool:
+    if agent_md.name != "us_daily_report_agent.md":
+        return True
+    payload_path = agent_md.parent / "main_strategy_v2_backtest.json"
+    if not payload_path.exists():
+        return True
+    try:
+        validator = _validator_module()
+        payload = validator.load_json(payload_path)
+        text = agent_md.read_text(encoding="utf-8")
+    except (OSError, RuntimeError, SystemExit):
+        return False
+    failures = validator.validate_us_report_text_against_payload(payload, text, agent_md.name)
+    return not failures
+
+
 def _is_fresh_codex_agent_report(agent_md: Path, as_of: str) -> bool:
     if not agent_md.exists() or agent_md.stat().st_size <= 0:
         return False
@@ -376,6 +403,8 @@ def _is_fresh_codex_agent_report(agent_md: Path, as_of: str) -> bool:
     if mtime not in {_date.fromisoformat(as_of), _date.today()}:
         return False
     if agent_md.name == "us_daily_report_agent.md" and not _is_structured_us_agent_report(agent_md):
+        return False
+    if not _agent_report_matches_payload(agent_md):
         return False
     return True
 
@@ -441,6 +470,32 @@ def _ensure_us_narrator(as_of: str) -> None:
     _ensure_narrator(as_of, "us")
 
 
+def validate_main_strategy_contract(as_of: str, market: str, extra_paths: list[Path] | None = None) -> None:
+    validator = _validator_module()
+    report_dir = _main_strategy_report_dir(as_of)
+    failures = validator.validate_report_dir(report_dir)
+    extra_paths = extra_paths or []
+    if market == "us":
+        payload = validator.load_json(report_json_path(as_of))
+        seen: set[Path] = set()
+        for path in extra_paths:
+            if path in seen or not path.exists():
+                continue
+            seen.add(path)
+            text = path.read_text(encoding="utf-8")
+            try:
+                label = str(path.relative_to(STACK_ROOT))
+            except ValueError:
+                label = str(path)
+            failures.extend(validator.validate_us_report_text_against_payload(payload, text, label))
+    if failures:
+        details = "\n".join(f"- {failure.code}: {failure.detail}" for failure in failures[:20])
+        more = "" if len(failures) <= 20 else f"\n... {len(failures) - 20} more"
+        raise RuntimeError(
+            f"refusing to send {market} report; Main Strategy V2 contract failed:\n{details}{more}"
+        )
+
+
 def main() -> None:
     args = parse_args()
     if args.delivery_mode == "prod" and args.market == "all" and not args.dry_run:
@@ -470,6 +525,7 @@ def main() -> None:
     if not args.dry_run:
         effective_path = materialize_legacy_report(args.date, args.session, args.market, path)
         validate_market_report_scope(effective_path, args.market)
+        validate_main_strategy_contract(args.date, args.market, [path, effective_path])
 
     if args.delivery_mode == "test":
         recipients, source = _resolve_test_recipients(args.test_recipient)

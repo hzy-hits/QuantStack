@@ -36,6 +36,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 from codex_backend import backend, call_llm, concurrency  # noqa: E402
 from sections.gamma_spring import build_gamma_spring_snapshot, render_gamma_spring_section  # noqa: E402
+from validate_main_strategy_v2_reports import validate_us_report_text_against_payload  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[2]
 PROMPTS_DIR = ROOT / "quant-research-v1" / "prompts"
@@ -655,7 +656,7 @@ def _markdown_table_count(text: str) -> int:
     return count
 
 
-def validate_structured_us_report(text: str, as_of: str) -> None:
+def validate_structured_us_report(text: str, as_of: str, payload: dict[str, Any] | None = None) -> None:
     required = [
         f"# 美股量化日报 — {as_of}",
         "## 一句话",
@@ -674,6 +675,11 @@ def validate_structured_us_report(text: str, as_of: str) -> None:
     for marker in ["IV/HV", "Gamma", "Production"]:
         if marker not in text:
             raise RuntimeError(f"US narrator output missing required marker: {marker}")
+    if payload:
+        failures = validate_us_report_text_against_payload(payload, text, "us_narrator_output")
+        if failures:
+            details = "; ".join(f"{failure.code}: {failure.detail}" for failure in failures)
+            raise RuntimeError(f"US narrator output violates data-lineage contract: {details}")
 
 
 def _first_table(section: str, *, max_rows: int = 8) -> str:
@@ -838,6 +844,8 @@ def call_narrator(extractor_outputs: dict[str, str],
     """Single narrator call — receives extractor outputs + payload digest."""
     prompt = load_prompt("merge") + "\n\n" + final_style_guard(as_of)
     layout_skeleton = build_layout_skeleton(art, as_of)
+    payload = art.get("main_strategy_v2_backtest")
+    payload = payload if isinstance(payload, dict) else None
     payload_digest = art.get("_us_daily_report_md", "")[:30000]  # cap to avoid token blow-up
     user_msg = (
         f"### 宏观提取\n{extractor_outputs.get('macro', '[missing]')}\n\n"
@@ -857,7 +865,7 @@ def call_narrator(extractor_outputs: dict[str, str],
     if not narrative:
         return None
     try:
-        validate_structured_us_report(narrative, as_of)
+        validate_structured_us_report(narrative, as_of, payload)
         return narrative
     except RuntimeError as exc:
         repair_user_msg = (
@@ -876,7 +884,7 @@ def call_narrator(extractor_outputs: dict[str, str],
             max_tokens=4500,
         )
         if repaired:
-            validate_structured_us_report(repaired, as_of)
+            validate_structured_us_report(repaired, as_of, payload)
         return repaired
 
 

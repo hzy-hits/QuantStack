@@ -139,7 +139,7 @@ def render_us_data_calibration_section(payload: dict[str, Any]) -> list[str]:
             "",
             (
                 f"- 校准结论: 这是 `{report_date}` 的报告标签,但 US price/options/gamma 主体仍是 "
-                f"`{latest_stock}` 美股上一交易日数据；只能用于下一次开盘前评估,不能读成 `{report_date}` 已收盘结果。"
+                f"`{latest_stock}` 美股上一交易日数据；只能用于下一次开盘前评估,不是当日美股已收盘数据,不能读成 `{report_date}` 已收盘结果。"
             ),
         ]
     lines.append("")

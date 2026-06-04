@@ -3039,24 +3039,38 @@ def _latest_dated_subdir(root: Path, as_of: str) -> str | None:
 
 def load_options_anomaly_payload(as_of: str) -> list[dict[str, Any]]:
     path = OPTIONS_ANOMALY_ROOT / as_of / "options_anomaly.csv"
+    source_date = as_of
+    fallback_used = False
     if not path.exists():
         fallback = _latest_dated_subdir(OPTIONS_ANOMALY_ROOT, as_of)
         if fallback is None:
             return []
         path = OPTIONS_ANOMALY_ROOT / fallback / "options_anomaly.csv"
+        source_date = fallback
+        fallback_used = fallback != as_of
         if not path.exists():
             return []
     with path.open("r", encoding="utf-8") as handle:
-        return list(csv.DictReader(handle))
+        rows = list(csv.DictReader(handle))
+    for row in rows:
+        row.setdefault("requested_date", as_of)
+        row.setdefault("source_date", source_date)
+        row.setdefault("fallback_used", str(fallback_used).lower())
+        row.setdefault("source_path", str(path.relative_to(STACK_ROOT)))
+    return rows
 
 
 def load_options_tenor_signals(as_of: str) -> list[dict[str, Any]]:
     path = OPTIONS_TENOR_ROOT / as_of / "options_tenor_signals.jsonl"
+    source_date = as_of
+    fallback_used = False
     if not path.exists():
         fallback = _latest_dated_subdir(OPTIONS_TENOR_ROOT, as_of)
         if fallback is None:
             return []
         path = OPTIONS_TENOR_ROOT / fallback / "options_tenor_signals.jsonl"
+        source_date = fallback
+        fallback_used = fallback != as_of
         if not path.exists():
             return []
     out: list[dict[str, Any]] = []
@@ -3066,9 +3080,15 @@ def load_options_tenor_signals(as_of: str) -> list[dict[str, Any]]:
             if not line:
                 continue
             try:
-                out.append(json.loads(line))
+                row = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if isinstance(row, dict):
+                row.setdefault("requested_date", as_of)
+                row.setdefault("source_date", source_date)
+                row.setdefault("fallback_used", fallback_used)
+                row.setdefault("source_path", str(path.relative_to(STACK_ROOT)))
+                out.append(row)
     return out
 
 
@@ -4433,6 +4453,60 @@ def build_risk_regime(
     out = decision.as_dict()
     out["artifact_missing"] = False
     return out
+
+
+def build_report_dates(payload: dict[str, Any]) -> dict[str, Any]:
+    """Single lineage contract for report label date vs effective source dates."""
+    status = payload.get("us_market_data_status") or {}
+    us = payload.get("us") or {}
+    fg = payload.get("fear_greed") or {}
+    bubble = payload.get("bubble_hedge") or {}
+    capitulation = payload.get("capitulation") or {}
+    gamma = payload.get("gamma_spring") or {}
+    anomaly_rows = payload.get("options_anomaly_rows") or []
+    tenor_rows = payload.get("options_tenor_signals") or []
+    verdicts = payload.get("options_verdicts") or {}
+
+    def latest_from_rows(rows: list[dict[str, Any]], key: str) -> str | None:
+        values = sorted({str(row.get(key)) for row in rows if row.get(key)})
+        return values[-1] if values else None
+
+    verdict_dates = sorted(
+        {
+            str(row.get("effective_date"))
+            for row in verdicts.values()
+            if isinstance(row, dict) and row.get("effective_date")
+        }
+    )
+    return {
+        "report_label_date": payload.get("as_of"),
+        "effective_us_market_date": status.get("effective_us_market_date")
+        or status.get("prices_daily_latest_date")
+        or us.get("current_date"),
+        "prices_effective_date": status.get("prices_daily_latest_date"),
+        "report_decisions_effective_date": us.get("current_date"),
+        "options_analysis_effective_date": status.get("options_analysis_latest_as_of"),
+        "options_chain_effective_date": status.get("options_chain_latest_as_of"),
+        "options_sentiment_effective_date": status.get("options_sentiment_latest_as_of"),
+        "options_verdicts_effective_date": verdict_dates[-1] if verdict_dates else None,
+        "gamma_effective_date": gamma.get("effective_date") or status.get("options_chain_latest_as_of"),
+        "fear_greed_source": fg.get("source"),
+        "fear_greed_score": fg.get("score"),
+        "fear_greed_timestamp": fg.get("timestamp") or fg.get("generated_at"),
+        "bubble_hedge_as_of": bubble.get("as_of"),
+        "capitulation_as_of": capitulation.get("as_of"),
+        "risk_regime_source_as_of": bubble.get("as_of"),
+        "options_anomaly_source_date": latest_from_rows(anomaly_rows, "source_date"),
+        "options_anomaly_fallback_used": any(
+            str(row.get("fallback_used")).lower() == "true" for row in anomaly_rows
+        ),
+        "options_tenor_source_date": latest_from_rows(tenor_rows, "source_date"),
+        "options_tenor_fallback_used": any(
+            str(row.get("fallback_used")).lower() == "true" for row in tenor_rows
+        ),
+        "us_data_state": status.get("state"),
+        "us_previous_session": bool(status.get("is_previous_session")),
+    }
 
 
 def build_portfolio_risk_overlay(
@@ -7153,10 +7227,12 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "options_anomaly_rows": load_options_anomaly_payload(as_of.isoformat()),
         "options_tenor_signals": load_options_tenor_signals(as_of.isoformat()),
         "bubble_hedge": bubble_hedge_payload,
+        "capitulation": capitulation_payload,
         "risk_regime": risk_regime,
         "cn_risk_regime": cn_risk_regime,
         "promotion_contract": promotion_contract,
     }
+    payload["report_dates"] = build_report_dates(payload)
     assert_promoted_execution_rows(payload)
     payload["ai_supply_chain_relationships"] = build_ai_supply_chain_relationships()
     payload["ai_supercycle_evidence_ledger"] = build_ai_supercycle_evidence_ledger(payload)
