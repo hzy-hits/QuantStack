@@ -631,6 +631,8 @@ tasks:
     command:
       - python3
       - scripts/score_options_anomaly_radar.py
+      - --as-of
+      - "{cst_date}"
     log: ops/logs/research.options_anomaly_radar.log
     lock: ops/state/research.options_anomaly_radar.lock
     timeout_minutes: 10
@@ -801,6 +803,8 @@ tasks:
     command:
       - python3
       - scripts/score_options_tenor_radar.py
+      - --as-of
+      - "{cst_date}"
     log: ops/logs/research.options_tenor_radar.log
     lock: ops/state/research.options_tenor_radar.lock
     timeout_minutes: 10
