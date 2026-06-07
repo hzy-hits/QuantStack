@@ -607,3 +607,75 @@ Legend: . = tested weak, + = decent IC, ++ = strong IC, +++ = promoted, ! = stro
 - Experiments run: 22
 - OOS passed: 2/2
 - Passing factors: reclaim_relvol_accel_10_20, reclaim_relvol_accel_20
+
+## Session 20260602_060002_fd206b — CN
+- Timestamp: 2026-06-02 06:57
+- Experiments run: 16
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260602_140002_0d2b0f — CN
+- Timestamp: 2026-06-02 14:56
+- Experiments run: 20
+- OOS passed: 2/3
+- Passing factors: pb_float_amount_absorption_20, cheap_locked_float
+
+## Session 20260602_145619_176062 — US
+- Timestamp: 2026-06-02 15:52
+- Experiments run: 20
+- OOS passed: 2/2
+- Passing factors: close_loc_relvol_accel_10_40, close_loc_relvol_stepup_10_40
+
+## Session 20260603_060002_b50f3d — CN
+- Timestamp: 2026-06-03 06:55
+- Experiments run: 22
+- OOS passed: 0/2
+- Passing factors: none
+
+## Session 20260603_140002_270be5 — CN
+- Timestamp: 2026-06-03 14:55
+- Experiments run: 20
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260603_145509_614d50 — US
+- Timestamp: 2026-06-03 15:52
+- Experiments run: 14
+- OOS passed: 0/0
+- Passing factors: none
+
+## Session 20260604_060002_35b979 — CN
+- Timestamp: 2026-06-04 06:56
+- Experiments run: 22
+- OOS passed: 0/2
+- Passing factors: none
+
+## Session 20260604_140002_7b9360 — CN
+- Timestamp: 2026-06-04 14:57
+- Experiments run: 17
+- OOS passed: 2/2
+- Passing factors: pb_float_amount_absorption_20, cheap_locked_float
+
+## Session 20260604_145705_492d65 — US
+- Timestamp: 2026-06-04 15:53
+- Experiments run: 21
+- OOS passed: 0/2
+- Passing factors: none
+
+## Session 20260605_060002_c506a5 — CN
+- Timestamp: 2026-06-05 06:57
+- Experiments run: 22
+- OOS passed: 1/1
+- Passing factors: locked_float_flow_floor_20
+
+## Session 20260605_140003_315ee3 — CN
+- Timestamp: 2026-06-05 14:59
+- Experiments run: 19
+- OOS passed: 0/1
+- Passing factors: none
+
+## Session 20260605_145901_215228 — US
+- Timestamp: 2026-06-05 15:54
+- Experiments run: 21
+- OOS passed: 0/1
+- Passing factors: none
