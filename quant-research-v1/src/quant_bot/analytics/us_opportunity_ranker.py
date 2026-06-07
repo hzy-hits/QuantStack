@@ -288,6 +288,185 @@ def _weighted_mean(items: list[tuple[float, float]]) -> float | None:
     return sum(value * max(weight, 0.0) for value, weight in items) / denom
 
 
+def _norm_pdf(value: float) -> float:
+    return math.exp(-0.5 * value * value) / math.sqrt(2.0 * math.pi)
+
+
+def _bs_gamma_for_curve(spot: float, strike: float, implied_volatility: Any, days_to_exp: Any) -> float | None:
+    iv = round_or_none(implied_volatility)
+    dte = round_or_none(days_to_exp)
+    if spot <= 0 or strike <= 0 or iv is None or iv <= 0 or iv > 5.0 or dte is None or dte < 0:
+        return None
+    t = max(dte, 1.0) / 365.0
+    vol_time = iv * math.sqrt(t)
+    if vol_time <= 0:
+        return None
+    try:
+        d1 = (math.log(spot / strike) + 0.5 * iv * iv * t) / vol_time
+    except (ValueError, ZeroDivisionError):
+        return None
+    gamma = _norm_pdf(d1) / (spot * vol_time)
+    return gamma if gamma > 0 and math.isfinite(gamma) else None
+
+
+def _fallback_curve_gamma(current_gamma: Any, current_spot: float, scenario_spot: float) -> float | None:
+    gamma = round_or_none(current_gamma)
+    if gamma is None or gamma <= 0:
+        return None
+    if current_spot > 0 and scenario_spot > 0:
+        return gamma * (current_spot / scenario_spot) ** 2
+    return gamma
+
+
+def _band_from_prices(prices: list[float]) -> list[float] | None:
+    if not prices:
+        return None
+    return [round(min(prices), 4), round(max(prices), 4)]
+
+
+def _gamma_v3_curve_fields(symbol_rows: list[dict[str, Any]], spot: float) -> dict[str, Any]:
+    curve: list[dict[str, float]] = []
+    bs_used = 0
+    fallback_used = 0
+    for idx in range(41):
+        scenario_spot = spot * (0.80 + idx * 0.01)
+        net = 0.0
+        total_abs = 0.0
+        for row in symbol_rows:
+            strike = round_or_none(row.get("strike"))
+            oi = int(row.get("open_interest") or 0)
+            if strike is None or strike <= 0 or oi <= 0:
+                continue
+            gamma = _bs_gamma_for_curve(
+                scenario_spot,
+                strike,
+                row.get("implied_volatility"),
+                row.get("days_to_exp"),
+            )
+            if gamma is not None:
+                bs_used += 1
+            else:
+                gamma = _fallback_curve_gamma(row.get("gamma"), spot, scenario_spot)
+                if gamma is not None:
+                    fallback_used += 1
+            if gamma is None or gamma <= 0:
+                continue
+            sign = 1.0 if str(row.get("option_type") or "").lower() == "call" else -1.0
+            gex = gamma * 100.0 * scenario_spot * scenario_spot * 0.01 * oi
+            signed = sign * gex
+            net += signed
+            total_abs += abs(gex)
+        curve.append(
+            {
+                "price": scenario_spot,
+                "net_gex_1pct": net,
+                "net_gamma_ratio": net / total_abs if total_abs > 0 else 0.0,
+            }
+        )
+    zero_levels: list[float] = []
+    for left, right in zip(curve, curve[1:]):
+        left_gex = left["net_gex_1pct"]
+        right_gex = right["net_gex_1pct"]
+        if abs(left_gex) <= 1e-9:
+            zero_levels.append(left["price"])
+        elif left_gex * right_gex < 0:
+            denom = right_gex - left_gex
+            if abs(denom) > 1e-12:
+                weight = -left_gex / denom
+                if 0 <= weight <= 1:
+                    zero_levels.append(left["price"] + weight * (right["price"] - left["price"]))
+    zero_levels = sorted({round(level, 4) for level in zero_levels})
+    nearest_zero = min(zero_levels, key=lambda level: abs(level - spot)) if zero_levels else None
+    flip_distance = (nearest_zero - spot) / spot if nearest_zero is not None and spot > 0 else None
+    current = min(curve, key=lambda point: abs(point["price"] - spot)) if curve else {}
+    current_ratio = float(current.get("net_gamma_ratio") or 0.0)
+    current_net_gex = float(current.get("net_gex_1pct") or 0.0)
+    if flip_distance is not None and abs(flip_distance) <= 0.015:
+        curve_state = "ZERO_GAMMA_TRANSITION"
+    elif current_ratio >= 0.10:
+        curve_state = "POSITIVE_GEX_PIN_ZONE"
+    elif current_ratio <= -0.10:
+        curve_state = "NEGATIVE_GEX_ACCEL_ZONE"
+    else:
+        curve_state = "MIXED_GEX_CURVE"
+    if curve_state == "ZERO_GAMMA_TRANSITION":
+        flip_regime = "near_flip_transition"
+        flip_model_score = 0.50
+    elif current_ratio >= 0.10 and (nearest_zero is None or spot >= nearest_zero):
+        flip_regime = "positive_spring"
+        flip_model_score = 0.66
+    elif current_ratio <= -0.10:
+        flip_regime = "negative_acceleration_unconfirmed"
+        flip_model_score = 0.36
+    elif current_ratio >= 0.10:
+        flip_regime = "positive_gamma_below_flip"
+        flip_model_score = 0.56
+    else:
+        flip_regime = "mixed_gamma"
+        flip_model_score = 0.50
+    quality_den = bs_used + fallback_used
+    quality = "no_valid_gex_curve"
+    if quality_den > 0:
+        quality = "bs_iv_repriced" if bs_used / quality_den >= 0.50 else "static_gamma_fallback"
+    return {
+        "gamma_v3_curve_state": curve_state,
+        "gamma_v3_zero_gamma_levels": zero_levels,
+        "gamma_v3_zero_gamma_band": (
+            [round(nearest_zero - spot * 0.005, 4), round(nearest_zero + spot * 0.005, 4)]
+            if nearest_zero is not None
+            else None
+        ),
+        "gamma_v3_positive_gex_pin_zone": _band_from_prices([point["price"] for point in curve if point["net_gex_1pct"] > 0]),
+        "gamma_v3_negative_gex_accel_zone": _band_from_prices([point["price"] for point in curve if point["net_gex_1pct"] < 0]),
+        "gamma_v3_gex_flip_distance_pct": round(flip_distance, 4) if flip_distance is not None else None,
+        "gamma_v3_curve_quality": quality,
+        "gamma_v3_current_net_gex_1pct": round(current_net_gex, 2),
+        "gamma_v3_current_net_gamma_ratio": round(current_ratio, 4),
+        "gamma_v3_flip_regime": flip_regime,
+        "gamma_v3_flip_model_score": round(flip_model_score, 4),
+    }
+
+
+def _latest_price_spots(
+    con: duckdb.DuckDBPyConnection,
+    symbols: list[str],
+    as_of: Any,
+) -> dict[str, dict[str, Any]]:
+    if not symbols or not table_exists(con, "prices_daily"):
+        return {}
+    try:
+        rows = rows_as_dicts(
+            con,
+            f"""
+            WITH latest AS (
+                SELECT symbol, MAX(date) AS price_date
+                FROM prices_daily
+                WHERE symbol IN ({placeholders(symbols)})
+                  AND date <= CAST(? AS DATE)
+                  AND close IS NOT NULL
+                GROUP BY symbol
+            )
+            SELECT p.symbol, p.date AS price_date, p.close
+            FROM prices_daily p
+            JOIN latest l ON l.symbol = p.symbol AND l.price_date = p.date
+            """,
+            [*symbols, as_iso(as_of)],
+        )
+    except duckdb.Error:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        close = round_or_none(row.get("close"))
+        if close is None or close <= 0:
+            continue
+        out[normalize_symbol(row.get("symbol"))] = {
+            "spot": close,
+            "spot_source": "prices_daily_close",
+            "spot_price_date": as_iso(row.get("price_date")),
+        }
+    return out
+
+
 def latest_gamma_v2_alpha(
     con: duckdb.DuckDBPyConnection,
     symbols: list[str],
@@ -303,6 +482,7 @@ def latest_gamma_v2_alpha(
         return {}
     volume_expr = "COALESCE(volume, 0)" if "volume" in cols else "0"
     iv_expr = "implied_volatility" if "implied_volatility" in cols else "NULL"
+    dte_expr = "days_to_exp" if "days_to_exp" in cols else "NULL"
     dte_filter = "AND days_to_exp BETWEEN 1 AND ?" if "days_to_exp" in cols else ""
     latest_date = con.execute(
         f"""
@@ -333,7 +513,8 @@ def latest_gamma_v2_alpha(
         con,
         f"""
         SELECT symbol, current_price, contract_symbol, option_type, strike, gamma,
-               open_interest, {volume_expr} AS volume, {iv_expr} AS implied_volatility
+               open_interest, {volume_expr} AS volume, {iv_expr} AS implied_volatility,
+               {dte_expr} AS days_to_exp
         FROM options_chain_quotes
         WHERE as_of = CAST(? AS DATE)
           AND symbol IN ({placeholders(symbols)})
@@ -364,6 +545,7 @@ def latest_gamma_v2_alpha(
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
         grouped.setdefault(normalize_symbol(row.get("symbol")), []).append(row)
+    spot_overrides = _latest_price_spots(con, symbols, latest_date)
     out: dict[str, dict[str, Any]] = {}
     for symbol, symbol_rows in grouped.items():
         spots = [
@@ -376,6 +558,10 @@ def latest_gamma_v2_alpha(
         spot = sorted(spots)[len(spots) // 2]
         if not spot or spot <= 0:
             continue
+        spot_override = spot_overrides.get(symbol) or {}
+        override_spot = round_or_none(spot_override.get("spot"))
+        if override_spot is not None and override_spot > 0:
+            spot = override_spot
         by_strike: dict[float, dict[str, float]] = {}
         total_abs = net = volume_signed = volume_abs = oi_change_signed = oi_change_abs = 0.0
         put_skew_items: list[tuple[float, float]] = []
@@ -397,9 +583,13 @@ def latest_gamma_v2_alpha(
             flow = gex_unit * max(volume, 0)
             volume_signed += sign * flow
             volume_abs += abs(flow)
-            bucket = by_strike.setdefault(strike, {"signed": 0.0, "abs": 0.0})
+            bucket = by_strike.setdefault(strike, {"signed": 0.0, "abs": 0.0, "call": 0.0, "put": 0.0})
             bucket["signed"] += signed
             bucket["abs"] += abs(gex)
+            if sign > 0:
+                bucket["call"] += gex
+            else:
+                bucket["put"] += gex
             prev_oi = prev_by_contract.get((symbol, str(row.get("contract_symbol") or "")))
             if prev_oi is not None:
                 oi_change = oi - prev_oi
@@ -413,6 +603,7 @@ def latest_gamma_v2_alpha(
                 call_skew_items.append((iv, max(oi, volume, 1.0)))
         if total_abs <= 0 or not by_strike:
             continue
+        curve_fields = _gamma_v3_curve_fields(symbol_rows, spot)
         center = sum(strike * value["abs"] for strike, value in by_strike.items()) / total_abs
         max_wall = max(by_strike.items(), key=lambda item: item[1]["abs"])[0]
         displacement = (spot - center) / center if center > 0 else 0.0
@@ -443,10 +634,23 @@ def latest_gamma_v2_alpha(
             wall_transition = "WALL_BREAK_UP"
         elif wall_transition_score <= -0.25:
             wall_transition = "WALL_BREAK_DOWN"
-        state_part = 0.62 if net_ratio >= 0.25 else 0.42 if net_ratio <= -0.25 else 0.52
+        curve_state = str(curve_fields.get("gamma_v3_curve_state") or "MIXED_GEX_CURVE")
+        flip_regime = str(curve_fields.get("gamma_v3_flip_regime") or "mixed_gamma")
+        flip_part = float(curve_fields.get("gamma_v3_flip_model_score") or 0.50)
+        if curve_state == "NEGATIVE_GEX_ACCEL_ZONE":
+            if wall_transition_score >= 0.25 and dealer_pressure >= 0.10:
+                flip_regime = "negative_acceleration_breakout"
+                flip_part = 0.62
+            elif wall_transition_score <= -0.10 or dealer_pressure < 0:
+                flip_regime = "negative_acceleration_risk_off"
+                flip_part = 0.30
+        curve_fields["gamma_v3_flip_regime"] = flip_regime
+        curve_fields["gamma_v3_flip_model_score"] = round(flip_part, 4)
         dealer_part = clamp(0.5 + 0.5 * dealer_pressure)
         wall_part = clamp(0.5 + wall_transition_score)
-        gamma_score = clamp(0.46 * dealer_part + 0.34 * wall_part + 0.20 * state_part)
+        gamma_score = clamp(0.38 * dealer_part + 0.27 * wall_part + 0.35 * flip_part)
+        if flip_regime in {"negative_acceleration_risk_off", "near_flip_transition"}:
+            gamma_score = min(gamma_score, 0.60)
         do_not_chase = net_ratio >= 0.25 and displacement > 0.08
         if do_not_chase:
             gamma_score = min(gamma_score, 0.58)
@@ -454,10 +658,14 @@ def latest_gamma_v2_alpha(
             gamma_score >= 0.64
             and dealer_pressure >= -0.05
             and wall_transition_score >= -0.05
+            and flip_regime not in {"negative_acceleration_risk_off", "near_flip_transition"}
             and not do_not_chase
         )
         management_signal = (
             "gamma_v2_entry_alpha" if entry_signal else
+            "breakout_hold_ok" if flip_regime == "negative_acceleration_breakout" else
+            "reduce_or_tighten_stop" if flip_regime == "negative_acceleration_risk_off" else
+            "no_add_tighten_stop" if flip_regime == "near_flip_transition" else
             "do_not_chase_above_wall" if do_not_chase else
             "reduce_or_tighten_stop" if wall_transition_score <= -0.25 else
             "no_add_tighten_stop" if dealer_pressure <= -0.25 else
@@ -476,6 +684,9 @@ def latest_gamma_v2_alpha(
             "gamma_v2_management_signal": management_signal,
             "gamma_v2_effective_date": as_iso(latest_date),
             "gamma_v2_previous_effective_date": as_iso(previous_date),
+            "gamma_v3_spot_source": spot_override.get("spot_source") or "options_chain_current_price",
+            "gamma_v3_spot_price_date": spot_override.get("spot_price_date"),
+            **curve_fields,
         }
     return out
 
@@ -1170,6 +1381,19 @@ def public_row(row: dict[str, Any]) -> dict[str, Any]:
         "gamma_v2_management_signal",
         "gamma_v2_effective_date",
         "gamma_v2_previous_effective_date",
+        "gamma_v3_curve_state",
+        "gamma_v3_zero_gamma_levels",
+        "gamma_v3_zero_gamma_band",
+        "gamma_v3_positive_gex_pin_zone",
+        "gamma_v3_negative_gex_accel_zone",
+        "gamma_v3_gex_flip_distance_pct",
+        "gamma_v3_curve_quality",
+        "gamma_v3_current_net_gex_1pct",
+        "gamma_v3_current_net_gamma_ratio",
+        "gamma_v3_flip_regime",
+        "gamma_v3_flip_model_score",
+        "gamma_v3_spot_source",
+        "gamma_v3_spot_price_date",
         "trend_regime",
         "signal_confidence",
         "execution_mode",
@@ -1396,7 +1620,7 @@ def build_ranker_payload(
         "notes": [
             "Candidate universe is the ai_infra BFS workbench when ai_infra_mode is active.",
             "Alpha Factory sleeve membership is the execution contract.",
-            "Gamma Spring v2 can create `us_gamma_v2_alpha` entry-alpha candidates inside the admitted AI universe.",
+            "Gamma Spring v3 GEX curve/state machine runs under the `us_gamma_v2_alpha` compatibility sleeve inside the admitted AI universe.",
             "Options/flow quality controls expression choice, not legacy promotion.",
             "Headline/event risk forces 0R watch.",
         ],

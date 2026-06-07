@@ -91,8 +91,14 @@ class GammaSpringTests(unittest.TestCase):
             self.assertEqual(snap["effective_date"], "2026-05-29")
             self.assertGreater(by_symbol["PIN"]["net_gamma_ratio"], 0)
             self.assertIn(by_symbol["PIN"]["state"], {"PINNED_GAMMA_WELL", "GAMMA_REVERSION_BAND"})
+            self.assertIn(by_symbol["PIN"]["gex_curve_state"], {"POSITIVE_GEX_PIN_ZONE", "ZERO_GAMMA_TRANSITION"})
+            self.assertGreater(len(by_symbol["PIN"]["gex_curve_points"]), 10)
+            self.assertIsNotNone(by_symbol["PIN"]["positive_gex_pin_zone"])
+            self.assertIn("gex_flip_regime", by_symbol["PIN"])
             self.assertLess(by_symbol["ACC"]["net_gamma_ratio"], 0)
             self.assertEqual(by_symbol["ACC"]["state"], "NEGATIVE_GAMMA_ACCELERATOR")
+            self.assertIn(by_symbol["ACC"]["gex_curve_state"], {"NEGATIVE_GEX_ACCEL_ZONE", "ZERO_GAMMA_TRANSITION"})
+            self.assertIsNotNone(by_symbol["ACC"]["negative_gex_accel_zone"])
 
     def test_render_section_is_report_safe_context(self) -> None:
         payload = {
@@ -116,6 +122,7 @@ class GammaSpringTests(unittest.TestCase):
         }
         text = "\n".join(render_gamma_spring_section(payload))
         self.assertIn("US Gamma Spring", text)
+        self.assertIn("GEX 区间", text)
         self.assertIn("股票买卖管理", text)
         self.assertIn("不是期权交易指令", text)
         self.assertIn("PINNED_GAMMA_WELL", text)

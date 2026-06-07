@@ -344,6 +344,135 @@ def classify_gamma(net_ratio: float, abs_gex: float, displacement: float, well_w
     return "MIXED_GAMMA_FIELD"
 
 
+def norm_pdf(value: float) -> float:
+    return math.exp(-0.5 * value * value) / math.sqrt(2.0 * math.pi)
+
+
+def bs_gamma(spot: float, strike: float, implied_volatility: float | None, days_to_exp: float | None) -> float | None:
+    if (
+        spot <= 0
+        or strike <= 0
+        or implied_volatility is None
+        or implied_volatility <= 0
+        or implied_volatility > 5.0
+        or days_to_exp is None
+        or days_to_exp < 0
+    ):
+        return None
+    t = max(days_to_exp, 1.0) / 365.0
+    vol_time = implied_volatility * math.sqrt(t)
+    if vol_time <= 0:
+        return None
+    try:
+        d1 = (math.log(spot / strike) + 0.5 * implied_volatility * implied_volatility * t) / vol_time
+    except (ValueError, ZeroDivisionError):
+        return None
+    gamma = norm_pdf(d1) / (spot * vol_time)
+    return gamma if gamma > 0 and math.isfinite(gamma) else None
+
+
+def build_gex_curve_v3(rows: list[dict[str, Any]], *, spot: float, half_life_days: float) -> dict[str, Any]:
+    curve: list[dict[str, float]] = []
+    bs_used = 0
+    fallback_used = 0
+    for idx in range(41):
+        scenario_spot = spot * (0.80 + idx * 0.01)
+        net = 0.0
+        total_abs = 0.0
+        for row in rows:
+            strike = _float(row.get("strike"))
+            gamma = _float(row.get("gamma"))
+            iv = _float(row.get("implied_volatility"))
+            oi = float(row.get("open_interest") or 0.0)
+            option_type = str(row.get("option_type") or "").lower()
+            dte = max(0.0, float(row.get("days_to_exp") or 0.0))
+            if strike is None or strike <= 0 or oi <= 0 or option_type not in {"call", "put"}:
+                continue
+            scenario_gamma = bs_gamma(scenario_spot, strike, iv, dte)
+            if scenario_gamma is not None:
+                bs_used += 1
+            elif gamma is not None and gamma > 0:
+                scenario_gamma = gamma * (spot / scenario_spot) ** 2
+                fallback_used += 1
+            if scenario_gamma is None or scenario_gamma <= 0:
+                continue
+            time_weight = math.exp(-dte / max(1.0, half_life_days))
+            sign = 1.0 if option_type == "call" else -1.0
+            gex = scenario_gamma * CONTRACT_MULTIPLIER * scenario_spot * scenario_spot * 0.01 * time_weight * oi
+            net += sign * gex
+            total_abs += abs(gex)
+        curve.append(
+            {
+                "price": scenario_spot,
+                "net_gex_1pct": net,
+                "net_gamma_ratio": net / total_abs if total_abs > 0 else 0.0,
+            }
+        )
+    zero_levels: list[float] = []
+    for left, right in zip(curve, curve[1:]):
+        left_gex = left["net_gex_1pct"]
+        right_gex = right["net_gex_1pct"]
+        if abs(left_gex) <= 1e-9:
+            zero_levels.append(left["price"])
+        elif left_gex * right_gex < 0:
+            denom = right_gex - left_gex
+            if abs(denom) > 1e-12:
+                weight = -left_gex / denom
+                if 0 <= weight <= 1:
+                    zero_levels.append(left["price"] + weight * (right["price"] - left["price"]))
+    zero_levels = sorted({round(level, 4) for level in zero_levels})
+    nearest_zero = min(zero_levels, key=lambda level: abs(level - spot)) if zero_levels else None
+    flip_distance = (nearest_zero - spot) / spot if nearest_zero is not None and spot > 0 else None
+    current = min(curve, key=lambda point: abs(point["price"] - spot)) if curve else {}
+    current_ratio = float(current.get("net_gamma_ratio") or 0.0)
+    current_net_gex = float(current.get("net_gex_1pct") or 0.0)
+    if flip_distance is not None and abs(flip_distance) <= 0.015:
+        curve_state = "ZERO_GAMMA_TRANSITION"
+    elif current_ratio >= 0.10:
+        curve_state = "POSITIVE_GEX_PIN_ZONE"
+    elif current_ratio <= -0.10:
+        curve_state = "NEGATIVE_GEX_ACCEL_ZONE"
+    else:
+        curve_state = "MIXED_GEX_CURVE"
+    if curve_state == "ZERO_GAMMA_TRANSITION":
+        flip_regime = "near_flip_transition"
+        flip_model_score = 0.50
+    elif current_ratio >= 0.10 and (nearest_zero is None or spot >= nearest_zero):
+        flip_regime = "positive_spring"
+        flip_model_score = 0.66
+    elif current_ratio <= -0.10:
+        flip_regime = "negative_acceleration_unconfirmed"
+        flip_model_score = 0.36
+    elif current_ratio >= 0.10:
+        flip_regime = "positive_gamma_below_flip"
+        flip_model_score = 0.56
+    else:
+        flip_regime = "mixed_gamma"
+        flip_model_score = 0.50
+    quality_den = bs_used + fallback_used
+    quality = "no_valid_gex_curve"
+    if quality_den > 0:
+        quality = "bs_iv_repriced" if bs_used / quality_den >= 0.50 else "static_gamma_fallback"
+    pos_prices = [point["price"] for point in curve if point["net_gex_1pct"] > 0]
+    neg_prices = [point["price"] for point in curve if point["net_gex_1pct"] < 0]
+    return {
+        "gex_curve_state": curve_state,
+        "zero_gamma_levels": zero_levels,
+        "zero_gamma_band": (
+            [round(nearest_zero - spot * 0.005, 4), round(nearest_zero + spot * 0.005, 4)]
+            if nearest_zero is not None else None
+        ),
+        "positive_gex_pin_zone": [round(min(pos_prices), 4), round(max(pos_prices), 4)] if pos_prices else None,
+        "negative_gex_accel_zone": [round(min(neg_prices), 4), round(max(neg_prices), 4)] if neg_prices else None,
+        "gex_flip_distance_pct": round(flip_distance, 4) if flip_distance is not None else None,
+        "gex_curve_quality": quality,
+        "current_net_gex_1pct": round(current_net_gex, 2),
+        "current_net_gamma_ratio": round(current_ratio, 4),
+        "gex_flip_regime": flip_regime,
+        "gex_flip_model_score": round(flip_model_score, 4),
+    }
+
+
 def option_features(
     rows: list[dict[str, Any]],
     *,
@@ -447,6 +576,7 @@ def option_features(
         max_abs_wall = None
         max_positive_wall = None
         max_negative_wall = None
+    curve_fields = build_gex_curve_v3(rows, spot=spot, half_life_days=half_life_days)
     put_skew = _weighted_mean(put_skew_items)
     call_skew = _weighted_mean(call_skew_items)
     skew_ratio = put_skew / call_skew if put_skew and call_skew and call_skew > 0 else None
@@ -494,6 +624,13 @@ def option_features(
                 wall_transition = "WALL_BREAK_DOWN" if wall_transition == "NO_TRANSITION" else wall_transition + "+WALL_BREAK_DOWN"
                 wall_transition_score -= 0.35
     wall_transition_score = max(-1.0, min(1.0, wall_transition_score))
+    if curve_fields["gex_curve_state"] == "NEGATIVE_GEX_ACCEL_ZONE":
+        if wall_transition_score >= 0.25 and dealer_pressure_proxy >= 0.10:
+            curve_fields["gex_flip_regime"] = "negative_acceleration_breakout"
+            curve_fields["gex_flip_model_score"] = 0.62
+        elif wall_transition_score <= -0.10 or dealer_pressure_proxy < 0:
+            curve_fields["gex_flip_regime"] = "negative_acceleration_risk_off"
+            curve_fields["gex_flip_model_score"] = 0.30
 
     return {
         "iv_ann": atm_iv,
@@ -519,6 +656,7 @@ def option_features(
         "gamma_state": gamma_state,
         "n_contracts": len(rows),
         "total_oi": call_oi + put_oi,
+        **curve_fields,
     }
 
 
@@ -588,6 +726,61 @@ def gamma_v2_alpha_fields(row: dict[str, Any]) -> dict[str, Any]:
         "gamma_v2_entry_signal": entry_signal,
         "gamma_v2_management_signal": management_signal,
     }
+
+
+def gamma_v3_alpha_fields(row: dict[str, Any]) -> dict[str, Any]:
+    dealer = _float(row.get("dealer_pressure_proxy")) or 0.0
+    transition_score = _float(row.get("wall_transition_score")) or 0.0
+    curve_state = str(row.get("gex_curve_state") or "MIXED_GEX_CURVE")
+    flip_regime = str(row.get("gex_flip_regime") or "mixed_gamma")
+    flip_part = _float(row.get("gex_flip_model_score")) or 0.50
+    if curve_state == "NEGATIVE_GEX_ACCEL_ZONE":
+        if transition_score >= 0.25 and dealer >= 0.10:
+            flip_regime = "negative_acceleration_breakout"
+            flip_part = 0.62
+        elif transition_score <= -0.10 or dealer < 0:
+            flip_regime = "negative_acceleration_risk_off"
+            flip_part = 0.30
+    dealer_part = max(0.0, min(1.0, 0.5 + 0.5 * dealer))
+    wall_part = max(0.0, min(1.0, 0.5 + transition_score))
+    score = max(0.0, min(1.0, 0.38 * dealer_part + 0.27 * wall_part + 0.35 * flip_part))
+    if flip_regime in {"negative_acceleration_risk_off", "near_flip_transition"}:
+        score = min(score, 0.60)
+    entry_signal = (
+        score >= 0.64
+        and dealer >= -0.05
+        and transition_score >= -0.05
+        and flip_regime not in {"negative_acceleration_risk_off", "near_flip_transition"}
+    )
+    management_signal = (
+        "gamma_v3_entry_alpha" if entry_signal else
+        "breakout_hold_ok" if flip_regime == "negative_acceleration_breakout" else
+        "reduce_or_tighten_stop" if flip_regime == "negative_acceleration_risk_off" else
+        "no_add_tighten_stop" if flip_regime == "near_flip_transition" else
+        "hold_context_only"
+    )
+    return {
+        "gamma_v3_alpha_score": round(score * 100.0, 2),
+        "gamma_v3_entry_signal": entry_signal,
+        "gamma_v3_management_signal": management_signal,
+        "gex_flip_regime": flip_regime,
+        "gex_flip_model_score": round(flip_part, 4),
+    }
+
+
+def gamma_v3_multiplier(row: dict[str, Any]) -> float:
+    regime = str(row.get("gex_flip_regime") or "mixed_gamma")
+    if regime == "positive_spring":
+        return 1.0
+    if regime == "negative_acceleration_breakout":
+        return 0.95
+    if regime == "mixed_gamma":
+        return 0.85
+    if regime == "near_flip_transition":
+        return 0.70
+    if regime == "negative_acceleration_risk_off":
+        return 0.55
+    return 0.75
 
 
 def dealer_pressure_bucket(value: float | None) -> str:
@@ -663,8 +856,12 @@ def simulate_strategy(
             exposure = (1.0 if row["trend_on"] else 0.0) * ivhv_band_exposure(row) * row["gamma_tanh_multiplier"]
         elif strategy == "ivhv_band_gamma_v2":
             exposure = (1.0 if row["trend_on"] else 0.0) * ivhv_band_exposure(row) * row["gamma_v2_multiplier"]
+        elif strategy == "ivhv_band_gamma_v3":
+            exposure = (1.0 if row["trend_on"] else 0.0) * ivhv_band_exposure(row) * row["gamma_v3_multiplier"]
         elif strategy == "gamma_v2_entry_alpha":
             exposure = 1.0 if row.get("gamma_v2_entry_signal") else 0.0
+        elif strategy == "gamma_v3_entry_alpha":
+            exposure = 1.0 if row.get("gamma_v3_entry_signal") else 0.0
         elif strategy == "ivhv_gamma_tanh":
             exposure = (1.0 if row["trend_on"] else 0.0) * iv_timing_multiplier(row["iv_bucket"]) * row["gamma_tanh_multiplier"]
         elif strategy == "gamma_tanh_only":
@@ -719,7 +916,7 @@ def summary_table(summary: dict[str, Any]) -> list[str]:
         "| Strategy | Days | Invested | Total | Ann. | Sharpe | Max DD | Invested hit | Avg exposure | Avg turnover |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
-    for key in ("buy_hold", "ema200_below_buy", "ema200_above_buy", "trend_only", "gamma_tanh_only", "gamma_v2_entry_alpha", "ivhv_timing", "ivhv_gamma_tanh", "ivhv_band_timing", "ivhv_band_gamma_tanh", "ivhv_band_gamma_v2"):
+    for key in ("buy_hold", "ema200_below_buy", "ema200_above_buy", "trend_only", "gamma_tanh_only", "gamma_v2_entry_alpha", "gamma_v3_entry_alpha", "ivhv_timing", "ivhv_gamma_tanh", "ivhv_band_timing", "ivhv_band_gamma_tanh", "ivhv_band_gamma_v2", "ivhv_band_gamma_v3"):
         stats = summary.get(key) or {}
         lines.append(
             f"| {key} | {stats.get('n_days', 0)} | {stats.get('invested_days', 0)} | {_fmt_pct(stats.get('total_return'))} | "
@@ -755,6 +952,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
         "- IV/HV: OI-weighted near-ATM IV divided by 20-day realized HV.",
         "- Gamma Spring: signed call/put GEX projected to center strike, net gamma ratio and tanh risk brake.",
         "- Gamma v2: OI-change / volume / quote-size / skew dealer-pressure proxy plus center/wall transition risk brake.",
+        "- Gamma v3: GEX curve over S0*0.80..S0*1.20 with gamma flip, positive spring, and negative acceleration regimes.",
         "- No leverage: low IV keeps full trend exposure; high IV cuts exposure; gamma tanh only cuts exposure.",
         "",
         "## Results",
@@ -774,6 +972,8 @@ def render_markdown(payload: dict[str, Any]) -> str:
     lines.extend(diagnostic_table("Gamma State Diagnostics - Trend-On Days", payload["diagnostics"]["gamma_state_trend_on_forward_returns"]))
     lines.extend(diagnostic_table("Dealer Pressure Proxy Diagnostics - Trend-On Days", payload["diagnostics"]["dealer_pressure_trend_on_forward_returns"]))
     lines.extend(diagnostic_table("Wall Transition Diagnostics - Trend-On Days", payload["diagnostics"]["wall_transition_trend_on_forward_returns"]))
+    lines.extend(diagnostic_table("Gamma v3 Flip Regime Diagnostics - All Days", payload["diagnostics"]["gex_flip_regime_forward_returns"]))
+    lines.extend(diagnostic_table("Gamma v3 Flip Regime Diagnostics - Trend-On Days", payload["diagnostics"]["gex_flip_regime_trend_on_forward_returns"]))
     lines += [
         "## Data",
         "",
@@ -791,7 +991,9 @@ def verdict(summary: dict[str, Any]) -> str:
     gamma = summary.get("ivhv_gamma_tanh") or {}
     band = summary.get("ivhv_band_timing") or {}
     v2 = summary.get("ivhv_band_gamma_v2") or {}
+    v3 = summary.get("ivhv_band_gamma_v3") or {}
     gamma_entry = summary.get("gamma_v2_entry_alpha") or {}
+    gamma_v3_entry = summary.get("gamma_v3_entry_alpha") or {}
     parts: list[str] = []
     if trend.get("n_days") and iv.get("n_days"):
         parts.append(
@@ -817,10 +1019,20 @@ def verdict(summary: dict[str, Any]) -> str:
             f"- Gamma v2 dealer-pressure/wall-transition delta vs IV/HV band: {(v2.get('sharpe') or 0.0) - (band.get('sharpe') or 0.0):+.2f} "
             f"({_fmt_num(v2.get('sharpe'))} vs {_fmt_num(band.get('sharpe'))})."
         )
+    if band.get("n_days") and v3.get("n_days"):
+        parts.append(
+            f"- Gamma v3 flip/state-machine delta vs IV/HV band: {(v3.get('sharpe') or 0.0) - (band.get('sharpe') or 0.0):+.2f} "
+            f"({_fmt_num(v3.get('sharpe'))} vs {_fmt_num(band.get('sharpe'))})."
+        )
     if gamma_entry.get("n_days") and trend.get("n_days"):
         parts.append(
             f"- Gamma v2 entry alpha vs pure trend Sharpe delta: {(gamma_entry.get('sharpe') or 0.0) - (trend.get('sharpe') or 0.0):+.2f} "
             f"({_fmt_num(gamma_entry.get('sharpe'))} vs {_fmt_num(trend.get('sharpe'))}, invested_days={gamma_entry.get('invested_days', 0)})."
+        )
+    if gamma_v3_entry.get("n_days") and trend.get("n_days"):
+        parts.append(
+            f"- Gamma v3 entry alpha vs pure trend Sharpe delta: {(gamma_v3_entry.get('sharpe') or 0.0) - (trend.get('sharpe') or 0.0):+.2f} "
+            f"({_fmt_num(gamma_v3_entry.get('sharpe'))} vs {_fmt_num(trend.get('sharpe'))}, invested_days={gamma_v3_entry.get('invested_days', 0)})."
         )
     return "\n".join(parts) if parts else "Insufficient rows."
 
@@ -916,6 +1128,8 @@ def main() -> int:
         gamma_mult = gamma_tanh_multiplier(opt)
         gamma_v2_mult = gamma_v2_multiplier(opt)
         gamma_alpha = gamma_v2_alpha_fields(opt)
+        gamma_v3_alpha = gamma_v3_alpha_fields(opt)
+        gamma_v3_mult = gamma_v3_multiplier(gamma_v3_alpha)
         feature_rows.append(
             {
                 "date": as_of.isoformat(),
@@ -950,6 +1164,19 @@ def main() -> int:
                 "gamma_v2_alpha_score": gamma_alpha["gamma_v2_alpha_score"],
                 "gamma_v2_entry_signal": gamma_alpha["gamma_v2_entry_signal"],
                 "gamma_v2_management_signal": gamma_alpha["gamma_v2_management_signal"],
+                "gamma_v3_multiplier": gamma_v3_mult,
+                "gamma_v3_alpha_score": gamma_v3_alpha["gamma_v3_alpha_score"],
+                "gamma_v3_entry_signal": gamma_v3_alpha["gamma_v3_entry_signal"],
+                "gamma_v3_management_signal": gamma_v3_alpha["gamma_v3_management_signal"],
+                "gex_curve_state": opt.get("gex_curve_state"),
+                "gex_flip_regime": gamma_v3_alpha["gex_flip_regime"],
+                "gex_flip_model_score": gamma_v3_alpha["gex_flip_model_score"],
+                "gex_flip_distance_pct": opt.get("gex_flip_distance_pct"),
+                "zero_gamma_band": opt.get("zero_gamma_band"),
+                "positive_gex_pin_zone": opt.get("positive_gex_pin_zone"),
+                "negative_gex_accel_zone": opt.get("negative_gex_accel_zone"),
+                "current_net_gamma_ratio": opt.get("current_net_gamma_ratio"),
+                "gex_curve_quality": opt.get("gex_curve_quality"),
                 "oi_change_net_ratio": opt.get("oi_change_net_ratio"),
                 "oi_change_abs_gex": opt.get("oi_change_abs_gex"),
                 "oi_change_contracts": opt.get("oi_change_contracts"),
@@ -974,7 +1201,7 @@ def main() -> int:
 
     strategy_rows: list[dict[str, Any]] = []
     summary: dict[str, Any] = {}
-    for strategy in ("buy_hold", "ema200_below_buy", "ema200_above_buy", "trend_only", "gamma_tanh_only", "gamma_v2_entry_alpha", "ivhv_timing", "ivhv_gamma_tanh", "ivhv_band_timing", "ivhv_band_gamma_tanh", "ivhv_band_gamma_v2"):
+    for strategy in ("buy_hold", "ema200_below_buy", "ema200_above_buy", "trend_only", "gamma_tanh_only", "gamma_v2_entry_alpha", "gamma_v3_entry_alpha", "ivhv_timing", "ivhv_gamma_tanh", "ivhv_band_timing", "ivhv_band_gamma_tanh", "ivhv_band_gamma_v2", "ivhv_band_gamma_v3"):
         rows = simulate_strategy(feature_rows, strategy=strategy, cost_bps=args.cost_bps)
         strategy_rows.extend(rows)
         summary[strategy] = _stats(rows)
@@ -986,6 +1213,8 @@ def main() -> int:
         "gamma_state_trend_on_forward_returns": bucket_diagnostics([row for row in feature_rows if row["trend_on"]], "gamma_state"),
         "dealer_pressure_trend_on_forward_returns": bucket_diagnostics([row for row in feature_rows if row["trend_on"]], "dealer_pressure_bucket"),
         "wall_transition_trend_on_forward_returns": bucket_diagnostics([row for row in feature_rows if row["trend_on"]], "wall_transition"),
+        "gex_flip_regime_forward_returns": bucket_diagnostics(feature_rows, "gex_flip_regime"),
+        "gex_flip_regime_trend_on_forward_returns": bucket_diagnostics([row for row in feature_rows if row["trend_on"]], "gex_flip_regime"),
     }
     payload = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),

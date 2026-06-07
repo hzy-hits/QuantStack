@@ -90,6 +90,9 @@ class UsOpportunityRankerTests(unittest.TestCase):
             self.assertEqual(row["production_action"], "buy_stock_with_gamma_v2_entry")
             self.assertTrue(row["gamma_v2_entry_signal"])
             self.assertGreater(row["gamma_v2_alpha_score"], 64.0)
+            self.assertIn(row["gamma_v3_curve_state"], {"POSITIVE_GEX_PIN_ZONE", "ZERO_GAMMA_TRANSITION"})
+            self.assertEqual(row["gamma_v3_curve_quality"], "bs_iv_repriced")
+            self.assertIn("gamma_v3_flip_regime", row)
 
     def test_ai_infra_expand_uses_all_us_symbols_not_only_p0(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

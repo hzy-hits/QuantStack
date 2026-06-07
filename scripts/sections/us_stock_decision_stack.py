@@ -1,7 +1,7 @@
 """US stock decision stack report section.
 
 The US pipeline is intentionally layered: AI evidence admits the stock universe,
-trend + IV/HV drives the main timing context, Gamma Spring v2 manages exposure,
+trend + IV/HV drives the main timing context, Gamma Spring v3 manages exposure,
 and portfolio risk converts the idea into final stock R.
 """
 from __future__ import annotations
@@ -80,24 +80,24 @@ def render_us_stock_decision_stack_section(payload: dict[str, Any], *, limit: in
     lines = [
         "## US Stock Decision Stack / 美股买卖管理总线",
         "",
-        "- 设计: 主策略不是单一神奇指标,而是分层总线: AI universe 准入 -> Gamma Spring v2 入场 alpha -> trend + IV/HV timing -> portfolio/beta 风险预算。",
-        "- Gamma v2 定位: 美股选股/入场主引擎之一,在已准入 AI universe 内可生成 `us_gamma_v2_alpha` production candidate;同时继续负责仓位上限、收紧止损、不追高和突破后持有观察。",
-        "- 风控边界: dealer sign 仍是 OI change / volume / skew proxy,所以 Gamma v2 可以给入场 alpha,但不能绕过 source evidence、headline risk、组合 R 和 beta hedge。",
+        "- 设计: 主策略不是单一神奇指标,而是分层总线: AI universe 准入 -> Gamma Spring v3 GEX 区间状态机 -> trend + IV/HV timing -> portfolio/beta 风险预算。",
+        "- Gamma v3 定位: 美股选股/入场主引擎之一,在已准入 AI universe 内可生成 `us_gamma_v2_alpha` 兼容 production candidate;同时继续负责仓位上限、收紧止损、不追高和突破后持有观察。",
+        "- 风控边界: dealer sign 仍是 OI change / volume / skew proxy,所以 Gamma v3 可以给入场 alpha,但不能绕过 source evidence、headline risk、组合 R 和 beta hedge。",
         "",
         "| Layer | Production role | Today status | Can create candidate? | Can change stock R? |",
         "|---|---|---|---|---|",
         "| AI universe / source evidence | 候选准入 | 只允许 AI universe / 晋级票进入 production | yes, only after promotion | evidence multiplier |",
-        f"| Gamma Spring v2 | 选股/入场 alpha 主引擎 | {len(gamma_rows)} rows; reduce/tighten {reduce_count}, no-add/chase {no_add_count}, hold {hold_count} | yes, inside admitted universe | create entry / cap R / tighten stop |",
+        f"| Gamma Spring v3 | 选股/入场 alpha 主引擎 | {len(gamma_rows)} rows; reduce/tighten {reduce_count}, no-add/chase {no_add_count}, hold {hold_count} | yes, inside admitted universe | create entry / cap R / tighten stop |",
         "| Trend + IV/HV healthy band | timing 确认 / volatility health | IV/HV 0.90-1.35 配合 trend 是健康带 | yes, inside admitted universe | entry quality / hold / skip |",
         "| Portfolio / beta overlay | 组合风险预算 | final R、hedge、net beta 统一收口 | no | final R / hedge |",
         "",
     ]
     if not actions:
-        lines += ["- 今日无 US production action; Gamma v2 仍保留为观察/风险管理 context。", ""]
+        lines += ["- 今日无 US production action; Gamma v3 仍保留为观察/风险管理 context。", ""]
         return lines
 
     lines += [
-        "| Symbol | Stock R | Timing source | IV/HV | Gamma v2 | Dealer px | Wall | Mgmt |",
+        "| Symbol | Stock R | Timing source | IV/HV | Gamma v3 | Dealer px | Wall | Mgmt |",
         "|---|---:|---|---:|---:|---:|---|---|",
     ]
     for action in actions[:limit]:

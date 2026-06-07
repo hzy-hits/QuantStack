@@ -69,8 +69,9 @@ TREND_MAINLINE_PROMOTED_SLEEVES = [
         "gate_version": "operator_gamma_v2_alpha_v1",
         "created_by": "operator_directive_2026_05_31",
         "gates_snapshot_json": (
-            '{"contract":"Gamma Spring v2 can receive stock R as a US entry-alpha sleeve '
-            'inside the admitted AI universe after dealer-pressure proxy, wall transition, '
+            '{"contract":"Gamma Spring v3 GEX curve/state machine can receive stock R under '
+            'the us_gamma_v2_alpha compatibility sleeve inside the admitted AI universe after '
+            'dealer-pressure proxy, wall/zero-gamma transition, '
             'source-evidence, headline-risk and portfolio-overlay checks pass; it is a stock '
             'entry/management signal, not an option trade instruction"}'
         ),

@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Backtest Gamma v2 as a standalone US entry-alpha engine.
+"""Backtest Gamma v3 flip/state-machine as a standalone US entry-alpha engine.
 
 This is cross-sectional and can either scan the full local optionable universe
 or only AI Infra names from global_universe_v2.jsonl. It reuses the production
-Gamma v2 scoring function, then simulates close-to-next-close stock returns for
-the top ranked entry signals.
+Gamma scoring function, then simulates close-to-next-close stock returns for the
+top ranked entry signals. The production sleeve id remains `us_gamma_v2_alpha`
+for compatibility, but the current model includes GEX curve, gamma flip, and
+positive-spring / negative-acceleration regimes.
 """
 from __future__ import annotations
 
@@ -468,6 +470,22 @@ def run_backtest(args: argparse.Namespace) -> dict[str, Any]:
         }
         for symbol, count in selected_counter.most_common(30)
     ]
+    regime_summary: list[dict[str, Any]] = []
+    regime_counter = Counter(str(row.get("gamma_v3_flip_regime") or "missing") for row in selections)
+    for regime, count in regime_counter.most_common():
+        subset = [row for row in selections if str(row.get("gamma_v3_flip_regime") or "missing") == regime]
+        avg_next = sum(float(row["fwd_return"]) for row in subset) / count if count else 0.0
+        hit_rate = sum(1 for row in subset if float(row["fwd_return"]) > 0) / count if count else None
+        avg_score = sum(float(row.get("gamma_v2_alpha_score") or 0.0) for row in subset) / count if count else 0.0
+        regime_summary.append(
+            {
+                "gamma_v3_flip_regime": regime,
+                "selected_days": count,
+                "avg_next_return": avg_next,
+                "hit_rate": hit_rate,
+                "avg_score": avg_score,
+            }
+        )
     return {
         "config": {
             "requested_start": args.start.isoformat(),
@@ -504,6 +522,7 @@ def run_backtest(args: argparse.Namespace) -> dict[str, Any]:
             "max_entry_candidates_per_day": max(candidate_counts) if candidate_counts else 0,
             "avg_entry_score": sum(score_values) / len(score_values) if score_values else None,
             "top_selected": top_selected,
+            "flip_regime_summary": regime_summary,
         },
         "daily": daily_rows,
         "selections": selections,
@@ -534,7 +553,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     diagnostics = payload["diagnostics"]
     lines = [
-        f"# Gamma v2 Entry Alpha Engine Backtest - {config['requested_start']}..{config['requested_end']}",
+        f"# Gamma v3 Flip Entry Alpha Engine Backtest - {config['requested_start']}..{config['requested_end']}",
         "",
         (
             "Scope: cross-sectional stock timing backtest. AI Infra universe filter is enabled; "
@@ -543,6 +562,7 @@ def render_markdown(payload: dict[str, Any]) -> str:
             else "Scope: cross-sectional stock timing backtest. AI universe and source-evidence filters are disabled."
         ),
         "Execution: close-to-next-close stock return, equal-weight top-N entry signals, no leverage.",
+        "Model: GEX curve on S0*0.80..S0*1.20; positive GEX = spring/pinning, negative GEX = acceleration regime; gamma flip near spot is transition risk.",
         "",
         "## Data Coverage",
         "",
@@ -578,6 +598,18 @@ def render_markdown(payload: dict[str, Any]) -> str:
         f"- avg entry candidates/day: {fmt_num(diagnostics['avg_entry_candidates_per_day'])}",
         f"- max entry candidates/day: {diagnostics['max_entry_candidates_per_day']}",
         f"- avg entry score: {fmt_num(diagnostics['avg_entry_score'])}",
+        "",
+        "## Flip Regime Attribution",
+        "",
+        "| Flip regime | Selected rows | Avg next | Hit | Avg score |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for row in diagnostics.get("flip_regime_summary", []):
+        lines.append(
+            f"| {row['gamma_v3_flip_regime']} | {row['selected_days']} | "
+            f"{fmt_pct(row['avg_next_return'])} | {fmt_pct(row['hit_rate'])} | {fmt_num(row['avg_score'])} |"
+        )
+    lines += [
         "",
         "## Most Selected Symbols",
         "",
