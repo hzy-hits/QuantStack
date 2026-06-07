@@ -23,13 +23,14 @@
 | `top_stock_trade` / `secondary_stock_trade` | 正式执行风险:止损线、option-flow 反转、headline_risk 抬升 |
 | `top_probe` / `secondary_probe` | 小仓试错风险:0.25R 上限,不可加仓 |
 | `event_risk_watch` / `negative_headline_no_probe` | 阻断:今日 0R |
-| `production_decision_summary.us_execution_gate.allowed=False` | 全 0R:stable alpha gate 未过 |
+| `production_decision_summary.us_execution_gate.allowed=False` | 全 0R:硬门禁,例如 stock tape 过期 |
+| stable alpha gate warning | 只能写 haircut / warning context,不能写成全 0R |
 
 ## 规则
 
 - 输出语言:中文
 - 格式:固定标题 + 表格 + 列表
-- 必读字段:`options_anomaly_rows`(squeeze/pressure)、`headline_risk` per ranker row、`us_execution_gate`(stable alpha gate)、`portfolio_risk_overlay`(组合层 long+hedge+VaR)、`us_left_side`(超跌候选)、`bubble_hedge.victims`
+- 必读字段:`options_anomaly_rows`(squeeze/pressure)、`headline_risk` per ranker row、`us_execution_gate`(hard gate + stable warning)、`portfolio_risk_overlay`(组合层 long+hedge+VaR)、`us_left_side`(超跌候选)、`bubble_hedge.victims`
 - headline_risk:必须按 news_scored.severity ≥ 2 + subject_match=true 才算真负面;tag-list 文章不算
 - options_anomaly:short_squeeze_score vs selling_pressure_score 都列;不写交易建议
 - left_side:超跌可能是机会也可能是 falling knife,只写"距 EMA21 X%"事实
@@ -43,6 +44,7 @@
 ## US Execution Gate
 - allowed: [true|false]
 - top_blocker: [原样摘录]
+- top_warning: [原样摘录]
 - ev_status: [passed|failed|pending|cn_direct|unknown]
 - selected_policy.us: [值 或 none]
 - stock_data_current: [true|false] (latest prices_daily=[date])

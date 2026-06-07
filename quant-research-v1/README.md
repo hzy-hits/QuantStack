@@ -7,7 +7,7 @@ maturity and bulletin generation.
 
 The operating rule is:
 
-**Python/Rust compute; agents narrate; Quant Stack promotes only stable alpha.**
+**Python/Rust compute; agents narrate; US execution uses AI-infra ranker + IV/HV + Gamma Spring v3 + portfolio risk controls. Stable-alpha bulletin is an audit / haircut context, not a hard zero-R gate.**
 
 `Execution Alpha` in the report is a research execution candidate, not an order.
 
@@ -23,7 +23,7 @@ Rust + Python ingestion -> DuckDB -> analytics -> report_decisions
 payload markdown -> agents -> Chinese report -> Gmail
         |
         v
-Quant Stack stable alpha gate -> alpha_bulletin_us.md
+Quant Stack stable-alpha audit -> alpha_bulletin_us.md
 ```
 
 The full daily runner is now the Rust `quant-stack us-daily` state machine.

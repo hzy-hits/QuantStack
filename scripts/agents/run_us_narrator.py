@@ -24,7 +24,7 @@ import asyncio
 import json
 import os
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -47,23 +47,27 @@ def final_style_guard(as_of: str) -> str:
     return f"""
 ## 最终写作覆盖（最高优先级）
 
-这份报告是发给人读的美股日报，不是多 agent 调试日志。最终输出必须是“Codex 结构化研报”：由你裁决和改写，但必须保留紧凑 Markdown 表格，不能写成整篇 plain text 散文。
+这份报告是发给人读的美股交易 memo，不是多 agent 调试日志。最终输出必须是“Codex 结构化研报”：先讲清楚今天的策略故事,再用量化、风控、新闻、期权/Gamma 去解释为什么这样交易。不要写成问答模板,也不要写成模型输出堆砌。
 
 - 第一行固定为 `# 美股量化日报 — {as_of}`。
-- 只写 6 个二级标题：`一句话`、`市场状态`、`今日交易清单`、`观察与风险`、`催化与复核`、`附注`。
+- 只写 6 个二级标题：`策略主线`、`市场结构`、`交易计划`、`风险与反证`、`催化与复核`、`附注`。
+- `策略主线` 写成 2-4 个自然段,像交易员晨会复盘: 市场在演什么故事,为什么这导致今天的仓位选择,哪些证据支持,哪些证据反驳。不要写成模板问答。
+- 首次出现术语要顺手翻译,但不要做术语表。例: `0R` 写成“不新增仓位风险(0R)”; `WEDGE` 写成“趋势强但利率/波动仍咬住的 WEDGE 状态”; `MRS` 写成“市场风险偏好分数 MRS”; `Gamma` 写成“期权仓位形成的支撑/压力区”。
 - 全文至少包含 4 张 Markdown 表格，且表格必须使用 `|` 分隔列：
-  1. `今日交易清单` 内必须有 Production candidates 表，列为 `Symbol / Decision / Size / Entry / Risk / Hedge / Why`。
-  2. `观察与风险` 内必须有 Watch / 0R context 表，列为 `Symbol / Status / Reason / Next check`。
-  3. `观察与风险` 内必须有 IV/HV 表，列为 `Symbol / IV/HV / IV rank / Context / Action`。
-  4. `观察与风险` 内必须有 Gamma v2 表，列为 `Symbol / Gamma state / Dealer proxy / Wall / Management`。
-- `市场状态` 的表格必须包含数据校准行：报告标签日期、US 收盘价数据截至、US 候选/执行数据日期、期权/Gamma 有效日、Fear/Greed source。若 US 数据状态是 previous_session，必须明写“不是当日美股已收盘数据”。
+  1. `交易计划` 内必须有 Production candidates 表，列为 `Symbol / Decision / Size / Entry / Risk / Hedge / Why`。
+  2. `风险与反证` 内必须有 Watch / 0R context 表，列为 `Symbol / Status / Reason / Next check`。
+  3. `风险与反证` 内必须有 IV/HV 表，列为 `Symbol / IV/HV / IV rank / Context / Action`。
+  4. `风险与反证` 内必须有 Gamma v3 表，列为 `Symbol / Gamma state / Dealer proxy / Wall / Management`。
+- `市场结构` 先讲 regime/tape/资金风险的因果链,再给市场证据表。表里必须包含数据校准行：报告标签日期、US 收盘价数据截至、US 候选/执行数据日期、期权/Gamma 有效日、Fear/Greed source。若 US 数据状态是 previous_session，必须明写“不是当日美股已收盘数据”。
+- `市场结构` 内必须保留 `US Realized Horizon Edge` 字样和对应小表或行,写成“历史持有周期复盘(US Realized Horizon Edge)”,说明 1D/3D/5D/10D 哪些周期真的赚钱。
 - 如果某张表没有行，也要保留表头并写一行 `None | - | - | - | -`，不要把表格删掉。
 - 不出现这些词或痕迹：提取器、payload、digest、merge-agent、ranker、模型名、system prompt、user_msg、英文分层名。
 - 不使用 emoji 或装饰符号；最终报告只靠标题、紧凑表格和短段落组织信息。
-- 不直接输出内部字段名：`stable_alpha_gate`、`ev_status`、`production_decision_summary`、`actionable`、`execution_blocked_0r`、`active_watch`、`ranked_watch`。要翻译成人话，例如“稳定策略门禁未放行”“只观察，不执行”。
+- 不直接输出内部字段名：`stable_alpha_gate`、`ev_status`、`production_decision_summary`、`actionable`、`execution_blocked_0r`、`active_watch`、`ranked_watch`。要翻译成人话，例如“稳定策略门禁未放行”“只观察，不执行”。不要把 `WEDGE`、`MRS`、`0R` 当作结论本身。
 - Fear/Greed 必须保留 source。source=proxy 时只能写 `Internal Fear/Greed proxy`，不得写成 `CNN Fear & Greed` 或 `CNN F&G`；source=cnn 时才可以写 CNN。
-- `今日交易清单` 必须先给正式执行表；没有正式执行时，表格第一行写 `None` 并在表后写“本期无可执行做多”。随后用短句分开写“小仓试错 / 观察 / 回避”，不要制造半执行清单。
-- 期权和新闻只能解释股票决策和风险，不给期权合约、strike、到期日或期权买卖指令。IV/HV 只写成“健康带/事件溢价高/波动过低或过高”的股票上下文；Gamma Spring v2 是 `us_gamma_v2_alpha` 选股/入场主引擎之一,但只能写成股票入场优先级、dealer pressure proxy、wall transition、仓位上限、收紧止损、不追高,不写成期权买卖建议。
+- `交易计划` 必须先给正式执行表；没有正式执行时，表格第一行写 `None` 并在表后自然解释“本期无可执行做多”。随后用一小段交易故事解释为什么高分观察票没有变成仓位,不要制造半执行清单。
+- 期权和新闻只能解释股票决策和风险，不给期权合约、strike、到期日或期权买卖指令。IV/HV 只写成“健康带/事件溢价高/波动过低或过高”的股票上下文；Gamma Spring v3 是 GEX curve + 区间状态机,也是 `us_gamma_v2_alpha` 兼容 sleeve 的选股/入场主引擎之一,但必须翻译成“期权仓位支撑/压力区”和“追高/止损/等待”的股票管理语言，不写成期权买卖建议。
+- Congressional Trading / 政策资金流只能写成催化或风险 overlay：同委员会多人买入提高观察优先级，刚披露交易强调时间窗口，集中卖出触发风险复核；它不证明 AI 供应链关系，也不能直接生成 R。
 - 不限制字数。表格承载事实，段落承载裁决；每张表后最多写 2-4 句解释，不要把表格内容重复写成散文。
 - 可以保留股票代码、R、beta、IV、VIX、P/C、EMA、SMH、SPY、QQQ 等必要缩写；其它机器状态一律翻译。
 """
@@ -77,7 +81,7 @@ def write_agent_report(report_dir: Path, out_name: str, narrative: str, as_of: s
         "backend": backend(),
         "model": os.environ.get("CODEX_MODEL", "gpt-5.5"),
         "reasoning_effort": os.environ.get("CODEX_REASONING_EFFORT", "high"),
-        "generated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "script": Path(__file__).name,
     }
     out_path.with_name(out_path.name + ".meta.json").write_text(
@@ -96,6 +100,44 @@ def load_prompt(name: str) -> str:
     if not path.exists():
         raise SystemExit(f"prompt missing: {path}")
     return path.read_text(encoding="utf-8")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(1, int(os.environ.get(name, str(default))))
+    except ValueError:
+        return default
+
+
+def _call_llm_with_retries(
+    system_msg: str,
+    user_msg: str,
+    *,
+    label: str,
+    temperature: float,
+    max_tokens: int,
+    attempts: int,
+) -> str | None:
+    last_error = ""
+    for idx in range(1, max(1, attempts) + 1):
+        attempt_label = label if attempts <= 1 else f"{label}:attempt{idx}"
+        try:
+            response = call_llm(
+                system_msg,
+                user_msg,
+                label=attempt_label,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:  # noqa: BLE001 - retry any backend failure uniformly.
+            last_error = str(exc)
+            continue
+        if response:
+            return response
+        last_error = "empty output"
+    if last_error:
+        print(f"  {label} failed after {attempts} attempt(s): {last_error}")
+    return None
 
 
 def load_payload_artifacts(report_dir: Path) -> dict[str, Any]:
@@ -128,6 +170,8 @@ def build_event_payload(art: dict[str, Any]) -> str:
     md = art.get("_us_daily_report_md", "")
     sections = _slice_md_sections(md, [
         "Serenity",
+        "Congressional Trading",
+        "政策资金流",
         "财报日历",
         "美股财报",
         "Source Review",
@@ -613,6 +657,8 @@ def build_risk_payload(art: dict[str, Any]) -> str:
     sections = _slice_md_sections(md, [
         "US Production Gate",
         "US 期权异常",
+        "Congressional Trading",
+        "政策资金流",
         "US 左侧观察池",
         "组合风险覆盖",
         "Portfolio Risk Overlay",
@@ -645,6 +691,154 @@ def _join_payload_sections(label: str, sections: str) -> str:
     return f"# {label}\n\n{sections}"
 
 
+def _brief_value(value: Any, default: str = "-") -> str:
+    if value is None or value == "":
+        return default
+    if isinstance(value, float):
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    return str(value)
+
+
+def _brief_r(value: Any) -> str:
+    try:
+        return f"{float(value):.4g}R"
+    except (TypeError, ValueError):
+        return "-R"
+
+
+def _brief_pct(value: Any) -> str:
+    try:
+        return f"{float(value):+.2f}%"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _plain_regime_label(state: str, multiplier: Any) -> str:
+    state_l = (state or "").lower()
+    mult = _brief_value(multiplier)
+    if state_l == "wedge":
+        return f"趋势仍强,但利率/波动约束还在,新加仓需要减码({mult}x)"
+    if state_l == "confirm":
+        return f"趋势和风险偏好相互确认,允许按规则加仓({mult}x)"
+    if state_l == "press":
+        return f"趋势强且回撤风险低,可以更积极执行({mult}x)"
+    if state_l == "hedge":
+        return f"风险偏防守,先控仓位和 beta({mult}x)"
+    return f"{state or '未知状态'}({mult}x)"
+
+
+def build_strategy_story_brief(art: dict[str, Any], as_of: str) -> str:
+    """Trading-story brief that anchors the final narrator.
+
+    This is not a fallback report. It is a small, deterministic bridge from
+    model outputs to a coherent strategy narrative: market backdrop, execution
+    constraint, candidate tension, and risk evidence. The Codex narrator still
+    writes the final report.
+    """
+    payload = art.get("main_strategy_v2_backtest")
+    if not isinstance(payload, dict):
+        return "No payload available; preserve report structure and state data gaps clearly."
+    decision = payload.get("production_decision_summary") or {}
+    summary = decision.get("summary") or {}
+    gate = summary.get("us_execution_gate") or {}
+    status = payload.get("us_market_data_status") or {}
+    regime = payload.get("risk_regime") or {}
+    mrs = payload.get("market_regime_score") or {}
+    ranker = payload.get("us_opportunity_ranker") or {}
+    actions = [
+        row for row in (decision.get("actionable") or [])
+        if str(row.get("market") or "").upper() == "US"
+    ]
+
+    gate_allowed = bool(gate.get("allowed"))
+    us_r = summary.get("us_r")
+    if actions:
+        action_line = f"最终执行表给出 {len(actions)} 个美股执行仓位,合计 {_brief_r(us_r)}"
+    elif gate_allowed:
+        action_line = f"美股门禁允许,但最终执行表没有给出仓位,美股合计 {_brief_r(us_r)}"
+    else:
+        action_line = f"美股最终执行为 {_brief_r(us_r)},也就是不新增美股仓位风险"
+
+    blocker = (
+        gate.get("top_blocker")
+        or gate.get("top_warning")
+        or summary.get("top_blocker")
+        or "IV/HV + Gamma Spring v3 + risk regime 控制执行仓位"
+    )
+    regime_text = _plain_regime_label(str(regime.get("state") or ""), regime.get("r_multiplier"))
+    mrs_line = ""
+    if mrs.get("mrs") is not None:
+        mrs_line = (
+            f"市场风险偏好分数(MRS)={_brief_value(mrs.get('mrs'))}, "
+            f"{mrs.get('mrs_bucket') or '-'}, {mrs.get('bucket_history') or '-'}。"
+        )
+
+    data_line = (
+        f"报告标签 {as_of},美股收盘价/候选数据截至 "
+        f"{status.get('effective_us_market_date') or status.get('prices_daily_latest_date') or '-'},"
+        f"期权/Gamma 有效日 {status.get('options_chain_latest_as_of') or '-'}。"
+    )
+    if status.get("is_previous_session"):
+        data_line += "这不是当日美股已收盘结果,只能作为下一次开盘前评估。"
+
+    policy_flow = payload.get("congressional_trading") or {}
+    policy_summary = policy_flow.get("summary") or {}
+    policy_rows = policy_flow.get("rows") or []
+    if policy_rows:
+        top_policy = policy_rows[0]
+        policy_line = (
+            f"政策资金流有 {policy_summary.get('symbols', len(policy_rows))} 个 ticker 线索: "
+            f"{top_policy.get('symbol')}={top_policy.get('state')}, "
+            f"{top_policy.get('report_role')}。它只影响催化/风险复核,不能证明 AI 关系或直接生成 R。"
+        )
+    else:
+        policy_line = "政策资金流没有可核验 artifact；不要引用单条社媒披露或传闻。"
+
+    ranked_rows = ranker.get("all_rows") or []
+    top_watch: list[str] = []
+    for row in ranked_rows[:8]:
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        ret_5d = _brief_pct(row.get("ret_5d_pct"))
+        gamma_state = str(row.get("gamma_v3_flip_regime") or row.get("gamma_v2_management_signal") or "-")
+        opt = str(row.get("options_quality_reason") or "-")
+        if not gate_allowed:
+            verdict = "观察"
+        elif "trade" in str(row.get("production_tier") or "").lower():
+            verdict = "执行候选"
+        else:
+            verdict = "观察"
+        top_watch.append(f"- {symbol}: {verdict}; 5日 {ret_5d}; Gamma={gamma_state}; options={opt[:80]}")
+    watch_block = "\n".join(top_watch) if top_watch else "- None: 没有可展示观察候选"
+
+    return f"""
+## 策略叙事底稿（最高优先级）
+
+这份底稿只规定报告的因果链,不要照抄成问答。最终报告要像交易员晨会 memo,围绕“市场故事 -> 仓位取舍 -> 反证风险 -> 复核触发”展开。
+
+### 主线冲突
+美股 AI-infra tape 仍强,但最终仓位选择是: {action_line}。关键约束是: {blocker}。市场环境可以写成: {regime_text}。{mrs_line or ''}
+
+### 数据口径
+{data_line}
+
+### 政策资金流
+{policy_line}
+
+### 观察名单的叙事位置
+如果美股最终执行为 0R,下面这些高分票只能作为故事里的“候选张力”: 它们解释为什么市场有机会,但不能被写成仓位。
+
+{watch_block}
+
+### 写作约束
+- 不要写模板问答。
+- 不要写二元问答。
+- 量化、风控、新闻、期权/Gamma 都要服务于同一条交易故事,不能各写各的。
+- 技术词只作为证据,不要让 WEDGE/MRS/Gamma/R 乘数抢在故事前面。
+""".strip()
+
+
 def _markdown_table_count(text: str) -> int:
     lines = text.splitlines()
     count = 0
@@ -659,10 +853,10 @@ def _markdown_table_count(text: str) -> int:
 def validate_structured_us_report(text: str, as_of: str, payload: dict[str, Any] | None = None) -> None:
     required = [
         f"# 美股量化日报 — {as_of}",
-        "## 一句话",
-        "## 市场状态",
-        "## 今日交易清单",
-        "## 观察与风险",
+        "## 策略主线",
+        "## 市场结构",
+        "## 交易计划",
+        "## 风险与反证",
         "## 催化与复核",
         "## 附注",
     ]
@@ -672,9 +866,11 @@ def validate_structured_us_report(text: str, as_of: str, payload: dict[str, Any]
     table_count = _markdown_table_count(text)
     if table_count < 4:
         raise RuntimeError(f"US narrator output has only {table_count} Markdown tables; expected >=4")
-    for marker in ["IV/HV", "Gamma", "Production"]:
+    for marker in ["IV/HV", "Gamma", "US Realized Horizon Edge", "Congressional"]:
         if marker not in text:
             raise RuntimeError(f"US narrator output missing required marker: {marker}")
+    if not any(marker in text for marker in ["Production", "正式执行", "可执行做多"]):
+        raise RuntimeError("US narrator output missing execution marker: Production/正式执行")
     if payload:
         failures = validate_us_report_text_against_payload(payload, text, "us_narrator_output")
         if failures:
@@ -725,6 +921,7 @@ def build_layout_skeleton(art: dict[str, Any], as_of: str) -> str:
             _compact_section(_slice_md_sections(md, ["风控引擎"]), max_lines=10),
             _compact_section(_slice_md_sections(md, ["恐惧贪婪"]), max_lines=10),
             _compact_section(_slice_md_sections(md, ["SPX × P/C"]), max_lines=10),
+            _compact_section(_slice_md_sections(md, ["US Realized Horizon Edge"]), max_lines=12),
         ]
         if part
     )
@@ -742,9 +939,13 @@ def build_layout_skeleton(art: dict[str, Any], as_of: str) -> str:
     gamma_table = _first_table(_slice_md_sections(md, ["US Gamma Spring"]), max_rows=10)
     if not gamma_table:
         gamma_table = "| Symbol | Gamma state | Dealer proxy | Wall | Management |\n|---|---|---:|---|---|\n| None | - | - | - | - |"
+    congressional_table = _first_table(_slice_md_sections(md, ["Congressional Trading", "政策资金流"]), max_rows=8)
+    if not congressional_table:
+        congressional_table = "| Symbol | Signal | Lawmakers / committee | Disclosure lag | Read-through | Report role |\n|---|---|---|---:|---|---|\n| None | NO_CONGRESSIONAL_TRADING_DATA | - | - | no verified artifact | context_only |"
     catalyst = "\n\n".join(
         part
         for part in [
+            _compact_section(_slice_md_sections(md, ["Congressional Trading", "政策资金流"]), max_lines=14),
             _compact_section(_slice_md_sections(md, ["财报日历", "美股财报"]), max_lines=14),
             _compact_section(_slice_md_sections(md, ["Source Review", "source-review"]), max_lines=14),
         ]
@@ -753,21 +954,21 @@ def build_layout_skeleton(art: dict[str, Any], as_of: str) -> str:
     return f"""
 # 美股量化日报 — {as_of}
 
-## 一句话
-用 1-2 句写 regime、执行 R、最大约束。
+## 策略主线
+写 2-4 个自然段,讲清楚市场故事、仓位取舍、反证风险。不要写模板问答,不要用未解释的 WEDGE、MRS、0R、Gamma 开头。
 
-## 市场状态
-用 3-5 句裁决，然后保留一张紧凑市场表。
+## 市场结构
+先给 2-3 句 regime/tape/资金风险的因果链,再保留数据校准和关键市场证据。
 
 {market or "| Metric | Value |\n|---|---|\n| Market | no market skeleton |"}
 
-## 今日交易清单
+## 交易计划
 必须先给 Production candidates 表。优先从下表改写成列: Symbol / Decision / Size / Entry / Risk / Hedge / Why。
 
 {prod_table}
 
-## 观察与风险
-必须保留下面三类表，不要改成段落。
+## 风险与反证
+必须保留下面三类表。表前先用一段话说明这些证据如何支持或反驳交易故事,不要写成自动买入清单。
 
 ### Watch / 0R context
 {watch_table}
@@ -775,11 +976,14 @@ def build_layout_skeleton(art: dict[str, Any], as_of: str) -> str:
 ### IV/HV
 {iv_table}
 
-### Gamma v2
+### Gamma v3
 {gamma_table}
 
+### Congressional trading
+{congressional_table}
+
 ## 催化与复核
-必须给 Catalyst / review 表；若下面素材不是表格，整理成表格。
+必须给 Catalyst / review 表；若下面素材不是表格，整理成表格。政策资金流只写成催化/风险复核,不能写成 AI source evidence 或执行 R 来源。
 
 {catalyst or "| Item | Date | Impact | Review |\n|---|---|---|---|\n| None | - | - | - |"}
 
@@ -809,10 +1013,13 @@ async def call_extractor_async(
     async with sem:
         response = await loop.run_in_executor(
             None,
-            lambda: call_llm(
-                system_msg, user_msg,
+            lambda: _call_llm_with_retries(
+                system_msg,
+                user_msg,
                 label=f"extractor:{name}",
-                temperature=0.1, max_tokens=1200,
+                temperature=0.1,
+                max_tokens=1200,
+                attempts=_env_int("US_NARRATOR_EXTRACTOR_RETRIES", 2),
             ),
         )
     if not response:
@@ -831,11 +1038,16 @@ async def run_extractors(art: dict[str, Any], as_of: str) -> dict[str, str]:
         "options": build_options_payload(art, as_of),
     }
     sem = asyncio.Semaphore(concurrency())
-    tasks = [
-        call_extractor_async(sem, name, payload)
-        for name, payload in payloads.items()
-    ]
-    results = await asyncio.gather(*tasks)
+    async def _run_one(name: str, payload: str) -> tuple[str, str]:
+        try:
+            return await call_extractor_async(sem, name, payload)
+        except Exception as exc:  # noqa: BLE001 - one extractor should not kill the narrator.
+            message = f"[{name} Codex extractor failed after retries: {exc}]"
+            print(f"    {message}")
+            return name, message
+
+    tasks = [_run_one(name, payload) for name, payload in payloads.items()]
+    results = await asyncio.gather(*tasks, return_exceptions=False)
     return dict(results)
 
 
@@ -844,10 +1056,12 @@ def call_narrator(extractor_outputs: dict[str, str],
     """Single narrator call — receives extractor outputs + payload digest."""
     prompt = load_prompt("merge") + "\n\n" + final_style_guard(as_of)
     layout_skeleton = build_layout_skeleton(art, as_of)
+    story_brief = build_strategy_story_brief(art, as_of)
     payload = art.get("main_strategy_v2_backtest")
     payload = payload if isinstance(payload, dict) else None
     payload_digest = art.get("_us_daily_report_md", "")[:30000]  # cap to avoid token blow-up
     user_msg = (
+        f"### 策略叙事底稿（最高优先级）\n{story_brief}\n\n"
         f"### 宏观提取\n{extractor_outputs.get('macro', '[missing]')}\n\n"
         f"### 事件提取\n{extractor_outputs.get('event', '[missing]')}\n\n"
         f"### 量化提取\n{extractor_outputs.get('quant', '[missing]')}\n\n"
@@ -858,9 +1072,13 @@ def call_narrator(extractor_outputs: dict[str, str],
         f"### Payload Digest(交叉验证用)\n{payload_digest}\n\n"
         f"### 任务\n请按最终写作覆盖重写为日期 {as_of} 的完整美股日报。"
     )
-    narrative = call_llm(
-        prompt, user_msg, label="narrator:us",
-        temperature=0.2, max_tokens=4500,
+    narrative = _call_llm_with_retries(
+        prompt,
+        user_msg,
+        label="narrator:us",
+        temperature=0.2,
+        max_tokens=4500,
+        attempts=_env_int("US_NARRATOR_RETRIES", 2),
     )
     if not narrative:
         return None
@@ -876,16 +1094,33 @@ def call_narrator(extractor_outputs: dict[str, str],
             f"### 必须保留的版式骨架\n{layout_skeleton}\n\n"
             f"### 日期\n{as_of}"
         )
-        repaired = call_llm(
-            prompt,
-            repair_user_msg,
-            label="narrator:us:repair",
-            temperature=0.1,
-            max_tokens=4500,
-        )
-        if repaired:
-            validate_structured_us_report(repaired, as_of, payload)
-        return repaired
+        repair_attempts = _env_int("US_NARRATOR_REPAIR_RETRIES", 2)
+        last_error = str(exc)
+        for idx in range(1, repair_attempts + 1):
+            repaired = _call_llm_with_retries(
+                prompt,
+                repair_user_msg,
+                label=f"narrator:us:repair{idx}",
+                temperature=0.1,
+                max_tokens=4500,
+                attempts=1,
+            )
+            if not repaired:
+                continue
+            try:
+                validate_structured_us_report(repaired, as_of, payload)
+                return repaired
+            except RuntimeError as repair_exc:
+                last_error = str(repair_exc)
+                repair_user_msg = (
+                    f"上一版美股日报结构仍不合格: {repair_exc}\n\n"
+                    "继续只修复结构和版式,保留事实,必须输出完整报告。"
+                    "不要解释错误,不要输出检查过程。\n\n"
+                    f"### 不合格上一版\n{repaired}\n\n"
+                    f"### 必须保留的版式骨架\n{layout_skeleton}\n\n"
+                    f"### 日期\n{as_of}"
+                )
+        raise RuntimeError(f"US Codex narrator failed structured validation after repair: {last_error}")
 
 
 async def main_async(args) -> None:
@@ -913,6 +1148,9 @@ async def main_async(args) -> None:
     out_name = "us_daily_report.md" if args.overwrite else "us_daily_report_agent.md"
     out_path = write_agent_report(report_dir, out_name, narrative, as_of)
     print(f"  wrote {out_path} ({len(narrative)} chars)")
+    if args.overwrite:
+        agent_path = write_agent_report(report_dir, "us_daily_report_agent.md", narrative, as_of)
+        print(f"  synced {agent_path} ({len(narrative)} chars)")
 
 
 def main() -> None:

@@ -38,6 +38,16 @@ def parse_args() -> argparse.Namespace:
         choices=["off", "enforce", "expand", "enforce_expand"],
         default=None,
     )
+    parser.add_argument(
+        "--skip-us-narrator",
+        action="store_true",
+        help="Do not run the Codex US narrator after the deterministic generator.",
+    )
+    parser.add_argument(
+        "--skip-us-delivery-sync",
+        action="store_true",
+        help="Do not sync the Codex US report into quant-research-v1/reports.",
+    )
     parser.add_argument("--skip-backtest", action="store_true")
     parser.add_argument("--skip-validate", action="store_true")
     return parser.parse_args()
@@ -101,12 +111,36 @@ def validator_command(args: argparse.Namespace, report_date: str) -> list[str]:
     ]
 
 
+def us_narrator_command(report_date: str) -> list[str]:
+    return [
+        sys.executable,
+        "scripts/agents/run_us_narrator.py",
+        "--date",
+        report_date,
+        "--overwrite",
+    ]
+
+
+def sync_us_delivery_report(args: argparse.Namespace, report_date: str) -> None:
+    src = args.output_root / report_date / "us_daily_report.md"
+    if not src.exists():
+        raise FileNotFoundError(src)
+    dst = STACK_ROOT / "quant-research-v1" / "reports" / f"{report_date}_report_zh_post.md"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    dst.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    print(f"+ synced {src.relative_to(STACK_ROOT)} -> {dst.relative_to(STACK_ROOT)}", flush=True)
+
+
 def main() -> None:
     args = parse_args()
     report_date = args.date or date.today().isoformat()
     if not args.skip_backtest:
         run_command(backtest_command(args, report_date))
     run_command(generator_command(args, report_date))
+    if not args.skip_us_narrator:
+        run_command(us_narrator_command(report_date))
+        if not args.skip_us_delivery_sync:
+            sync_us_delivery_report(args, report_date)
     if not args.skip_validate:
         run_command(validator_command(args, report_date))
     print(f"Main Strategy V2 pipeline complete: {args.output_root / report_date}")

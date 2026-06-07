@@ -18,9 +18,10 @@
 
 - 输出语言:中文
 - 格式:固定标题 + 表格
-- 必读字段:`earnings_calendar.us`(财报日历)、`serenity_crosscheck`(Serenity 第三方 picks)、`nvda_investments`(NVDA 投资追踪)、`news_scored`(LLM 分类后的新闻)
+- 必读字段:`earnings_calendar.us`(财报日历)、`serenity_crosscheck`(Serenity 第三方 picks)、`congressional_trading`(国会议员交易/政策资金流)、`nvda_investments`(NVDA 投资追踪)、`news_scored`(LLM 分类后的新闻)
 - 财报日期 = 催化剂时钟;不得把"明天财报"单独升级为今日买入理由
 - Serenity 是第三方观点,不影响我方 ranker 决策;只列冲突 / 涨过头警报
+- Congressional Trading 是政策/资金流 overlay:同委员会多人买入只提高催化观察优先级,刚披露交易强调时间窗口,集中卖出触发风险复核;不得写成 AI source evidence,不得直接生成 R
 - NVDA 投资追踪:只列 verified=TRUE 的真实记录
 - 新闻新鲜度 < 24h 且 subject_match=true 才入"今日重大新闻"区
 - 数据缺失写 `[缺失]`,不给交易建议,不预测业绩
@@ -45,6 +46,11 @@
 - Stance 翻转: [N 个,列 prev→now]
 - 涨过头警报(我方 rank ≥70 + Serenity neutral/bearish): [list top 5]
 - 我方低估(Serenity prio ≥80 bullish + 我方 rank<50): [list]
+
+## Congressional Trading / 政策资金流
+| Symbol | signal | 人员/委员会 | 披露滞后 | 读法 | 角色 |
+|---|---|---|---:|---|---|
+(最多 10 行;无 artifact 则写 `NO_CONGRESSIONAL_TRADING_DATA`)
 
 ## 财报日历(未来 7 天 US 重点)
 | 日期 | 代码 | 财期 | EPS 预估 | EPS 实际 | Surprise |
