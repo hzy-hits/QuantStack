@@ -24,7 +24,6 @@ GROUP_LABELS = {
     "weekly": "Weekly Reports",
     "factor": "Factor Lab Daily",
     "paper": "Paper Trading",
-    "autoresearch": "Autoresearch",
     "maintenance": "Weekly Maintenance",
     "watchdog": "Watchdog",
 }

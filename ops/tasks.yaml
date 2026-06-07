@@ -1056,7 +1056,7 @@ tasks:
   ops.catch_up:
     # Catch-up runner for missed scheduled tasks. WSL2 suspends when idle and
     # cron does not replay missed jobs on resume; this re-runs research /
-    # factor / autoresearch / paper tasks that were due earlier TODAY but
+    # factor / paper tasks that were due earlier TODAY but
     # never succeeded. Runs every 15 min, offset from us.watchdog.
     group: watchdog
     schedule: "5,20,35,50 * * * *"

@@ -10,7 +10,7 @@ but never succeeded, and runs them late via ops/run_task.sh. run_task's
 flock makes a late run and a normal cron run mutually exclusive.
 
 Scope: only the light, cadence-flexible groups (research / factor /
-autoresearch / paper). The heavy market-pipeline runs (cn.* / us.* /
+paper). The heavy market-pipeline runs (cn.* / us.* /
 weekly.*) are deliberately excluded — running those hours late is worse
 than skipping (stale market timing, late emails, 4h jobs colliding).
 """
@@ -31,7 +31,7 @@ STATE_DIR = STACK_ROOT / "ops" / "state"
 RUN_TASK = STACK_ROOT / "ops" / "run_task.sh"
 CST = timezone(timedelta(hours=8))
 
-CATCHUP_GROUPS = {"research", "factor", "autoresearch", "paper"}
+CATCHUP_GROUPS = {"research", "factor", "paper"}
 GRACE_MINUTES = 20   # ignore a slot younger than this — let normal cron try first
 
 
