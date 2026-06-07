@@ -5,6 +5,7 @@ import importlib.util
 import sys
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 STACK_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = STACK_ROOT / "scripts" / "generate_main_strategy_v2_report.py"
@@ -136,6 +137,42 @@ class OptionsAnomalyReportSectionTests(unittest.TestCase):
         self.assertIn("LEAPS", text)
         self.assertIn("weekly 3.0x / LEAPS 8.0x", text)
 
+    def test_exact_options_artifact_date_does_not_fallback_for_daily_report(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            anomaly_root = root / "us_options_anomaly_radar"
+            tenor_root = root / "us_options_tenor_radar"
+            (anomaly_root / "2026-06-03").mkdir(parents=True)
+            (tenor_root / "2026-06-03").mkdir(parents=True)
+            (anomaly_root / "2026-06-03" / "options_anomaly.csv").write_text(
+                "symbol,as_of,spot_close\nNVDA,2026-06-03,215\n",
+                encoding="utf-8",
+            )
+            (tenor_root / "2026-06-03" / "options_tenor_signals.jsonl").write_text(
+                '{"symbol":"NVDA","pattern":"gamma_trap"}\n',
+                encoding="utf-8",
+            )
+
+            old_anomaly_root = self.module.OPTIONS_ANOMALY_ROOT
+            old_tenor_root = self.module.OPTIONS_TENOR_ROOT
+            self.module.OPTIONS_ANOMALY_ROOT = anomaly_root
+            self.module.OPTIONS_TENOR_ROOT = tenor_root
+            try:
+                self.assertEqual(
+                    self.module.load_options_anomaly_payload("2026-06-04", "2026-06-04"),
+                    [],
+                )
+                self.assertEqual(
+                    self.module.load_options_tenor_signals("2026-06-04", "2026-06-04"),
+                    [],
+                )
+                fallback_rows = self.module.load_options_anomaly_payload("2026-06-04")
+                self.assertEqual(fallback_rows[0]["source_date"], "2026-06-03")
+                self.assertEqual(fallback_rows[0]["fallback_used"], "true")
+            finally:
+                self.module.OPTIONS_ANOMALY_ROOT = old_anomaly_root
+                self.module.OPTIONS_TENOR_ROOT = old_tenor_root
+
     def test_production_summary_uses_us_trade_plan_fallback(self) -> None:
         payload = {
             "portfolio_risk_overlay": {
@@ -176,7 +213,7 @@ class OptionsAnomalyReportSectionTests(unittest.TestCase):
         self.assertIn("stop 94.00", action["risk_plan"])
         self.assertIn("target 110.00", action["risk_plan"])
 
-    def test_us_failed_ev_gate_blocks_execution_r(self) -> None:
+    def test_us_stable_alpha_warning_does_not_block_execution_r(self) -> None:
         payload = {
             "as_of": "2026-05-25",
             "strategy_alpha_bulletin": {
@@ -204,12 +241,15 @@ class OptionsAnomalyReportSectionTests(unittest.TestCase):
 
         summary = self.module.build_production_decision_summary(payload)
 
-        self.assertEqual(summary["actionable"], [])
-        self.assertEqual(summary["summary"]["us_r"], 0)
-        self.assertIn("US stable alpha gate not passed", summary["summary"]["top_blocker"])
-        self.assertEqual(summary["watch"][0]["symbol"], "AMZN")
+        self.assertEqual(summary["actionable"][0]["symbol"], "AMZN")
+        self.assertEqual(summary["summary"]["us_r"], 0.5)
+        self.assertIsNone(summary["summary"]["top_blocker"])
+        gate = summary["summary"]["us_execution_gate"]
+        self.assertTrue(gate["allowed"])
+        self.assertTrue(gate["stable_alpha_warning"])
+        self.assertIn("US stable alpha gate warning only", gate["top_warning"])
         gate_rows = [r for r in summary["no_trade"] if r["area"] == "US execution gate"]
-        self.assertEqual(gate_rows[0]["status"], "0R")
+        self.assertEqual(gate_rows[0]["status"], "pass_with_stable_alpha_warning")
 
     def test_cn_probability_pick_must_be_actionable(self) -> None:
         payload = {

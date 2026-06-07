@@ -245,6 +245,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cn-db", type=Path, default=STACK_ROOT / "quant-research-cn" / "data" / "quant_cn_report.duckdb")
     parser.add_argument("--promotion-db", type=Path, default=None, help="Optional alpha_factory_backtest.duckdb containing promoted_sleeves.")
     parser.add_argument(
+        "--congressional-trading-root",
+        type=Path,
+        default=STACK_ROOT / "reports" / "review_dashboard" / "congressional_trading",
+        help="Optional local artifact root for congressional trading rows.",
+    )
+    parser.add_argument(
         "--ai-infra-mode",
         choices=["off", "enforce", "expand", "enforce_expand"],
         default=None,
@@ -341,9 +347,13 @@ def build_us_market_data_status(db_path: Path, as_of: date) -> dict[str, Any]:
     status: dict[str, Any] = {
         "as_of": as_of.isoformat(),
         "prices_daily_latest_date": None,
+        "options_effective_cutoff_date": None,
         "options_analysis_latest_as_of": None,
+        "options_analysis_raw_latest_as_of": None,
         "options_chain_latest_as_of": None,
+        "options_chain_raw_latest_as_of": None,
         "options_sentiment_latest_as_of": None,
+        "options_sentiment_raw_latest_as_of": None,
         "market_quotes_latest_as_of": None,
         "market_quotes_latest_session": None,
         "market_quotes_latest_quote_time": None,
@@ -358,28 +368,40 @@ def build_us_market_data_status(db_path: Path, as_of: date) -> dict[str, Any]:
         if not table_exists(con, "prices_daily"):
             status.update({"stock_data_current": False, "state": "missing_prices_daily"})
             return status
-        row = con.execute("SELECT MAX(date) FROM prices_daily WHERE close IS NOT NULL").fetchone()
+        row = con.execute(
+            "SELECT MAX(date) FROM prices_daily WHERE close IS NOT NULL AND date <= CAST(? AS DATE)",
+            [as_of.isoformat()],
+        ).fetchone()
         latest = parse_date(as_iso(row[0]) or "") if row and row[0] is not None else None
-        if table_exists(con, "options_analysis"):
+
+        # The report label can be today's local date while US cash prices are
+        # still yesterday's completed session. Keep raw options freshness for
+        # diagnostics, but cap the effective options/gamma date to the stock
+        # close date so one payload never mixes 6/04 options with 6/03 stocks.
+        options_cutoff = latest if latest and latest <= as_of else as_of
+        status["options_effective_cutoff_date"] = options_cutoff.isoformat()
+
+        def _latest_as_of(table: str, cutoff: date) -> date | None:
             row = con.execute(
-                "SELECT MAX(as_of) FROM options_analysis WHERE as_of <= CAST(? AS DATE)",
-                [as_of.isoformat()],
+                f"SELECT MAX(as_of) FROM {table} WHERE as_of <= CAST(? AS DATE)",
+                [cutoff.isoformat()],
             ).fetchone()
-            value = parse_date(as_iso(row[0]) or "") if row and row[0] is not None else None
+            return parse_date(as_iso(row[0]) or "") if row and row[0] is not None else None
+
+        if table_exists(con, "options_analysis"):
+            raw_value = _latest_as_of("options_analysis", as_of)
+            value = _latest_as_of("options_analysis", options_cutoff)
+            status["options_analysis_raw_latest_as_of"] = raw_value.isoformat() if raw_value else None
             status["options_analysis_latest_as_of"] = value.isoformat() if value else None
         if table_exists(con, "options_chain_quotes"):
-            row = con.execute(
-                "SELECT MAX(as_of) FROM options_chain_quotes WHERE as_of <= CAST(? AS DATE)",
-                [as_of.isoformat()],
-            ).fetchone()
-            value = parse_date(as_iso(row[0]) or "") if row and row[0] is not None else None
+            raw_value = _latest_as_of("options_chain_quotes", as_of)
+            value = _latest_as_of("options_chain_quotes", options_cutoff)
+            status["options_chain_raw_latest_as_of"] = raw_value.isoformat() if raw_value else None
             status["options_chain_latest_as_of"] = value.isoformat() if value else None
         if table_exists(con, "options_sentiment"):
-            row = con.execute(
-                "SELECT MAX(as_of) FROM options_sentiment WHERE as_of <= CAST(? AS DATE)",
-                [as_of.isoformat()],
-            ).fetchone()
-            value = parse_date(as_iso(row[0]) or "") if row and row[0] is not None else None
+            raw_value = _latest_as_of("options_sentiment", as_of)
+            value = _latest_as_of("options_sentiment", options_cutoff)
+            status["options_sentiment_raw_latest_as_of"] = raw_value.isoformat() if raw_value else None
             status["options_sentiment_latest_as_of"] = value.isoformat() if value else None
         if table_exists(con, "market_quotes"):
             row = con.execute(
@@ -1037,9 +1059,14 @@ def summarize_us(
     start: date,
     as_of: date,
     promoted_rows: list[dict[str, Any]] | None = None,
+    *,
+    current_as_of: date | None = None,
+    options_as_of: date | None = None,
 ) -> dict[str, Any]:
+    current_as_of = current_as_of or as_of
+    options_as_of = options_as_of or current_as_of
     rows, status = load_us_rows(db_path, start, as_of)
-    options = load_us_options(db_path, as_of)
+    options = load_us_options(db_path, options_as_of)
     options_history = load_us_options_range(db_path, start, as_of)
     v2_rows = [row for row in rows if is_us_v2_policy(row)]
     v2_option_rows = [
@@ -1052,7 +1079,7 @@ def summarize_us(
     legacy_rows = [row for row in rows if is_us_legacy_policy(row)]
     v2_stock_net_rows = rows_with_return_cost(v2_rows, US_STOCK_ROUNDTRIP_COST_PCT)
 
-    current_rows, current_date, current_status = load_us_current_rows(db_path, as_of)
+    current_rows, current_date, current_status = load_us_current_rows(db_path, current_as_of)
     v2_metrics = compute_metrics("US V2 LOW/core/executable/trending", v2_rows)
     v2_stock_net_metrics = compute_metrics(
         f"US V2 stock-only net after {US_STOCK_ROUNDTRIP_COST_PCT:.2f}% roundtrip cost",
@@ -1125,7 +1152,7 @@ def summarize_us(
         current,
         query_us_theme_current_candidates(
             db_path,
-            as_of,
+            current_as_of,
             DEFAULT_US_THEME_SEED_MAP,
         ),
     )
@@ -2625,10 +2652,10 @@ def _decision_trigger(market: str, row: dict[str, Any], ranked: dict[str, Any], 
 def evaluate_us_execution_gate(payload: dict[str, Any]) -> dict[str, Any]:
     """Single production contract for US stock execution rows.
 
-    US actionables require the stable strategy gate to have an explicit passed
-    policy, and the stock price tape must be current for the report date. Options
-    may still render as context, but cannot rescue execution R when this gate is
-    closed.
+    US execution is driven by the AI-infra ranker, IV/HV health band, Gamma
+    Spring v3 and the portfolio risk regime. The older stable-alpha bulletin is
+    advisory here: it can explain haircuts and warnings, but it must not zero the
+    US book by itself. Stale stock tape remains a hard gate.
     """
     bulletin = payload.get("strategy_alpha_bulletin") or {}
     ev_status = str((bulletin.get("ev_status") or {}).get("us") or "unknown").lower()
@@ -2638,29 +2665,36 @@ def evaluate_us_execution_gate(payload: dict[str, Any]) -> dict[str, Any]:
     stock_current = data_status.get("stock_data_current")
     latest_stock_date = data_status.get("prices_daily_latest_date")
     as_of = payload.get("as_of")
-    reasons: list[str] = []
+    hard_reasons: list[str] = []
+    warnings: list[str] = []
 
     if bulletin and (ev_status != "passed" or not selected_policy):
-        reasons.append(
-            "US stable alpha gate not passed "
+        warnings.append(
+            "US stable alpha gate warning only "
             f"(ev_status={ev_status}, selected_policy={selected_policy or 'none'}, "
-            f"evaluated_through={evaluated_through or '-'})"
+            f"evaluated_through={evaluated_through or '-'}); "
+            "sizing is controlled by IV/HV + Gamma Spring v3 + risk regime"
         )
     if stock_current is False:
-        reasons.append(
+        hard_reasons.append(
             "US stock tape is stale or market is closed "
             f"(latest prices_daily={latest_stock_date or '-'}, report_date={as_of or '-'})"
         )
 
     return {
-        "allowed": not reasons,
+        "allowed": not hard_reasons,
         "ev_status": ev_status,
         "selected_policy": selected_policy,
         "evaluated_through": evaluated_through,
         "stock_data_current": stock_current,
         "latest_stock_date": latest_stock_date,
-        "reasons": reasons,
-        "top_blocker": "; ".join(reasons) if reasons else None,
+        "reasons": hard_reasons,
+        "hard_reasons": hard_reasons,
+        "warnings": warnings,
+        "stable_alpha_warning": bool(warnings),
+        "stable_alpha_mode": "warning_haircut_only",
+        "top_blocker": "; ".join(hard_reasons) if hard_reasons else None,
+        "top_warning": "; ".join(warnings) if warnings else None,
     }
 
 
@@ -2907,8 +2941,19 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
     no_trade = [
         {
             "area": "US execution gate",
-            "status": "pass" if us_gate["allowed"] else "0R",
-            "reason": us_gate["top_blocker"] or "stable alpha gate and stock tape are current",
+            "status": (
+                "pass_with_stable_alpha_warning"
+                if us_gate["allowed"] and us_gate.get("warnings")
+                else ("pass" if us_gate["allowed"] else "0R")
+            ),
+            "reason": (
+                us_gate.get("top_warning")
+                if us_gate["allowed"] and us_gate.get("warnings")
+                else (
+                    us_gate["top_blocker"]
+                    or "IV/HV + Gamma Spring v3 gate and stock tape are current"
+                )
+            ),
         },
         {
             "area": "US options",
@@ -3037,17 +3082,27 @@ def _latest_dated_subdir(root: Path, as_of: str) -> str | None:
     return candidates[-1] if candidates else None
 
 
-def load_options_anomaly_payload(as_of: str) -> list[dict[str, Any]]:
-    path = OPTIONS_ANOMALY_ROOT / as_of / "options_anomaly.csv"
-    source_date = as_of
+def _artifact_source_path(path: Path) -> str:
+    try:
+        return str(path.relative_to(STACK_ROOT))
+    except ValueError:
+        return str(path)
+
+
+def load_options_anomaly_payload(as_of: str, source_as_of: str | None = None) -> list[dict[str, Any]]:
+    artifact_as_of = source_as_of or as_of
+    path = OPTIONS_ANOMALY_ROOT / artifact_as_of / "options_anomaly.csv"
+    source_date = artifact_as_of
     fallback_used = False
     if not path.exists():
-        fallback = _latest_dated_subdir(OPTIONS_ANOMALY_ROOT, as_of)
+        if source_as_of is not None:
+            return []
+        fallback = _latest_dated_subdir(OPTIONS_ANOMALY_ROOT, artifact_as_of)
         if fallback is None:
             return []
         path = OPTIONS_ANOMALY_ROOT / fallback / "options_anomaly.csv"
         source_date = fallback
-        fallback_used = fallback != as_of
+        fallback_used = fallback != artifact_as_of
         if not path.exists():
             return []
     with path.open("r", encoding="utf-8") as handle:
@@ -3056,21 +3111,24 @@ def load_options_anomaly_payload(as_of: str) -> list[dict[str, Any]]:
         row.setdefault("requested_date", as_of)
         row.setdefault("source_date", source_date)
         row.setdefault("fallback_used", str(fallback_used).lower())
-        row.setdefault("source_path", str(path.relative_to(STACK_ROOT)))
+        row.setdefault("source_path", _artifact_source_path(path))
     return rows
 
 
-def load_options_tenor_signals(as_of: str) -> list[dict[str, Any]]:
-    path = OPTIONS_TENOR_ROOT / as_of / "options_tenor_signals.jsonl"
-    source_date = as_of
+def load_options_tenor_signals(as_of: str, source_as_of: str | None = None) -> list[dict[str, Any]]:
+    artifact_as_of = source_as_of or as_of
+    path = OPTIONS_TENOR_ROOT / artifact_as_of / "options_tenor_signals.jsonl"
+    source_date = artifact_as_of
     fallback_used = False
     if not path.exists():
-        fallback = _latest_dated_subdir(OPTIONS_TENOR_ROOT, as_of)
+        if source_as_of is not None:
+            return []
+        fallback = _latest_dated_subdir(OPTIONS_TENOR_ROOT, artifact_as_of)
         if fallback is None:
             return []
         path = OPTIONS_TENOR_ROOT / fallback / "options_tenor_signals.jsonl"
         source_date = fallback
-        fallback_used = fallback != as_of
+        fallback_used = fallback != artifact_as_of
         if not path.exists():
             return []
     out: list[dict[str, Any]] = []
@@ -3087,7 +3145,7 @@ def load_options_tenor_signals(as_of: str) -> list[dict[str, Any]]:
                 row.setdefault("requested_date", as_of)
                 row.setdefault("source_date", source_date)
                 row.setdefault("fallback_used", fallback_used)
-                row.setdefault("source_path", str(path.relative_to(STACK_ROOT)))
+                row.setdefault("source_path", _artifact_source_path(path))
                 out.append(row)
     return out
 
@@ -3235,6 +3293,10 @@ def build_cn_shadow_full(cn_db: Path, symbols: list[str], as_of: date) -> dict[s
 # scripts/sections/iv_view.py
 from sections.iv_view import build_options_verdicts  # noqa: E402
 from sections.index_skew import build_index_skew  # noqa: E402
+from sections.congressional_trading import (  # noqa: E402
+    build_congressional_trading_snapshot,
+    render_congressional_trading_section,
+)
 def load_my_book_overlay(as_of: date) -> dict[str, Any]:
     path = STACK_ROOT / "reports" / "review_dashboard" / "my_book_overlay" / as_of.isoformat() / "my_book_overlay.json"
     if not path.exists():
@@ -6267,6 +6329,17 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
         )
         con.execute(
             """
+            CREATE TABLE IF NOT EXISTS congressional_trading (
+                as_of DATE, symbol VARCHAR, state VARCHAR, score DOUBLE,
+                buy_count INTEGER, sell_count INTEGER, unique_lawmakers INTEGER,
+                latest_disclosure_date DATE, avg_disclosure_lag_days DOUBLE,
+                report_role VARCHAR, ai_universe_member BOOLEAN,
+                read_through VARCHAR, payload_json VARCHAR
+            )
+            """
+        )
+        con.execute(
+            """
             CREATE TABLE IF NOT EXISTS cn_lifecycle_research (
                 as_of DATE, scope VARCHAR, bucket_type VARCHAR, bucket VARCHAR,
                 n INTEGER, avg_pct DOUBLE, lcb80_pct DOUBLE,
@@ -6387,6 +6460,7 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
         con.execute("DELETE FROM option_real_bid_ask_ledger WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM option_real_bid_ask_legs WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM us_gamma_spring WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
+        con.execute("DELETE FROM congressional_trading WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM cn_lifecycle_research WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM profit_readiness WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
         con.execute("DELETE FROM pipeline_requirements_audit WHERE as_of = CAST(? AS DATE)", [payload["as_of"]])
@@ -6583,6 +6657,28 @@ def write_duckdb(path: Path, payload: dict[str, Any]) -> None:
                     row.get("gamma_v2_multiplier"),
                     row.get("management_signal"),
                     row.get("state"),
+                    json.dumps(row, ensure_ascii=False, default=str),
+                ],
+            )
+        for row in (payload.get("congressional_trading") or {}).get("rows") or []:
+            con.execute(
+                """
+                INSERT INTO congressional_trading
+                VALUES (CAST(? AS DATE), ?, ?, ?, ?, ?, ?, TRY_CAST(? AS DATE), ?, ?, ?, ?, ?)
+                """,
+                [
+                    payload["as_of"],
+                    row.get("symbol"),
+                    row.get("state"),
+                    row.get("score"),
+                    row.get("buy_count"),
+                    row.get("sell_count"),
+                    row.get("unique_lawmakers"),
+                    row.get("latest_disclosure_date"),
+                    row.get("avg_disclosure_lag_days"),
+                    row.get("report_role"),
+                    bool(row.get("ai_universe_member")),
+                    row.get("read_through"),
                     json.dumps(row, ensure_ascii=False, default=str),
                 ],
             )
@@ -7067,7 +7163,25 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     else:
         promotion_contract = load_promotion_contract(promotion_db, as_of)
     promoted_rows = promotion_contract.get("rows") or []
-    us = summarize_us(args.us_db, start, as_of, promoted_rows)
+    us_market_data_status = build_us_market_data_status(args.us_db, as_of)
+
+    def _status_date(field: str, default: date) -> date:
+        value = us_market_data_status.get(field)
+        parsed = parse_date(str(value)) if value else None
+        return parsed or default
+
+    us_effective_as_of = _status_date("effective_us_market_date", as_of)
+    us_options_chain_as_of = _status_date("options_chain_latest_as_of", us_effective_as_of)
+    us_options_sentiment_as_of = _status_date("options_sentiment_latest_as_of", us_options_chain_as_of)
+    us_options_artifact_as_of = us_options_chain_as_of or us_options_sentiment_as_of or us_effective_as_of
+    us = summarize_us(
+        args.us_db,
+        start,
+        as_of,
+        promoted_rows,
+        current_as_of=us_effective_as_of,
+        options_as_of=us_options_sentiment_as_of,
+    )
     cn = summarize_cn(args.cn_db, start, as_of, promoted_rows)
     limit_up = summarize_limit_up(args.cn_db, start, as_of)
     ranker_ai_infra_mode = getattr(args, "ai_infra_mode", None) or (
@@ -7080,7 +7194,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     cn_risk_regime = load_cn_risk_regime_payload(as_of.isoformat())
     us_regime_state = str((risk_regime or {}).get("state") or "hedge").lower()
     us_ranker = us_opportunity_ranker.build_ranker_payload(
-        as_of=as_of,
+        as_of=us_effective_as_of,
         candidates=us.get("current") or [],
         candidate_status="from_main_strategy_v2_current",
         us_db=args.us_db,
@@ -7168,11 +7282,16 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
             if row.get("symbol")
         }
     )
-    us_trade_plan = build_us_stock_trade_plan(args.us_db, us_trade_plan_symbols, as_of)
-    options_verdicts = build_options_verdicts(args.us_db, us_trade_plan_symbols, as_of)
+    us_trade_plan = build_us_stock_trade_plan(args.us_db, us_trade_plan_symbols, us_effective_as_of)
+    options_verdicts = build_options_verdicts(args.us_db, us_trade_plan_symbols, us_options_sentiment_as_of)
     gamma_spring_symbols = sorted({*us_trade_plan_symbols, "SPY", "QQQ", "SMH"})
-    gamma_spring = build_gamma_spring_snapshot(args.us_db, gamma_spring_symbols, as_of)
+    gamma_spring = build_gamma_spring_snapshot(args.us_db, gamma_spring_symbols, us_options_chain_as_of)
     index_skew = build_index_skew(args.us_db, as_of)
+    congressional_trading = build_congressional_trading_snapshot(
+        as_of,
+        artifact_root=args.congressional_trading_root,
+        ai_symbols=set(us_trade_plan_symbols),
+    )
     cn_basket_symbols = [
         str(row.get("symbol") or "").upper()
         for row in ((cn_ranker or {}).get("production_basket") or [])
@@ -7212,20 +7331,25 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "satellite_pool_report": satellite_pool_report,
         "ema_tape_overlay": ema_overlay,
         "strategy_alpha_bulletin": load_strategy_alpha_bulletin(as_of),
-        "us_market_data_status": build_us_market_data_status(args.us_db, as_of),
+        "us_market_data_status": us_market_data_status,
         "report_action_backtest_summary": load_report_action_backtest_summary(as_of.isoformat()),
         "us_trade_plan": us_trade_plan,
         "options_verdicts": options_verdicts,
         "gamma_spring": gamma_spring,
         "index_skew": index_skew,
+        "congressional_trading": congressional_trading,
         "cn_shadow_full": cn_shadow_full,
         "market_regime_score": build_market_regime_score(args.us_db, as_of),
         "serenity_crosscheck": build_serenity_crosscheck(
             args.us_db, as_of, (us_ranker or {}).get("all_rows") or []
         ),
         "fear_greed": load_fear_greed_payload(as_of.isoformat()),
-        "options_anomaly_rows": load_options_anomaly_payload(as_of.isoformat()),
-        "options_tenor_signals": load_options_tenor_signals(as_of.isoformat()),
+        "options_anomaly_rows": load_options_anomaly_payload(
+            as_of.isoformat(), us_options_artifact_as_of.isoformat()
+        ),
+        "options_tenor_signals": load_options_tenor_signals(
+            as_of.isoformat(), us_options_artifact_as_of.isoformat()
+        ),
         "bubble_hedge": bubble_hedge_payload,
         "capitulation": capitulation_payload,
         "risk_regime": risk_regime,
@@ -7293,6 +7417,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     (output_dir / "gamma_spring.json").write_text(
         json.dumps(payload.get("gamma_spring") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    (output_dir / "congressional_trading.md").write_text(
+        "\n".join(render_congressional_trading_section(payload, limit=60)),
+        encoding="utf-8",
+    )
+    (output_dir / "congressional_trading.json").write_text(
+        json.dumps(payload.get("congressional_trading") or {}, ensure_ascii=False, indent=2, sort_keys=True, default=str),
         encoding="utf-8",
     )
     (output_dir / "earnings_calendar.md").write_text(

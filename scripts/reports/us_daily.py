@@ -16,6 +16,7 @@ from typing import Any
 
 from lib.fmt import fmt_pct, fmt_r
 from sections.gamma_spring import render_gamma_spring_section
+from sections.congressional_trading import render_congressional_trading_section
 from sections.iv_view import render_iv_view_section
 from sections.index_skew import render_index_skew_section
 # render_us_left_side_section is a wrapper in main (injects
@@ -199,6 +200,7 @@ def render_us_standalone_report(payload: dict[str, Any]) -> str:
     lines += render_fear_greed_section(payload)
     lines += render_market_regime_score_section(payload)
     lines += render_serenity_crosscheck_section(payload)
+    lines += render_congressional_trading_section(payload)
     lines += render_options_anomaly_section(payload)
     lines += render_options_tenor_section(payload)
     lines += m.render_bubble_hedge_section(payload)

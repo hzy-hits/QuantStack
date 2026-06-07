@@ -214,15 +214,17 @@ def validate_forbidden_daily_copy(files: dict[str, str]) -> list[ValidationFailu
 def validate_us_gate(payload: dict[str, Any]) -> list[ValidationFailure]:
     failures: list[ValidationFailure] = []
     us_r, us_action_count = summary_us_exposure(payload)
-    bulletin = payload.get("strategy_alpha_bulletin") or {}
-    ev_status = str(((bulletin.get("ev_status") or {}).get("us")) or "").lower()
-    selected_policy = (bulletin.get("selected_policies") or {}).get("us")
-    gate_passed = ev_status == "passed" and bool(selected_policy)
-    if not gate_passed and (us_r > 0.000001 or us_action_count > 0):
+    summary = ((payload.get("production_decision_summary") or {}).get("summary") or {})
+    execution_gate = summary.get("us_execution_gate")
+    if (
+        isinstance(execution_gate, dict)
+        and execution_gate.get("allowed") is False
+        and (us_r > 0.000001 or us_action_count > 0)
+    ):
         failures.append(
             ValidationFailure(
-                "us_ev_gate_failed_with_execution_r",
-                f"ev_status.us={ev_status or '-'} selected_policy={selected_policy or '-'} "
+                "us_hard_gate_failed_with_execution_r",
+                f"top_blocker={execution_gate.get('top_blocker') or '-'} "
                 f"but us_r={us_r:.4f}, us_action_count={us_action_count}",
             )
         )

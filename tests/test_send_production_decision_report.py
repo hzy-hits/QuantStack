@@ -93,11 +93,32 @@ class MarketReportScopeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             report = Path(tmpdir) / "us_daily_report_agent.md"
             as_of = date.today().isoformat()
-            report.write_text(f"# 美股量化日报 — {as_of}\n\n## 一句话\n纯段落。\n", encoding="utf-8")
+            report.write_text(f"# 美股量化日报 — {as_of}\n\n## 策略主线\n纯段落。\n", encoding="utf-8")
             report.with_name(report.name + ".meta.json").write_text(
                 json.dumps({"as_of": as_of, "backend": "codex"}),
                 encoding="utf-8",
             )
+            self.assertFalse(module._is_fresh_codex_agent_report(report, as_of))
+
+    def test_agent_report_must_be_newer_than_payload(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report_dir = Path(tmpdir)
+            report = report_dir / "us_daily_report_agent.md"
+            as_of = date.today().isoformat()
+            report.write_text(structured_us_report(as_of), encoding="utf-8")
+            report.with_name(report.name + ".meta.json").write_text(
+                json.dumps({"as_of": as_of, "backend": "codex"}),
+                encoding="utf-8",
+            )
+            payload = report_dir / "main_strategy_v2_backtest.json"
+            payload.write_text("{}", encoding="utf-8")
+            old_time = report.stat().st_mtime
+            newer_time = old_time + 10
+            import os
+
+            os.utime(payload, (newer_time, newer_time))
+
             self.assertFalse(module._is_fresh_codex_agent_report(report, as_of))
 
     def test_disabled_narrator_refuses_fallback_delivery(self) -> None:
@@ -135,18 +156,18 @@ def structured_us_report(as_of: str) -> str:
     )
     return f"""# 美股量化日报 — {as_of}
 
-## 一句话
+## 策略主线
 Production 候选保留,IV/HV 与 Gamma 共同约束。
 
-## 市场状态
+## 市场结构
 | Metric | Value |
 |---|---|
 | VIX | 15 |
 
-## 今日交易清单
+## 交易计划
 {table}
 
-## 观察与风险
+## 风险与反证
 | Symbol | Status | Reason | Next check |
 |---|---|---|---|
 | AMD | watch | IV/HV high | next open |
@@ -158,6 +179,11 @@ Production 候选保留,IV/HV 与 Gamma 共同约束。
 | Symbol | Gamma state | Dealer proxy | Wall | Management |
 |---|---|---:|---|---|
 | NVDA | Gamma | +10% | wall | hold |
+
+### Congressional Trading / 政策资金流
+| Symbol | Signal | Lawmakers / committee | Disclosure lag | Read-through | Report role |
+|---|---|---|---:|---|---|
+| None | NO_CONGRESSIONAL_TRADING_DATA | - | - | no verified artifact | context_only |
 
 ## 催化与复核
 | Item | Date | Impact | Review |

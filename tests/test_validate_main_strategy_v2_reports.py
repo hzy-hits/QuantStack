@@ -123,11 +123,16 @@ class MainStrategyV2ReportValidatorTests(unittest.TestCase):
 
             self.assertEqual(failures, [])
 
-    def test_ev_failed_with_us_r_fails(self) -> None:
+    def test_stable_alpha_warning_allows_us_r(self) -> None:
         payload = self._clean_payload()
         payload["strategy_alpha_bulletin"] = {
             "ev_status": {"us": "failed"},
             "selected_policies": {"us": None},
+        }
+        payload["production_decision_summary"]["summary"]["us_execution_gate"] = {
+            "allowed": True,
+            "warnings": ["stable alpha warning only"],
+            "top_warning": "stable alpha warning only",
         }
         with TemporaryDirectory() as tmp:
             report_dir = Path(tmp) / "2026-05-25"
@@ -140,7 +145,30 @@ class MainStrategyV2ReportValidatorTests(unittest.TestCase):
 
             codes = {failure.code for failure in self.module.validate_report_dir(report_dir)}
 
-            self.assertIn("us_ev_gate_failed_with_execution_r", codes)
+            self.assertNotIn("us_ev_gate_failed_with_execution_r", codes)
+            self.assertNotIn("us_hard_gate_failed_with_execution_r", codes)
+
+    def test_stale_stock_data_with_us_r_fails(self) -> None:
+        payload = self._clean_payload()
+        payload["us_market_data_status"]["stock_data_current"] = False
+        payload["production_decision_summary"]["summary"]["us_execution_gate"] = {
+            "allowed": False,
+            "top_blocker": "US stock tape is stale",
+            "reasons": ["US stock tape is stale"],
+        }
+        with TemporaryDirectory() as tmp:
+            report_dir = Path(tmp) / "2026-05-25"
+            _write_report(
+                report_dir,
+                payload,
+                self._clean_cn_report(),
+                self._clean_us_report(),
+            )
+
+            codes = {failure.code for failure in self.module.validate_report_dir(report_dir)}
+
+            self.assertIn("us_hard_gate_failed_with_execution_r", codes)
+            self.assertIn("us_stale_stock_data_with_execution_r", codes)
 
     def test_old_options_trade_language_fails(self) -> None:
         with TemporaryDirectory() as tmp:

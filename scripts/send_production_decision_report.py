@@ -257,7 +257,7 @@ def replacement_report_text(text: str, as_of: str, session: str, market: str) ->
     body = text
     if body.startswith("# Main Strategy V2 Backtest"):
         body = "\n".join(body.splitlines()[2:]).lstrip()
-    body = body.replace("## 今日交易决策 / Production Decision", "## 今日交易清单")
+    body = body.replace("## 今日交易决策 / Production Decision", "## 交易计划")
     note = "> 新日报已替代旧 agent 报告；可交易名单、观察名单和风险说明分开读。"
     return f"{title}\n\n{note}\n\n{body}"
 
@@ -354,17 +354,19 @@ def _is_structured_us_agent_report(agent_md: Path) -> bool:
         return False
     required = [
         "# 美股量化日报",
-        "## 一句话",
-        "## 市场状态",
-        "## 今日交易清单",
-        "## 观察与风险",
+        "## 策略主线",
+        "## 市场结构",
+        "## 交易计划",
+        "## 风险与反证",
         "## 催化与复核",
         "## 附注",
-        "Production",
         "IV/HV",
         "Gamma",
+        "Congressional",
     ]
     if any(marker not in text for marker in required):
+        return False
+    if not any(marker in text for marker in ["Production", "正式执行", "可执行做多"]):
         return False
     return _markdown_table_count(text) >= 4
 
@@ -401,6 +403,9 @@ def _is_fresh_codex_agent_report(agent_md: Path, as_of: str) -> bool:
 
     mtime = _dt.fromtimestamp(agent_md.stat().st_mtime).date()
     if mtime not in {_date.fromisoformat(as_of), _date.today()}:
+        return False
+    payload_path = agent_md.parent / "main_strategy_v2_backtest.json"
+    if payload_path.exists() and agent_md.stat().st_mtime < payload_path.stat().st_mtime:
         return False
     if agent_md.name == "us_daily_report_agent.md" and not _is_structured_us_agent_report(agent_md):
         return False

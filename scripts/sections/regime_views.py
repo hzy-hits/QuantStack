@@ -217,13 +217,26 @@ def render_fear_greed_section(payload: dict[str, Any]) -> list[str]:
 
 def render_us_execution_gate_notice(payload: dict[str, Any]) -> list[str]:
     gate = ((payload.get("production_decision_summary") or {}).get("summary") or {}).get("us_execution_gate")
-    if not isinstance(gate, dict) or gate.get("allowed"):
+    if not isinstance(gate, dict):
         return []
+    if gate.get("allowed"):
+        warnings = gate.get("warnings") or []
+        if not warnings:
+            return []
+        lines = [
+            "## US Production Gate",
+            "",
+            "- 今日美股执行由 AI-infra ranker、IV/HV、Gamma Spring v3 和组合风险层控制；stable alpha gate 仅作 warning / haircut context。",
+        ]
+        for warning in warnings[:3]:
+            lines.append(f"- {warning}")
+        lines.append("")
+        return lines
     reasons = gate.get("reasons") or []
     lines = [
         "## US Production Gate",
         "",
-        "- 今日美股执行 R = 0；ranker、新闻和期权异动进入观察区。",
+        "- 今日美股执行 R = 0；触发硬门禁，ranker、新闻和期权异动进入观察区。",
     ]
     for reason in reasons[:3]:
         lines.append(f"- {reason}")
