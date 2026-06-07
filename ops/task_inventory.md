@@ -19,12 +19,12 @@ This inventory mirrors the active user crontab captured in
 | `paper.record` | `33 4 * * 2-6` | `factor-lab` | `python3 scripts/paper_trade.py record` | no | `factor-lab/logs/paper_YYYYMMDD.log` |
 | `paper.evaluate` | `47 7 * * 2-6` | `factor-lab` | `python3 scripts/paper_trade.py evaluate` | no | `factor-lab/logs/paper_YYYYMMDD.log` |
 | `paper.report` | `53 7 * * 2-6` | `factor-lab` | `python3 scripts/paper_trade.py report` | no | `factor-lab/logs/paper_YYYYMMDD.log` |
-| `autoresearch.cn.morning` | `0 6 * * 1-5` | `factor-lab` | `bash scripts/autoresearch.sh --market cn` | no | `factor-lab/logs/autoresearch_YYYYMMDD.log` |
-| `autoresearch.all.midday` | `0 10 * * 1-5` | `factor-lab` | `bash scripts/autoresearch.sh` | no | `factor-lab/logs/autoresearch_YYYYMMDD.log` |
-| `autoresearch.all.afternoon` | `0 14 * * 1-5` | `factor-lab` | `bash scripts/autoresearch.sh` | no | `factor-lab/logs/autoresearch_YYYYMMDD.log` |
 | `factor.maintenance.weekly` | `17 8 * * 6` | `factor-lab` | `python3 scripts/weekly_maintenance.py --days 250` | no | `factor-lab/logs/maintenance_YYYYMMDD.log` |
 | `us.watchdog.reboot` | `@reboot` | `quant-research-v1` | `sleep 180 && uv run python scripts/cron_watchdog.py` | no | `quant-research-v1/logs/cron_watchdog.log` |
 | `us.watchdog` | `12,27,42,57 * * * *` | `quant-research-v1` | `uv run python scripts/cron_watchdog.py` | no | `quant-research-v1/logs/cron_watchdog.log` |
 
 The generated root-only crontab is `ops/crontab.quant-stack`. It should not be
 installed until dry-run review passes.
+
+Autoresearch is intentionally not scheduled. Run `bash factor-lab/scripts/autoresearch.sh`
+manually for scoped research reviews only.

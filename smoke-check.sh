@@ -39,15 +39,40 @@ require_path() {
     fi
 }
 
+require_command() {
+    local command_name="$1"
+    local label="$2"
+    if [[ "$command_name" == */* ]]; then
+        if [[ -x "$command_name" ]]; then
+            pass "$label: $command_name"
+        else
+            fail "$label missing or not executable: $command_name"
+        fi
+    elif command -v "$command_name" >/dev/null 2>&1; then
+        pass "$label: $(command -v "$command_name")"
+    else
+        fail "$label missing from PATH: $command_name"
+    fi
+}
+
 latest_file() {
-    local pattern="$1"
-    ls -1t $pattern 2>/dev/null | head -n 1
+    "$PYTHON_BIN" - "$@" <<'PY'
+import glob
+import os
+import sys
+
+files = []
+for pattern in sys.argv[1:]:
+    files.extend(path for path in glob.glob(pattern) if os.path.isfile(path))
+if files:
+    print(max(files, key=os.path.getmtime))
+PY
 }
 
 parse_field() {
     local file="$1"
     local prefix="$2"
-    python3 - "$file" "$prefix" <<'PY'
+    "$PYTHON_BIN" - "$file" "$prefix" <<'PY'
 from pathlib import Path
 import sys
 
@@ -60,31 +85,11 @@ for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
 PY
 }
 
-payload_signal_date() {
-    local file="$1"
-    python3 - "$file" <<'PY'
-from pathlib import Path
-import re
-import sys
-
-path = Path(sys.argv[1])
-text = path.read_text(encoding="utf-8", errors="replace")
-needle = "## Factor Lab Independent Trading Signal"
-idx = text.find(needle)
-if idx < 0:
-    sys.exit(1)
-match = re.search(r"(A股|美股)\s+—\s+(\d{4}-\d{2}-\d{2})", text[idx:])
-if not match:
-    sys.exit(1)
-print(match.group(2))
-PY
-}
-
 section "Paths"
 require_path "$FACTOR_LAB_ROOT" "factor-lab root"
 require_path "$QUANT_CN_ROOT" "quant-research-cn root"
 require_path "$QUANT_US_ROOT" "quant-research-v1 root"
-require_path "$PYTHON_BIN" "python bin"
+require_command "$PYTHON_BIN" "python bin"
 
 section "Agent Defaults"
 echo "backend=$FACTOR_LAB_AGENT_BACKEND"
@@ -128,7 +133,7 @@ else
     sed -n '1,40p' /tmp/factorlab-us-signal.log
 fi
 
-section "Autoresearch"
+section "Autoresearch Artifacts"
 latest_cn_auto="$(latest_file "$FACTOR_LAB_ROOT/reports/autoresearch_cn_*.md")"
 latest_us_auto="$(latest_file "$FACTOR_LAB_ROOT/reports/autoresearch_us_*.md")"
 
@@ -141,7 +146,7 @@ if [[ -n "${latest_cn_auto:-}" ]]; then
         warn "CN autoresearch latest run has 0 experiments"
     fi
 else
-    fail "No CN autoresearch report found"
+    pass "No CN autoresearch report found; autoresearch is manual-only"
 fi
 
 if [[ -n "${latest_us_auto:-}" ]]; then
@@ -153,73 +158,48 @@ if [[ -n "${latest_us_auto:-}" ]]; then
         warn "US autoresearch latest run has 0 experiments"
     fi
 else
-    fail "No US autoresearch report found"
+    pass "No US autoresearch report found; autoresearch is manual-only"
 fi
 
 section "CN Reports"
-latest_cn_report="$(latest_file "$QUANT_CN_ROOT/reports/*_report_zh.md")"
-latest_cn_payload="$(latest_file "$QUANT_CN_ROOT/reports/*_payload_structural.md")"
+latest_cn_report="$(latest_file \
+    "$QUANT_CN_ROOT/reports/*_report_zh_evening.md" \
+    "$QUANT_CN_ROOT/reports/*_report_zh_morning.md" \
+    "$QUANT_CN_ROOT/reports/*_report_weekly_zh.md")"
 if [[ -n "${latest_cn_report:-}" ]]; then
     pass "CN final report exists: $(basename "$latest_cn_report")"
     ls -lh "$latest_cn_report"
-    if grep -q 'Factor Lab 因子实验报告' "$latest_cn_report"; then
-        pass "CN final report includes Factor Lab experiment section"
-    else
-        warn "CN final report missing Factor Lab experiment section"
-    fi
+    pass "CN legacy report presence checked; dashboard validator owns report contract"
 else
     fail "No CN final report found"
 fi
 
-if [[ -n "${latest_cn_payload:-}" ]]; then
-    pass "CN structural payload exists: $(basename "$latest_cn_payload")"
-    cn_payload_date="$(basename "$latest_cn_payload" | cut -d_ -f1)"
-    cn_signal_date="$(payload_signal_date "$latest_cn_payload" 2>/dev/null || true)"
-    if [[ -n "${cn_signal_date:-}" ]]; then
-        echo "CN payload signal date=$cn_signal_date payload_date=$cn_payload_date"
-        if [[ "$cn_signal_date" == "$cn_payload_date" ]]; then
-            pass "CN payload signal date matches payload date"
-        else
-            warn "CN payload signal date is stale"
-        fi
-    else
-        warn "CN payload missing parsable Factor Lab signal block"
-    fi
-else
-    fail "No CN structural payload found"
-fi
-
 section "US Reports"
 latest_us_report="$(latest_file "$QUANT_US_ROOT/reports/*_report_zh_*.md")"
-latest_us_payload="$(latest_file "$QUANT_US_ROOT/reports/*_payload_structural.md")"
 if [[ -n "${latest_us_report:-}" ]]; then
     pass "US final report exists: $(basename "$latest_us_report")"
     ls -lh "$latest_us_report"
-    if grep -q 'Factor Lab 因子实验报告' "$latest_us_report"; then
-        pass "US final report includes Factor Lab experiment section"
-    else
-        warn "US final report missing Factor Lab experiment section"
-    fi
+    pass "US legacy report presence checked; dashboard validator owns report contract"
 else
     fail "No US final report found"
 fi
 
-if [[ -n "${latest_us_payload:-}" ]]; then
-    pass "US structural payload exists: $(basename "$latest_us_payload")"
-    us_payload_date="$(basename "$latest_us_payload" | cut -d_ -f1)"
-    us_signal_date="$(payload_signal_date "$latest_us_payload" 2>/dev/null || true)"
-    if [[ -n "${us_signal_date:-}" ]]; then
-        echo "US payload signal date=$us_signal_date payload_date=$us_payload_date"
-        if [[ "$us_signal_date" == "$us_payload_date" ]]; then
-            pass "US payload signal date matches payload date"
-        else
-            warn "US payload signal date is stale"
-        fi
+section "Main Strategy V2"
+latest_dashboard_json="$(latest_file "$QUANT_STACK_ROOT/reports/review_dashboard/main_strategy_v2/*/main_strategy_v2_backtest.json")"
+if [[ -n "${latest_dashboard_json:-}" ]]; then
+    dashboard_dir="$(dirname "$latest_dashboard_json")"
+    dashboard_date="$(basename "$dashboard_dir")"
+    pass "Main Strategy V2 dashboard exists: $dashboard_date"
+    require_path "$dashboard_dir/cn_daily_report.md" "dashboard CN report"
+    require_path "$dashboard_dir/us_daily_report.md" "dashboard US report"
+    if "$PYTHON_BIN" "$QUANT_STACK_ROOT/scripts/validate_main_strategy_v2_reports.py" --date "$dashboard_date" >/tmp/main-strategy-v2-validate.log 2>&1; then
+        pass "Main Strategy V2 validator passed for $dashboard_date"
     else
-        warn "US payload missing parsable Factor Lab signal block"
+        fail "Main Strategy V2 validator failed for $dashboard_date"
+        sed -n '1,80p' /tmp/main-strategy-v2-validate.log
     fi
 else
-    fail "No US structural payload found"
+    fail "No Main Strategy V2 dashboard JSON found"
 fi
 
 section "Summary"

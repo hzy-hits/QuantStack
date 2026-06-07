@@ -145,11 +145,19 @@ def test_default_cn_tasks_use_slot_specific_report_files():
 
     morning = tasks["cn-morning"].completion
     assert morning.kind == "file_exists"
-    assert morning.path_template == "reports/{logical_date}_report_zh_morning.md"
+    assert morning.path_template == "quant-research-cn/reports/{logical_date}_report_zh_morning.md"
 
     evening = tasks["cn-evening"].completion
     assert evening.kind == "file_exists"
-    assert evening.path_template == "reports/{logical_date}_report_zh_evening.md"
+    assert evening.path_template == "quant-research-cn/reports/{logical_date}_report_zh_evening.md"
+
+
+def test_default_tasks_do_not_schedule_autoresearch():
+    tasks = {task.name for task in build_default_tasks(REPO_ROOT)}
+
+    assert "autoresearch-cn-06" not in tasks
+    assert "autoresearch-am" not in tasks
+    assert "autoresearch-pm" not in tasks
 
 
 def test_update_completion_state_marks_existing_artifact_complete(tmp_path: Path):

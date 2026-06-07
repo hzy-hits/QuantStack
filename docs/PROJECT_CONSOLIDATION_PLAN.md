@@ -366,10 +366,11 @@ factor-lab         -> apps/factor-lab
 | `paper.record` | Factor Lab paper trade record |
 | `paper.evaluate` | Factor Lab paper trade evaluate |
 | `paper.report` | Factor Lab paper trade report |
-| `autoresearch.cn.morning` | CN autoresearch |
-| `autoresearch.all.midday` | all-market autoresearch midday |
-| `autoresearch.all.afternoon` | all-market autoresearch afternoon |
 | `factor.maintenance.weekly` | weekly Factor Lab maintenance |
+
+Autoresearch is no longer a registered scheduled task. Run
+`bash factor-lab/scripts/autoresearch.sh [--market cn|us|all]` manually for
+scoped research reviews.
 
 ## Immediate Implementation Order
 

@@ -13,6 +13,10 @@ market producers; it standardizes how cron calls them.
 - `task_inventory.md`: human-readable inventory of scheduled jobs.
 - `review_packet.sh`: creates a review handoff under `reports/review_packets/`.
 
+Autoresearch is manual-only. It is intentionally excluded from
+`tasks.yaml`/`crontab.quant-stack`; run `bash factor-lab/scripts/autoresearch.sh`
+directly for scoped research reviews.
+
 ## Dry Run
 
 ```bash

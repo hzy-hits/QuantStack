@@ -44,7 +44,9 @@ tasks:
     # Asia/Shanghai 21:30-04:00 (EDT) or 22:30-05:00 (EST) = US 9:30-16:00 ET.
     # Run every 30min during US trading hours (M-F US, so Mon-Sat in CST).
     # Overlapping hour ranges intentionally cover both DST variants.
-    schedule: "*/30 21-23 * * 1-5,*/30 0-5 * * 2-6"
+    schedules:
+      - "*/30 21-23 * * 1-5"
+      - "*/30 0-5 * * 2-6"
     cwd: ""
     command: ["python3", "scripts/intraday/refresh_index_chains.py"]
     log: ops/logs/intraday.index_refresh.log
@@ -251,60 +253,6 @@ tasks:
     owner: factor_lab
     outputs:
       - factor-lab/reports
-
-  autoresearch.cn.morning:
-    group: autoresearch
-    schedule: "0 6 * * 1-5"
-    cwd: factor-lab
-    command: ["bash", "scripts/autoresearch.sh", "--market", "cn"]
-    log: ops/logs/autoresearch.cn.morning.log
-    legacy_log: factor-lab/logs/autoresearch_{cst_yyyymmdd}.log
-    lock: ops/state/autoresearch.cn.morning.lock
-    timeout_minutes: 180
-    sends_email: false
-    market: cn
-    session: morning
-    owner: factor_lab
-    outputs:
-      - factor-lab/runtime/autoresearch
-      - factor-lab/reports/autoresearch_exports/ai_supply_chain
-      - factor-lab/research_rollups
-
-  autoresearch.all.midday:
-    group: autoresearch
-    schedule: "0 10 * * 1-5"
-    cwd: factor-lab
-    command: ["bash", "scripts/autoresearch.sh"]
-    log: ops/logs/autoresearch.all.midday.log
-    legacy_log: factor-lab/logs/autoresearch_{cst_yyyymmdd}.log
-    lock: ops/state/autoresearch.all.midday.lock
-    timeout_minutes: 180
-    sends_email: false
-    market: all
-    session: midday
-    owner: factor_lab
-    outputs:
-      - factor-lab/runtime/autoresearch
-      - factor-lab/reports/autoresearch_exports/ai_supply_chain
-      - factor-lab/research_rollups
-
-  autoresearch.all.afternoon:
-    group: autoresearch
-    schedule: "0 14 * * 1-5"
-    cwd: factor-lab
-    command: ["bash", "scripts/autoresearch.sh"]
-    log: ops/logs/autoresearch.all.afternoon.log
-    legacy_log: factor-lab/logs/autoresearch_{cst_yyyymmdd}.log
-    lock: ops/state/autoresearch.all.afternoon.lock
-    timeout_minutes: 180
-    sends_email: false
-    market: all
-    session: afternoon
-    owner: factor_lab
-    outputs:
-      - factor-lab/runtime/autoresearch
-      - factor-lab/reports/autoresearch_exports/ai_supply_chain
-      - factor-lab/research_rollups
 
   factor.maintenance.weekly:
     group: maintenance

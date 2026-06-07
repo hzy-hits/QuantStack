@@ -91,8 +91,8 @@ Rust 这层管:顺序、超时、错误传播、状态写入、邮件投递。
 06:00-08:00  数据 ingest            cn_flow / cn_index / satellite_index / wedge_instruments / fear_greed
 09:00        US 因子日跑            factor.us.daily(→ daily_factors.sh us)
 04:00        CN 因子日跑            factor.cn.daily
-10:00 / 14:00 autoresearch           autoresearch.all.midday / .afternoon(Factor Mining 模式仅在 hour ∉ [9,12])
-                                    autoresearch.cn.morning(06:00,Factor Mining)
+手动        autoresearch           `bash factor-lab/scripts/autoresearch.sh ...`
+                                    仅用于专项因子研究,不再 cron 日跑
 11:00-12:00  AI-infra 研究           bfs_discovery / expansion_candidates / source_ingest / promotion_plan /
                                     source_review_readiness / cn_ai_evidence_verify / production_universe_refresh /
                                     evidence_card_drafts / ai_supercycle_readiness / ai_tape_cross_compare
@@ -118,9 +118,7 @@ Rust 这层管:顺序、超时、错误传播、状态写入、邮件投递。
 |---|---|---|
 | `factor.cn.daily` | 04:00 工作日 | CN 因子挖掘(bootstrap + money gate) |
 | `factor.us.daily` | 09:00 周二-周六 | US 因子挖掘 |
-| `autoresearch.cn.morning` | 06:00 工作日 | CN 因子假设生成(LLM agent,Factor Mining 模式) |
-| `autoresearch.all.midday` | 10:00 工作日 | Strategy Optimization 模式(网格搜索 + SigReg,**不产 autoresearch.jsonl**) |
-| `autoresearch.all.afternoon` | 14:00 工作日 | Factor Mining 模式(US + CN 因子假设,产 jsonl) |
+| `autoresearch` | 手动 | 专项因子研究。日跑已停用,避免低边际收益的 LLM 公式搜索继续污染 tracked runtime/journal。入口仍是 `bash factor-lab/scripts/autoresearch.sh [--market cn|us|all]` |
 | `factor.maintenance.weekly` | 周六 08:17 | 因子健康度维护 |
 | `paper.record/.evaluate/.report` | 04:33 / 07:47 / 07:53 周二-周六 | 纸面交易簿 |
 
