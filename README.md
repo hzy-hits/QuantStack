@@ -239,6 +239,9 @@ quant-stack/
 
 - [Refactor Plan](REFACTOR_PLAN.md): 拆分
   `scripts/generate_main_strategy_v2_report.py`(11,105 → 7,581 行,进行中)。
+- [Production Hardening Plan](docs/plans/2026-06-10-production-hardening.md):
+  执行 gate 硬断言 / narrator 校验强化 / ops depends_on / 晋级 alpha 告警 /
+  setup 闸门决策 / regime 连续化(2026-06-10 review 的 6 项修复)。
 
 **归档:** 已完成或被取代的 plan/audit/handoff 在
 [docs/archive/](docs/archive/README.md)(CLAUDE_HANDOFF、
