@@ -226,4 +226,4 @@ why each name cleared the gates; (3) the wedge/victim/confirmation read;
 *Companion docs:*
 - *`CLAUDE.md` — developer instructions and pipeline architecture*
 - *`ai_infra/docs/` — BFS methodology, G0-G4 evidence gates, financials/options methodology*
-- *`CLAUDE_HANDOFF.md` — current pipeline state and follow-ups*
+- *root `docs/ARCHITECTURE.md` — stack-wide runtime authority (handoff log archived at root `docs/archive/CLAUDE_HANDOFF.md`)*

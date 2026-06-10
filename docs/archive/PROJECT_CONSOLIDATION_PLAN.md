@@ -1,5 +1,7 @@
 # Project Consolidation Plan
 
+> **ARCHIVED 2026-06-10** — Phase 0-4 已完成(ops/ task registry、统一 crontab、review packet、scripts/sleeves 拆分均已落地);Phase 5 物理搬目录被明确搁置。注意:schema 提案中的 depends_on 从未实现。
+
 Date: 2026-05-09
 
 ## Goal

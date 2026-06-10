@@ -1,5 +1,7 @@
 # AI Infra Specialist Pipeline Reorg
 
+> **ARCHIVED 2026-06-10** — 已完成:AI-infra 专业户改造已落地(universe/证据门/research.* 任务群均在生产)。现状见 docs/ARCHITECTURE.md。
+
 Date: 2026-05-13
 
 ## Goal

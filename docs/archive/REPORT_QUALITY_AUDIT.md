@@ -1,5 +1,7 @@
 # Report Quality Audit
 
+> **ARCHIVED 2026-06-10** — 2026-05-08 的点状审计,早于 narrator 架构;报告质量约束现由 docs/REPORT_DELIVERY_CONTRACT.md 与 narrator prompt 合同承载。
+
 This audit translates the goal "reports should make sense and guide trading"
 into concrete checks. It is not enough for a pipeline to finish; the report must
 separate executable tickets from research, show evidence, state blockers, and

@@ -1,6 +1,6 @@
 """US daily report Codex narrator — extractor + narrator pipeline.
 
-Phase D.2 of PHASE_D_PLAN.md.
+Phase D.2 of docs/archive/PHASE_D_PLAN.md.
 
 Architecture:
     payload (loaded from existing JSON artifacts)

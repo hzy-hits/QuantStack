@@ -1,5 +1,7 @@
 # Phase D — US Agent + Narrator Architecture
 
+> **ARCHIVED 2026-06-10** — 已完成:US agent+narrator 架构已上线(scripts/agents/run_us_narrator.py,实际 backend=codex 而非计划中的 DeepSeek)。注意:计划承诺的 programmatic fallback 未实现,narrator 失败即整报失败。
+
 **目标**: US daily report 走 `program → payload → 4 extractor + 1 narrator → final report`,对齐 CN 端架构(`quant-research-cn/prompts/`)。
 
 **当前状态**: US daily 100% 由 `scripts/generate_main_strategy_v2_report.py` 硬拼 markdown。CN 已有 5 prompt 跑 DeepSeek 走 agent-narrator。

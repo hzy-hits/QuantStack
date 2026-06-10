@@ -1,5 +1,7 @@
 # Claude Handoff
 
+> **ARCHIVED 2026-06-10** — 2026-05-13 时代的 agent 交接日志(十余个批次工作记录)。仓库现状请读 docs/ARCHITECTURE.md 与根 AGENTS.md。
+
 版本日期：2026-05-13
 
 这份文档用于把当前 Quant Stack 项目交给 Claude 或其他 agent 接手。先读本文件，再按下面的顺序读详细文档。

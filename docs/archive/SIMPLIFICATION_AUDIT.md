@@ -1,5 +1,7 @@
 # Simplification and Overdesign Audit
 
+> **ARCHIVED 2026-06-10** — 2026-05-08 的点状审计,结论已消化进后续重构(REFACTOR_PLAN/PROJECT_CONSOLIDATION)。
+
 This audit identifies which parts of the stack should remain modular, which are
 overdesigned, and which simplifications are available but not fully used.
 

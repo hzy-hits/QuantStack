@@ -7,7 +7,7 @@ research systems. The rule is deliberately narrow:
 narrate the result.**
 
 The active product direction is narrower than a general market research stack:
-Quant Stack is being reorganized into an AI-infra specialist fund pipeline.
+Quant Stack is an AI-infra specialist fund pipeline (reorg completed 2026-05).
 Broad market data is still allowed for benchmark, hedge, liquidity and macro
 context, but production stock candidates should come from the `ai_infra`
 universe or source-reviewed promotion path.
@@ -183,40 +183,67 @@ This prevents historical `algorithm_postmortem` from collapsing into all
 
 ```text
 quant-stack/
+├── ops/                      # task registry (tasks.yaml), unified cron runner, logs, state
 ├── crates/
 │   ├── quant-stack-core      # shared alpha gate, bulletin, report model
-│   ├── quant-stack-cli       # root daily control plane
+│   ├── quant-stack-cli       # root daily control plane (target/release/quant-stack)
+│   ├── quant-fetcher         # US data fetcher (Finnhub/FRED/SEC/Polymarket)
 │   └── quant-stack-py        # thin PyO3 bindings for tests/notebooks/legacy Python
-├── scripts/
-│   └── score_strategy_stability_gate.py  # Python fallback/compat gate
+├── scripts/                  # ~36 research.* component tasks, radars, report pipeline,
+│   ├── lib/ sleeves/ agents/ #   shared helpers, alpha sleeves, LLM narrator agents
+│   └── generate_main_strategy_v2_report.py  # main report generator (refactor in progress)
+├── ai_infra/                 # AI-infra research OS: universe, evidence, BFS discovery
 ├── quant-research-v1/        # US producer, report, agents, delivery
 ├── quant-research-cn/        # A-share producer, report, agents, delivery
-└── factor-lab/               # research factor discovery
+├── factor-lab/               # research factor discovery + paper trading
+├── data/                     # shared DuckDB (strategy backtest history)
+├── reports/                  # review_dashboard + intraday (gitignored)
+└── docs/                     # operating docs (see index below) + docs/archive/
 ```
 
 ## Operating Docs
 
-- [Claude Handoff](CLAUDE_HANDOFF.md): current repository location, latest
-  pushed commits, validation notes, agent read order, and a ready-to-use
-  handoff prompt for Claude or another agent.
-- [Agent Operating Manual](AGENTS.md): the first entrypoint for future agents;
-  defines the AI-infra specialist fund objective, source-review promotion path,
-  universe boundary, report contract, and common commands.
-- [AI Infra Specialist Pipeline Reorg](docs/AI_INFRA_SPECIALIST_PIPELINE_REORG.md):
-  how the project should stop behaving like a broad-market screener and become
-  an AI-infra-only research, ranking, allocation, and benchmark-attribution
-  pipeline.
+权威入口与阅读顺序(2026-06-10 整理;归档规则见 [docs/archive/](docs/archive/README.md)):
+
+**现状权威(先读这两份):**
+
+- [Architecture Reference](docs/ARCHITECTURE.md): single source of truth for
+  what runs where — 数据层 / Rust 编排 / `research.*` 组件 / narrator 叙事层 /
+  已知坑与操作速查。
+- [Agent Operating Manual](AGENTS.md): agent 首入口;AI-infra 专业户目标、
+  source-review 晋级路径、universe 边界、执行规则。
+
+**边界与合同(改代码前查):**
+
 - [Module Boundaries](docs/MODULE_BOUNDARIES.md): what each market, shared
   crate, Factor Lab, options, and reporting module owns.
 - [AI Supercycle Pipeline Contract](docs/AI_SUPERCYCLE_PIPELINE_CONTRACT.md):
-  production-candidate, source-evidence, and report constraints for the
-  AI-supercycle workflow.
-- [Report Quality Audit](docs/REPORT_QUALITY_AUDIT.md): concrete criteria for a
-  report that can guide trading decisions without inventing tickets.
-- [Simplification Audit](docs/SIMPLIFICATION_AUDIT.md): overdesign risks,
-  unused simplification paths, and the next cleanup backlog.
-- [Loopholes and Fixes](docs/LOOPHOLES_AND_FIXES.md): process loopholes found
-  in the daily strategy loop and the concrete enforcement fixes.
+  production-candidate, source-evidence, and report constraints.
+- [Report Delivery Contract](docs/REPORT_DELIVERY_CONTRACT.md): research
+  artifacts vs user-facing daily reports.
+
+**投资框架与研究备忘:**
+
+- [AI Infra Investment Mandate](docs/AI_INFRA_INVESTMENT_MANDATE.md):
+  投资哲学与边界。
+- [AI Infra Quant Fund Integration](docs/AI_INFRA_QUANT_FUND_INTEGRATION.md):
+  `ai_infra` 研究 OS 与量化系统的集成关系。
+- [AI Infra Research Mainlines](docs/AI_INFRA_RESEARCH_MAINLINES.md):
+  产业链主线研究框架(与 `ai_infra/` 冲突时以后者为准)。
+- [HBM / CoWoS Deep Dive](docs/AI_INFRA_HBM_COWOS_DEEP_DIVE.md):
+  source-review gated 研究备忘。
+- [Factor Family OOS Review 2026-06-07](docs/FACTOR_FAMILY_OOS_REVIEW_2026-06-07.md):
+  因子家族 OOS 失败审查与隔离决定。
+
+**进行中的计划:**
+
+- [Refactor Plan](REFACTOR_PLAN.md): 拆分
+  `scripts/generate_main_strategy_v2_report.py`(11,105 → 7,581 行,进行中)。
+
+**归档:** 已完成或被取代的 plan/audit/handoff 在
+[docs/archive/](docs/archive/README.md)(CLAUDE_HANDOFF、
+PROJECT_CONSOLIDATION_PLAN、PHASE_D_PLAN、AI_INFRA_SPECIALIST_PIPELINE_REORG、
+ALPHA_SLEEVE_ENGINEERING_PLAN 及三份 2026-05-08 审计),**不反映现状**。
 
 ## Verification
 

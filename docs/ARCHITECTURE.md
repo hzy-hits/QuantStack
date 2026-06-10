@@ -3,7 +3,7 @@
 Single source of truth for **what runs where**. Read this before asking
 "是不是混了 / 老代码还在不 / cron 跑了啥".
 
-Date: 2026-05-20 · Maintainer: operator + Claude Code
+Date: 2026-06-10 · Maintainer: operator + Claude Code
 
 ---
 
@@ -74,6 +74,15 @@ cn.evening       18:00 工作日             .                  quant-stack dail
 之后是 factor lab refresh、组件产物加载、`generate_main_strategy_v2_report.py`
 合成 R-based 决策报告、`send_production_decision_report.py` 发邮件等。
 Rust 这层管:顺序、超时、错误传播、状态写入、邮件投递。
+
+**叙事层(narrator)**:日报正文不是程序拼的模板 —— US 走
+`scripts/agents/run_us_narrator.py`、CN 走 `scripts/agents/run_cn_narrator.py`
+(分别由 `run_main_strategy_v2_report_pipeline.py` 和
+`send_production_decision_report.py` 的 `_ensure_narrator` 拉起):
+多个 extractor + 1 个 narrator,backend=**codex CLI**。
+**没有 programmatic fallback** —— narrator 失败(如 codex 配额耗尽)整个
+报告任务直接失败,不会发降级版报告。设计记录见
+`docs/archive/PHASE_D_PLAN.md`(其中承诺的 fallback 未实现)。
 
 **为啥 `us.premarket` 的 cwd 是 `quant-research-v1` 而 `cn.morning` 是 `.`** —— 历史包袱。
 `run_full.sh` 还住在老 US 仓目录,但里面就是 `exec "$STACK_ROOT/target/release/quant-stack"`,完全等价。
@@ -259,6 +268,9 @@ python3 scripts/snapshot_universe_membership.py
 - **WSL2 cron 是 best-effort** —— Windows 睡/WSL idle 关机时不跑,**不补跑**。
   `ops.catch_up` 醒来后 15 分钟内会补,但前提是它装进了 live crontab
   (`crontab ops/crontab.quant-stack`)。
+- **narrator 吃 codex CLI 配额** —— extractor/narrator 全走 codex,配额耗尽当天
+  US/CN 日报全部断供(2026-06-10 实例:catch_up 重试也只会再次失败)。
+  配额恢复后手动补:`python3 scripts/agents/run_us_narrator.py --date YYYY-MM-DD --overwrite`。
 - **US prices/options 滞后 1 个交易日** —— `us.postmarket` 早 5 点拉的是**前一日**收盘。
   日报的"期权读数" loader 已有 `_latest_dated_subdir` 回退,会读最新可用日期,不再 n/a。
 - **CN 周一缺口** —— 周一 NY 日历昨天=周日,无数据。`check_us_ready` fallback
@@ -278,7 +290,7 @@ python3 scripts/snapshot_universe_membership.py
 ## 12. 历史包袱(留着没废,但不影响主链)
 
 - `scripts/run_alpha_sleeve_backtest.py` —— Alpha sleeve 工程的回测,
-  休眠状态,绑着 `docs/ALPHA_SLEEVE_ENGINEERING_PLAN.md`。
+  休眠状态,绑着 `docs/archive/ALPHA_SLEEVE_ENGINEERING_PLAN.md`(已归档)。
 - 老的 `quant-research-v1/scripts/run_full.sh` —— 就是个 exec shell,只剩"找正确的 quant-stack 二进制"的逻辑。
 
 **注:`quant-research-v1/scripts/run_daily.py` 不是历史包袱** —— 它是 Rust

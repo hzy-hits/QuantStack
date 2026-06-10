@@ -1,12 +1,12 @@
 # Quant Stack Agent Operating Manual
 
-版本日期：2026-05-13
+版本日期：2026-06-10
 
 本文件是后续 agent 进入本仓库时的顶层入口。先读这里，再读被引用的详细文档。
 
 ## 一句话目标
 
-Quant Stack 要收敛成一套 AI Infra 专门基金研究管线，而不是泛市场股票扫描器：
+Quant Stack 是一套 AI Infra 专门基金研究管线，而不是泛市场股票扫描器：
 
 ```text
 ai_infra 原文研究 / BFS 发现
@@ -23,13 +23,16 @@ ai_infra 原文研究 / BFS 发现
 ## Agent 必读顺序
 
 1. 本文件：仓库目标、边界和执行规则。
-2. `CLAUDE_HANDOFF.md`：给 Claude/其他 agent 的当前仓库状态、验证结果和接手提示。
-3. `docs/AI_INFRA_SPECIALIST_PIPELINE_REORG.md`：AI Infra 专门基金改造方案。
+2. `docs/ARCHITECTURE.md`：**现状唯一权威** —— 什么在跑、在哪跑、数据层、
+   narrator 叙事层、已知坑、操作速查。
+3. `docs/MODULE_BOUNDARIES.md`：US producer、CN producer、Factor Lab、shared gate、reporting 的职责边界。
 4. `docs/AI_SUPERCYCLE_PIPELINE_CONTRACT.md`：生产候选、source evidence、报告约束。
 5. `docs/AI_INFRA_QUANT_FUND_INTEGRATION.md`：`ai_infra` 与量化系统的集成关系。
-6. `docs/MODULE_BOUNDARIES.md`：US producer、CN producer、Factor Lab、shared gate、reporting 的职责边界。
-7. `docs/PROJECT_CONSOLIDATION_PLAN.md`：当前不要乱搬目录，先用 root ops/control plane 收敛。
-8. `ai_infra/START_HERE.md` 和 `ai_infra/docs/README.md`：`ai_infra` 的研究入口。
+6. `ai_infra/START_HERE.md` 和 `ai_infra/docs/README.md`：`ai_infra` 的研究入口。
+
+已完成或被取代的历史计划（specialist reorg、project consolidation、Phase D、
+CLAUDE_HANDOFF 交接日志等）都在 `docs/archive/`（见其 README 清单），
+**不要当作现状依据**。
 
 `ai_infra` 方法论文档：
 
@@ -237,7 +240,8 @@ python3 -m unittest \
   tests.test_send_production_decision_report
 ```
 
-更多当前 specialist smoke tests、source-review loop、rebalance ledger 命令见 `CLAUDE_HANDOFF.md`。
+更多操作速查（手动跑 task、catch-up、回测、证据门验证）见 `docs/ARCHITECTURE.md` §10；
+历史命令记录在 `docs/archive/CLAUDE_HANDOFF.md`。
 
 共享控制面示例：
 

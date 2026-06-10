@@ -1,5 +1,7 @@
 # Alpha Sleeve Engineering Plan
 
+> **ARCHIVED 2026-06-10** — 已完成主体:sleeve 模块已建成(scripts/sleeves/),回测脚本休眠(见 docs/ARCHITECTURE.md 历史包袱节)。
+
 Date: 2026-05-09
 
 ## Objective

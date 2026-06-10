@@ -1,5 +1,7 @@
 # Loopholes and Fixes
 
+> **ARCHIVED 2026-06-10** — 2026-05-08 的修复清单,所列漏洞均已修复(文内即为 Implemented Fixes 记录)。
+
 This is the implementation checklist for the "do not trust the strategy blindly"
 loop. The target is not 100% market certainty; that is impossible. The target is
 100% process enforcement for the parts this repo controls:
