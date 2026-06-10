@@ -12,7 +12,7 @@
 
 - 所有定时任务在 `ops/tasks.yaml` 注册,`ops/run_task.sh <task_id>` 执行;crontab 由 `ops/render_cron.py` 生成,不要手改 crontab。
 - 美股日报链:`us.premarket`(20:00)/ `us.postmarket`(05:00)+ 12:25 `research.main_strategy_v2_report`;A股:`cn.morning`(08:30)/ `cn.evening`(18:00),走 Rust `target/release/quant-stack`。
-- 报告正文由 LLM narrator 生成(backend=codex CLI)。**codex 配额耗尽当天 US/CN 日报会断供,没有 fallback**;恢复后补:`python3 scripts/agents/run_us_narrator.py --date YYYY-MM-DD --overwrite`。
+- 报告正文由 LLM narrator 生成:codex CLI 为主,失败自动 fallback 到 DeepSeek(`deepseek-v4-pro`;`QUANT_NARRATOR_FALLBACK=none` 可关,`QUANT_NARRATOR_BACKEND=deepseek` 可切主后端)。手动补跑:`python3 scripts/agents/run_us_narrator.py --date YYYY-MM-DD --overwrite`。
 - `reports/` 和各 DuckDB 不进 git;DuckDB 单写者,手动跑任务可能与正在跑的 cron 撞文件锁。
 - WSL2 cron 不补跑;`ops.catch_up` 每 15 分钟补当天漏跑的 research/factor/paper 任务。
 

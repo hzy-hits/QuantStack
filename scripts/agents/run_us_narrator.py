@@ -34,7 +34,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 SCRIPTS_DIR = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
-from codex_backend import backend, call_llm, concurrency  # noqa: E402
+from codex_backend import (  # noqa: E402
+    backend,
+    call_llm,
+    concurrency,
+    runtime_backend_summary,
+    runtime_model_summary,
+)
 from sections.gamma_spring import build_gamma_spring_snapshot, render_gamma_spring_section  # noqa: E402
 from validate_main_strategy_v2_reports import validate_us_report_text_against_payload  # noqa: E402
 
@@ -78,8 +84,8 @@ def write_agent_report(report_dir: Path, out_name: str, narrative: str, as_of: s
     out_path.write_text(narrative, encoding="utf-8")
     meta = {
         "as_of": as_of,
-        "backend": backend(),
-        "model": os.environ.get("CODEX_MODEL", "gpt-5.5"),
+        "backend": runtime_backend_summary(),
+        "model": runtime_model_summary(),
         "reasoning_effort": os.environ.get("CODEX_REASONING_EFFORT", "high"),
         "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "script": Path(__file__).name,

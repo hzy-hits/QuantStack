@@ -79,10 +79,12 @@ Rust 这层管:顺序、超时、错误传播、状态写入、邮件投递。
 `scripts/agents/run_us_narrator.py`、CN 走 `scripts/agents/run_cn_narrator.py`
 (分别由 `run_main_strategy_v2_report_pipeline.py` 和
 `send_production_decision_report.py` 的 `_ensure_narrator` 拉起):
-多个 extractor + 1 个 narrator,backend=**codex CLI**。
-**没有 programmatic fallback** —— narrator 失败(如 codex 配额耗尽)整个
-报告任务直接失败,不会发降级版报告。设计记录见
-`docs/archive/PHASE_D_PLAN.md`(其中承诺的 fallback 未实现)。
+多个 extractor + 1 个 narrator,统一走 `scripts/agents/codex_backend.py`。
+后端链:**codex CLI 为主,失败自动 fallback 到 DeepSeek API**
+(默认 `deepseek-v4-pro`,2026-06-10 起;key 复用 quant-research-cn
+config 的 `api.deepseek_key`)。`QUANT_NARRATOR_FALLBACK=none` 恢复
+fail-closed,`QUANT_NARRATOR_BACKEND=deepseek` 直接切主后端。
+设计记录见 `docs/archive/PHASE_D_PLAN.md`。
 
 **为啥 `us.premarket` 的 cwd 是 `quant-research-v1` 而 `cn.morning` 是 `.`** —— 历史包袱。
 `run_full.sh` 还住在老 US 仓目录,但里面就是 `exec "$STACK_ROOT/target/release/quant-stack"`,完全等价。
@@ -268,9 +270,10 @@ python3 scripts/snapshot_universe_membership.py
 - **WSL2 cron 是 best-effort** —— Windows 睡/WSL idle 关机时不跑,**不补跑**。
   `ops.catch_up` 醒来后 15 分钟内会补,但前提是它装进了 live crontab
   (`crontab ops/crontab.quant-stack`)。
-- **narrator 吃 codex CLI 配额** —— extractor/narrator 全走 codex,配额耗尽当天
-  US/CN 日报全部断供(2026-06-10 实例:catch_up 重试也只会再次失败)。
-  配额恢复后手动补:`python3 scripts/agents/run_us_narrator.py --date YYYY-MM-DD --overwrite`。
+- **narrator 吃 codex CLI 配额** —— 配额耗尽时自动 fallback 到 DeepSeek
+  (2026-06-10 起;此前会整天断供)。报告 `meta.json` 的 `backend` 字段
+  如实记录实际产出后端。手动补跑:
+  `python3 scripts/agents/run_us_narrator.py --date YYYY-MM-DD --overwrite`。
 - **US prices/options 滞后 1 个交易日** —— `us.postmarket` 早 5 点拉的是**前一日**收盘。
   日报的"期权读数" loader 已有 `_latest_dated_subdir` 回退,会读最新可用日期,不再 n/a。
 - **CN 周一缺口** —— 周一 NY 日历昨天=周日,无数据。`check_us_ready` fallback

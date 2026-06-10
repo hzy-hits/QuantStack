@@ -28,7 +28,13 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from codex_backend import backend, call_llm, concurrency  # noqa: E402
+from codex_backend import (  # noqa: E402
+    backend,
+    call_llm,
+    concurrency,
+    runtime_backend_summary,
+    runtime_model_summary,
+)
 # Reuse the section slicer + payload join helpers from the US narrator.
 from run_us_narrator import _join_payload_sections, _slice_md_sections  # noqa: E402
 
@@ -73,8 +79,8 @@ def write_agent_report(report_dir: Path, out_name: str, narrative: str, as_of: s
     out_path.write_text(narrative, encoding="utf-8")
     meta = {
         "as_of": as_of,
-        "backend": backend(),
-        "model": os.environ.get("CODEX_MODEL", "gpt-5.5"),
+        "backend": runtime_backend_summary(),
+        "model": runtime_model_summary(),
         "reasoning_effort": os.environ.get("CODEX_REASONING_EFFORT", "high"),
         "generated_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
         "script": Path(__file__).name,
