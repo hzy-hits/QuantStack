@@ -3058,14 +3058,29 @@ def load_bubble_hedge_payload(as_of: str) -> dict[str, Any] | None:
 
 
 def load_report_action_backtest_summary(as_of: str) -> dict[str, Any] | None:
+    source_as_of = as_of
     path = REPORT_ACTION_BACKTEST_ROOT / as_of / "report_action_backtest_summary.json"
     if not path.exists():
-        return None
+        # Morning sends (cn.morning 08:30) run before today's 12:25 backtest
+        # task — fall back to the latest dated artifact at/below as_of (same
+        # convention as the options loaders). Without this the delivery
+        # contract's Realized Horizon Edge requirement can never pass before
+        # noon. source_as_of records the lineage.
+        fallback = _latest_dated_subdir(REPORT_ACTION_BACKTEST_ROOT, as_of)
+        if not fallback:
+            return None
+        source_as_of = fallback
+        path = REPORT_ACTION_BACKTEST_ROOT / fallback / "report_action_backtest_summary.json"
+        if not path.exists():
+            return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    payload.setdefault("source_as_of", source_as_of)
+    return payload
 
 
 # B.14: realized_horizon_edge section + helpers → scripts/sections/realized_horizon.py
