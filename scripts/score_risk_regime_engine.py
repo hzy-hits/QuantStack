@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime
@@ -71,6 +72,40 @@ GREED_EXTREME = 75.0            # Fear & Greed at/above this = extreme greed
 FEAR_EXTREME = 30.0             # Fear & Greed at/below this = fear
 MOVE_CALM = 80.0                # MOVE below this = Treasury market calm / risk-on
 MOVE_VIX_RATES_STRESS = 6.0     # MOVE/VIX at/above this = rates vol dominates stress
+
+
+def _smoothstep(value: float | None, lo: float, hi: float) -> float:
+    """0→1 ramp between lo and hi (smooth, clamped); None → 0."""
+    if value is None:
+        return 0.0
+    t = max(0.0, min(1.0, (value - lo) / (hi - lo)))
+    return t * t * (3.0 - 2.0 * t)
+
+
+def wedge_pressure(*, corr: float | None, move_level: float | None, move_rising: bool,
+                   tlt_ret_20d: float | None, hyg_ret_20d: float | None) -> float:
+    """0..1 continuous wedge pressure.
+
+    The binary wedge triggers have cliff edges: 2026-06-10 read corr 0.446
+    (<0.5), MOVE 77 (<80), TLT -0.51% (>-2%), HYG -0.45% (>-1%) — every signal
+    marginally un-tripped → full 1.00x. This score turns the same inputs into
+    a continuous discount ramp starting BELOW each binary threshold.
+    """
+    corr_p = _smoothstep(corr, 0.35, CORR_FLIP_THRESHOLD)
+    move_p = _smoothstep(move_level, 70.0, MOVE_CALM) * (1.0 if move_rising else 0.5)
+    tlt_p = _smoothstep(-(tlt_ret_20d if tlt_ret_20d is not None else 0.0),
+                        1.0, -TLT_WEDGE_DRAWDOWN_PCT)
+    hyg_p = _smoothstep(-(hyg_ret_20d if hyg_ret_20d is not None else 0.0),
+                        0.5, -HYG_CREDIT_STRESS_PCT)
+    return round(0.35 * corr_p + 0.25 * move_p + 0.25 * tlt_p + 0.15 * hyg_p, 4)
+
+
+def continuous_multiplier(*, state: str, base_multiplier: float, pressure: float) -> float:
+    """Shadow multiplier: only the full-size hedge state gets the continuous
+    discount (other states are already discounted); floor = wedge tier."""
+    if state != "hedge":
+        return base_multiplier
+    return round(max(R_MULTIPLIER["wedge"], base_multiplier * (1.0 - 0.35 * pressure)), 2)
 
 
 @dataclass(frozen=True)
@@ -382,18 +417,39 @@ def main() -> int:
         capitulation=capitulation,
     )
 
+    signals = decision.signals or {}
+    pressure = wedge_pressure(
+        corr=signals.get("smh_tlt_corr_20d"),
+        move_level=signals.get("move_level"),
+        move_rising=bool((signals.get("move_chg_20d") or 0) > 0),
+        tlt_ret_20d=signals.get("tlt_ret_20d_pct"),
+        hyg_ret_20d=signals.get("hyg_ret_20d_pct"),
+    )
+    r_cont = continuous_multiplier(
+        state=decision.state, base_multiplier=decision.r_multiplier, pressure=pressure)
+
     payload = {
         "as_of": as_of,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "framework": "hedge_wedge_confirm_press",
         **decision.as_dict(),
+        # Shadow continuous multiplier (docs/plans/2026-06-10-production-hardening.md
+        # Task 6). Consumers read r_multiplier; flip via QUANT_REGIME_CONTINUOUS=1
+        # only after backtest A/B + >=10 trading days of shadow diff review.
+        "wedge_pressure": pressure,
+        "r_multiplier_continuous": r_cont,
+        "r_multiplier_source": "binary",
     }
+    if os.environ.get("QUANT_REGIME_CONTINUOUS") == "1":
+        payload["r_multiplier"] = r_cont
+        payload["r_multiplier_source"] = "continuous"
     out_dir = write_radar_outputs(
         args.output_root, as_of, "risk_regime", payload, render_markdown(as_of, decision),
     )
     print(
         f"risk regime: {decision.state.upper()} "
-        f"(R x{decision.r_multiplier:.2f}) → {out_dir / 'risk_regime.json'}"
+        f"(R x{decision.r_multiplier:.2f}, shadow continuous x{r_cont:.2f} "
+        f"pressure {pressure:.2f}) → {out_dir / 'risk_regime.json'}"
     )
     return 0
 
