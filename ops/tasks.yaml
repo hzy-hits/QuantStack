@@ -487,6 +487,7 @@ tasks:
     # corrects any fresh auto-stamps, and BEFORE production_universe_refresh
     # (12:07) / main_strategy_v2 (12:25).
     group: research
+    depends_on: [research.ai_infra_promotion_plan]
     schedule: "0 12 * * 1-5"
     cwd: .
     command:
@@ -510,6 +511,7 @@ tasks:
     # and BEFORE main_strategy_v2_report (12:25) so the snapshot reflects
     # today's promotions.
     group: research
+    depends_on: [research.source_review_readiness]
     schedule: "7 12 * * 1-5"
     cwd: .
     command:
@@ -686,6 +688,7 @@ tasks:
     # -0.20 to -0.35, DTE 30-60 when available). Runs AFTER bubble_hedge_radar
     # because it reads victims from bubble_hedge.json.
     group: research
+    depends_on: [research.bubble_hedge_radar]
     schedule: "16 12 * * 1-5"
     cwd: .
     command:
@@ -709,6 +712,7 @@ tasks:
     # risk-regime engine's 5th state (CAPITULATION). Runs AFTER
     # bubble_hedge_radar (12:14), BEFORE risk_regime_engine (12:17).
     group: research
+    depends_on: [research.bubble_hedge_radar]
     schedule: "15 12 * * 1-5"
     cwd: .
     command:
@@ -731,6 +735,7 @@ tasks:
     # confirmed) every day, plus LEAPS-call suggestions for high-beta wash-out
     # names when capitulation fires. Runs AFTER capitulation_radar (12:15).
     group: research
+    depends_on: [research.capitulation_radar]
     schedule: "16 12 * * 1-5"
     cwd: .
     command:
@@ -755,6 +760,7 @@ tasks:
     # Runs AFTER bubble_hedge_radar (12:14) + capitulation_radar (12:15),
     # BEFORE main_strategy_v2 (12:25).
     group: research
+    depends_on: [research.bubble_hedge_radar, research.capitulation_radar]
     schedule: "17 12 * * 1-5"
     cwd: .
     command:
@@ -779,6 +785,7 @@ tasks:
     # Runs AFTER bubble_hedge_radar (12:14, for the MOVE layer), BEFORE
     # main_strategy_v2 (12:25).
     group: research
+    depends_on: [research.bubble_hedge_radar]
     schedule: "18 12 * * 1-5"
     cwd: .
     command:
@@ -837,6 +844,7 @@ tasks:
 
   research.main_strategy_v2_report:
     group: research
+    depends_on: [research.risk_regime_engine, research.production_universe_refresh]
     schedule: "25 12 * * 1-5"
     cwd: .
     command:
@@ -866,6 +874,7 @@ tasks:
 
   research.production_basket_audit:
     group: research
+    depends_on: [research.main_strategy_v2_report]
     schedule: "27 12 * * 1-5"
     cwd: .
     command:

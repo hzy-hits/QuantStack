@@ -25,6 +25,12 @@ from pathlib import Path
 
 import yaml
 
+from tasklib import (
+    cron_matches as _matches,
+    order_by_dependency,
+    parse_cron_field as _parse_field,
+)
+
 STACK_ROOT = Path(__file__).resolve().parents[1]
 TASKS_YAML = STACK_ROOT / "ops" / "tasks.yaml"
 STATE_DIR = STACK_ROOT / "ops" / "state"
@@ -33,43 +39,6 @@ CST = timezone(timedelta(hours=8))
 
 CATCHUP_GROUPS = {"research", "factor", "paper"}
 GRACE_MINUTES = 20   # ignore a slot younger than this — let normal cron try first
-
-
-def _parse_field(field: str, lo: int, hi: int) -> set[int]:
-    """Expand one cron field (supports '*', 'a', 'a-b', comma lists)."""
-    if field == "*":
-        return set(range(lo, hi + 1))
-    out: set[int] = set()
-    for part in field.split(","):
-        if part == "*":
-            out.update(range(lo, hi + 1))
-        elif "-" in part:
-            a, b = part.split("-")
-            out.update(range(int(a), int(b) + 1))
-        else:
-            out.add(int(part))
-    return out
-
-
-def _matches(expr: str, dt: datetime) -> bool:
-    """True if a 5-field cron expression matches datetime dt."""
-    parts = expr.split()
-    if len(parts) != 5:
-        return False
-    minute, hour, dom, month, dow = parts
-    if dt.minute not in _parse_field(minute, 0, 59):
-        return False
-    if dt.hour not in _parse_field(hour, 0, 23):
-        return False
-    if dt.day not in _parse_field(dom, 1, 31):
-        return False
-    if dt.month not in _parse_field(month, 1, 12):
-        return False
-    cron_dow = dt.isoweekday() % 7          # Mon=1..Sat=6, Sun=0
-    dow_set = _parse_field(dow, 0, 7)
-    if 7 in dow_set:                        # cron allows 7 for Sunday
-        dow_set.add(0)
-    return cron_dow in dow_set
 
 
 def most_recent_fire(expr: str, now: datetime) -> datetime | None:
@@ -112,7 +81,9 @@ def find_missed(now: datetime) -> list[tuple[str, datetime]]:
         last = _last_success(task_id)
         if last is None or last < fire:
             missed.append((task_id, fire))
-    return missed
+    # depends_on targets first, so a blocked dependent finds its dependency
+    # already replayed in the same catch-up pass.
+    return order_by_dependency(missed, tasks)
 
 
 def main() -> int:

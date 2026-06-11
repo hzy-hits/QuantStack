@@ -113,9 +113,121 @@ def materialize_task(task_id: str, date_override: str | None = None) -> dict[str
         "sends_email": bool(rendered.get("sends_email")),
         "owner": rendered.get("owner") or "",
         "outputs": rendered.get("outputs") or [],
+        "depends_on": list(rendered.get("depends_on") or []),
     }
     return out
 
 
 def to_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True)
+
+
+CST_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def parse_cron_field(field: str, lo: int, hi: int) -> set[int]:
+    """Expand one cron field (supports '*', 'a', 'a-b', comma lists, '*/n')."""
+    if field == "*":
+        return set(range(lo, hi + 1))
+    out: set[int] = set()
+    for part in field.split(","):
+        if part == "*":
+            out.update(range(lo, hi + 1))
+        elif part.startswith("*/"):
+            step = int(part[2:])
+            out.update(range(lo, hi + 1, step))
+        elif "-" in part:
+            a, b = part.split("-")
+            out.update(range(int(a), int(b) + 1))
+        else:
+            out.add(int(part))
+    return out
+
+
+def cron_matches(expr: str, dt: datetime) -> bool:
+    """True if a 5-field cron expression matches datetime dt."""
+    parts = expr.split()
+    if len(parts) != 5:
+        return False
+    minute, hour, dom, month, dow = parts
+    if dt.minute not in parse_cron_field(minute, 0, 59):
+        return False
+    if dt.hour not in parse_cron_field(hour, 0, 23):
+        return False
+    if dt.day not in parse_cron_field(dom, 1, 31):
+        return False
+    if dt.month not in parse_cron_field(month, 1, 12):
+        return False
+    cron_dow = dt.isoweekday() % 7          # Mon=1..Sat=6, Sun=0
+    dow_set = parse_cron_field(dow, 0, 7)
+    if 7 in dow_set:                        # cron allows 7 for Sunday
+        dow_set.add(0)
+    return cron_dow in dow_set
+
+
+def _scheduled_today(task: dict[str, Any], now: datetime) -> bool:
+    """True if any of the task's cron day-fields match today (time ignored)."""
+    exprs = [task.get("schedule")] if task.get("schedule") else list(task.get("schedules") or [])
+    for expr in exprs:
+        if not expr or str(expr).startswith("@"):
+            continue
+        parts = str(expr).split()
+        if len(parts) != 5:
+            continue
+        _minute, _hour, dom, month, dow = parts
+        if now.day not in parse_cron_field(dom, 1, 31):
+            continue
+        if now.month not in parse_cron_field(month, 1, 12):
+            continue
+        dow_set = parse_cron_field(dow, 0, 7)
+        if 7 in dow_set:
+            dow_set.add(0)
+        if now.isoweekday() % 7 in dow_set:
+            return True
+    return False
+
+
+def unmet_dependencies(task: dict[str, Any], *, registry: dict[str, dict[str, Any]],
+                       state_dir: Path, now: datetime) -> list[str]:
+    """depends_on entries that are scheduled today but have no success today (CST).
+
+    A dependency that is not scheduled today (weekend/holiday cadence) counts
+    as met so dependents are never dead-blocked.
+    """
+    unmet: list[str] = []
+    for dep_id in task.get("depends_on") or []:
+        dep = registry.get(dep_id)
+        if dep is None or not _scheduled_today(dep, now):
+            continue
+        success_path = state_dir / f"{dep_id}.last_success.json"
+        try:
+            finished = datetime.fromisoformat(
+                json.loads(success_path.read_text(encoding="utf-8"))["finished_at"])
+        except (OSError, ValueError, KeyError):
+            unmet.append(dep_id)
+            continue
+        if finished.tzinfo is None:
+            finished = finished.replace(tzinfo=CST_TZ)
+        if finished.astimezone(CST_TZ).date() != now.astimezone(CST_TZ).date():
+            unmet.append(dep_id)
+    return unmet
+
+
+def order_by_dependency(missed: list[tuple[str, Any]],
+                        registry: dict[str, dict[str, Any]]) -> list[tuple[str, Any]]:
+    """Order (task_id, due) items so depends_on targets run first (stable)."""
+    pending = {task_id for task_id, _ in missed}
+    ordered: list[tuple[str, Any]] = []
+    remaining = list(missed)
+    for _ in range(len(missed) + 1):
+        progressed = False
+        for item in list(remaining):
+            deps = set((registry.get(item[0]) or {}).get("depends_on") or [])
+            if not deps & pending:
+                ordered.append(item)
+                pending.discard(item[0])
+                remaining.remove(item)
+                progressed = True
+        if not progressed:
+            return ordered + remaining  # cycle fallback: keep original order
+    return ordered

@@ -14,7 +14,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TextIO
 
-from tasklib import STACK_ROOT, load_registry, materialize_task, tasks, to_json
+from tasklib import (
+    CST_TZ,
+    STACK_ROOT,
+    load_registry,
+    materialize_task,
+    tasks,
+    to_json,
+    unmet_dependencies,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -95,6 +103,26 @@ def run_task(task: dict[str, object]) -> int:
     lock_fh.truncate()
     lock_fh.write(str(os.getpid()))
     lock_fh.flush()
+
+    if not os.environ.get("RUN_TASK_IGNORE_DEPS"):
+        unmet = unmet_dependencies(
+            task,
+            registry=tasks(),
+            state_dir=STACK_ROOT / "ops" / "state",
+            now=datetime.now(CST_TZ),
+        )
+        if unmet:
+            print(
+                f"task blocked on dependencies: {task['task_id']} <- {','.join(unmet)} "
+                "(catch_up retries within 15min; RUN_TASK_IGNORE_DEPS=1 to bypass)",
+                file=sys.stderr,
+            )
+            write_state(task, "last_blocked", {
+                "task_id": task["task_id"],
+                "blocked_at": utc_now(),
+                "unmet": unmet,
+            })
+            return 75
 
     tee = open_logs(task)
     started = utc_now()

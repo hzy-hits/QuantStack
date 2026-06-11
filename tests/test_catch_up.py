@@ -14,6 +14,9 @@ SCRIPT_PATH = STACK_ROOT / "ops" / "catch_up.py"
 def _load_module():
     if "catch_up" in sys.modules:
         return sys.modules["catch_up"]
+    ops_dir = str(STACK_ROOT / "ops")
+    if ops_dir not in sys.path:
+        sys.path.insert(0, ops_dir)  # catch_up does `from tasklib import ...`
     spec = importlib.util.spec_from_file_location("catch_up", SCRIPT_PATH)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
