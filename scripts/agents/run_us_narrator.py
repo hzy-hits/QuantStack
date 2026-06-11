@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -845,6 +846,16 @@ def build_strategy_story_brief(art: dict[str, Any], as_of: str) -> str:
 """.strip()
 
 
+# Style-guard enforcement (mirrors final_style_guard): emoji/decoration ban and
+# internal-field-name ban. Repair loop consumes these errors automatically.
+_EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF☀-➿⬀-⯿️]")
+_BANNED_INTERNAL_TOKENS = [
+    "提取器", "payload", "digest", "merge-agent", "user_msg", "system prompt",
+    "stable_alpha_gate", "ev_status", "production_decision_summary",
+    "execution_blocked_0r", "active_watch", "ranked_watch",
+]
+
+
 def _markdown_table_count(text: str) -> int:
     lines = text.splitlines()
     count = 0
@@ -877,6 +888,23 @@ def validate_structured_us_report(text: str, as_of: str, payload: dict[str, Any]
             raise RuntimeError(f"US narrator output missing required marker: {marker}")
     if not any(marker in text for marker in ["Production", "正式执行", "可执行做多"]):
         raise RuntimeError("US narrator output missing execution marker: Production/正式执行")
+    allowed_h2 = {
+        "## 策略主线", "## 市场结构", "## 交易计划",
+        "## 风险与反证", "## 催化与复核", "## 附注",
+    }
+    extra_h2 = [ln.strip() for ln in text.splitlines()
+                if ln.strip().startswith("## ") and ln.strip() not in allowed_h2]
+    if extra_h2:
+        raise RuntimeError(f"US narrator output has unexpected H2 sections: {extra_h2[:5]}")
+    emoji_hits = _EMOJI_RE.findall(text)
+    if emoji_hits:
+        raise RuntimeError(
+            f"US narrator output contains emoji/decoration: {sorted(set(emoji_hits))[:8]}")
+    internal_hits = [token for token in _BANNED_INTERNAL_TOKENS if token in text]
+    lowered = text.lower()
+    internal_hits += [token for token in ("gpt-5.5", "deepseek") if token in lowered]
+    if internal_hits:
+        raise RuntimeError(f"US narrator output leaks internal field names: {internal_hits}")
     if payload:
         failures = validate_us_report_text_against_payload(payload, text, "us_narrator_output")
         if failures:
@@ -1100,7 +1128,9 @@ def call_narrator(extractor_outputs: dict[str, str],
             f"### 必须保留的版式骨架\n{layout_skeleton}\n\n"
             f"### 日期\n{as_of}"
         )
-        repair_attempts = _env_int("US_NARRATOR_REPAIR_RETRIES", 2)
+        # 3 rounds: the stricter style rules (H2 whitelist / emoji / internal
+        # tokens) consume repair budget before lineage fixes land on DeepSeek.
+        repair_attempts = _env_int("US_NARRATOR_REPAIR_RETRIES", 3)
         last_error = str(exc)
         for idx in range(1, repair_attempts + 1):
             repaired = _call_llm_with_retries(
