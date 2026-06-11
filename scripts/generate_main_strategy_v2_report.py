@@ -2805,6 +2805,18 @@ def build_production_decision_summary(payload: dict[str, Any]) -> dict[str, Any]
                 or row.get("target_price")
                 or (trade_plan or {}).get("target")
             )
+            plan_status = (trade_plan or {}).get("status")
+            if plan_status and plan_status != "ok" and not stop_value:
+                blocked_execution.append({
+                    "market": "US",
+                    "symbol": row.get("symbol"),
+                    "name": row.get("name") or ranked.get("name") or "",
+                    "state": "execution_blocked_0r",
+                    "reason": clean_table_text(
+                        f"no executable plan ({(trade_plan or {}).get('rule') or plan_status}); "
+                        "run price backfill before sizing", 160),
+                })
+                continue
             plan_suffix = ""
             if trade_plan:
                 if trade_plan.get("status") == "ok":
