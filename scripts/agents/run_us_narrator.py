@@ -849,6 +849,43 @@ def build_strategy_story_brief(art: dict[str, Any], as_of: str) -> str:
 # Style-guard enforcement (mirrors final_style_guard): emoji/decoration ban and
 # internal-field-name ban. Repair loop consumes these errors automatically.
 _EMOJI_RE = re.compile(r"[\U0001F000-\U0001FAFF☀-➿⬀-⯿️]")
+_SYMBOL_CELL_RE = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+
+
+def _is_table_separator(line: str) -> bool:
+    body = line.strip().strip("|").replace("|", "").strip()
+    return bool(body) and set(body) <= {"-", ":", " "}
+
+
+def _table_separator_mismatches(text: str) -> list[str]:
+    """Header rows whose separator row has a different column count."""
+    lines = text.splitlines()
+    bad: list[str] = []
+    for idx in range(len(lines) - 1):
+        cur, nxt = lines[idx].strip(), lines[idx + 1].strip()
+        if (cur.startswith("|") and cur.endswith("|") and nxt.startswith("|")
+                and _is_table_separator(nxt) and cur.count("|") != nxt.count("|")):
+            bad.append(cur[:50])
+    return bad
+
+
+def _executed_symbols(text: str) -> set[str]:
+    """First-column tickers of the 交易计划 production table."""
+    in_plan = False
+    out: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## "):
+            in_plan = stripped == "## 交易计划"
+            continue
+        if not in_plan or not stripped.startswith("|") or _is_table_separator(stripped):
+            continue
+        first = stripped.strip("|").split("|")[0].strip().strip("*` ")
+        if first in {"Symbol", "SYMBOL", "None"}:
+            continue
+        if _SYMBOL_CELL_RE.match(first):
+            out.add(first)
+    return out
 _BANNED_INTERNAL_TOKENS = [
     "提取器", "payload", "digest", "merge-agent", "user_msg", "system prompt",
     "stable_alpha_gate", "ev_status", "production_decision_summary",
@@ -905,6 +942,21 @@ def validate_structured_us_report(text: str, as_of: str, payload: dict[str, Any]
     internal_hits += [token for token in ("gpt-5.5", "deepseek") if token in lowered]
     if internal_hits:
         raise RuntimeError(f"US narrator output leaks internal field names: {internal_hits}")
+    bad_separators = _table_separator_mismatches(text)
+    if bad_separators:
+        raise RuntimeError(
+            f"US narrator output has table separator column mismatches: {bad_separators[:3]}")
+    executed = _executed_symbols(text)
+    if executed:
+        for block in text.split("\n\n"):
+            if ("仅观察" in block or "只观察" in block) and "不执行" in block:
+                offenders = sorted(
+                    sym for sym in executed
+                    if re.search(rf"(?<![A-Z0-9]){re.escape(sym)}(?![A-Z0-9])", block))
+                if offenders:
+                    raise RuntimeError(
+                        "US narrator output lists executed symbols under 仅观察/不执行 wording: "
+                        f"{offenders} — executed positions must read 持有不加码, not 不执行")
     if payload:
         failures = validate_us_report_text_against_payload(payload, text, "us_narrator_output")
         if failures:
