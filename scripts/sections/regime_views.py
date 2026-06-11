@@ -43,6 +43,14 @@ def render_risk_regime_section(payload: dict[str, Any], regime_key: str = "risk_
         f"- 对冲指引：{regime.get('hedge_directive') or '—'}",
         f"- Victim 动作：{regime.get('victim_action') or '—'}",
     ]
+    shadow = regime.get("r_multiplier_continuous")
+    if not is_cn and shadow is not None:
+        lines.append(
+            f"- 影子连续乘数（仅披露，不改执行 R）：`{float(shadow):.2f}x`"
+            f"（wedge_pressure {float(regime.get('wedge_pressure') or 0):.2f}，"
+            f"context dampener {float(regime.get('context_dampener') or 1):.2f}）"
+            "——连续口径若显著低于执行乘数，说明二元闸门正处在阈值悬崖附近。"
+        )
     if regime.get("artifact_missing"):
         art = "cn_risk_regime" if is_cn else "bubble_hedge"
         lines.append(f"- ⚠️ {art} 工件缺失，gate 退化为 1.0x。")
@@ -215,13 +223,25 @@ def render_fear_greed_section(payload: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _promotion_alpha_alert_line(payload: dict[str, Any]) -> str | None:
+    alert = payload.get("promotion_alpha_alert")
+    if not isinstance(alert, dict) or alert.get("ir") is None:
+        return None
+    return (
+        f"- 晋级质量告警：promote_now trailing-4w 5d 主动 IR {float(alert['ir']):+.2f}"
+        f"（N={alert.get('n')}，week {alert.get('week')}，数据 {alert.get('source_as_of') or '—'}）"
+        "——连续两周告警须人工冻结晋级；新增执行票的证据权重应下调。"
+    )
+
+
 def render_us_execution_gate_notice(payload: dict[str, Any]) -> list[str]:
     gate = ((payload.get("production_decision_summary") or {}).get("summary") or {}).get("us_execution_gate")
     if not isinstance(gate, dict):
         return []
+    alert_line = _promotion_alpha_alert_line(payload)
     if gate.get("allowed"):
         warnings = gate.get("warnings") or []
-        if not warnings:
+        if not warnings and not alert_line:
             return []
         lines = [
             "## US Production Gate",
@@ -230,6 +250,8 @@ def render_us_execution_gate_notice(payload: dict[str, Any]) -> list[str]:
         ]
         for warning in warnings[:3]:
             lines.append(f"- {warning}")
+        if alert_line:
+            lines.append(alert_line)
         lines.append("")
         return lines
     reasons = gate.get("reasons") or []
@@ -240,5 +262,7 @@ def render_us_execution_gate_notice(payload: dict[str, Any]) -> list[str]:
     ]
     for reason in reasons[:3]:
         lines.append(f"- {reason}")
+    if alert_line:
+        lines.append(alert_line)
     lines.append("")
     return lines

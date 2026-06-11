@@ -30,7 +30,7 @@
 
 - 输出语言:中文
 - 格式:固定标题 + 表格 + 列表
-- 必读字段:`options_anomaly_rows`(squeeze/pressure)、`headline_risk` per ranker row、`us_execution_gate`(hard gate + stable warning)、`portfolio_risk_overlay`(组合层 long+hedge+VaR)、`us_left_side`(超跌候选)、`bubble_hedge.victims`
+- 必读字段:`options_anomaly_rows`(squeeze/pressure)、`headline_risk` per ranker row、`us_execution_gate`(hard gate + stable warning)、`portfolio_risk_overlay`(组合层 long+hedge+VaR)、`us_left_side`(超跌候选)、`bubble_hedge.victims`、晋级质量告警(US Production Gate 段若含"晋级质量告警"行必须原样提取——它说明晋级闸门近期产出负 alpha,新增票证据权重要下调)
 - headline_risk:必须按 news_scored.severity ≥ 2 + subject_match=true 才算真负面;tag-list 文章不算
 - options_anomaly:short_squeeze_score vs selling_pressure_score 都列;不写交易建议
 - left_side:超跌可能是机会也可能是 falling knife,只写"距 EMA21 X%"事实
@@ -48,6 +48,7 @@
 - ev_status: [passed|failed|pending|cn_direct|unknown]
 - selected_policy.us: [值 或 none]
 - stock_data_current: [true|false] (latest prices_daily=[date])
+- 晋级质量告警: [Production Gate 段的告警行原样照搬;无则写 无]
 
 ## Headline Risk (severity ≥ 2 + subject_match)
 | Symbol | sev | sent | event_type | 最新标题摘 |
@@ -73,3 +74,5 @@
 ## 判断
 
 (恰好 3 句话,每句包含 1 个 payload 数字。领域:执行 gate 状态、组合最大未对冲风险、单名最大风险点。)
+
+第 4 行固定输出一行:`矛盾点: [本域内部最大的一处数据矛盾,或与上一期相比的最大变化;没有就写 无]`——这是给叙事官的预消化张力素材,必须 ticker 级或指标级,不写空话。

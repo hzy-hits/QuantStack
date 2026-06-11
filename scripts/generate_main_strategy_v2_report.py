@@ -3057,6 +3057,28 @@ def load_bubble_hedge_payload(as_of: str) -> dict[str, Any] | None:
         return None
 
 
+PROMOTION_ALPHA_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "ai_infra_promotion_alpha"
+
+
+def load_promotion_alpha_alert(as_of: str) -> dict[str, Any] | None:
+    """Latest promotion-alpha KPI alert at/below as_of (alert.json exists only
+    while the trailing-4w 5d IR breach is active; source_as_of keeps lineage)."""
+    day = as_of
+    if not (PROMOTION_ALPHA_ROOT / day / "alert.json").exists():
+        day = _latest_dated_subdir(PROMOTION_ALPHA_ROOT, as_of) or ""
+    path = PROMOTION_ALPHA_ROOT / day / "alert.json" if day else None
+    if path is None or not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    payload.setdefault("source_as_of", day)
+    return payload
+
+
 def load_report_action_backtest_summary(as_of: str) -> dict[str, Any] | None:
     source_as_of = as_of
     path = REPORT_ACTION_BACKTEST_ROOT / as_of / "report_action_backtest_summary.json"
@@ -7218,6 +7240,25 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
     bubble_hedge_payload = load_bubble_hedge_payload(as_of.isoformat())
     capitulation_payload = load_capitulation_payload(as_of.isoformat())
     risk_regime = build_risk_regime(bubble_hedge_payload, capitulation_payload)
+    # The in-process rebuild owns state/multiplier; the radar artifact carries
+    # the disclosure-only shadow fields (continuous multiplier) — merge them in
+    # so the report can surface the cliff-edge early warning.
+    _shadow_day = as_of.isoformat()
+    _shadow_path = STACK_ROOT / "reports" / "review_dashboard" / "risk_regime" / _shadow_day / "risk_regime.json"
+    if not _shadow_path.exists():
+        _fallback_day = _latest_dated_subdir(
+            STACK_ROOT / "reports" / "review_dashboard" / "risk_regime", _shadow_day)
+        _shadow_path = (
+            STACK_ROOT / "reports" / "review_dashboard" / "risk_regime" / _fallback_day / "risk_regime.json"
+            if _fallback_day else _shadow_path)
+    try:
+        _shadow_artifact = json.loads(_shadow_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        _shadow_artifact = {}
+    if isinstance(_shadow_artifact, dict) and isinstance(risk_regime, dict):
+        for _key in ("r_multiplier_continuous", "wedge_pressure", "context_dampener"):
+            if _key in _shadow_artifact:
+                risk_regime.setdefault(_key, _shadow_artifact[_key])
     cn_risk_regime = load_cn_risk_regime_payload(as_of.isoformat())
     us_regime_state = str((risk_regime or {}).get("state") or "hedge").lower()
     us_ranker = us_opportunity_ranker.build_ranker_payload(
@@ -7360,6 +7401,7 @@ def build_payload(args: argparse.Namespace) -> dict[str, Any]:
         "strategy_alpha_bulletin": load_strategy_alpha_bulletin(as_of),
         "us_market_data_status": us_market_data_status,
         "report_action_backtest_summary": load_report_action_backtest_summary(as_of.isoformat()),
+        "promotion_alpha_alert": load_promotion_alpha_alert(as_of.isoformat()),
         "us_trade_plan": us_trade_plan,
         "options_verdicts": options_verdicts,
         "gamma_spring": gamma_spring,

@@ -69,7 +69,8 @@ def final_style_guard(as_of: str) -> str:
 - `市场结构` 内必须保留 `US Realized Horizon Edge` 字样和对应小表或行,写成“历史持有周期复盘(US Realized Horizon Edge)”,说明 1D/3D/5D/10D 哪些周期真的赚钱。
 - 如果某张表没有行，也要保留表头并写一行 `None | - | - | - | -`，不要把表格删掉。
 - 不出现这些词或痕迹：提取器、payload、digest、merge-agent、ranker、模型名、system prompt、user_msg、英文分层名。
-- 不使用 emoji 或装饰符号；最终报告只靠标题、紧凑表格和短段落组织信息。
+- 不使用 emoji 或装饰符号；最终报告只靠标题、紧凑表格和短段落组织信息。每张表的分隔行(`|---|`)列数必须与表头一致。
+- 执行表中的票在正文其它位置只许用“持有/持有不加码/加码受限/止损收紧”语态；“仅观察”“不执行”只能用于未执行票。
 - 不直接输出内部字段名：`stable_alpha_gate`、`ev_status`、`production_decision_summary`、`actionable`、`execution_blocked_0r`、`active_watch`、`ranked_watch`。要翻译成人话，例如“稳定策略门禁未放行”“只观察，不执行”。不要把 `WEDGE`、`MRS`、`0R` 当作结论本身。
 - Fear/Greed 必须保留 source。source=proxy 时只能写 `Internal Fear/Greed proxy`，不得写成 `CNN Fear & Greed` 或 `CNN F&G`；source=cnn 时才可以写 CNN。
 - `交易计划` 必须先给正式执行表；没有正式执行时，表格第一行写 `None` 并在表后自然解释“本期无可执行做多”。随后用一小段交易故事解释为什么高分观察票没有变成仓位,不要制造半执行清单。

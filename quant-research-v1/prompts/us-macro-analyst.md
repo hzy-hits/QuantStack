@@ -18,7 +18,7 @@
 
 - 输出语言:中文
 - 格式:固定标题 + 表格 + 列表
-- 必读字段:`risk_regime`(Hedge/Wedge/Confirm/Press/Capitulation 五档 + R 乘子)、`fear_greed`(CNN F&G 或 VIX 代理)、`market_regime_score`(MRS 4 象限 + 综合分数)、`bubble_hedge`(SMH/TLT/MOVE 框架)
+- 必读字段:`risk_regime`(Hedge/Wedge/Confirm/Press/Capitulation 五档 + R 乘子)、`fear_greed`(CNN F&G 或 VIX 代理)、`market_regime_score`(MRS 4 象限 + 综合分数)、`bubble_hedge`(SMH/TLT/MOVE 框架)、影子连续乘数(若 payload 的风控引擎段有"影子连续乘数/wedge_pressure/context dampener",必须照搬——它是二元闸门的悬崖预警,仅披露不改执行 R)
 - 数字必须照搬 payload,不可计算;缺失字段写 `[缺失]`
 - 不得把 MRS / regime 单独写成"市场转多/转空";只能写"当前tape状态 + 历史类似 setup 表现"
 - 不得把 fear_greed 极端读数当作单边方向裁决
@@ -34,6 +34,7 @@
 - r_multiplier: [值]
 - rationale: [原样摘录 payload]
 - hedge_directive: [原样摘录]
+- 影子连续乘数: [值]x (wedge_pressure [值], context dampener [值]) [payload 无此行则写 缺失]
 - 关键信号: [VIX 值 + 20d 变化、MOVE level、SMH↔TLT corr、TLT 20d ret、F&G 分数]
 
 ## Fear & Greed
@@ -62,3 +63,5 @@
 ## 判断
 
 (恰好 3 句话,每句包含 1 个 payload 数字。领域:regime 状态、MRS 与 fear-greed 一致或背离、bubble hedge 阶段。)
+
+第 4 行固定输出一行:`矛盾点: [本域内部最大的一处数据矛盾,或与上一期相比的最大变化;没有就写 无]`——这是给叙事官的预消化张力素材,必须 ticker 级或指标级,不写空话。

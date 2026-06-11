@@ -25,6 +25,8 @@
 
 若 `us_execution_gate.allowed=False`,做多区必须写"本期无可执行做多";stable alpha gate 只是 warning/haircut context,不能把它写成全 0R 硬门禁;`production_decision_summary.actionable` 为空时不得从 ranker 硬拔。
 
+**执行票语态(硬规则)**:凡出现在交易计划执行表中的票,正文其它任何地方只许用"持有 / 持有不加码 / 加码受限 / 止损收紧"语态;"仅观察"、"不执行"、"不进仓"这些词只能用于**未执行**的票。想表达"已执行但不追加",写"持有不加码",不写"不执行"。
+
 ## Hedge Fund Operating Contract
 
 - 美股可以把新闻、期权/flow、价格写成联合证据;但**期权是股票决策辅助,不是默认下单品种**
@@ -81,13 +83,15 @@
 写 2-4 个自然段。第一段讲市场主线: AI-infra tape、指数/半导体相对强弱、利率/波动/新闻风险的拉扯。第二段讲仓位取舍: 为什么最终执行表给出或不给出美股 R。第三段讲反证和等待触发: 哪些量化、风控、新闻、期权/Gamma 信号会改变结论。不要写二元问答,不要写列表式模板。
 
 ## 市场结构
-先给 2-3 句裁决,再给市场证据表。必须包含风险状态、R 乘数、数据校准、Fear & Greed source、MRS、SMH/SPY/QQQ、P/C 或 VIX。数据校准必须写清报告标签日期、US 收盘价数据截至、US 候选/执行数据日期、期权/Gamma 有效日；若是 previous_session，必须明写“不是当日美股已收盘数据”。不要输出内部字段名。若 source=proxy，必须写 `Internal Fear/Greed proxy`，不得写成 CNN Fear & Greed。必须保留“历史持有周期复盘(US Realized Horizon Edge)”小表或对应行。
+先给 2-3 句裁决,再给市场证据表。必须包含风险状态、R 乘数、数据校准、Fear & Greed source、MRS、SMH/SPY/QQQ、P/C 或 VIX。数据校准必须写清报告标签日期、US 收盘价数据截至、US 候选/执行数据日期、期权/Gamma 有效日；若是 previous_session，必须明写“不是当日美股已收盘数据”。不要输出内部字段名。若 source=proxy，必须写 `Internal Fear/Greed proxy`，不得写成 CNN Fear & Greed。必须保留“历史持有周期复盘(US Realized Horizon Edge)”小表或对应行;该回测若标注“数据截至”早于报告日,要照实保留这个日期。
+**层间背离裁决(硬规则)**:若风控引擎的状态/R 乘数与 MRS 象限、三大指数 Gamma 状态或影子连续乘数方向不一致(例如引擎满仓但 MRS 在确认 bear 象限、或影子乘数显著低于执行乘数),必须用 1-2 句**明示这个背离**,并说明仓位最终按哪一层执行、为什么。背离本身是信息,不准悄悄抹平。
+**昨日对比(硬规则)**:必须包含一句与上一交易日的变化——R 乘数是否迁移、MRS 移了多少/象限有无切换、SPY/QQQ/SMH 的 Gamma 状态有无变化;无上期上下文就明说"无上期上下文"。
 
 ## 交易计划
-(必须先给 Production candidates Markdown 表：`Symbol / Decision / Size / Entry / Risk / Hedge / Why`。没有正式执行时也保留表头，第一行写 `None`，然后写"本期无可执行做多"。随后用短句分开写小仓试错、观察、回避。不要写英文分层名，不要把观察票写成半执行。)
+(必须先给 Production candidates Markdown 表：`Symbol / Decision / Size / Entry / Risk / Hedge / Why`。没有正式执行时也保留表头，第一行写 `None`，然后写"本期无可执行做多"。随后用短句分开写小仓试错、观察、回避。不要写英文分层名，不要把观察票写成半执行。**每票的 Why 必须含三件套**：①主题/证据(supercycle layer + 评分或证据状态)②期权/Gamma 读法(IV/HV 健康度或 Gamma 状态对入场的含义)③风控线逻辑(止损/目标依据,如 Gamma wall、EMA、-6%/+10% 机械线)。三件套写不满说明这票证据不足,要在表后明说。)
 
 ## 风险与反证
-先用一段话把量化、风控、新闻、期权/Gamma、政策资金流的冲突讲成一个反证故事: 哪些信号支持进攻,哪些信号要求降权。然后给至少 4 张表：Watch / 0R context 表、IV/HV 表、Gamma v3 表、Congressional Trading / 政策资金流表。只写会改变交易清单的新闻、外部研究源变化、政策资金流、期权定位、IV/HV 便宜/昂贵名单、Gamma Spring zero-gamma / pin / acceleration 区间和组合风险。期权只解释风险或股票 timing，不写 strike / 到期 / 合约 / 期权买卖指令。
+先用一段话把量化、风控、新闻、期权/Gamma、政策资金流的冲突讲成一个反证故事: 哪些信号支持进攻,哪些信号要求降权。若 payload 或提取中出现**晋级质量告警**(promotion alpha trailing IR 告警),必须在这一段明示,并把"新增执行票的证据权重下调"写进反证。然后给至少 4 张表：Watch / 0R context 表、IV/HV 表、Gamma v3 表、Congressional Trading / 政策资金流表。只写会改变交易清单的新闻、外部研究源变化、政策资金流、期权定位、IV/HV 便宜/昂贵名单、Gamma Spring zero-gamma / pin / acceleration 区间和组合风险。期权只解释风险或股票 timing，不写 strike / 到期 / 合约 / 期权买卖指令。
 
 ## 催化与复核
 (必须给 Catalyst / review Markdown 表。未来 3-7 天财报、source review、需要复核的价格/风险条件。上一份日报提过的名字必须给去向；没有上下文就明说无上一期上下文。)
@@ -99,6 +103,8 @@
 ## 写作风格
 
 - **像对冲基金晨会纪要**:冷静、精准、有攻击性。每句话都有信息量。
+- **版式纪律(一次写对,不要靠修复)**:全文恰好上述 6 个二级标题,不得新增 `## ` 段;不使用 emoji 或装饰符号;每张表的分隔行(`|---|`)列数必须与表头列数一致。
+- **裸表禁令**:每张表后至少 1 句、至多 4 句裁决——这组数字让仓位/风控**做什么或不做什么**;不许贴表不解读。
 - 数字驱动但先讲故事:先说"半导体强势还在,但利率约束让仓位不能追",再括号写"SMH 5d +x%,SMH/TLT corr +x,MRS +x"。不要让数字串代替结论。
 - 有观点但不强行选边:除非 regime 明确 confirm/press 且 MRS 同向,否则写区间、轮动、触发条件。
 - 期权 context 是辅助。**不写期权交易指令**(strike / 到期日 / size)。

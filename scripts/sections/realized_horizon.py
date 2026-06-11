@@ -40,10 +40,12 @@ def render_realized_horizon_edge_section(payload: dict[str, Any], market: str) -
     horizons = data.get("horizons") or {}
     if not horizons:
         return []
+    source = summary.get("source_as_of")
     lines = [
         f"## {market.upper()} Realized Horizon Edge",
         "",
-        "- 来自最近日报 actionables 的 close-to-close 回测，用来决定默认复核/持有周期。",
+        "- 来自最近日报 actionables 的 close-to-close 回测，用来决定默认复核/持有周期。"
+        + (f"数据截至 {source}（早间报告使用最近一期已完成回测）。" if source else ""),
         "",
         "| Horizon | N | R-weighted | Median | Win | Verdict |",
         "|---:|---:|---:|---:|---:|---|",
