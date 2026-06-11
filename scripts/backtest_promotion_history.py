@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -36,6 +37,12 @@ DEFAULT_OUTPUT_ROOT = STACK_ROOT / "reports" / "review_dashboard" / "ai_infra_pr
 
 HORIZONS = (5, 20, 60)
 SPY = "SPY"
+
+# Promotion-alpha KPI alert: trailing-4w 5d active IR at/below threshold with
+# a meaningful sample. Two consecutive weekly alerts = operator freezes
+# promote_now pending review (manual rule; auto-freeze is a later decision).
+ALERT_IR_THRESHOLD = -0.10
+ALERT_MIN_N = 40
 
 
 @dataclass(frozen=True)
@@ -265,7 +272,34 @@ def _aggregate_trailing(rows: list[BacktestRow], horizon: int, weeks: int = 4) -
     return out
 
 
+def promotion_alpha_alert(
+    trailing_5d: list[tuple[str, dict[str, float | int | None]]],
+) -> dict[str, object] | None:
+    """Warning when the latest trailing-4w 5d aggregate breaches the KPI floor."""
+    if not trailing_5d:
+        return None
+    week, agg = trailing_5d[-1]
+    n = int(agg.get("n") or 0)
+    ir = agg.get("ir")
+    if n >= ALERT_MIN_N and ir is not None and ir <= ALERT_IR_THRESHOLD:
+        return {
+            "level": "warning",
+            "week": week,
+            "horizon": "5d",
+            "n": n,
+            "ir": ir,
+            "mean_active_pct": agg.get("mean_active_pct"),
+            "rule": f"trailing-4w 5d IR<={ALERT_IR_THRESHOLD} with N>={ALERT_MIN_N}",
+        }
+    return None
+
+
+def promotion_alpha_alert_for_rows(rows: list[BacktestRow]) -> dict[str, object] | None:
+    return promotion_alpha_alert(_aggregate_trailing(rows, 5, weeks=4))
+
+
 def render_markdown(rows: list[BacktestRow], as_of: str) -> str:
+    alert = promotion_alpha_alert_for_rows(rows)
     lines: list[str] = [
         f"# AI Infra Promotion Alpha Ledger - {as_of}",
         "",
@@ -275,6 +309,15 @@ def render_markdown(rows: list[BacktestRow], as_of: str) -> str:
         "",
         f"- promote_now 行数: {len(rows)}",
         "",
+    ]
+    if alert:
+        lines += [
+            f"> **[ALERT]** promote_now trailing-4w 5d active IR {alert['ir']:+.2f}"
+            f" (N={alert['n']}, week {alert['week']}) — {alert['rule']};"
+            " 连续两周告警须人工冻结晋级。",
+            "",
+        ]
+    lines += [
         "## Aggregate by Horizon",
         "",
         "| Horizon | N | Mean Active % | Hit Rate | IR |",
@@ -392,6 +435,17 @@ def write_outputs(rows: list[BacktestRow], out_dir: Path, as_of: str) -> None:
         for row in rows:
             writer.writerow(row.as_dict())
     (out_dir / "promotion_alpha_ledger.md").write_text(render_markdown(rows, as_of), encoding="utf-8")
+    alert = promotion_alpha_alert_for_rows(rows)
+    alert_path = out_dir / "alert.json"
+    if alert:
+        alert_path.write_text(json.dumps(alert, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print(
+            f"[ALERT] promotion alpha: trailing-4w 5d IR {alert['ir']:+.2f} "
+            f"N={alert['n']} week={alert['week']} — operator rule: two consecutive "
+            "weekly alerts freeze promote_now"
+        )
+    elif alert_path.exists():
+        alert_path.unlink()
 
 
 def main() -> int:
