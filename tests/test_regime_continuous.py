@@ -51,5 +51,24 @@ class ContinuousRegimeTest(unittest.TestCase):
         self.assertEqual(eng.continuous_multiplier(state="wedge", base_multiplier=0.60, pressure=0.9), 0.60)
 
 
+class ContextDampenerTest(unittest.TestCase):
+    def test_quadrant_iii_plus_broad_negative_gamma(self) -> None:
+        # 2026-06-10: MRS -0.65 象限 III + SPY/QQQ/SMH 全负加速 → 0.85*0.85
+        d = eng.context_dampener(mrs=-0.65, mrs_quadrant="III", negative_accel_count=3)
+        self.assertAlmostEqual(d, 0.7225, places=4)
+
+    def test_missing_context_is_neutral(self) -> None:
+        self.assertEqual(eng.context_dampener(mrs=None, mrs_quadrant=None, negative_accel_count=0), 1.0)
+
+    def test_mild_context_partial_discount(self) -> None:
+        # MRS 未到 -0.5 → 无象限折扣;单一指数负加速 → 0.95
+        self.assertAlmostEqual(
+            eng.context_dampener(mrs=-0.2, mrs_quadrant="III", negative_accel_count=1), 0.95, places=4)
+
+    def test_floor(self) -> None:
+        self.assertGreaterEqual(
+            eng.context_dampener(mrs=-2.0, mrs_quadrant="III", negative_accel_count=9), 0.70)
+
+
 if __name__ == "__main__":
     unittest.main()

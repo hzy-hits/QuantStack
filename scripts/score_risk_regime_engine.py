@@ -108,6 +108,57 @@ def continuous_multiplier(*, state: str, base_multiplier: float, pressure: float
     return round(max(R_MULTIPLIER["wedge"], base_multiplier * (1.0 - 0.35 * pressure)), 2)
 
 
+def context_dampener(*, mrs: float | None, mrs_quadrant: str | None,
+                     negative_accel_count: int) -> float:
+    """0.70..1.0 dampener from the engine's own sibling layers.
+
+    MRS quadrant III (SPX down + P/C up, historically the worst forward
+    bucket) at depressed MRS, and broad index negative-gamma acceleration,
+    each pull the shadow multiplier down. Missing data is neutral (1.0).
+    """
+    dampener = 1.0
+    if mrs is not None and mrs <= -0.5 and str(mrs_quadrant or "").strip().upper() == "III":
+        dampener *= 0.85
+    dampener *= max(0.85, 1.0 - 0.05 * max(0, int(negative_accel_count)))
+    return round(max(0.70, dampener), 4)
+
+
+GAMMA_CONTEXT_SYMBOLS = ("SPY", "QQQ", "SMH")
+US_DB_PATH = STACK_ROOT / "quant-research-v1" / "data" / "quant.duckdb"
+
+
+def load_context_signals(as_of: str) -> dict[str, Any]:
+    """Best-effort MRS + index-gamma context for the shadow dampener.
+
+    Any failure (missing DB, missing options history, locked file) degrades
+    to neutral inputs — the shadow multiplier must never break the engine.
+    """
+    out: dict[str, Any] = {
+        "mrs": None, "mrs_quadrant": None, "negative_accel_count": 0, "available": False,
+    }
+    try:
+        from datetime import date as _date
+
+        from sections.gamma_spring import build_gamma_spring_snapshot
+        from sections.market_regime import build_market_regime_score
+
+        day = _date.fromisoformat(as_of)
+        mrs = build_market_regime_score(US_DB_PATH, day)
+        if mrs.get("available"):
+            out["mrs"] = mrs.get("mrs")
+            out["mrs_quadrant"] = mrs.get("quadrant")
+        snapshot = build_gamma_spring_snapshot(US_DB_PATH, list(GAMMA_CONTEXT_SYMBOLS), day)
+        count = 0
+        for row in snapshot.get("rows") or []:
+            if str(row.get("gex_flip_regime") or "").startswith("negative_acceleration"):
+                count += 1
+        out["negative_accel_count"] = count
+        out["available"] = True
+    except Exception as exc:  # noqa: BLE001 — context is shadow-only, never fatal.
+        print(f"  [warn] regime context signals unavailable: {exc}", file=sys.stderr)
+    return out
+
+
 @dataclass(frozen=True)
 class RegimeDecision:
     state: str
@@ -427,6 +478,14 @@ def main() -> int:
     )
     r_cont = continuous_multiplier(
         state=decision.state, base_multiplier=decision.r_multiplier, pressure=pressure)
+    context = load_context_signals(as_of)
+    dampener = context_dampener(
+        mrs=context.get("mrs"),
+        mrs_quadrant=context.get("mrs_quadrant"),
+        negative_accel_count=int(context.get("negative_accel_count") or 0),
+    )
+    if decision.state == "hedge":
+        r_cont = round(max(R_MULTIPLIER["wedge"], r_cont * dampener), 2)
 
     payload = {
         "as_of": as_of,
@@ -439,6 +498,8 @@ def main() -> int:
         "wedge_pressure": pressure,
         "r_multiplier_continuous": r_cont,
         "r_multiplier_source": "binary",
+        "context_dampener": dampener,
+        "context_signals": context,
     }
     if os.environ.get("QUANT_REGIME_CONTINUOUS") == "1":
         payload["r_multiplier"] = r_cont
