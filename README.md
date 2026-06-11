@@ -221,6 +221,8 @@ quant-stack/
   production-candidate, source-evidence, and report constraints.
 - [Report Delivery Contract](docs/REPORT_DELIVERY_CONTRACT.md): research
   artifacts vs user-facing daily reports.
+- [Decisions Log](docs/DECISIONS.md): 正式决策记录(改交易行为的开关翻转
+  必须在此留痕;复议条件齐备才重开)。
 
 **投资框架与研究备忘:**
 

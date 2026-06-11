@@ -475,7 +475,7 @@ def _render_md(result: dict[str, Any]) -> str:
         lines.append("|---|---:|---:|---:|---:|---:|")
         for key, name in (("gated_regime_overlay", "regime overlay(本策略)"),
                            ("naive_always_hold", "无脑 always-hold 篮子"),
-                           ("setup_gated", "进场setup闸门(只回调进)"),
+                           ("setup_gated", "进场setup闸门(只回调进;research-only 对照腿,生产未采用 — docs/DECISIONS.md 2026-06-10)"),
                            ("benchmark", f"基准 {bench}")):
             s = m.get(key) or {}
             lines.append(
