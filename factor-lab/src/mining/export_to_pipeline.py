@@ -658,6 +658,10 @@ def export(market: str, as_of: str | None = None):
 
 
 def main():
+    from pathlib import Path as _Path
+    if (_Path(__file__).resolve().parents[2] / "DISABLED").exists():
+        print("factor-lab DISABLED (sentinel present) — skipping export_to_pipeline")
+        return
     parser = argparse.ArgumentParser()
     parser.add_argument("--market", choices=["cn", "us"], required=True)
     parser.add_argument("--date", default=None)

@@ -9,6 +9,10 @@ set -uo pipefail
 
 PROJ_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJ_DIR"
+if [ -f "$PROJ_DIR/DISABLED" ]; then
+    echo "factor-lab DISABLED (sentinel present) — skipping daily_factors.sh"
+    exit 0
+fi
 mkdir -p logs data
 PYTHON="${PYTHON_BIN:-python3}"
 export FACTOR_LAB_AGENT_BACKEND="${FACTOR_LAB_AGENT_BACKEND:-codex}"

@@ -1,0 +1,20 @@
+factor-lab disabled for the portability refactor (decision A, 2026-06-25).
+
+Why: promoted factors were all research_only (never passed the money gate),
+so factor-lab contributed nothing to production reports. Removed from the
+deployment to drop the 12GB factor_lab.duckdb and simplify migration.
+
+What this sentinel does:
+  - factor-lab/scripts/daily_factors.sh         -> exits 0 early when present
+  - factor-lab/src/mining/export_to_pipeline.py -> no-ops when present
+  The Rust orchestrator keeps its is_dir() guard happy (dir still exists), and
+  its factor refresh/import steps are non-fatal, so US/CN pipelines are unaffected.
+
+Cron tasks removed from ops/tasks.yaml: factor.cn.daily, factor.us.daily,
+paper.record, paper.evaluate, paper.report, factor.maintenance.weekly.
+
+Archived before deletion: factor-lab/archive/{paper_returns,factor_registry}_20260625.parquet
+
+To RE-ENABLE: delete this file, restore the cron tasks in ops/tasks.yaml
+(git history), re-run ops/render_cron.py, and rebuild factor_lab.duckdb via a
+daily_factors.sh run.
