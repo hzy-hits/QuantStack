@@ -42,7 +42,7 @@ Date: 2026-06-25 · 状态:待评审 · 作者:operator + Claude
 - indices 数组加一项 `(cfg.universe.scan.star, "000688.SH")`(科创50 指数代码)。仅当 `star=true` 拉其 `index_weight` 成分。
 
 ### 组件 4 — 篮子兜底(文档 + 操作,无新代码)
-- 闸门放开后,watchlist 里的 688 名字即可进 universe。**ai_infra 的 24 个科创板名字中,不在科创50 成分里的,操作员加入 `config.yaml` 的 `universe.watchlist`** → 保证篮子持仓全覆盖,与科创50 成员无关。
+- 闸门放开后,watchlist 里的 688 名字即可进 universe。**ai_infra 的 23 个科创板名字中,不在科创50 成分里的,操作员加入 `config.yaml` 的 `universe.watchlist`** → 保证篮子持仓全覆盖,与科创50 成员无关。
 
 ### 组件 5 — 补价格历史(操作步骤)
 - 启用 `star` 后,新纳入的 STAR 标的历史只有 ~45 行(`n<60` 会被分析静默丢弃)→ 跑 `python3 scripts/backfill_cn_prices.py` 补齐,再跑首次真实日报。
@@ -61,7 +61,7 @@ Date: 2026-06-25 · 状态:待评审 · 作者:operator + Claude
 1. `config.yaml` 设 `universe.scan.star: true`;`./target/release/quant-cn run`(或 cn.morning dry/test)。
 2. 确认 universe 含 688 名字、跑完无 panic;`scripts/backfill_cn_prices.py` 已补新标的。
 3. CN 报告出现科创板标的,其 limit/vol 信号按 ±20% 计(对比 `price_limit_pct`)。
-4. ai_infra 的 24 个 STAR 名字在 CN 分析里有 momentum/flow/regime 输出(此前没有)。
+4. ai_infra 的 23 个 STAR 名字在 CN 分析里有 momentum/flow/regime 输出(此前没有)。
 
 ## 回滚
 
