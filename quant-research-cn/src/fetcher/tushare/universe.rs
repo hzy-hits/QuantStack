@@ -6,8 +6,8 @@ use tracing::info;
 use super::{fetch_and_store, query, str_val, ts_date_val};
 use crate::config::Settings;
 
-fn is_tradable_a_share(code: &str) -> bool {
-    !code.starts_with("688")
+fn is_tradable_a_share(code: &str, allow_star: bool) -> bool {
+    allow_star || !code.starts_with("688")
 }
 
 pub async fn fetch_universe(
@@ -22,6 +22,7 @@ pub async fn fetch_universe(
         (cfg.universe.scan.csi500, "000905.SH"),
         (cfg.universe.scan.csi1000, "000852.SH"),
         (cfg.universe.scan.sse50, "000016.SH"),
+        (cfg.universe.scan.star, "000688.SH"),
     ];
 
     for (enabled, index_code) in &indices {
@@ -39,7 +40,7 @@ pub async fn fetch_universe(
 
         for row in &rows {
             if let Some(code) = row.first().and_then(|v| v.as_str()) {
-                if is_tradable_a_share(code) {
+                if is_tradable_a_share(code, cfg.universe.scan.star) {
                     symbols.push(code.to_string());
                 }
             }
@@ -53,7 +54,7 @@ pub async fn fetch_universe(
 
     // Add watchlist
     for sym in &cfg.universe.watchlist {
-        if is_tradable_a_share(sym) && !symbols.contains(sym) {
+        if is_tradable_a_share(sym, cfg.universe.scan.star) && !symbols.contains(sym) {
             symbols.push(sym.clone());
         }
     }
@@ -190,4 +191,20 @@ pub async fn fetch_fund_portfolio(
     .await?;
     info!(rows = total, end_date = %end_date, "fund_portfolio (公募持仓) fetched");
     Ok(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_tradable_a_share;
+
+    #[test]
+    fn star_gated_by_flag() {
+        // 688 excluded when star off, allowed when star on
+        assert!(!is_tradable_a_share("688981.SH", false));
+        assert!(is_tradable_a_share("688981.SH", true));
+        // main board / ChiNext always tradable, regardless of flag
+        assert!(is_tradable_a_share("600519.SH", false));
+        assert!(is_tradable_a_share("600519.SH", true));
+        assert!(is_tradable_a_share("300750.SZ", false));
+    }
 }

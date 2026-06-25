@@ -21,6 +21,7 @@ universe:
     csi500: true                # 中证500 — mid cap alpha pool
     csi1000: true               # 中证1000 — small cap alpha pool (exclude 688* at fetch/filter)
     sse50: true                 # 上证50 — mega cap
+    star: false                 # 科创板(688),±20% 涨跌幅;opt-in,默认关
 
   # Sector / thematic ETFs
   asset_classes:

@@ -606,6 +606,7 @@ mod tests {
                     csi500: false,
                     csi1000: false,
                     sse50: false,
+                    star: false,
                 },
                 asset_classes: AssetClassConfig {
                     sector_etfs: false,

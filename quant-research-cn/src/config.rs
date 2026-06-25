@@ -66,6 +66,8 @@ pub struct ScanConfig {
     pub csi500: bool,
     pub csi1000: bool,
     pub sse50: bool,
+    #[serde(default)]
+    pub star: bool,
 }
 
 #[derive(Deserialize, Clone)]
