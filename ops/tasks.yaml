@@ -984,3 +984,17 @@ tasks:
     session: watchdog
     owner: ops
     outputs: []
+
+  data.prune_snapshots:
+    group: maintenance
+    schedule: "40 7 * * 1-5"
+    cwd: .
+    command: ["python3", "ops/prune_snapshots.py", "--apply", "--keep-days", "7"]
+    log: ops/logs/data.prune_snapshots.log
+    lock: ops/state/data.prune_snapshots.lock
+    timeout_minutes: 10
+    sends_email: false
+    market: all
+    session: maintenance
+    owner: ops
+    outputs: []
