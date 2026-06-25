@@ -40,3 +40,26 @@ def test_boundary_exactly_keep_days_is_kept():
     keep, delete = prune.classify_snapshots(names, today=today, keep_days=7)
     assert keep == ["quant_research_2026-06-18_pre.duckdb"]
     assert delete == []
+
+
+def test_prune_dir_dry_run_keeps_files(tmp_path):
+    for n in ("quant_research_2026-06-01_pre.duckdb",
+              "quant_research_2026-06-24_pre.duckdb",
+              "quant.duckdb"):
+        (tmp_path / n).write_bytes(b"x" * 10)
+    today = datetime.date(2026, 6, 25)
+    paths, total = prune.prune_dir(tmp_path, today=today, keep_days=7, apply=False)
+    # would delete only the old snapshot
+    assert [p.name for p in paths] == ["quant_research_2026-06-01_pre.duckdb"]
+    assert total == 10
+    # dry-run: nothing actually deleted
+    assert (tmp_path / "quant_research_2026-06-01_pre.duckdb").exists()
+
+
+def test_prune_dir_apply_deletes(tmp_path):
+    (tmp_path / "quant_research_2026-06-01_pre.duckdb").write_bytes(b"x" * 10)
+    (tmp_path / "quant.duckdb").write_bytes(b"x" * 10)
+    today = datetime.date(2026, 6, 25)
+    paths, total = prune.prune_dir(tmp_path, today=today, keep_days=7, apply=True)
+    assert not (tmp_path / "quant_research_2026-06-01_pre.duckdb").exists()
+    assert (tmp_path / "quant.duckdb").exists()  # canonical untouched
