@@ -47,6 +47,17 @@ def prune_dir(
     names = [p.name for p in data_dir.iterdir() if p.is_file()]
     _, to_delete = classify_snapshots(names, today=today, keep_days=keep_days)
     paths = [data_dir / n for n in sorted(to_delete)]
+
+    # Collect sidecars for each deleted snapshot
+    for snapshot_name in to_delete:
+        for sidecar_ext in (".wal", ".lock"):
+            sidecar_name = snapshot_name + sidecar_ext
+            sidecar_path = data_dir / sidecar_name
+            if sidecar_path.exists():
+                paths.append(sidecar_path)
+
+    # Sort paths for consistent output
+    paths.sort(key=lambda p: p.name)
     total = sum(p.stat().st_size for p in paths)
     if apply:
         for p in paths:

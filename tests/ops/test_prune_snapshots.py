@@ -63,3 +63,20 @@ def test_prune_dir_apply_deletes(tmp_path):
     paths, total = prune.prune_dir(tmp_path, today=today, keep_days=7, apply=True)
     assert not (tmp_path / "quant_research_2026-06-01_pre.duckdb").exists()
     assert (tmp_path / "quant.duckdb").exists()  # canonical untouched
+
+
+def test_prune_dir_apply_deletes_sidecars(tmp_path):
+    base = tmp_path / "quant_research_2026-06-01_pre.duckdb"
+    base.write_bytes(b"x" * 10)
+    (tmp_path / "quant_research_2026-06-01_pre.duckdb.wal").write_bytes(b"x" * 5)
+    (tmp_path / "quant_research_2026-06-01_pre.duckdb.lock").write_bytes(b"x" * 3)
+    (tmp_path / "quant.duckdb.wal").write_bytes(b"x" * 7)  # canonical sidecar -> must survive
+    today = datetime.date(2026, 6, 25)
+    paths, total = prune.prune_dir(tmp_path, today=today, keep_days=7, apply=True)
+    names = {p.name for p in paths}
+    assert "quant_research_2026-06-01_pre.duckdb" in names
+    assert "quant_research_2026-06-01_pre.duckdb.wal" in names
+    assert "quant_research_2026-06-01_pre.duckdb.lock" in names
+    assert total == 18  # 10 + 5 + 3
+    assert not (tmp_path / "quant_research_2026-06-01_pre.duckdb.wal").exists()
+    assert (tmp_path / "quant.duckdb.wal").exists()  # canonical sidecar untouched
