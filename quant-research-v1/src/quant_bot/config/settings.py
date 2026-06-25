@@ -130,6 +130,15 @@ class BroadScreenConfig(BaseModel):
 class FundamentalsConfig(BaseModel):
     enabled: bool = True
     refresh_days: int = 7
+    premarket_max_seconds: int = 420
+    postmarket_max_seconds: int = 1200
+    request_timeout_seconds: float = 8.0
+
+
+class MarketQuotesConfig(BaseModel):
+    enabled: bool = True
+    premarket_max_seconds: int = 120
+    postmarket_max_seconds: int = 180
 
 
 class ReportingConfig(BaseModel):
@@ -152,6 +161,7 @@ class Settings(BaseModel):
     dip_scanner: DipScannerConfig = Field(default_factory=DipScannerConfig)
     broad_screen: BroadScreenConfig = Field(default_factory=BroadScreenConfig)
     fundamentals: FundamentalsConfig = Field(default_factory=FundamentalsConfig)
+    market_quotes: MarketQuotesConfig = Field(default_factory=MarketQuotesConfig)
 
     @classmethod
     def load(cls, path: str | Path = "config.yaml") -> "Settings":

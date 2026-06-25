@@ -28,6 +28,7 @@ from __future__ import annotations
 import base64
 import mimetypes
 import re
+import time
 from email.header import Header
 from email.mime.base import MIMEBase
 from email.mime.image import MIMEImage
@@ -83,6 +84,49 @@ log = structlog.get_logger()
 
 # ── OAuth constants ──────────────────────────────────────────────────────────
 SCOPES = ["https://www.googleapis.com/auth/gmail.compose"]
+GMAIL_API_RETRY_ATTEMPTS = 5
+GMAIL_API_RETRY_INITIAL_DELAY_SECONDS = 3.0
+
+
+def _is_retryable_gmail_error(exc: Exception) -> bool:
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    if status in {408, 429, 500, 502, 503, 504}:
+        return True
+
+    text = repr(exc).lower()
+    retry_markers = (
+        "ssl",
+        "eof occurred",
+        "timeout",
+        "timed out",
+        "connection reset",
+        "connection aborted",
+        "temporarily unavailable",
+        "max retries exceeded",
+        "remote end closed connection",
+        "broken pipe",
+    )
+    return any(marker in text for marker in retry_markers)
+
+
+def _execute_gmail_call(label: str, func, *, attempts: int = GMAIL_API_RETRY_ATTEMPTS):
+    delay = GMAIL_API_RETRY_INITIAL_DELAY_SECONDS
+    for attempt in range(1, attempts + 1):
+        try:
+            return func()
+        except Exception as exc:
+            if attempt >= attempts or not _is_retryable_gmail_error(exc):
+                raise
+            log.warning(
+                "gmail_api_retry",
+                label=label,
+                attempt=attempt,
+                attempts=attempts,
+                delay_seconds=delay,
+                error=str(exc),
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, 30.0)
 
 
 def load_recipients(config_path: str = "config.yaml") -> list[str]:
@@ -503,7 +547,7 @@ def _get_gmail_service(
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
             try:
-                creds.refresh(Request())
+                _execute_gmail_call("token_refresh", lambda: creds.refresh(Request()))
             except Exception as e:
                 log.error("gmail_token_refresh_failed", error=str(e))
                 # Only discard the token on explicit invalid/revoked states.
@@ -612,9 +656,12 @@ def send_report_email(
     # rely on Gmail filling an unencoded non-ASCII display name.
     account_addr = ""
     try:
-        account_addr = (
-            service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        profile = _execute_gmail_call(
+            "profile_lookup",
+            lambda: service.users().getProfile(userId="me").execute(),
+            attempts=3,
         )
+        account_addr = profile.get("emailAddress", "")
     except Exception as e:
         log.warning("gmail_profile_lookup_failed", error=str(e))
 
@@ -636,9 +683,12 @@ def send_report_email(
             bcc=bcc_recipients,
             sender=sender,
         )
-        result = service.users().messages().send(
-            userId="me", body=_encode_message(msg)
-        ).execute()
+        result = _execute_gmail_call(
+            "message_send",
+            lambda: service.users().messages().send(
+                userId="me", body=_encode_message(msg)
+            ).execute(),
+        )
         msg_id = result.get("id", "")
         msg_ids.append(msg_id)
         log.info(
@@ -662,9 +712,12 @@ def _resolve_sender(service, config_path: str) -> str:
     """
     account_addr = ""
     try:
-        account_addr = (
-            service.users().getProfile(userId="me").execute().get("emailAddress", "")
+        profile = _execute_gmail_call(
+            "profile_lookup",
+            lambda: service.users().getProfile(userId="me").execute(),
+            attempts=3,
         )
+        account_addr = profile.get("emailAddress", "")
     except Exception as e:  # noqa: BLE001
         log.warning("gmail_profile_lookup_failed", error=str(e))
     return _format_sender(load_sender_name(config_path), account_addr or "me")
@@ -692,9 +745,12 @@ def create_report_draft(
     old_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(60)
     try:
-        result = service.users().drafts().create(
-            userId="me", body={"message": _encode_message(msg)}
-        ).execute()
+        result = _execute_gmail_call(
+            "draft_create",
+            lambda: service.users().drafts().create(
+                userId="me", body={"message": _encode_message(msg)}
+            ).execute(),
+        )
     finally:
         socket.setdefaulttimeout(old_timeout)
 
@@ -722,9 +778,12 @@ def send_alert_email(
     old_timeout = socket.getdefaulttimeout()
     socket.setdefaulttimeout(30)
     try:
-        result = service.users().messages().send(
-            userId="me", body=_encode_message(msg)
-        ).execute()
+        result = _execute_gmail_call(
+            "alert_send",
+            lambda: service.users().messages().send(
+                userId="me", body=_encode_message(msg)
+            ).execute(),
+        )
     finally:
         socket.setdefaulttimeout(old_timeout)
 

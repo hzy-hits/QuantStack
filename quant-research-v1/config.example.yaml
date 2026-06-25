@@ -66,6 +66,18 @@ data:
   # How often to refresh S&P 500 constituent list (days)
   constituent_refresh_days: 7
 
+fundamentals:
+  enabled: true
+  refresh_days: 7
+  premarket_max_seconds: 420
+  postmarket_max_seconds: 1200
+  request_timeout_seconds: 8.0
+
+market_quotes:
+  enabled: true
+  premarket_max_seconds: 120
+  postmarket_max_seconds: 180
+
 fred:
   # FRED series to track — label them here for Claude readability
   series:

@@ -37,6 +37,7 @@ class CompletionCheck:
     path_template: str
     markers: tuple[str, ...] = ()
     min_size: int = 1
+    state_task_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -164,11 +165,12 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         TaskConfig(
             name="us-premarket",
             workdir=stack_root,
-            command=("target/release/quant-stack", "us-daily", "--stack-root", str(stack_root), "--delivery-mode", "prod", "--premarket", "{logical_date}"),
+            command=("ops/run_task.sh", "us.premarket", "--date", "{logical_date}"),
             completion=CompletionCheck(
                 kind="file_exists",
                 path_template="quant-research-v1/reports/{logical_date}_report_zh_pre.md",
                 min_size=200,
+                state_task_id="us.premarket",
             ),
             local_weekdays=(0, 1, 2, 3, 4),
             local_hour=20,
@@ -180,11 +182,12 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         TaskConfig(
             name="us-postmarket",
             workdir=stack_root,
-            command=("target/release/quant-stack", "us-daily", "--stack-root", str(stack_root), "--delivery-mode", "prod", "{logical_date}"),
+            command=("ops/run_task.sh", "us.postmarket", "--date", "{logical_date}"),
             completion=CompletionCheck(
                 kind="file_exists",
                 path_template="quant-research-v1/reports/{logical_date}_report_zh_post.md",
                 min_size=200,
+                state_task_id="us.postmarket",
             ),
             local_weekdays=(1, 2, 3, 4, 5),
             local_hour=5,
@@ -211,11 +214,12 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         TaskConfig(
             name="cn-morning",
             workdir=stack_root,
-            command=("target/release/quant-stack", "daily", "--stack-root", str(stack_root), "--date", "{logical_date}", "--markets", "cn", "--session", "morning", "--run-producers", "--with-narrative", "--send-reports", "--delivery-mode", "prod"),
+            command=("ops/run_task.sh", "cn.morning", "--date", "{logical_date}"),
             completion=CompletionCheck(
                 kind="file_exists",
                 path_template="quant-research-cn/reports/{logical_date}_report_zh_morning.md",
                 min_size=200,
+                state_task_id="cn.morning",
             ),
             local_weekdays=(0, 1, 2, 3, 4),
             local_hour=8,
@@ -226,11 +230,12 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
         TaskConfig(
             name="cn-evening",
             workdir=stack_root,
-            command=("target/release/quant-stack", "daily", "--stack-root", str(stack_root), "--date", "{logical_date}", "--markets", "cn", "--session", "evening", "--run-producers", "--with-narrative", "--send-reports", "--delivery-mode", "prod"),
+            command=("ops/run_task.sh", "cn.evening", "--date", "{logical_date}"),
             completion=CompletionCheck(
                 kind="file_exists",
                 path_template="quant-research-cn/reports/{logical_date}_report_zh_evening.md",
                 min_size=200,
+                state_task_id="cn.evening",
             ),
             local_weekdays=(0, 1, 2, 3, 4),
             local_hour=18,
@@ -400,6 +405,49 @@ def _resolve_path(base_dir: Path, template: str, context: dict[str, str]) -> Pat
     return path if path.is_absolute() else (base_dir / path)
 
 
+def _parse_state_time(state_path: Path) -> datetime | None:
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        try:
+            return datetime.fromtimestamp(state_path.stat().st_mtime, tz=LOCAL_TZ)
+        except OSError:
+            return None
+
+    raw = payload.get("finished_at") or payload.get("started_at") or payload.get("blocked_at")
+    if not isinstance(raw, str) or not raw:
+        try:
+            return datetime.fromtimestamp(state_path.stat().st_mtime, tz=LOCAL_TZ)
+        except OSError:
+            return None
+    try:
+        when = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        return when.replace(tzinfo=LOCAL_TZ)
+    return when.astimezone(LOCAL_TZ)
+
+
+def _has_unresolved_failure(due: DueRun, state_task_id: str) -> bool:
+    state_dir = due.task.workdir / "ops" / "state"
+    failure_path = state_dir / f"{state_task_id}.last_failure.json"
+    if not failure_path.exists():
+        return False
+
+    success_path = state_dir / f"{state_task_id}.last_success.json"
+    if not success_path.exists():
+        return True
+
+    failure_at = _parse_state_time(failure_path)
+    success_at = _parse_state_time(success_path)
+    if failure_at is None:
+        return True
+    if success_at is None:
+        return True
+    return failure_at >= success_at
+
+
 def task_completed(due: DueRun) -> bool:
     check = due.task.completion
     context = due.context()
@@ -407,14 +455,23 @@ def task_completed(due: DueRun) -> bool:
     if not path.exists():
         return False
     if check.kind == "file_exists":
-        return path.stat().st_size >= check.min_size
+        artifact_complete = path.stat().st_size >= check.min_size
+        return artifact_complete and not (
+            check.state_task_id and _has_unresolved_failure(due, check.state_task_id)
+        )
 
     text = path.read_text(encoding="utf-8", errors="replace")
     markers = tuple(marker.format(**context) for marker in check.markers)
     if check.kind == "file_contains_all":
-        return all(marker in text for marker in markers)
+        artifact_complete = all(marker in text for marker in markers)
+        return artifact_complete and not (
+            check.state_task_id and _has_unresolved_failure(due, check.state_task_id)
+        )
     if check.kind == "file_contains_any":
-        return any(marker in text for marker in markers)
+        artifact_complete = any(marker in text for marker in markers)
+        return artifact_complete and not (
+            check.state_task_id and _has_unresolved_failure(due, check.state_task_id)
+        )
     raise ValueError(f"unsupported completion check kind: {check.kind}")
 
 

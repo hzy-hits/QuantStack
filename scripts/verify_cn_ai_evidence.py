@@ -41,7 +41,7 @@ import yaml
 
 STACK_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_UNIVERSE = STACK_ROOT / "ai_infra" / "data" / "global_universe_v2.jsonl"
-DEFAULT_CONFIG = Path("/home/ivena/coding/rust/quant-research-cn/config.yaml")
+DEFAULT_CONFIG = STACK_ROOT / "quant-research-cn" / "config.yaml"
 
 # Segment-name keywords. Lower-cased substring match against bz_item.
 AI_DIRECT_KW = (

@@ -22,7 +22,7 @@ where
     loop {
         let resp = match build().send().await {
             Ok(r) => r,
-            Err(e) if e.is_timeout() || e.is_connect() => {
+            Err(e) => {
                 if attempt >= MAX_RETRIES {
                     return Err(anyhow!(
                         "HTTP request failed after {} retries: {}",
@@ -32,8 +32,10 @@ where
                 }
                 let wait_secs = 1u64 << attempt;
                 warn!(
-                    "http network_error err={} attempt={}/{} retry_in={}s",
+                    "http send_error err={} timeout={} connect={} attempt={}/{} retry_in={}s",
                     e,
+                    e.is_timeout(),
+                    e.is_connect(),
                     attempt + 1,
                     MAX_RETRIES,
                     wait_secs
@@ -42,7 +44,6 @@ where
                 attempt += 1;
                 continue;
             }
-            Err(e) => return Err(e.into()),
         };
         let status = resp.status();
 

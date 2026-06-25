@@ -25,7 +25,7 @@ import yaml
 
 STACK_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CN_DB = STACK_ROOT / "quant-research-cn" / "data" / "quant_cn.duckdb"
-DEFAULT_CONFIG = Path("/home/ivena/coding/rust/quant-research-cn/config.yaml")
+DEFAULT_CONFIG = STACK_ROOT / "quant-research-cn" / "config.yaml"
 
 
 def _pro(config_path: Path):

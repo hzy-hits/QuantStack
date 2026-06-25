@@ -7,6 +7,7 @@ import fcntl
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import time
@@ -89,6 +90,56 @@ def build_command(task: dict[str, object]) -> list[str]:
     return command
 
 
+def _default_gateway_ip() -> str:
+    try:
+        output = subprocess.check_output(
+            ["ip", "route", "show", "default"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        return ""
+    parts = output.split()
+    try:
+        return parts[parts.index("via") + 1]
+    except (ValueError, IndexError):
+        return ""
+
+
+def _tcp_port_open(host: str, port: int, *, timeout_seconds: float = 0.5) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout_seconds):
+            return True
+    except OSError:
+        return False
+
+
+def inject_delivery_proxy(env: dict[str, str], task: dict[str, object]) -> str:
+    """Prefer an explicit Windows-host proxy for email tasks.
+
+    WSL may be routed through a transparent TUN/fake-ip proxy even when no
+    proxy env vars are set. Google API TLS handshakes are materially more
+    reliable through the explicit proxy port when it is available.
+    """
+    if not bool(task.get("sends_email")):
+        return ""
+    if env.get("QUANT_DISABLE_AUTO_PROXY"):
+        return ""
+    if any(env.get(k) for k in ("HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy")):
+        return ""
+
+    proxy_url = env.get("QUANT_DELIVERY_PROXY_URL", "").strip()
+    if not proxy_url:
+        gateway = _default_gateway_ip()
+        if not gateway or not _tcp_port_open(gateway, 7897):
+            return ""
+        proxy_url = f"http://{gateway}:7897"
+
+    for key in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env.setdefault(key, proxy_url)
+    return proxy_url
+
+
 def run_task(task: dict[str, object]) -> int:
     lock_path = Path(str(task.get("lock") or STACK_ROOT / "ops" / "state" / f"{task['task_id']}.lock"))
     lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +209,9 @@ def run_task(task: dict[str, object]) -> int:
         env["QUANT_STACK_ROOT"] = str(STACK_ROOT)
         for key, value in (task.get("env") or {}).items():  # type: ignore[union-attr]
             env[str(key)] = str(value)
+        proxy_url = inject_delivery_proxy(env, task)
+        if proxy_url:
+            tee.write(f"delivery_proxy: {proxy_url}\n")
 
         command = build_command(task)
         proc = subprocess.Popen(

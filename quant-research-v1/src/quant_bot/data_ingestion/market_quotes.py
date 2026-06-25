@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 import math
 import os
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError, as_completed
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -17,6 +18,7 @@ log = structlog.get_logger()
 
 DEFAULT_MAX_WORKERS = 8
 DEFAULT_MAX_SYMBOLS = 180
+DEFAULT_MAX_SECONDS = 120
 
 
 def _safe_float(value: Any) -> float | None:
@@ -194,35 +196,64 @@ def fetch_market_quotes(
     *,
     max_workers: int | None = None,
     max_symbols: int | None = None,
+    max_seconds: int | None = None,
 ) -> pl.DataFrame:
     session = "pre" if session in {"pre", "premarket", "morning"} else "post"
     unique_symbols = sorted({s.strip().upper() for s in symbols if str(s).strip()})
     if not unique_symbols:
         return pl.DataFrame()
 
-    max_symbols = max_symbols or int(os.getenv("US_MARKET_QUOTES_MAX_SYMBOLS", DEFAULT_MAX_SYMBOLS))
+    if max_symbols is None:
+        max_symbols = int(os.getenv("US_MARKET_QUOTES_MAX_SYMBOLS", DEFAULT_MAX_SYMBOLS))
+    if max_symbols <= 0:
+        log.info("market_quote_skipped", reason="max_symbols_zero", requested=len(unique_symbols))
+        return pl.DataFrame()
     fetch_symbols = unique_symbols[:max_symbols]
     workers = max_workers or int(os.getenv("US_MARKET_QUOTES_MAX_WORKERS", DEFAULT_MAX_WORKERS))
+    if max_seconds is None:
+        max_seconds = int(os.getenv("US_MARKET_QUOTES_MAX_SECONDS", DEFAULT_MAX_SECONDS))
+    if max_seconds <= 0:
+        log.info("market_quote_skipped", reason="max_seconds_zero", requested=len(fetch_symbols))
+        return pl.DataFrame()
 
     rows: list[dict[str, Any]] = []
     failures = 0
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
-        futures = {
-            executor.submit(fetch_market_quote, symbol, as_of, session): symbol
-            for symbol in fetch_symbols
-        }
-        for future in as_completed(futures):
-            symbol = futures[future]
-            try:
-                row = future.result()
-            except Exception as exc:  # noqa: BLE001
-                failures += 1
-                log.debug("market_quote_fetch_error", symbol=symbol, error=str(exc))
-                continue
-            if row:
-                rows.append(row)
-            else:
-                failures += 1
+    started = time.monotonic()
+    executor = ThreadPoolExecutor(max_workers=max(1, workers))
+    futures = {
+        executor.submit(fetch_market_quote, symbol, as_of, session): symbol
+        for symbol in fetch_symbols
+    }
+    try:
+        try:
+            completed_iter = as_completed(futures, timeout=max_seconds)
+            for future in completed_iter:
+                symbol = futures[future]
+                try:
+                    row = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    failures += 1
+                    log.debug("market_quote_fetch_error", symbol=symbol, error=str(exc))
+                    continue
+                if row:
+                    rows.append(row)
+                else:
+                    failures += 1
+        except TimeoutError:
+            elapsed = time.monotonic() - started
+            failures += sum(1 for future in futures if not future.done())
+            log.info(
+                "market_quote_budget_exhausted",
+                requested=len(fetch_symbols),
+                rows=len(rows),
+                failures=failures,
+                elapsed_seconds=round(elapsed, 1),
+                max_seconds=max_seconds,
+            )
+    finally:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
 
     if failures:
         log.info(
@@ -264,6 +295,8 @@ def fetch_and_store_market_quotes(
     symbols: list[str],
     as_of: date,
     session: str,
+    *,
+    max_seconds: int | None = None,
 ) -> int:
-    df = fetch_market_quotes(symbols, as_of, session)
+    df = fetch_market_quotes(symbols, as_of, session, max_seconds=max_seconds)
     return upsert_market_quotes(con, df)

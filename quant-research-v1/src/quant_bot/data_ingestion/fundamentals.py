@@ -14,6 +14,7 @@ log = structlog.get_logger()
 # 1.05s between calls = ~57 calls/min, safely under the limit.
 # ~750 symbols * 2 calls * 1.05s ≈ 26 min.
 _RATE_LIMIT_SLEEP = 1.05
+_DEFAULT_REQUEST_TIMEOUT_SECONDS = 8.0
 
 
 def _profile_fresh(
@@ -38,13 +39,17 @@ def _profile_fresh(
     return (as_of - last_date).days < refresh_days
 
 
-def _fetch_profile(symbol: str, api_key: str) -> dict | None:
+def _fetch_profile(
+    symbol: str,
+    api_key: str,
+    request_timeout_seconds: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS,
+) -> dict | None:
     """GET /stock/profile2 — returns company metadata or None."""
     try:
         resp = requests.get(
             "https://finnhub.io/api/v1/stock/profile2",
             params={"symbol": symbol, "token": api_key},
-            timeout=15,
+            timeout=(3.05, request_timeout_seconds),
         )
         if resp.status_code == 429:
             log.warning("finnhub_rate_limited", symbol=symbol)
@@ -60,13 +65,17 @@ def _fetch_profile(symbol: str, api_key: str) -> dict | None:
         return None
 
 
-def _fetch_metrics(symbol: str, api_key: str) -> dict | None:
+def _fetch_metrics(
+    symbol: str,
+    api_key: str,
+    request_timeout_seconds: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS,
+) -> dict | None:
     """GET /stock/metric?metric=all — returns valuation metrics or None."""
     try:
         resp = requests.get(
             "https://finnhub.io/api/v1/stock/metric",
             params={"symbol": symbol, "metric": "all", "token": api_key},
-            timeout=15,
+            timeout=(3.05, request_timeout_seconds),
         )
         if resp.status_code == 429:
             log.warning("finnhub_rate_limited", symbol=symbol)
@@ -97,6 +106,8 @@ def fetch_fundamentals(
     as_of: date,
     api_key: str,
     refresh_days: int = 7,
+    max_seconds: float | None = None,
+    request_timeout_seconds: float = _DEFAULT_REQUEST_TIMEOUT_SECONDS,
 ) -> int:
     """
     Fetch company profile + valuation metrics for symbols from Finnhub.
@@ -117,18 +128,32 @@ def fetch_fundamentals(
         return 0
 
     log.info("fundamentals_fetching", stale=len(stale), total=len(symbols),
-             est_minutes=round(len(stale) * 2 * _RATE_LIMIT_SLEEP / 60, 1))
+             est_minutes=round(len(stale) * 2 * _RATE_LIMIT_SLEEP / 60, 1),
+             max_seconds=max_seconds)
 
     fetched = 0
     batch_rows = []
+    started = time.monotonic()
 
     for i, sym in enumerate(stale):
+        elapsed = time.monotonic() - started
+        if max_seconds is not None and elapsed >= max_seconds:
+            log.warning(
+                "fundamentals_budget_exhausted",
+                done=i,
+                total=len(stale),
+                fetched=fetched,
+                elapsed_seconds=round(elapsed, 1),
+                max_seconds=max_seconds,
+            )
+            break
+
         # Fetch profile
-        profile = _fetch_profile(sym, api_key)
+        profile = _fetch_profile(sym, api_key, request_timeout_seconds)
         time.sleep(_RATE_LIMIT_SLEEP)
 
         # Fetch metrics
-        metrics = _fetch_metrics(sym, api_key)
+        metrics = _fetch_metrics(sym, api_key, request_timeout_seconds)
         time.sleep(_RATE_LIMIT_SLEEP)
 
         if profile is None and metrics is None:

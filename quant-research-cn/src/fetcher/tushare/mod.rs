@@ -18,7 +18,7 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, Duration};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::Settings;
 
@@ -208,7 +208,12 @@ pub async fn fetch_all(db: &Connection, cfg: &Settings, as_of: NaiveDate) -> Res
 
     // ── Macro data (Shibor daily, LPR monthly, macro indicators) ──
     total += macro_cn::fetch_shibor(&client, token, db, as_of).await?;
-    total += macro_cn::fetch_lpr(&client, token, db, as_of).await?;
+    match macro_cn::fetch_lpr(&client, token, db, as_of).await {
+        Ok(rows) => total += rows,
+        Err(e) => {
+            warn!(error = %e, "shibor_lpr fetch failed; continuing with remaining Tushare endpoints");
+        }
+    }
     let macro_series: Vec<(String, String)> = cfg
         .r#macro
         .series

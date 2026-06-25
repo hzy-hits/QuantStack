@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime
 from pathlib import Path
 
@@ -99,6 +100,8 @@ def test_root_runner_us_postmarket_missing_report_is_due(tmp_path: Path, monkeyp
     task = tasks["us-postmarket"]
     assert task.workdir == stack_root
     assert task.completion.path_template == "quant-research-v1/reports/{logical_date}_report_zh_post.md"
+    assert task.completion.state_task_id == "us.postmarket"
+    assert task.command == ("ops/run_task.sh", "us.postmarket", "--date", "{logical_date}")
 
     now_local = datetime(2026, 5, 7, 8, 0, tzinfo=LOCAL_TZ)
     due = [
@@ -110,6 +113,52 @@ def test_root_runner_us_postmarket_missing_report_is_due(tmp_path: Path, monkeyp
 
     report = stack_root / "quant-research-v1" / "reports" / "2026-05-06_report_zh_post.md"
     report.write_text("x" * 300, encoding="utf-8")
+    assert task_completed(due) is True
+
+
+def test_task_completed_rejects_report_when_delivery_failure_is_unresolved(tmp_path: Path):
+    reports_dir = tmp_path / "quant-research-v1" / "reports"
+    reports_dir.mkdir(parents=True)
+    report = reports_dir / "2026-05-06_report_zh_post.md"
+    report.write_text("x" * 300, encoding="utf-8")
+
+    state_dir = tmp_path / "ops" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "us.postmarket.last_success.json").write_text(
+        json.dumps({"finished_at": "2026-05-07T00:10:00+00:00"}),
+        encoding="utf-8",
+    )
+    (state_dir / "us.postmarket.last_failure.json").write_text(
+        json.dumps({"finished_at": "2026-05-07T00:50:00+00:00"}),
+        encoding="utf-8",
+    )
+
+    task = _task(
+        tmp_path,
+        name="us-postmarket",
+        completion=CompletionCheck(
+            "file_exists",
+            "quant-research-v1/reports/{logical_date}_report_zh_post.md",
+            min_size=200,
+            state_task_id="us.postmarket",
+        ),
+        local_hour=5,
+        local_minute=0,
+        logical_date_kind="ny",
+    )
+    due = DueRun(
+        task=task,
+        local_day=date(2026, 5, 7),
+        logical_date=date(2026, 5, 6),
+        scheduled_at_local=datetime(2026, 5, 7, 5, 0, tzinfo=LOCAL_TZ),
+    )
+
+    assert task_completed(due) is False
+
+    (state_dir / "us.postmarket.last_success.json").write_text(
+        json.dumps({"finished_at": "2026-05-07T01:10:00+00:00"}),
+        encoding="utf-8",
+    )
     assert task_completed(due) is True
 
 

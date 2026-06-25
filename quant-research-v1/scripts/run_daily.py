@@ -523,6 +523,12 @@ def main() -> None:
                 n_fund = fetch_fundamentals(
                     raw_con, fund_syms, as_of, cfg.api.finnhub_key,
                     refresh_days=cfg.fundamentals.refresh_days,
+                    max_seconds=(
+                        cfg.fundamentals.premarket_max_seconds
+                        if session == "pre"
+                        else cfg.fundamentals.postmarket_max_seconds
+                    ),
+                    request_timeout_seconds=cfg.fundamentals.request_timeout_seconds,
                 )
                 log_run(raw_con, run_id, "fundamentals", "ok", n_fund)
             except Exception as e:
@@ -785,13 +791,27 @@ def main() -> None:
 
         log.info("step_market_quotes", session=session)
         try:
-            quote_syms = sorted(
-                set(candidate_syms)
-                | set(ai_infra_option_syms)
-                | {"SPY", "QQQ", "SMH"}
-            )
-            n_quotes = fetch_and_store_market_quotes(research_con, quote_syms, as_of, session)
-            log_run(research_con, run_id, "market_quotes", "ok", n_quotes)
+            if not cfg.market_quotes.enabled:
+                log.info("market_quotes_skipped", reason="disabled")
+                log_run(research_con, run_id, "market_quotes", "skipped", 0, "disabled")
+            else:
+                quote_syms = sorted(
+                    set(candidate_syms)
+                    | set(ai_infra_option_syms)
+                    | {"SPY", "QQQ", "SMH"}
+                )
+                n_quotes = fetch_and_store_market_quotes(
+                    research_con,
+                    quote_syms,
+                    as_of,
+                    session,
+                    max_seconds=(
+                        cfg.market_quotes.premarket_max_seconds
+                        if session == "pre"
+                        else cfg.market_quotes.postmarket_max_seconds
+                    ),
+                )
+                log_run(research_con, run_id, "market_quotes", "ok", n_quotes)
         except Exception as e:
             log.warning("market_quotes_failed_nonfatal", error=str(e))
             log_run(research_con, run_id, "market_quotes", "error", 0, str(e))

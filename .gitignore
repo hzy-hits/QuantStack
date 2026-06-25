@@ -42,6 +42,7 @@ ai_infra/data/source_cache/
 reports/review_packets/
 factor-lab/runtime/strategy_calibration/
 factor-lab/runtime/autoresearch/*/autoresearch.jsonl
+factor-lab/archive/
 quant-research-cn/config/strategy_params.generated.yaml
 quant-research-v1/config/strategy_params.generated.yaml
 ai_infra/data/virtual_holdings.json

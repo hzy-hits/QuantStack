@@ -13,7 +13,7 @@ use std::thread;
 use std::time::Duration;
 use tracing::{info, warn};
 
-const DATA_TIMEOUT_SECS: u64 = 3600;
+const DEFAULT_DATA_TIMEOUT_SECS: u64 = 7200;
 const EMAIL_TIMEOUT_SECS: u64 = 120;
 /// The render step generates the payload AND runs the codex/GPT-5.5 narrator
 /// (6 extractors + 1 merge), which is far slower than the legacy DeepSeek path.
@@ -455,7 +455,7 @@ fn run_data_pipeline(ctx: &UsPipelineContext) -> Result<()> {
     }
     println!();
     println!("[1/7] US data producer ({})", ctx.session);
-    let mut cmd = timeout_command(DATA_TIMEOUT_SECS, "uv");
+    let mut cmd = timeout_command(data_timeout_secs(), "uv");
     cmd.arg("run")
         .arg("python")
         .arg("scripts/run_daily.py")
@@ -768,6 +768,14 @@ fn timeout_command<S: AsRef<std::ffi::OsStr>>(seconds: u64, program: S) -> Proce
     let mut cmd = ProcessCommand::new("timeout");
     cmd.arg(seconds.to_string()).arg(program);
     cmd
+}
+
+fn data_timeout_secs() -> u64 {
+    env::var("US_DATA_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .filter(|seconds| *seconds > 0)
+        .unwrap_or(DEFAULT_DATA_TIMEOUT_SECS)
 }
 
 fn run_command(label: &str, mut cmd: ProcessCommand, dry_run: bool) -> Result<()> {
