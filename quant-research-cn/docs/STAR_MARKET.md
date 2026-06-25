@@ -13,8 +13,17 @@
 启用后扫描 **科创50(000688.SH)** 成分;微观结构(±20% 涨跌幅)由
 `src/analytics/rv.rs::price_limit_pct` 已正确处理(688 → 20.0),无需额外配置。
 
+## 已知边界
+
+`scan.star: true` 后,688 名字进入 **主要候选/notable 路径和日报**,但以下两条专用通道**仍按设计排除 688**:
+
+- **超卖探索通道**(`notable.rs::is_mainboard_exploration_symbol`):仅扫主板标的,科创板不在其目标范围。
+- **Shadow-option-alpha 校准**(`shadow_option_alpha_calibration.rs:270` `NOT LIKE '688%'`):科创板无对应期权合约,校准通道主板专属,设计保留排除。
+
+这两处排除是刻意的,不受 `scan.star` 门控。
+
 ## AI-infra 篮子兜底
-`ai_infra/data/global_universe_v2.jsonl` 含 24 个 688 名字。**不在科创50 成分里的**,
+`ai_infra/data/global_universe_v2.jsonl` 含 23 个 688 名字。**不在科创50 成分里的**,
 加入 `config.yaml` 的 `universe.watchlist`——`star: true` 后 watchlist 的 688 也会放行,
 保证篮子持仓全覆盖,与科创50 成员无关。
 

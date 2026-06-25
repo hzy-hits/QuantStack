@@ -759,7 +759,7 @@ fn prepare_candidates(
     );
 
     // ── Pass 1: Score full universe with regime-adaptive weights ───────────
-    let mut candidates = load_candidates(db, &effective_dates)?;
+    let mut candidates = load_candidates(db, &effective_dates, cfg.universe.scan.star)?;
     if candidates.is_empty() {
         return Ok(PreparedCandidates {
             candidates,
@@ -1849,8 +1849,17 @@ fn front_rank_penalty(c: &Candidate) -> f64 {
 fn load_candidates(
     db: &Connection,
     effective_dates: &AnalyticsAsOfDates,
+    scan_star: bool,
 ) -> Result<Vec<Candidate>> {
-    let sql = "
+    // When scan.star is false (default), exclude 科创板 (688) codes so they don't
+    // enter the candidate pool. When true, the WHERE fragment is omitted so STAR
+    // names flow through to notable items and the daily report.
+    let star_exclusion = if scan_star {
+        ""
+    } else {
+        "AND lp.ts_code NOT LIKE '688%'"
+    };
+    let sql = format!("
         WITH ranked AS (
             SELECT ts_code, trade_date, close, pct_chg, vol,
                    ROW_NUMBER() OVER (PARTITION BY ts_code ORDER BY trade_date DESC) AS rn
@@ -1953,10 +1962,11 @@ fn load_candidates(
         LEFT JOIN analytics a_scr ON lp.ts_code = a_scr.ts_code AND a_scr.as_of = ? AND a_scr.module = 'shadow_option_alpha' AND a_scr.metric = 'stale_chase_risk'
         LEFT JOIN analytics a_eq ON lp.ts_code = a_eq.ts_code AND a_eq.as_of = ? AND a_eq.module = 'shadow_option_alpha' AND a_eq.metric = 'entry_quality_score'
         LEFT JOIN analytics a_cb ON lp.ts_code = a_cb.ts_code AND a_cb.as_of = ? AND a_cb.module = 'shadow_option_alpha' AND a_cb.metric = 'calibration_bucket'
-        WHERE lp.ts_code NOT LIKE '688%'
-    ";
+        WHERE 1=1
+        {star_exclusion}
+    ");
 
-    let mut stmt = db.prepare(sql)?;
+    let mut stmt = db.prepare(&sql)?;
     let rows = stmt.query_map(
         duckdb::params![
             &effective_dates.prices, // ranked CTE
