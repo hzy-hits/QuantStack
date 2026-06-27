@@ -3,6 +3,16 @@
 逆向时间序。每条:日期 / 决定 / 证据 / 复议条件。
 活文档不得引用本文件之外的口头决定;改交易行为的开关翻转必须在这里留痕。
 
+## 2026-06-27 — 取数解耦 (fetch workers + consolidate + freshness gate)
+
+## 2026-06-25 — 科创板纳入 CN universe (scan.star)
+
+## 2026-06-24 — Factor Lab 退役
+
+factor-lab 研究/因子层停用:删除 factor.*/paper.* cron;factor_lab.duckdb 归档到 ai_infra/archive;
+daily_factors.sh / export_to_pipeline.py 加 DISABLED 守卫跳过。autoresearch 仅保留手动用途。
+回滚条件:若恢复自动因子挖掘,需重建 cron + 解除守卫并在此留痕。
+
 ## 2026-06-10 — setup 进场闸门:仅保留为回测对照腿,不得接入生产 sizing
 
 - **决定**: `scripts/score_entry_setup.py` 维持 research-only。生产执行表
