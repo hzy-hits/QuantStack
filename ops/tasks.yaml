@@ -140,6 +140,88 @@ tasks:
     outputs:
       - quant-research-cn/reports
 
+  cn.fetch.tushare:
+    group: cn
+    schedule: "0 16 * * 1-5"
+    cwd: quant-research-cn
+    command:
+      - ./target/release/quant-cn
+      - fetch
+      - --source
+      - tushare
+      - --date
+      - "{cst_date}"
+      - --staging
+      - data/staging/cn_tushare.duckdb
+    log: ops/logs/cn.fetch.tushare.log
+    lock: ops/state/cn.fetch.tushare.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: cn
+    session: ingest
+    owner: cn_ingest
+    outputs:
+      - quant-research-cn/data/staging/cn_tushare.duckdb
+
+  cn.fetch.akshare:
+    group: cn
+    schedule: "5 16 * * 1-5"
+    cwd: quant-research-cn
+    command:
+      - ./target/release/quant-cn
+      - fetch
+      - --source
+      - akshare
+      - --date
+      - "{cst_date}"
+      - --staging
+      - data/staging/cn_akshare.duckdb
+    log: ops/logs/cn.fetch.akshare.log
+    lock: ops/state/cn.fetch.akshare.lock
+    timeout_minutes: 20
+    sends_email: false
+    market: cn
+    session: ingest
+    owner: cn_ingest
+    outputs:
+      - quant-research-cn/data/staging/cn_akshare.duckdb
+
+  cn.consolidate:
+    group: cn
+    schedule: "30 16 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/consolidate_raw.py
+      - --market
+      - cn
+    log: ops/logs/cn.consolidate.log
+    lock: ops/state/cn.consolidate.lock
+    timeout_minutes: 15
+    sends_email: false
+    market: cn
+    session: ingest
+    owner: cn_ingest
+    outputs:
+      - quant-research-cn/data/quant_cn.duckdb
+
+  cn.freshness_gate:
+    group: cn
+    schedule: "25 8 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - ops/freshness_gate.py
+      - --market
+      - cn
+    log: ops/logs/cn.freshness_gate.log
+    lock: ops/state/cn.freshness_gate.lock
+    timeout_minutes: 5
+    sends_email: false
+    market: cn
+    session: ingest
+    owner: cn_ingest
+
   weekly.us:
     group: weekly
     schedule: "30 9 * * 6"
