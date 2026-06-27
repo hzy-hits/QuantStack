@@ -771,4 +771,15 @@ pub const CREATE_TABLES: &str = "
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_norm_score DOUBLE;
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_norm_lcb_80 DOUBLE;
     ALTER TABLE strategy_ev ADD COLUMN IF NOT EXISTS ev_norm_lcb_95 DOUBLE;
+
+    CREATE TABLE IF NOT EXISTS fetch_state (
+        market      VARCHAR NOT NULL,
+        fetcher     VARCHAR NOT NULL,
+        as_of       DATE,
+        status      VARCHAR,
+        row_count   BIGINT DEFAULT 0,
+        fetched_at  TIMESTAMP DEFAULT current_timestamp,
+        error       VARCHAR,
+        PRIMARY KEY (market, fetcher)
+    );
 ";

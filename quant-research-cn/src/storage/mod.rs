@@ -38,6 +38,25 @@ pub fn init_schema(con: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Upsert a per-(market,fetcher) ingestion watermark row.
+pub fn record_fetch_state(
+    con: &Connection,
+    market: &str,
+    fetcher: &str,
+    as_of: chrono::NaiveDate,
+    status: &str,
+    rows: usize,
+    error: Option<&str>,
+) -> Result<()> {
+    con.execute(
+        "INSERT OR REPLACE INTO fetch_state \
+         (market, fetcher, as_of, status, row_count, fetched_at, error) \
+         VALUES (?, ?, ?, ?, ?, current_timestamp, ?)",
+        duckdb::params![market, fetcher, as_of.to_string(), status, rows as i64, error],
+    )?;
+    Ok(())
+}
+
 pub fn copy_database(src: &str, dst: &str) -> Result<()> {
     let src_path = Path::new(src);
     if !src_path.exists() {
@@ -221,4 +240,30 @@ fn current_catalog(con: &Connection) -> Result<String> {
 
 fn quote_ident(value: &str) -> String {
     format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use duckdb::Connection;
+
+    #[test]
+    fn fetch_state_table_exists_and_upsert_is_idempotent() {
+        let con = Connection::open_in_memory().unwrap();
+        init_schema(&con).unwrap();
+        let d = chrono::NaiveDate::from_ymd_opt(2026, 6, 26).unwrap();
+        record_fetch_state(&con, "cn", "tushare", d, "ok", 100, None).unwrap();
+        // same PK again with a different row_count → must REPLACE, not duplicate
+        record_fetch_state(&con, "cn", "tushare", d, "ok", 150, None).unwrap();
+        let (n, rows): (i64, i64) = con
+            .query_row(
+                "SELECT count(*), max(row_count) FROM fetch_state \
+                 WHERE market='cn' AND fetcher='tushare'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "upsert must not duplicate the (market,fetcher) PK");
+        assert_eq!(rows, 150, "latest write must win");
+    }
 }
