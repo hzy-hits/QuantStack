@@ -41,6 +41,9 @@ portfolio hedge third.
 
 ## Factor Lab Continuous Mining
 
+> ⚠️ DECOMMISSIONED 2026-06-24 — factor-lab 已退役;以下为历史记录,不反映现状。详见 docs/DECISIONS.md。
+> "Continuous mining" 已停止:factor.*/paper.* cron 已删,daily_factors.sh 加 DISABLED 守卫跳过。
+
 Factor Lab now has a dedicated bridge at
 `factor-lab/src/autoresearch/ai_infra_context.py`. Autoresearch sessions load
 `ai_infra/data/global_universe_v2.jsonl`, prepend a compact BFS/universe summary

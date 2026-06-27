@@ -100,10 +100,8 @@ fail-closed,`QUANT_NARRATOR_BACKEND=deepseek` 直接切主后端。
 
 ```
 06:00-08:00  数据 ingest            cn_flow / cn_index / satellite_index / wedge_instruments / fear_greed
-09:00        US 因子日跑            factor.us.daily(→ daily_factors.sh us)
-04:00        CN 因子日跑            factor.cn.daily
 手动        autoresearch           `bash factor-lab/scripts/autoresearch.sh ...`
-                                    仅用于专项因子研究,不再 cron 日跑
+                                    factor-lab 2026-06-24 退役;autoresearch 仅保留手动用途
 11:00-12:00  AI-infra 研究           bfs_discovery / expansion_candidates / source_ingest / promotion_plan /
                                     source_review_readiness / cn_ai_evidence_verify / production_universe_refresh /
                                     evidence_card_drafts / ai_supercycle_readiness / ai_tape_cross_compare
@@ -125,18 +123,15 @@ fail-closed,`QUANT_NARRATOR_BACKEND=deepseek` 直接切主后端。
 
 ### Factor Lab(独立研究层)
 
+> ⚠️ DECOMMISSIONED 2026-06-24 — factor-lab 已退役;以下为历史记录,不反映现状。详见 docs/DECISIONS.md。
+
 | Task | 时点 | 作用 |
 |---|---|---|
-| `factor.cn.daily` | 04:00 工作日 | CN 因子挖掘(bootstrap + money gate) |
-| `factor.us.daily` | 09:00 周二-周六 | US 因子挖掘 |
-| `autoresearch` | 手动 | 专项因子研究。日跑已停用,避免低边际收益的 LLM 公式搜索继续污染 tracked runtime/journal。入口仍是 `bash factor-lab/scripts/autoresearch.sh [--market cn|us|all]` |
-| `factor.maintenance.weekly` | 周六 08:17 | 因子健康度维护 |
-| `paper.record/.evaluate/.report` | 04:33 / 07:47 / 07:53 周二-周六 | 纸面交易簿 |
+| `autoresearch` | 手动 | 专项因子研究。仅保留手动用途;入口仍是 `bash factor-lab/scripts/autoresearch.sh [--market cn|us|all]` |
 
-**产出注入主管线**:promoted 因子(`factor_registry`)→ `export_to_pipeline` →
+**产出注入主管线**(历史):promoted 因子(`factor_registry`)→ `export_to_pipeline` →
 `analytics`(CN) / `analysis_daily`(US)的 `lab_factor` 列。
-**当前状态**:14 个 promoted,**全部 `research_only`,无一过 `fresh_buy_gate + money_ready`**,
-所以 `lab_factor` 自 05-06 起每日被正确清空(闸门做对了事,**不是 bug**)。
+退役后 `daily_factors.sh` / `export_to_pipeline.py` 加 DISABLED 守卫跳过,`lab_factor` 不再注入。
 
 ### CN 预处理
 

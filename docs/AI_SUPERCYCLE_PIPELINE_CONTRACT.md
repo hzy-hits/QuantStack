@@ -105,6 +105,9 @@ ledgers, but they must not mutate `evidence_state`, `verification_status` or the
 - `quant-research-v1/src/quant_bot/analytics/cn_opportunity_ranker.py`: maps CN
   industries to AI-supercycle layers, adds priority to ranking, and in
   production mode filters/expands through the local AI-infra A-share universe.
+
+> ⚠️ DECOMMISSIONED 2026-06-24 — factor-lab 已退役;以下 factor-lab 条目为历史记录,不反映现状。详见 docs/DECISIONS.md。
+
 - `factor-lab/src/agent/prompts.py`: tells autoresearch to search for AI-infra
   factors from `ai_infra/`, fill `AI_SUPERCYCLE_LAYER` /
   `SUPPLY_CHAIN_HYPOTHESIS`, and demand financials, CDS/credit, filings/news,

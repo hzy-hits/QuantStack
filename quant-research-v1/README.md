@@ -135,27 +135,17 @@ runtime loads, in order:
 - `QUANT_US_STRATEGY_PARAMS`
 - `config/strategy_params.generated.yaml`
 - `config/strategy_params.yaml`
-- `../factor-lab/runtime/strategy_calibration/us/strategy_params.generated.yaml`
 
 The wired runtime sections are `risk_params`, `options_alpha`,
 `overnight_gate`, and `overnight_continuation_alpha`. Defaults remain
-conservative legacy heuristics unless the calibration artifact can prove an OOS
-improvement. The US calibration job reads `algorithm_postmortem`,
-`alpha_postmortem`, `analysis_daily`, and `options_alpha`, then only activates a
-candidate parameter set when the walk-forward OOS EV80 lower-confidence bound is
-positive and better than the current default.
+conservative legacy heuristics unless a calibration artifact can prove an OOS
+improvement.
 
-Generate the US artifact:
-
-```bash
-cd ..
-python factor-lab/scripts/calibrate_strategy_params.py --market us
-```
-
-The same command is called by `factor-lab/scripts/weekly_maintenance.py` for
-both CN and US. If the data is not strong enough, the artifact still refreshes
-but keeps `provenance: legacy_heuristic`; that is intentional and prevents a
-single noisy week from rewriting production gates.
+> Note: factor-lab calibration is retired (2026-06-24). The
+> `factor-lab/scripts/calibrate_strategy_params.py` / `weekly_maintenance.py`
+> jobs no longer run; strategy params now come from local config / env only
+> (`QUANT_US_STRATEGY_PARAMS` → `config/strategy_params.generated.yaml` →
+> `config/strategy_params.yaml`). See `docs/DECISIONS.md`.
 
 ## Shared Alpha Gate
 

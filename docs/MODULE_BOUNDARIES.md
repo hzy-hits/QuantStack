@@ -200,6 +200,8 @@ Responsibilities:
 
 ## Factor Lab
 
+> ⚠️ DECOMMISSIONED 2026-06-24 — factor-lab 已退役;以下为历史记录,不反映现状。详见 docs/DECISIONS.md。
+
 Purpose: discover and maintain research factors without letting them override
 the main execution gate.
 

@@ -33,27 +33,14 @@ The average is positive, but the lower confidence bound is still negative, so th
 
 ## Calibration
 
-Weekend maintenance runs:
+> ⚠️ DECOMMISSIONED 2026-06-24 — factor-lab 已退役;以下为历史记录,不反映现状。详见 docs/DECISIONS.md。
 
-```bash
-python factor-lab/scripts/calibrate_strategy_params.py --market cn
-```
-
-The generated artifact is written to:
-
-```text
-factor-lab/runtime/strategy_calibration/cn/strategy_params.generated.yaml
-quant-research-cn/config/strategy_params.generated.yaml
-```
-
-Runtime loading order:
+factor-lab calibration is retired (the `calibrate_strategy_params.py` job and its `factor-lab/runtime/strategy_calibration/...` artifacts no longer run). Strategy params now come from local config / env only:
 
 ```text
 QUANT_CN_STRATEGY_PARAMS
 config/strategy_params.generated.yaml
 quant-research-cn/config/strategy_params.generated.yaml
-../factor-lab/runtime/strategy_calibration/cn/strategy_params.generated.yaml
-factor-lab/runtime/strategy_calibration/cn/strategy_params.generated.yaml
 ```
 
-The current artifact records strategy EV, limit-up model diagnostics, and the list of remaining legacy heuristic constants. Runtime code only activates calibrated `paper_trade_ev` parameters when the artifact says `selected: candidate`, `activation.use_candidate: true`, and candidate OOS `EV80 LCB` beats the default by the configured margin. Otherwise the artifact is read but built-in defaults remain effective.
+When no calibrated artifact is present, built-in defaults remain effective.
