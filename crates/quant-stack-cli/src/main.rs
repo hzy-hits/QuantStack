@@ -128,6 +128,8 @@ struct DailyArgs {
     #[arg(long)]
     run_producers: bool,
     #[arg(long)]
+    skip_fetch: bool,
+    #[arg(long)]
     with_narrative: bool,
     #[arg(long)]
     send_reports: bool,
@@ -340,6 +342,7 @@ fn run_daily(args: DailyArgs) -> Result<()> {
             &args.session,
             &markets,
             args.dry_run,
+            args.skip_fetch,
         )?;
     }
     enter_daily_state(DailyPipelineState::ProducersReady, &args, &markets);
@@ -420,6 +423,7 @@ fn run_producers(
     session: &str,
     markets: &[String],
     dry_run: bool,
+    cn_skip_fetch: bool,
 ) -> Result<()> {
     if markets.iter().any(|m| m == "us") {
         let mut cmd = ProcessCommand::new("python3");
@@ -434,7 +438,11 @@ fn run_producers(
     if markets.iter().any(|m| m == "cn") {
         let cn_root = stack_root.join("quant-research-cn");
         let mut cmd = cn_quant_command(&cn_root);
-        cmd.arg("run").arg("--date").arg(date).current_dir(&cn_root);
+        cmd.arg("run").arg("--date").arg(date);
+        if cn_skip_fetch {
+            cmd.arg("--skip-fetch");
+        }
+        cmd.current_dir(&cn_root);
         run_or_print("cn producer", cmd, dry_run)?;
     }
     Ok(())
