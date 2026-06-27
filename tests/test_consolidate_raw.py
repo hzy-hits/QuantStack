@@ -67,6 +67,20 @@ class ConsolidateCnTests(unittest.TestCase):
         merged = self.mod.consolidate_cn(str(self.hot), [str(self.tmp / "nope.duckdb")])
         self.assertEqual(merged, 0)
 
+    def test_creates_fetch_state_when_hot_lacks_it(self):
+        # Hot DB predates the fetch_state table (real production bootstrap case).
+        hot2 = self.tmp / "hot_no_fs.duckdb"
+        con = duckdb.connect(str(hot2))
+        con.execute("CREATE TABLE prices (ts_code VARCHAR, trade_date DATE, close DOUBLE, "
+                    "PRIMARY KEY (ts_code, trade_date))")  # NO fetch_state table
+        con.close()
+        self.mod.consolidate_cn(str(hot2), [str(self.stg)])
+        con = duckdb.connect(str(hot2), read_only=True)
+        # consolidate must have created fetch_state AND merged the watermark row
+        self.assertEqual(con.execute(
+            "SELECT row_count FROM fetch_state WHERE fetcher='tushare'").fetchone()[0], 2)
+        con.close()
+
 
 if __name__ == "__main__":
     unittest.main()

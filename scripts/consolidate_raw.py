@@ -23,11 +23,27 @@ CN_HOT_DEFAULT = STACK_ROOT / "quant-research-cn" / "data" / "quant_cn.duckdb"
 CN_STAGING_DIR_DEFAULT = STACK_ROOT / "quant-research-cn" / "data" / "staging"
 CN_SOURCES = ["cn_tushare.duckdb", "cn_akshare.duckdb"]
 
+# Consolidate owns the watermark table — ensure it exists in hot even if the hot
+# DB predates it (mirrors quant-research-cn/src/storage/schema.rs fetch_state).
+FETCH_STATE_DDL = """
+CREATE TABLE IF NOT EXISTS fetch_state (
+    market      VARCHAR NOT NULL,
+    fetcher     VARCHAR NOT NULL,
+    as_of       DATE,
+    status      VARCHAR,
+    row_count   BIGINT DEFAULT 0,
+    fetched_at  TIMESTAMP DEFAULT current_timestamp,
+    error       VARCHAR,
+    PRIMARY KEY (market, fetcher)
+);
+"""
+
 
 def consolidate_cn(hot_path: str, staging_paths: list[str]) -> int:
     """Merge each existing staging DB into hot via INSERT OR REPLACE. Returns rows merged."""
     con = connect_write(hot_path)  # exclusive fcntl lock on hot
     try:
+        con.execute(FETCH_STATE_DDL)  # ensure watermark table exists before merge
         hot_tables = {
             r[0] for r in con.execute(
                 "SELECT table_name FROM information_schema.tables WHERE table_schema='main'"
