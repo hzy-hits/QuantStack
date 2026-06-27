@@ -1038,6 +1038,8 @@ def build_layout_skeleton(art: dict[str, Any], as_of: str) -> str:
         ]
         if part
     )
+    market_section = market or "| Metric | Value |\n|---|---|\n| Market | no market skeleton |"
+    catalyst_section = catalyst or "| Item | Date | Impact | Review |\n|---|---|---|---|\n| None | - | - | - |"
     return f"""
 # 美股量化日报 — {as_of}
 
@@ -1047,7 +1049,7 @@ def build_layout_skeleton(art: dict[str, Any], as_of: str) -> str:
 ## 市场结构
 先给 2-3 句 regime/tape/资金风险的因果链,再保留数据校准和关键市场证据。
 
-{market or "| Metric | Value |\n|---|---|\n| Market | no market skeleton |"}
+{market_section}
 
 ## 交易计划
 必须先给 Production candidates 表。优先从下表改写成列: Symbol / Decision / Size / Entry / Risk / Hedge / Why。
@@ -1072,7 +1074,7 @@ def build_layout_skeleton(art: dict[str, Any], as_of: str) -> str:
 ## 催化与复核
 必须给 Catalyst / review 表；若下面素材不是表格，整理成表格。政策资金流只写成催化/风险复核,不能写成 AI source evidence 或执行 R 来源。
 
-{catalyst or "| Item | Date | Impact | Review |\n|---|---|---|---|\n| None | - | - | - |"}
+{catalyst_section}
 
 ## 附注
 options / news 仅作为股票决策证据,不是这份报告的交易标的。不构成投资建议。
