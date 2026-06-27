@@ -25,6 +25,7 @@ from sections.ai_supercycle import (
     render_ai_supercycle_value_radar_section,
 )
 from sections.selection_rationale import render_market_selection_rationale
+from sections.cn_ranked_watch import render_cn_ranked_watch_radar_section
 
 _main = None
 
@@ -79,6 +80,7 @@ def render_cn_standalone_report(payload: dict[str, Any]) -> str:
     ]
     lines += m.render_market_action_table(actions)
     lines += render_market_selection_rationale(payload, actions, "CN")
+    lines += render_cn_ranked_watch_radar_section(payload)
     lines += render_cn_left_side_watch_section(payload)
     lines += render_risk_regime_section(payload, regime_key="cn_risk_regime")
     lines += render_ai_supercycle_evidence_section(payload, "CN", limit=10)

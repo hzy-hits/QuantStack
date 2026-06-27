@@ -46,7 +46,7 @@ _MACRO_HEADERS = [
     "CN 风控引擎", "今天先看哪些板块", "A股 Benchmark Snapshot", "A股 AI Book vs Benchmark",
 ]
 _STRUCTURAL_HEADERS = [
-    "概率最优", "可交易名单", "逐票复核", "左侧观察池", "CN Realized Horizon Edge",
+    "概率最优", "可交易名单", "逐票复核", "0R 观察雷达", "左侧观察池", "CN Realized Horizon Edge",
 ]
 _EVENTS_HEADERS = [
     "AI Supercycle Evidence", "10x Value Radar", "财报披露日历",
