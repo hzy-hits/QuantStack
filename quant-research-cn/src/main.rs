@@ -43,10 +43,16 @@ enum Command {
         #[arg(long)]
         skip_fetch: bool,
     },
-    /// Fetch data only (no analytics)
+    /// Fetch data only (no analytics). With --staging, writes to a per-source staging DB.
     Fetch {
         #[arg(long)]
         date: Option<String>,
+        /// Which source to fetch: tushare | akshare | all (default all)
+        #[arg(long, default_value = "all")]
+        source: String,
+        /// Optional staging DB path; if set, fetch writes here instead of the hot raw DB
+        #[arg(long)]
+        staging: Option<String>,
     },
     /// Run analytics only (assumes data is fresh)
     Analyze {
@@ -222,14 +228,28 @@ async fn main() -> Result<()> {
                 info!(%path, "payload ready");
             }
         }
-        Command::Fetch { date } => {
+        Command::Fetch { date, source, staging } => {
             let as_of = config::resolve_date(date.as_deref())?;
-            let raw_db = storage::open(cfg.data.raw_path())?;
-            let (t, a) = tokio::join!(
-                fetcher::tushare::fetch_all(&raw_db, &cfg, as_of),
-                fetcher::akshare::fetch_all(&raw_db, &cfg, as_of),
-            );
-            info!(tushare = ?t, akshare = ?a, "fetch complete");
+            let target = staging.as_deref().unwrap_or(cfg.data.raw_path());
+            let db = storage::open(target)?;
+            info!(%as_of, source = %source, target, "fetch-only start");
+
+            if source == "tushare" || source == "all" {
+                let res = fetcher::tushare::fetch_all(&db, &cfg, as_of).await;
+                let rows = *res.as_ref().unwrap_or(&0);
+                let err = res.as_ref().err().map(|e| e.to_string());
+                let status = if res.is_ok() { "ok" } else { "error" };
+                storage::record_fetch_state(&db, "cn", "tushare", as_of, status, rows, err.as_deref())?;
+                info!(tushare = ?res, "tushare fetch recorded");
+            }
+            if source == "akshare" || source == "all" {
+                let res = fetcher::akshare::fetch_all(&db, &cfg, as_of).await;
+                let rows = *res.as_ref().unwrap_or(&0);
+                let err = res.as_ref().err().map(|e| e.to_string());
+                let status = if res.is_ok() { "ok" } else { "error" };
+                storage::record_fetch_state(&db, "cn", "akshare", as_of, status, rows, err.as_deref())?;
+                info!(akshare = ?res, "akshare fetch recorded");
+            }
         }
         Command::Analyze { date, module } => {
             let as_of = config::resolve_date(date.as_deref())?;
