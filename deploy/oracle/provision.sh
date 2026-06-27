@@ -20,12 +20,23 @@ DUCKDB_WANT="1.4.4"
 log() { printf '\n=== %s ===\n' "$*"; }
 
 log "1/6 system TZ -> ${TZ_WANT}"
-if [ "$(cat /etc/timezone 2>/dev/null || true)" != "${TZ_WANT}" ]; then
+# Authoritative check via timedatectl (cron uses /etc/localtime, which set-timezone updates).
+CUR_TZ="$(timedatectl show -p Timezone --value 2>/dev/null || true)"
+if [ "${CUR_TZ}" != "${TZ_WANT}" ]; then
   sudo timedatectl set-timezone "${TZ_WANT}"
 fi
+# Keep the Debian-legacy /etc/timezone text file consistent (some tools read it).
+echo "${TZ_WANT}" | sudo tee /etc/timezone >/dev/null
 echo "tz now: $(timedatectl | grep -i 'time zone' | xargs)"
 
 log "2/6 apt build/runtime deps"
+# Fresh cloud VMs run unattended-upgrades on boot — wait for the dpkg/apt lock first.
+for _ in $(seq 1 90); do
+  if sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 \
+     || sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+    echo "apt lock held, waiting 10s..."; sleep 10
+  else break; fi
+done
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   build-essential pkg-config libssl-dev ca-certificates curl git unzip \
