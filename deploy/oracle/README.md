@@ -14,7 +14,7 @@
 私有仓库 `git@github.com:hzy-hits/QuantStack.git`。在 Oracle 上二选一:
 - **deploy key**:`ssh-keygen -t ed25519 -f ~/.ssh/gh_deploy -N ""`,把 `~/.ssh/gh_deploy.pub` 加到 GitHub 仓库 Deploy Keys(read-only 即可),`~/.ssh/config` 配 `Host github.com / IdentityFile ~/.ssh/gh_deploy`。
 - 或 HTTPS + PAT。
-然后:`git clone git@github.com:hzy-hits/QuantStack.git ~/quant-stack && cd ~/quant-stack && git checkout refactor/portability-migration`
+然后:`git clone git@github.com:hzy-hits/QuantStack.git ~/quant-stack && cd ~/quant-stack`(默认 `main` 即当前权威主干,已含全部迁移代码)。
 
 ## 2. Provision 工具链(幂等)
 ```bash
