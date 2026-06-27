@@ -1,0 +1,10 @@
+# Per-source ingestion policy for the freshness gate.
+# criticality: critical → fail-closed when stale; optional → tolerate (note only).
+# max_staleness_days: data `as_of` older than today-N (calendar days) counts stale.
+cn:
+  - source: tushare
+    criticality: critical
+    max_staleness_days: 3
+  - source: akshare
+    criticality: optional
+    max_staleness_days: 7
