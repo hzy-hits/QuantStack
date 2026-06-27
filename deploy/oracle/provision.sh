@@ -40,7 +40,7 @@ done
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
   build-essential pkg-config libssl-dev ca-certificates curl git unzip \
-  python3-venv tzdata
+  python3-venv tzdata cron
 echo "apt deps ok"
 
 log "3/6 uv (Python/venv manager)"
