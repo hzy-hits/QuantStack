@@ -35,6 +35,10 @@ Hermes integration should follow the narrow-waist model already used on the Orac
 - keep fetch workers, compute bricks, and validators inside quant-stack;
 - let the Hermes lead editor agent use the available tools opportunistically, like a skill, rather than executing a hard-coded report section list.
 
+Versioned skill entrypoint:
+
+- `integrations/hermes/skills/quant-stack-cross-market-daily/SKILL.md`
+
 Fixed items are fact sources, validation, delivery state, and **US -> CN** causality. Non-fixed items are section order, narrative angle, tool selection, and emphasis.
 
 ## Style Target

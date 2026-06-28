@@ -1,0 +1,101 @@
+---
+name: quant-stack-cross-market-daily
+description: |
+  Write quant-stack cross-market daily reports from frozen US/CN strategy facts.
+  Use for A-share pre-market / US post-market, A-share post-market / US pre-market,
+  or any request to make the daily report agent-driven instead of pipeline-script-driven.
+version: 0.1.0
+platforms: [linux]
+metadata:
+  hermes:
+    tags: [quant-stack, market, daily-report, cn, us, cross-market]
+    category: finance
+---
+
+# Quant-Stack Cross-Market Daily
+
+This skill is the Hermes-side entrypoint for the cross-market daily report.
+It keeps Hermes core narrow: quant-stack exposes CLI commands and frozen fact
+packets; the Hermes lead editor chooses which facts matter and writes the
+narrative.
+
+## Core Contract
+
+- Fetch workers collect and stage data; they do not write narrative.
+- Compute bricks freeze R, actions, risk regimes, gates, evidence state, and
+  data freshness into quant-stack artifacts.
+- The lead editor reads frozen packet facts through `tool_manifest`, chooses
+  the useful facts heuristically, and writes the report.
+- Validators reject invented facts, stale/missing inputs, production delivery
+  markers, and causality drift.
+- The hard causal direction is always **US -> CN**.
+
+PM nuance: A-share post-market action is feedback on the prior US-to-CN
+transmission. It must not raise, cut, or otherwise drive US pre-market
+positioning.
+
+## Commands
+
+Run from the quant-stack repo on Oracle:
+
+```bash
+cd /home/ubuntu/quant-stack
+quant-research-v1/.venv/bin/python scripts/agents/run_cross_market_daily_shadow.py \
+  --slot am \
+  --cn-date YYYY-MM-DD
+```
+
+```bash
+cd /home/ubuntu/quant-stack
+quant-research-v1/.venv/bin/python scripts/agents/run_cross_market_daily_shadow.py \
+  --slot pm \
+  --cn-date YYYY-MM-DD
+```
+
+Use `--agent-backend off` for deterministic shadow output. Use
+`--agent-backend auto` only when the configured LLM backend is available and
+the user wants the lead editor agent to rewrite the packet.
+
+The command writes:
+
+- `reports/review_dashboard/main_strategy_v2/<cn-date>/cross_market_<slot>_shadow.md`
+- `cross_market_<slot>_shadow_packet.json`
+- `cross_market_<slot>_shadow_trajectory.jsonl`
+- `cross_market_<slot>_shadow.meta.json`
+
+## Agent Workflow
+
+1. Resolve the slot:
+   - AM: US post-market facts -> CN pre-market plan.
+   - PM: CN post-market feedback + US pre-market context, with no CN-to-US causality.
+2. Run the shadow command if the packet/report does not already exist for the
+   requested date.
+3. Read `cross_market_<slot>_shadow_packet.json`.
+4. Treat `tool_manifest` as the available skill/MCP-like tool surface. Select
+   facts opportunistically; do not convert `coverage_checklist` into fixed
+   section headings.
+5. Preserve packet numbers, tickers, dates, R values, and source paths exactly.
+6. Write in the style of a market execution diary: strong topical headline,
+   cause-effect chain first, compact tables only when they clarify execution,
+   then invalidation and next checks.
+7. Keep output shadow-only unless quant-stack validators and production gates
+   explicitly enable a deliverable report type.
+
+## Style Reference
+
+The writing style should be inspired by this Boist market diary post:
+
+https://boist.org/2026/06/22/2026%e5%b9%b46%e6%9c%8821%e6%97%a5%ef%bc%9a%e9%9f%a9%e6%97%a5%e8%82%a1%e5%b8%82%e5%86%8d%e5%88%9b%e7%ba%aa%e5%bd%95%ef%bc%8c%e6%9d%a0%e6%9d%86etf%e5%a6%82%e6%97%a5%e4%b8%ad%e5%a4%a9%ef%bc%9btokenmaxxi/
+
+Use it as style inspiration only. Do not copy its text, claims, or market
+facts into quant-stack reports.
+
+## Guardrails
+
+- Do not invent prices, news, catalysts, R, tickers, or actions.
+- Do not write `CN -> US`.
+- Do not imply A-shares guide US execution.
+- Do not send `--market all prod` or kitchen-ticket artifacts as production
+  email.
+- Do not edit Hermes core for this workflow; extend quant-stack CLI/skill/MCP
+  edges instead.
