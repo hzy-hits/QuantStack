@@ -227,6 +227,8 @@ tasks:
     depends_on: [us.postmarket]
     schedule: "30 7 * * 1-5"
     cwd: .
+    env:
+      HERMES_BIN: /home/ubuntu/.local/bin/hermes
     command:
       - python3
       - scripts/agents/run_cross_market_daily_shadow.py
@@ -255,6 +257,8 @@ tasks:
     depends_on: [research.main_strategy_v2_report]
     schedule: "30 18 * * 1-5"
     cwd: .
+    env:
+      HERMES_BIN: /home/ubuntu/.local/bin/hermes
     command:
       - python3
       - scripts/agents/run_cross_market_daily_shadow.py

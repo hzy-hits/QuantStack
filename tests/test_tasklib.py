@@ -36,6 +36,8 @@ class TasklibTests(unittest.TestCase):
         self.assertIn("auto", evening["command"])
         self.assertIn("us.postmarket", morning["depends_on"])
         self.assertIn("research.main_strategy_v2_report", evening["depends_on"])
+        self.assertEqual(morning["env"]["HERMES_BIN"], "/home/ubuntu/.local/bin/hermes")
+        self.assertEqual(evening["env"]["HERMES_BIN"], "/home/ubuntu/.local/bin/hermes")
 
 
 if __name__ == "__main__":
