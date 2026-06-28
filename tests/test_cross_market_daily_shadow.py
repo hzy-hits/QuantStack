@@ -114,7 +114,8 @@ def test_hermes_prompt_retires_legacy_narrator_templates(tmp_path: Path) -> None
     assert "finance-search MCP" in prompt
     assert "不要使用 quant-research-v1/prompts" in prompt
     assert "coverage_checklist 是验收清单,不是章节模板" in prompt
-    assert "禁止 CN -> US" in prompt
+    assert "不得把 A股盘后反馈写成会指导美股盘前或美股策略" in prompt
+    assert "CN -> US" not in prompt
 
 
 def test_call_hermes_agent_uses_hermes_skill(tmp_path: Path) -> None:

@@ -565,7 +565,8 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 硬约束:
 - 第一行必须以 `{title_rule}` 开头。
 - {slot_rule}
-- 因果方向固定为 US -> CN。禁止 CN -> US。
+- 因果方向固定为美股事实约束 A股策略;不得把 A股盘后反馈写成会指导美股盘前或美股策略。
+- 正文不要输出任何反向因果箭头标记。
 - 不得编造 packet/MCP 之外的价格、ticker、R、新闻、仓位和结论。
 - 不得触发邮件、cron、生产投递或文件修改;最终只输出 markdown 报告文本。
 - 生产状态必须保持 shadow_only / production_delivery disabled。
