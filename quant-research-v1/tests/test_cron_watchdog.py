@@ -93,7 +93,6 @@ def test_root_runner_us_postmarket_missing_report_is_due(tmp_path: Path, monkeyp
     us_root = stack_root / "quant-research-v1"
     (us_root / "reports").mkdir(parents=True)
     (stack_root / "quant-research-cn").mkdir(parents=True)
-    (stack_root / "factor-lab").mkdir(parents=True)
     monkeypatch.setenv("QUANT_STACK_ROOT", str(stack_root))
 
     tasks = {task.name: task for task in build_default_tasks(us_root)}
@@ -207,6 +206,17 @@ def test_default_tasks_do_not_schedule_autoresearch():
     assert "autoresearch-cn-06" not in tasks
     assert "autoresearch-am" not in tasks
     assert "autoresearch-pm" not in tasks
+
+
+def test_default_tasks_do_not_schedule_retired_factor_lab_or_paper_tasks():
+    tasks = {task.name for task in build_default_tasks(REPO_ROOT)}
+
+    assert "factor-cn-daily" not in tasks
+    assert "factor-us-daily" not in tasks
+    assert "paper-record" not in tasks
+    assert "paper-evaluate" not in tasks
+    assert "paper-report" not in tasks
+    assert "factor-maintenance" not in tasks
 
 
 def test_update_completion_state_marks_existing_artifact_complete(tmp_path: Path):

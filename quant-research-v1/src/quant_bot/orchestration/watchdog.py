@@ -24,10 +24,6 @@ GLOBAL_BUSY_PATTERNS = (
     "bash scripts/run_weekly.sh",
     "bash scripts/daily_pipeline.sh",
     "bash scripts/weekly_pipeline.sh",
-    "bash scripts/daily_factors.sh",
-    "bash scripts/autoresearch.sh",
-    "scripts/paper_trade.py",
-    "scripts/weekly_maintenance.py",
 )
 
 
@@ -111,24 +107,18 @@ def resolve_repo_dir(*candidates: str | Path | None) -> Path:
     raise FileNotFoundError(f"unable to resolve repo dir from: {candidates}")
 
 
-def resolve_stack_roots(project_dir: Path) -> tuple[Path, Path, Path]:
+def resolve_stack_roots(project_dir: Path) -> tuple[Path, Path]:
     us_root = project_dir.resolve()
     stack_root = os.environ.get("QUANT_STACK_ROOT")
     base_root = us_root.parents[1]
 
-    factor_lab_root = resolve_repo_dir(
-        os.environ.get("FACTOR_LAB_ROOT"),
-        Path(stack_root) / "factor-lab" if stack_root else None,
-        us_root.parent / "factor-lab",
-        base_root / "python" / "factor-lab",
-    )
     cn_root = resolve_repo_dir(
         os.environ.get("QUANT_CN_ROOT"),
         Path(stack_root) / "quant-research-cn" if stack_root else None,
         us_root.parent / "quant-research-cn",
         base_root / "rust" / "quant-research-cn",
     )
-    return us_root, cn_root, factor_lab_root
+    return us_root, cn_root
 
 
 @lru_cache(maxsize=None)
@@ -158,7 +148,7 @@ def scheduled_logical_date(local_day: date, task: TaskConfig) -> date:
 
 
 def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
-    us_root, cn_root, factor_lab_root = resolve_stack_roots(project_dir)
+    us_root, cn_root = resolve_stack_roots(project_dir)
     stack_root = Path(os.environ["QUANT_STACK_ROOT"]).resolve() if os.environ.get("QUANT_STACK_ROOT") else us_root.parent
 
     return (
@@ -256,105 +246,6 @@ def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
             local_hour=10,
             local_minute=0,
             priority=15,
-        ),
-        TaskConfig(
-            name="factor-cn-daily",
-            workdir=factor_lab_root,
-            command=("bash", "scripts/daily_factors.sh", "--market", "cn"),
-            completion=CompletionCheck(
-                kind="file_contains_all",
-                path_template="logs/daily_{local_date_nodash}.log",
-                markers=("=== A-Share Factor Lab Research Candidates ===", "Done:"),
-            ),
-            local_weekdays=(0, 1, 2, 3, 4),
-            local_hour=4,
-            local_minute=0,
-            trading_calendar="XSHG",
-            same_day_only=True,
-            priority=20,
-        ),
-        TaskConfig(
-            name="factor-us-daily",
-            workdir=factor_lab_root,
-            command=("bash", "scripts/daily_factors.sh", "--market", "us"),
-            completion=CompletionCheck(
-                kind="file_contains_all",
-                path_template="logs/daily_{local_date_nodash}.log",
-                markers=("=== US Factor Lab Research Candidates ===", "Done:"),
-            ),
-            local_weekdays=(1, 2, 3, 4, 5),
-            local_hour=9,
-            local_minute=0,
-            logical_date_kind="ny",
-            trading_calendar="XNYS",
-            same_day_only=True,
-            priority=20,
-        ),
-        TaskConfig(
-            name="paper-record",
-            workdir=factor_lab_root,
-            command=("python3", "scripts/paper_trade.py", "record"),
-            completion=CompletionCheck(
-                kind="file_contains_any",
-                path_template="logs/paper_{local_date_nodash}.log",
-                markers=("  Recorded ", "  Already recorded ", "  No factor selected for "),
-            ),
-            local_weekdays=(1, 2, 3, 4, 5),
-            local_hour=4,
-            local_minute=33,
-            logical_date_kind="ny",
-            trading_calendar="XNYS",
-            same_day_only=True,
-            priority=20,
-        ),
-        TaskConfig(
-            name="paper-evaluate",
-            workdir=factor_lab_root,
-            command=("python3", "scripts/paper_trade.py", "evaluate"),
-            completion=CompletionCheck(
-                kind="file_contains_any",
-                path_template="logs/paper_{local_date_nodash}.log",
-                markers=("    Cum:   Long", "  No unevaluated picks found"),
-            ),
-            local_weekdays=(1, 2, 3, 4, 5),
-            local_hour=7,
-            local_minute=47,
-            logical_date_kind="ny",
-            trading_calendar="XNYS",
-            same_day_only=True,
-            priority=20,
-        ),
-        TaskConfig(
-            name="paper-report",
-            workdir=factor_lab_root,
-            command=("python3", "scripts/paper_trade.py", "report"),
-            completion=CompletionCheck(
-                kind="file_contains_any",
-                path_template="logs/paper_{local_date_nodash}.log",
-                markers=("  Paper Trading Report", "No paper trading data yet."),
-            ),
-            local_weekdays=(1, 2, 3, 4, 5),
-            local_hour=7,
-            local_minute=53,
-            logical_date_kind="ny",
-            trading_calendar="XNYS",
-            same_day_only=True,
-            priority=20,
-        ),
-        TaskConfig(
-            name="factor-maintenance",
-            workdir=factor_lab_root,
-            command=("python3", "scripts/weekly_maintenance.py", "--days", "250"),
-            completion=CompletionCheck(
-                kind="file_contains_any",
-                path_template="logs/maintenance_{local_date_nodash}.log",
-                markers=("  Done:", "rows inserted"),
-            ),
-            local_weekdays=(5,),
-            local_hour=8,
-            local_minute=17,
-            same_day_only=True,
-            priority=40,
         ),
     )
 
