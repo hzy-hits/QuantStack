@@ -125,7 +125,8 @@ def test_hermes_prompt_retires_legacy_narrator_templates(tmp_path: Path) -> None
     assert "不得把 A股盘后反馈写成会指导美股盘前或美股策略" in prompt
     assert "CN -> US" not in prompt
     assert "数据缺口/待补证据" in prompt
-    assert "不要写成报告或投递失败" in prompt
+    assert "不要写成生产运行错误" in prompt
+    assert "投递失败" not in prompt
 
 
 def test_call_hermes_agent_uses_hermes_skill(tmp_path: Path) -> None:
