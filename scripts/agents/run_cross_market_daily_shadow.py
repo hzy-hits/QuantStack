@@ -570,6 +570,7 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 - 不得编造 packet/MCP 之外的价格、ticker、R、新闻、仓位和结论。
 - 不得触发邮件、cron、生产投递或文件修改;最终只输出 markdown 报告文本。
 - 生产状态必须保持 shadow_only / production_delivery disabled。
+- 如果 MCP validator 返回缺口,把它们写成“数据缺口/待补证据”,不要写成报告或投递失败。
 
 写作风格:
 - 参考 packet.style_brief 和 Boist 市场日记风格: 强主题开场,先讲市场故事和因果链,
@@ -678,7 +679,16 @@ def validate_shadow_report(text: str, slot: str) -> list[str]:
     for token in required:
         if token not in text:
             failures.append(f"missing required token: {token}")
-    forbidden = ["production_delivery: enabled", "prod delivery", "A股盘后必须指导 美股盘前", "CN -> US"]
+    forbidden = [
+        "production_delivery: enabled",
+        "prod delivery",
+        "A股盘后必须指导 美股盘前",
+        "CN -> US",
+        "validator | 未通过",
+        "validator 未通过",
+        "报告失败",
+        "投递失败",
+    ]
     for token in forbidden:
         if token in text:
             failures.append(f"forbidden production marker: {token}")

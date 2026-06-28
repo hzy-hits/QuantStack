@@ -89,6 +89,14 @@ def test_validator_rejects_cn_to_us_framing() -> None:
     assert any("CN -> US" in item for item in failures)
 
 
+def test_validator_rejects_delivery_failure_language() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report("# 跨市场晚报\n\nA股\n美股\nvalidator | 未通过\n", "pm")
+
+    assert any("validator | 未通过" in item for item in failures)
+
+
 def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
@@ -116,6 +124,8 @@ def test_hermes_prompt_retires_legacy_narrator_templates(tmp_path: Path) -> None
     assert "coverage_checklist 是验收清单,不是章节模板" in prompt
     assert "不得把 A股盘后反馈写成会指导美股盘前或美股策略" in prompt
     assert "CN -> US" not in prompt
+    assert "数据缺口/待补证据" in prompt
+    assert "不要写成报告或投递失败" in prompt
 
 
 def test_call_hermes_agent_uses_hermes_skill(tmp_path: Path) -> None:
