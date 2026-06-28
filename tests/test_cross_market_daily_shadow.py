@@ -136,10 +136,12 @@ def test_call_hermes_agent_uses_hermes_skill(tmp_path: Path) -> None:
 
     cmd = run.call_args.args[0]
     assert cmd[0] == "/home/ubuntu/.local/bin/hermes"
-    assert "-z" in cmd
+    assert cmd[1:4] == ["chat", "-Q", "-q"]
     assert "--skills" in cmd
     assert "quant-stack-cross-market-daily" in cmd
     assert "--max-turns" in cmd
+    assert "--source" in cmd
+    assert "quant-stack-cron" in cmd
     assert report.startswith("# 跨市场早报")
     assert packet["_agent_backend"] == "hermes"
 

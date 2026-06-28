@@ -66,7 +66,7 @@ def parse_args() -> argparse.Namespace:
         "--agent-backend",
         choices=["off", "auto", "hermes"],
         default="off",
-        help="off writes deterministic shadow text; auto calls codex_backend.call_llm; hermes calls Hermes oneshot.",
+        help="off writes deterministic shadow text; auto calls codex_backend.call_llm; hermes calls Hermes chat.",
     )
     parser.add_argument("--timeout", type=int, default=900)
     parser.add_argument("--hermes-bin", default=os.environ.get("HERMES_BIN", "hermes"))
@@ -595,13 +595,17 @@ def call_hermes_agent(
     prompt = build_hermes_prompt(packet)
     cmd = [
         hermes_bin,
-        "-z",
+        "chat",
+        "-Q",
+        "-q",
         prompt,
         "--skills",
         "quant-stack-cross-market-daily",
         "--accept-hooks",
         "--max-turns",
         str(max_turns),
+        "--source",
+        "quant-stack-cron",
     ]
     if model:
         cmd.extend(["--model", model])
