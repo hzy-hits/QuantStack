@@ -24,6 +24,19 @@ class TasklibTests(unittest.TestCase):
             ["./scripts/run_full.sh", "--prod", "--premarket", "2026-06-26"],
         )
 
+    def test_cross_market_tasks_use_hermes_with_fallback(self) -> None:
+        morning = materialize_task("daily.cross_market_am", "2026-06-26")
+        evening = materialize_task("daily.cross_market_pm", "2026-06-26")
+
+        self.assertEqual(morning["schedule"], "30 7 * * 1-5")
+        self.assertEqual(evening["schedule"], "30 18 * * 1-5")
+        self.assertIn("--agent-backend", morning["command"])
+        self.assertIn("hermes", morning["command"])
+        self.assertIn("--fallback-backend", evening["command"])
+        self.assertIn("auto", evening["command"])
+        self.assertIn("us.postmarket", morning["depends_on"])
+        self.assertIn("research.main_strategy_v2_report", evening["depends_on"])
+
 
 if __name__ == "__main__":
     unittest.main()

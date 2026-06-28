@@ -38,6 +38,7 @@ def _header() -> str:
 GROUP_LABELS = {
     "us": "US Pipeline",
     "cn": "CN Pipeline",
+    "daily": "Cross-Market Daily",
     "weekly": "Weekly Reports",
     "factor": "Factor Lab Daily",
     "paper": "Paper Trading",

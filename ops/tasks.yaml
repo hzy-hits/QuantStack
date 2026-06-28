@@ -222,6 +222,62 @@ tasks:
     session: ingest
     owner: cn_ingest
 
+  daily.cross_market_am:
+    group: daily
+    depends_on: [us.postmarket]
+    schedule: "30 7 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/agents/run_cross_market_daily_shadow.py
+      - --slot
+      - am
+      - --cn-date
+      - "{cst_date}"
+      - --agent-backend
+      - hermes
+      - --fallback-backend
+      - auto
+      - --timeout
+      - "900"
+    log: ops/logs/daily.cross_market_am.log
+    lock: ops/state/daily.cross_market_am.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: all
+    session: cross_market_am
+    owner: hermes_daily
+    outputs:
+      - reports/review_dashboard/main_strategy_v2
+
+  daily.cross_market_pm:
+    group: daily
+    depends_on: [research.main_strategy_v2_report]
+    schedule: "30 18 * * 1-5"
+    cwd: .
+    command:
+      - python3
+      - scripts/agents/run_cross_market_daily_shadow.py
+      - --slot
+      - pm
+      - --cn-date
+      - "{cst_date}"
+      - --agent-backend
+      - hermes
+      - --fallback-backend
+      - auto
+      - --timeout
+      - "900"
+    log: ops/logs/daily.cross_market_pm.log
+    lock: ops/state/daily.cross_market_pm.lock
+    timeout_minutes: 30
+    sends_email: false
+    market: all
+    session: cross_market_pm
+    owner: hermes_daily
+    outputs:
+      - reports/review_dashboard/main_strategy_v2
+
   weekly.us:
     group: weekly
     schedule: "30 9 * * 6"
