@@ -31,6 +31,12 @@ from zoneinfo import ZoneInfo
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_REPORT_ROOT = ROOT / "reports" / "review_dashboard" / "main_strategy_v2"
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
+STYLE_REFERENCE_URL = (
+    "https://boist.org/2026/06/22/"
+    "2026%e5%b9%b46%e6%9c%8821%e6%97%a5%ef%bc%9a%e9%9f%a9%e6%97%a5"
+    "%e8%82%a1%e5%b8%82%e5%86%8d%e5%88%9b%e7%ba%aa%e5%bd%95%ef%bc%8c"
+    "%e6%9d%a0%e6%9d%86etf%e5%a6%82%e6%97%a5%e4%b8%ad%e5%a4%a9%ef%bc%9btokenmaxxi/"
+)
 
 
 @dataclass(frozen=True)
@@ -239,6 +245,132 @@ def action_table(actions: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def build_tool_manifest(slot: str, cn_summary: dict[str, Any], us_summary: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "read_us_main_strategy_v2_payload",
+            "kind": "compute_brick",
+            "market": "US",
+            "source": us_summary.get("source_payload"),
+            "returns": ["gross_r", "actions", "risk_regime", "data_dates"],
+            "agent_use": "Find the US drivers that can constrain or relax the next CN session.",
+        },
+        {
+            "name": "read_cn_main_strategy_v2_payload",
+            "kind": "compute_brick",
+            "market": "CN",
+            "source": cn_summary.get("source_payload"),
+            "returns": ["gross_r", "actions", "risk_regime", "data_dates"],
+            "agent_use": (
+                "AM: map US risk into CN execution. "
+                "PM: audit how prior US-to-CN transmission behaved; do not create CN-to-US causality."
+            ),
+        },
+        {
+            "name": "read_us_daily_markdown",
+            "kind": "narrative_brick",
+            "market": "US",
+            "source": us_summary.get("source_markdown"),
+            "returns": ["existing_summary", "editor_notes"],
+            "agent_use": "Use as prior narrative context only after checking packet facts.",
+        },
+        {
+            "name": "read_cn_daily_markdown",
+            "kind": "narrative_brick",
+            "market": "CN",
+            "source": cn_summary.get("source_markdown"),
+            "returns": ["existing_summary", "editor_notes"],
+            "agent_use": "Use as CN context; PM usage is feedback and postmortem only.",
+        },
+        {
+            "name": "select_cross_market_transmission",
+            "kind": "agent_reasoning_tool",
+            "market": "US,CN",
+            "source": "packet.cn + packet.us",
+            "returns": ["dominant_us_driver", "cn_execution_implication", "invalidated_links"],
+            "agent_use": "Heuristically decide the story spine from facts; this is not a fixed section template.",
+        },
+        {
+            "name": "write_cross_market_daily",
+            "kind": "agent_output_tool",
+            "market": "US,CN",
+            "source": "selected packet facts",
+            "returns": ["markdown_report"],
+            "agent_use": "Write one deliverable-style shadow report after fact selection and causality checks.",
+        },
+    ]
+
+
+def build_agent_operating_mode(slot: str) -> dict[str, Any]:
+    if slot == "am":
+        objective = "Use US post-market facts to frame CN pre-market execution."
+    else:
+        objective = "Combine CN post-market feedback with US pre-market context without CN-to-US causality."
+    return {
+        "driver": "hermes_style_lead_editor",
+        "mode": "heuristic_tool_use",
+        "objective": objective,
+        "contract": (
+            "quant-stack freezes facts and exposes MCP/skill-like tools; "
+            "the lead editor chooses which facts matter and how to narrate them."
+        ),
+        "fixed": [
+            "fact sources",
+            "US -> CN causal direction",
+            "no invented numbers/tickers/news",
+            "shadow-only delivery state",
+        ],
+        "not_fixed": [
+            "section order",
+            "which available tools are worth using",
+            "headline angle beyond the required report prefix",
+            "narrative emphasis and length",
+        ],
+    }
+
+
+def build_data_boundary() -> dict[str, Any]:
+    return {
+        "fetch_workers": "Own data collection, staging, freshness, and retry state. They do not write narrative.",
+        "compute_bricks": "Read canonical data/artifacts and freeze R, actions, regimes, gates, and evidence facts.",
+        "agent_editor": "Reads frozen facts through the tool manifest, selects emphasis, writes narrative, and never computes.",
+        "validators": "Reject causality drift, invented facts, stale inputs, and production delivery markers.",
+    }
+
+
+def build_coverage_checklist(slot: str) -> list[str]:
+    if slot == "am":
+        return [
+            "Open with the US post-market driver that most changes CN risk for the next open.",
+            "Explain the US -> CN transmission path and where it can fail.",
+            "Translate the driver into CN execution limits, sector priority, and watch items.",
+            "Show actionable US/CN facts only when they clarify the story.",
+            "End with risk, invalidation, freshness, and data lineage checks.",
+        ]
+    return [
+        "Review CN post-market action as feedback on prior US-to-CN transmission.",
+        "Summarize US pre-market context from US facts, not from CN direction.",
+        "State explicitly that CN feedback cannot raise or cut US positioning.",
+        "Identify what the next US session can change for the following CN session.",
+        "End with risk, invalidation, freshness, and data lineage checks.",
+    ]
+
+
+def build_style_brief() -> dict[str, Any]:
+    return {
+        "reference_name": "Boist market execution diary",
+        "reference_url": STYLE_REFERENCE_URL,
+        "use_as": "style inspiration only; do not copy wording or claims",
+        "principles": [
+            "Narrative first: start from the market story, not from a table.",
+            "Use a strong topical headline and clear cause-effect chain.",
+            "Blend macro, sector, positioning, leverage, and event risk into one thesis.",
+            "Write like an execution diary: what changed, why it matters, what would invalidate it.",
+            "Use compact bullets/tables only for trade facts or explicit scenario thresholds.",
+        ],
+    }
+
+
 def build_packet(slot: str, cn: MarketArtifact, us: MarketArtifact) -> dict[str, Any]:
     cn_summary = summarize_artifact(cn)
     us_summary = summarize_artifact(us)
@@ -268,6 +400,11 @@ def build_packet(slot: str, cn: MarketArtifact, us: MarketArtifact) -> dict[str,
         "us_role": us_role,
         "cn_role": cn_role,
         "thesis": thesis,
+        "agent_operating_mode": build_agent_operating_mode(slot),
+        "data_boundary": build_data_boundary(),
+        "tool_manifest": build_tool_manifest(slot, cn_summary, us_summary),
+        "coverage_checklist": build_coverage_checklist(slot),
+        "style_brief": build_style_brief(),
         "cn": cn_summary,
         "us": us_summary,
         "invariants": [
@@ -337,7 +474,7 @@ def deterministic_report(packet: dict[str, Any]) -> str:
 def build_agent_messages(packet: dict[str, Any]) -> tuple[str, str]:
     if packet["slot"] == "am":
         title_rule = "# 跨市场早报"
-        direction_rule = "美股盘后必须指导 A股盘前: 仓位、行业优先级、风险线。"
+        direction_rule = "美股盘后事实可约束 A股盘前: 仓位、行业优先级、风险线。"
     else:
         title_rule = "# 跨市场晚报"
         direction_rule = (
@@ -345,10 +482,15 @@ def build_agent_messages(packet: dict[str, Any]) -> tuple[str, str]:
             "美股盘前仍由美股自己的 regime、money gate、期权/Gamma 和证据门决定。"
         )
     system = f"""
-你是 quant-stack 的跨市场 lead editor agent。你只能使用用户给定 packet 里的数字、ticker、日期和结论。
+你是 quant-stack 的 Hermes 风格跨市场 lead editor agent。你不是固定流水线脚本。
+packet 里的 tool_manifest 是 MCP/skill-like 工具面;你可以启发式选择事实、顺序和叙事重点。
+coverage_checklist 是验收清单,不是章节模板;不要机械照抄成固定小标题。
+
+你只能使用用户给定 packet 里的数字、ticker、日期和结论。
 禁止编造价格、R、ticker、新闻或仓位。输出一份中文跨市场日报,第一行必须以 `{title_rule}` 开头。
 {direction_rule}
-结构必须覆盖: 跨市场主线、US->CN 因果方向、A股反馈边界、交易清单、风险与复核、数据血缘。
+写法参考 packet.style_brief: 市场执行日记、强主题标题、先讲市场为何变化,再讲传导、执行和失效条件。
+必须满足 coverage_checklist 和 invariants,但正文结构由你按证据自行组织。
 """
     user = json.dumps(packet, ensure_ascii=False, indent=2)
     return system, user

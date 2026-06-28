@@ -60,6 +60,10 @@ def test_pm_packet_keeps_us_to_cn_causality(tmp_path: Path) -> None:
     assert packet["target_market"] == "CN"
     assert packet["cn_role"] == "feedback_only"
     assert "不反向约束美股" in packet["thesis"]
+    assert packet["agent_operating_mode"]["mode"] == "heuristic_tool_use"
+    assert packet["data_boundary"]["fetch_workers"].startswith("Own data collection")
+    assert any(tool["name"] == "select_cross_market_transmission" for tool in packet["tool_manifest"])
+    assert packet["style_brief"]["reference_url"].startswith("https://boist.org/")
 
 
 def test_pm_report_does_not_claim_cn_guides_us(tmp_path: Path) -> None:
@@ -81,3 +85,17 @@ def test_validator_rejects_cn_to_us_framing() -> None:
     failures = module.validate_shadow_report("# 跨市场晚报\n\nCN -> US\nA股\n美股\n", "pm")
 
     assert any("CN -> US" in item for item in failures)
+
+
+def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+
+    system, user = module.build_agent_messages(module.build_packet("am", cn, us))
+
+    assert "MCP/skill-like 工具面" in system
+    assert "不是章节模板" in system
+    assert "结构必须覆盖" not in system
+    assert "coverage_checklist" in user
+    assert "tool_manifest" in user
