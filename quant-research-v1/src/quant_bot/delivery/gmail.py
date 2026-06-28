@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
+import os
 import re
 import time
 from email.header import Header
@@ -153,6 +154,60 @@ def load_sender_name(config_path: str = "config.yaml") -> str | None:
         return None
     name = (cfg.get("reporting", {}) or {}).get("sender_name")
     return str(name).strip() or None if name else None
+
+
+def _read_key_value_file(path: Path | str | None) -> dict[str, str]:
+    if not path:
+        return {}
+    p = Path(path)
+    if not p.exists():
+        return {}
+    values: dict[str, str] = {}
+    for raw in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        value = value.strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        values[key.strip()] = value
+    return values
+
+
+def _resend_config_value(name: str, config_path: str = "config.yaml") -> str:
+    """Resolve Resend config without requiring secrets in git.
+
+    Resolution order:
+    1. Process env, e.g. RESEND_API_KEY / RESEND_FROM_EMAIL.
+    2. RESEND_ENV_FILE key-value file, e.g. Multica's /home/ubuntu/apps/multica/.env.
+    3. RESEND_API_KEY_FILE key-value file, matching ops-bot's secret-file style.
+    4. reporting.<lowercase name> in quant config for non-secret values.
+    5. Oracle compatibility fallback: /home/ubuntu/apps/multica/.env if present.
+    """
+    direct = os.environ.get(name, "").strip()
+    if direct:
+        return direct
+
+    for env_name in ("RESEND_ENV_FILE", "RESEND_API_KEY_FILE"):
+        value = _read_key_value_file(os.environ.get(env_name)).get(name, "").strip()
+        if value:
+            return value
+
+    reporting: dict = {}
+    p = Path(config_path)
+    if p.exists():
+        try:
+            cfg = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+            reporting = cfg.get("reporting", {}) if isinstance(cfg.get("reporting"), dict) else {}
+        except yaml.YAMLError:
+            reporting = {}
+    config_value = str(reporting.get(name.lower()) or reporting.get(name) or "").strip()
+    if config_value:
+        return config_value
+
+    oracle_multica_env = Path("/home/ubuntu/apps/multica/.env")
+    return _read_key_value_file(oracle_multica_env).get(name, "").strip()
 TOKEN_PATH = Path("token.json")
 CREDENTIALS_PATH = Path("credentials.json")
 
@@ -702,6 +757,92 @@ def send_report_email(
 
     log.info("gmail_send_complete", messages=len(msg_ids), bcc_count=len(bcc_recipients))
     return msg_ids
+
+
+def send_report_email_resend(
+    report_path: Path | str,
+    chart_paths: list[Path] | None = None,
+    to: str | None = None,
+    subject: str = "",
+    bcc: list[str] | None = None,
+    config_path: str = "config.yaml",
+) -> list[str]:
+    """Send a markdown report through Resend.
+
+    This is intentionally API-compatible with send_report_email for the daily
+    pipeline. It supports Multica's RESEND_ENV_FILE style and ops-bot's
+    RESEND_API_KEY_FILE style; no secret is read from git-tracked files.
+    """
+    import requests
+
+    if to:
+        direct_to = [to]
+        bcc_recipients: list[str] = bcc or []
+        log.info("resend_direct_recipient_override", has_bcc=bool(bcc_recipients))
+    else:
+        direct_to = []
+        bcc_recipients = load_recipients(config_path)
+        log.info("resend_recipients_from_config", count=len(bcc_recipients))
+
+    api_key = _resend_config_value("RESEND_API_KEY", config_path)
+    from_email = _resend_config_value("RESEND_FROM_EMAIL", config_path)
+    if not api_key:
+        raise ValueError("RESEND_API_KEY is not configured")
+    if not from_email:
+        raise ValueError("RESEND_FROM_EMAIL is not configured")
+
+    report_path = Path(report_path)
+    md_text = report_path.read_text(encoding="utf-8")
+    chart_paths = chart_paths or []
+    chart_cid_map: dict[str, str] = {
+        str(cp): f"chart_{idx}_{Path(cp).stem}"
+        for idx, cp in enumerate(chart_paths)
+    }
+    html = _md_to_html(md_text, chart_cid_map, chart_paths)
+
+    payload: dict[str, object] = {
+        "from": from_email,
+        "subject": subject,
+        "html": html,
+        "text": md_text[:12000],
+        "tags": [
+            {"name": "app", "value": "quant-stack"},
+            {"name": "provider", "value": "resend"},
+        ],
+    }
+    if direct_to:
+        payload["to"] = direct_to
+        if bcc_recipients:
+            payload["bcc"] = bcc_recipients
+    else:
+        visible_to = _resend_config_value("RESEND_VISIBLE_TO", config_path) or from_email
+        payload["to"] = [visible_to]
+        payload["bcc"] = bcc_recipients
+
+    timeout = float(os.environ.get("RESEND_TIMEOUT_SECONDS", "30"))
+    resp = requests.post(
+        "https://api.resend.com/emails",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=timeout,
+    )
+    if resp.status_code < 200 or resp.status_code >= 300:
+        body = (resp.text or "")[:800].replace(api_key, "re_***REDACTED***")
+        raise RuntimeError(f"Resend returned HTTP {resp.status_code}: {body}")
+    try:
+        data = resp.json()
+    except ValueError as exc:
+        raise RuntimeError(f"Resend returned non-JSON response: {resp.text[:300]}") from exc
+    msg_id = str(data.get("id") or "")
+    if not msg_id:
+        raise RuntimeError(f"Resend response missing id: {data}")
+    log.info(
+        "resend_sent",
+        to_count=len(direct_to) or 1,
+        bcc_count=len(bcc_recipients),
+        message_id=msg_id,
+    )
+    return [msg_id]
 
 
 def _resolve_sender(service, config_path: str) -> str:

@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -63,11 +64,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=None, help="Defaults to report-root/<cn-date>.")
     parser.add_argument(
         "--agent-backend",
-        choices=["off", "auto"],
+        choices=["off", "auto", "hermes"],
         default="off",
-        help="off writes deterministic shadow text; auto calls codex_backend.call_llm.",
+        help="off writes deterministic shadow text; auto calls codex_backend.call_llm; hermes calls Hermes oneshot.",
     )
     parser.add_argument("--timeout", type=int, default=900)
+    parser.add_argument("--hermes-bin", default=os.environ.get("HERMES_BIN", "hermes"))
+    parser.add_argument("--hermes-model", default=os.environ.get("HERMES_INFERENCE_MODEL", ""))
+    parser.add_argument("--hermes-provider", default=os.environ.get("HERMES_PROVIDER", ""))
+    parser.add_argument("--hermes-max-turns", type=int, default=int(os.environ.get("HERMES_MAX_TURNS", "16")))
+    parser.add_argument(
+        "--fallback-backend",
+        choices=["none", "auto", "off"],
+        default=os.environ.get("CROSS_MARKET_AGENT_FALLBACK", "auto"),
+        help="Fallback when --agent-backend hermes fails: auto=legacy LLM packet writer, off=deterministic.",
+    )
     return parser.parse_args()
 
 
@@ -298,6 +309,38 @@ def build_tool_manifest(slot: str, cn_summary: dict[str, Any], us_summary: dict[
             "returns": ["markdown_report"],
             "agent_use": "Write one deliverable-style shadow report after fact selection and causality checks.",
         },
+        {
+            "name": "finance-search.quant_stack_daily_snapshot",
+            "kind": "mcp_tool",
+            "market": "US,CN",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["compact_state", "ranker_summary", "available_reports"],
+            "agent_use": "Optional live read of frozen quant-stack state when the Hermes agent needs more context.",
+        },
+        {
+            "name": "finance-search.quant_stack_spine_triage",
+            "kind": "mcp_tool",
+            "market": "US,CN",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["routes", "selected_symbols", "risk_bricks"],
+            "agent_use": "Optional routing tool for dynamic lead-agent planning before writing.",
+        },
+        {
+            "name": "finance-search.quant_stack_task_status",
+            "kind": "mcp_tool",
+            "market": "ops",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["task_state", "log_tail"],
+            "agent_use": "Optional freshness and cron status check. Do not trigger delivery from this tool.",
+        },
+        {
+            "name": "finance-search.quant_stack_validate_main_strategy_v2",
+            "kind": "mcp_tool",
+            "market": "US,CN",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["validator_result"],
+            "agent_use": "Optional read-only validator guardrail before treating any report as deliverable.",
+        },
     ]
 
 
@@ -496,6 +539,99 @@ coverage_checklist 是验收清单,不是章节模板;不要机械照抄成固�
     return system, user
 
 
+def build_hermes_prompt(packet: dict[str, Any]) -> str:
+    if packet["slot"] == "am":
+        title_rule = "# 跨市场早报"
+        slot_rule = "AM: 美股盘后事实 -> A股盘前执行约束。"
+    else:
+        title_rule = "# 跨市场晚报"
+        slot_rule = "PM: A股盘后只作为上一轮 US->CN 传导反馈;美股盘前仍由美股事实决定。"
+    packet_json = json.dumps(packet, ensure_ascii=False, indent=2)
+    return f"""
+你是 Hermes lead editor agent,正在执行 quant-stack-cross-market-daily skill。
+
+目标: 动态编排工具和事实,写出一份中文跨市场日报。你不是旧的 extractor/narrator 流水线,
+不要使用 quant-research-v1/prompts 或 quant-research-cn/prompts 的固定章节模板。
+
+工作方式:
+- 先读下面 packet。packet 是 quant-stack 已冻结的事实砖和工具清单。
+- 可以启发式使用 finance-search MCP 工具,尤其是:
+  quant_stack_daily_snapshot, quant_stack_spine_triage, quant_stack_task_status,
+  quant_stack_validate_main_strategy_v2。
+- 如果 MCP 工具不可用或返回不足,继续使用 packet,但要在报告末尾的血缘里说明。
+- coverage_checklist 是验收清单,不是章节模板。
+- 正文结构、标题角度、叙事顺序由你按证据决定。
+
+硬约束:
+- 第一行必须以 `{title_rule}` 开头。
+- {slot_rule}
+- 因果方向固定为 US -> CN。禁止 CN -> US。
+- 不得编造 packet/MCP 之外的价格、ticker、R、新闻、仓位和结论。
+- 不得触发邮件、cron、生产投递或文件修改;最终只输出 markdown 报告文本。
+- 生产状态必须保持 shadow_only / production_delivery disabled。
+
+写作风格:
+- 参考 packet.style_brief 和 Boist 市场日记风格: 强主题开场,先讲市场故事和因果链,
+  再讲跨市场传导、仓位/风险约束、失效条件和下一步检查。
+- 少用机械表格。表格只服务交易事实、风险阈值或血缘。
+- 允许有判断,但每个判断必须能追溯到 packet 或 MCP 返回。
+
+packet:
+```json
+{packet_json}
+```
+""".strip()
+
+
+def call_hermes_agent(
+    packet: dict[str, Any],
+    *,
+    timeout: int,
+    hermes_bin: str,
+    model: str = "",
+    provider: str = "",
+    max_turns: int = 16,
+) -> str:
+    prompt = build_hermes_prompt(packet)
+    cmd = [
+        hermes_bin,
+        "-z",
+        prompt,
+        "--skills",
+        "quant-stack-cross-market-daily",
+        "--accept-hooks",
+        "--max-turns",
+        str(max_turns),
+    ]
+    if model:
+        cmd.extend(["--model", model])
+    if provider:
+        cmd.extend(["--provider", provider])
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"Hermes cross-market agent timed out after {timeout}s") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Hermes cross-market agent launch failed: {exc}") from exc
+    if result.returncode != 0:
+        tail = ((result.stderr or "") + "\n" + (result.stdout or ""))[-1600:]
+        raise RuntimeError(f"Hermes cross-market agent failed with exit={result.returncode}: {tail}")
+    text = (result.stdout or "").strip()
+    if not text:
+        raise RuntimeError("Hermes cross-market agent returned empty output")
+    packet["_agent_backend"] = "hermes"
+    packet["_agent_model"] = model or os.environ.get("HERMES_INFERENCE_MODEL", "")
+    packet["_agent_tooling"] = "quant-stack-cross-market-daily skill + finance-search MCP"
+    return text
+
+
 def call_agent(packet: dict[str, Any], timeout: int) -> str:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from codex_backend import call_llm, runtime_backend_summary, runtime_model_summary
@@ -514,6 +650,18 @@ def call_agent(packet: dict[str, Any], timeout: int) -> str:
     packet["_agent_backend"] = runtime_backend_summary()
     packet["_agent_model"] = runtime_model_summary()
     return text
+
+
+def fallback_report(packet: dict[str, Any], backend: str, timeout: int, reason: Exception) -> tuple[str, str]:
+    packet["_agent_primary_error"] = str(reason)[-800:]
+    if backend == "auto":
+        report = call_agent(packet, timeout)
+        return report, f"fallback:{packet.get('_agent_backend') or 'auto'}"
+    if backend == "off":
+        packet["_agent_backend"] = "deterministic_shadow"
+        packet["_agent_model"] = ""
+        return deterministic_report(packet), "fallback:deterministic_shadow"
+    raise reason
 
 
 def validate_shadow_report(text: str, slot: str) -> list[str]:
@@ -604,6 +752,22 @@ def main() -> int:
     if args.agent_backend == "off":
         report = deterministic_report(packet)
         backend_name = "deterministic_shadow"
+    elif args.agent_backend == "hermes":
+        try:
+            report = call_hermes_agent(
+                packet,
+                timeout=args.timeout,
+                hermes_bin=args.hermes_bin,
+                model=args.hermes_model,
+                provider=args.hermes_provider,
+                max_turns=args.hermes_max_turns,
+            )
+            backend_name = packet.get("_agent_backend") or "hermes"
+        except Exception as exc:
+            if args.fallback_backend == "none":
+                raise
+            print(f"warn: Hermes agent failed; using {args.fallback_backend} fallback: {exc}", file=sys.stderr)
+            report, backend_name = fallback_report(packet, args.fallback_backend, args.timeout, exc)
     else:
         report = call_agent(packet, args.timeout)
         backend_name = packet.get("_agent_backend") or "agent"

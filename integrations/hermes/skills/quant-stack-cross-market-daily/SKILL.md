@@ -19,6 +19,12 @@ It keeps Hermes core narrow: quant-stack exposes CLI commands and frozen fact
 packets; the Hermes lead editor chooses which facts matter and writes the
 narrative.
 
+The primary path is Hermes dynamic orchestration. Do not start from the legacy
+`quant-research-v1/prompts/` or `quant-research-cn/prompts/` extractor /
+narrator templates for cross-market reports. Those files may remain as
+single-market compatibility fallback until the old cron paths are retired, but
+they are not the design center for this workflow.
+
 ## Core Contract
 
 - Fetch workers collect and stage data; they do not write narrative.
@@ -53,8 +59,9 @@ quant-research-v1/.venv/bin/python scripts/agents/run_cross_market_daily_shadow.
 ```
 
 Use `--agent-backend off` for deterministic shadow output. Use
-`--agent-backend auto` only when the configured LLM backend is available and
-the user wants the lead editor agent to rewrite the packet.
+`--agent-backend hermes` for the real Hermes lead-editor path. Use
+`--agent-backend auto` only as a legacy Codex/DeepSeek fallback while the old
+single-market narrator stack is being retired.
 
 The command writes:
 
@@ -74,11 +81,16 @@ The command writes:
 4. Treat `tool_manifest` as the available skill/MCP-like tool surface. Select
    facts opportunistically; do not convert `coverage_checklist` into fixed
    section headings.
-5. Preserve packet numbers, tickers, dates, R values, and source paths exactly.
-6. Write in the style of a market execution diary: strong topical headline,
+5. Use finance-search MCP tools when useful:
+   - `quant_stack_daily_snapshot`
+   - `quant_stack_spine_triage`
+   - `quant_stack_task_status`
+   - `quant_stack_validate_main_strategy_v2`
+6. Preserve packet numbers, tickers, dates, R values, and source paths exactly.
+7. Write in the style of a market execution diary: strong topical headline,
    cause-effect chain first, compact tables only when they clarify execution,
    then invalidation and next checks.
-7. Keep output shadow-only unless quant-stack validators and production gates
+8. Keep output shadow-only unless quant-stack validators and production gates
    explicitly enable a deliverable report type.
 
 ## Style Reference

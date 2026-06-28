@@ -25,7 +25,7 @@ QUANT_V1_SRC = QUANT_V1_ROOT / "src"
 if str(QUANT_V1_SRC) not in sys.path:
     sys.path.insert(0, str(QUANT_V1_SRC))
 
-from quant_bot.delivery.gmail import send_report_email  # noqa: E402
+from quant_bot.delivery.gmail import send_report_email, send_report_email_resend  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,6 +39,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-generate", action="store_true", help="Send an already-generated report.")
     parser.add_argument("--delivery-dry-run", action="store_true", help="Generate and resolve recipients, but skip Gmail.")
     parser.add_argument("--dry-run", action="store_true", help="Print what would happen; skip generation and Gmail.")
+    parser.add_argument(
+        "--email-provider",
+        choices=["gmail", "resend"],
+        default=os.environ.get("QUANT_EMAIL_PROVIDER", "gmail"),
+        help="Email provider for live sends. Default: gmail.",
+    )
     return parser.parse_args()
 
 
@@ -501,6 +507,31 @@ def validate_main_strategy_contract(as_of: str, market: str, extra_paths: list[P
         )
 
 
+def send_delivery_email(
+    *,
+    provider: str,
+    effective_path: Path,
+    send_to: str | None,
+    send_bcc: list[str] | None,
+    subject: str,
+) -> list[str]:
+    kwargs: dict[str, Any] = {
+        "report_path": effective_path,
+        "chart_paths": [],
+        "to": send_to,
+        "bcc": send_bcc,
+        "subject": subject,
+        "config_path": str(QUANT_V1_ROOT / "config.yaml"),
+    }
+    if provider == "resend":
+        return send_report_email_resend(**kwargs)
+    return send_report_email(
+        **kwargs,
+        credentials_path=QUANT_V1_ROOT / "credentials.json",
+        token_path=QUANT_V1_ROOT / "token.json",
+    )
+
+
 def main() -> None:
     args = parse_args()
     if args.delivery_mode == "prod" and args.market == "all" and not args.dry_run:
@@ -548,22 +579,19 @@ def main() -> None:
     if effective_path != path:
         print(f"Source: {path}")
     print(f"Subject: {effective_subject}")
-    print(f"Delivery: {args.delivery_mode} ({delivery_note})")
+    print(f"Delivery: {args.delivery_mode} ({delivery_note}); provider={args.email_provider}")
     print(f"Headline: {load_headline(args.date, args.market)}")
 
     if args.dry_run or args.delivery_dry_run:
         print("Gmail send skipped")
         return
 
-    msg_ids = send_report_email(
-        report_path=effective_path,
-        chart_paths=[],
-        to=send_to,
-        bcc=send_bcc,
+    msg_ids = send_delivery_email(
+        provider=args.email_provider,
+        effective_path=effective_path,
+        send_to=send_to,
+        send_bcc=send_bcc,
         subject=effective_subject,
-        credentials_path=QUANT_V1_ROOT / "credentials.json",
-        token_path=QUANT_V1_ROOT / "token.json",
-        config_path=str(QUANT_V1_ROOT / "config.yaml"),
     )
     print(f"Sent production decision report: {len(msg_ids)} message(s) {','.join(msg_ids)}")
 

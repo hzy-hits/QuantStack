@@ -41,4 +41,23 @@ CN reports treat news as a lagging risk label. The first signal is price, volume
 - `--delivery-mode prod --market all` is refused.
 - `--market us` can only send a report headed `# 美股量化日报`.
 - `--market cn` can only send a report headed `# A股量化日报`.
-- Cross-market markers in a final report cause fail-fast before Gmail.
+- Cross-market markers in a final report cause fail-fast before email delivery.
+
+## Email Provider
+
+Gmail remains the default production provider. Resend is an explicit opt-in:
+
+```bash
+QUANT_EMAIL_PROVIDER=resend python3 scripts/send_production_decision_report.py ...
+```
+
+Resend configuration is secret-free in git. The sender reads:
+
+- `RESEND_API_KEY` / `RESEND_FROM_EMAIL` from the environment;
+- `RESEND_ENV_FILE`, e.g. Oracle Multica's `/home/ubuntu/apps/multica/.env`;
+- `RESEND_API_KEY_FILE`, matching the ops-bot secret-file pattern;
+- optional non-secret config values under `reporting`.
+
+The Oracle Multica domain (`mail.zh3nyu.com`) and ops-bot curl/timeout/dry-run
+pattern are reusable, but quant-stack must keep provider selection explicit so
+Gmail can remain the fallback path during migration.

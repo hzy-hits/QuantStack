@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,7 @@ def test_pm_packet_keeps_us_to_cn_causality(tmp_path: Path) -> None:
     assert packet["agent_operating_mode"]["mode"] == "heuristic_tool_use"
     assert packet["data_boundary"]["fetch_workers"].startswith("Own data collection")
     assert any(tool["name"] == "select_cross_market_transmission" for tool in packet["tool_manifest"])
+    assert any(tool["name"] == "finance-search.quant_stack_spine_triage" for tool in packet["tool_manifest"])
     assert packet["style_brief"]["reference_url"].startswith("https://boist.org/")
 
 
@@ -99,3 +101,58 @@ def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
     assert "结构必须覆盖" not in system
     assert "coverage_checklist" in user
     assert "tool_manifest" in user
+
+
+def test_hermes_prompt_retires_legacy_narrator_templates(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+
+    prompt = module.build_hermes_prompt(module.build_packet("pm", cn, us))
+
+    assert "Hermes lead editor agent" in prompt
+    assert "finance-search MCP" in prompt
+    assert "不要使用 quant-research-v1/prompts" in prompt
+    assert "coverage_checklist 是验收清单,不是章节模板" in prompt
+    assert "禁止 CN -> US" in prompt
+
+
+def test_call_hermes_agent_uses_hermes_skill(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    packet = module.build_packet("am", cn, us)
+
+    completed = mock.Mock(returncode=0, stdout="# 跨市场早报 — 2026-06-29\n\n美股影响A股。", stderr="")
+    with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
+        report = module.call_hermes_agent(
+            packet,
+            timeout=30,
+            hermes_bin="/home/ubuntu/.local/bin/hermes",
+            model="",
+            provider="",
+            max_turns=8,
+        )
+
+    cmd = run.call_args.args[0]
+    assert cmd[0] == "/home/ubuntu/.local/bin/hermes"
+    assert "-z" in cmd
+    assert "--skills" in cmd
+    assert "quant-stack-cross-market-daily" in cmd
+    assert "--max-turns" in cmd
+    assert report.startswith("# 跨市场早报")
+    assert packet["_agent_backend"] == "hermes"
+
+
+def test_fallback_report_uses_legacy_backend_only_after_primary_failure(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    packet = module.build_packet("am", cn, us)
+
+    with mock.patch.object(module, "call_agent", return_value="# 跨市场早报 — 2026-06-29\n\n美股 A股"):
+        report, backend = module.fallback_report(packet, "auto", 30, RuntimeError("hermes down"))
+
+    assert report.startswith("# 跨市场早报")
+    assert backend.startswith("fallback:")
+    assert "hermes down" in packet["_agent_primary_error"]

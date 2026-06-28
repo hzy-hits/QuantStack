@@ -41,6 +41,49 @@ Versioned skill entrypoint:
 
 Fixed items are fact sources, validation, delivery state, and **US -> CN** causality. Non-fixed items are section order, narrative angle, tool selection, and emphasis.
 
+## Narrator Cutover
+
+The cross-market report must not be another fixed extractor -> merge prompt
+pipeline. The old files under `quant-research-v1/prompts/` and
+`quant-research-cn/prompts/` remain only for legacy single-market compatibility.
+They are not the primary cross-market report path.
+
+Primary cross-market writer:
+
+```bash
+python3 scripts/agents/run_cross_market_daily_shadow.py \
+  --slot am \
+  --cn-date YYYY-MM-DD \
+  --agent-backend hermes
+```
+
+or:
+
+```bash
+python3 scripts/agents/run_cross_market_daily_shadow.py \
+  --slot pm \
+  --cn-date YYYY-MM-DD \
+  --agent-backend hermes
+```
+
+Hermes runs with `quant-stack-cross-market-daily` preloaded and can use the
+existing `finance-search` MCP server. Useful finance-search tools include:
+
+- `quant_stack_daily_snapshot`
+- `quant_stack_spine_triage`
+- `quant_stack_task_status`
+- `quant_stack_validate_main_strategy_v2`
+
+The agent may choose which tools to call. The code provides a packet,
+guardrails, and validation; it does not prescribe a section-by-section
+narrator template.
+
+Fallback policy: if Hermes is unavailable, the runner may use
+`--fallback-backend auto` to call the legacy packet-only LLM writer. That path
+is a resilience fallback, not the primary report architecture, and it still
+cannot use the old fixed extractor/merge prompt templates as the cross-market
+source of truth.
+
 ## Style Target
 
 Reference style: Boist's market diary post from 2026-06-22:

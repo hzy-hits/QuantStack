@@ -148,6 +148,28 @@ class MarketReportScopeTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "did not produce a verified agent report"):
                 module._ensure_narrator("2026-05-31", "us")
 
+    def test_resend_provider_invoked_for_delivery(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = Path(tmpdir) / "report.md"
+            report.write_text("# Report\n", encoding="utf-8")
+            with (
+                mock.patch.object(module, "QUANT_V1_ROOT", Path(tmpdir)),
+                mock.patch.object(module, "send_report_email_resend", return_value=["resend-id"]) as resend,
+                mock.patch.object(module, "send_report_email") as gmail,
+            ):
+                ids = module.send_delivery_email(
+                    provider="resend",
+                    effective_path=report,
+                    send_to="test@example.com",
+                    send_bcc=[],
+                    subject="subject",
+                )
+
+            self.assertEqual(ids, ["resend-id"])
+            resend.assert_called_once()
+            gmail.assert_not_called()
+
 def structured_us_report(as_of: str) -> str:
     table = (
         "| Symbol | Decision | Size | Entry | Risk | Hedge | Why |\n"
