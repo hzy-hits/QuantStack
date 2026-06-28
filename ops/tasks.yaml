@@ -9,7 +9,7 @@ tasks:
     group: us
     schedule: "0 20 * * 1-5"
     cwd: quant-research-v1
-    command: ["./scripts/run_full.sh", "--prod", "--premarket"]
+    command: ["./scripts/run_full.sh", "--prod", "--premarket", "{ny_date}"]
     log: ops/logs/us.premarket.log
     legacy_log: quant-research-v1/logs/cron_premarket.log
     lock: ops/state/us.premarket.lock
@@ -26,7 +26,7 @@ tasks:
     group: us
     schedule: "0 5 * * 2-6"
     cwd: quant-research-v1
-    command: ["./scripts/run_full.sh", "--prod"]
+    command: ["./scripts/run_full.sh", "--prod", "{ny_date}"]
     log: ops/logs/us.postmarket.log
     legacy_log: quant-research-v1/logs/cron_postmarket.log
     lock: ops/state/us.postmarket.lock
