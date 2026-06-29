@@ -198,6 +198,25 @@ def test_public_delivery_rejects_internal_research_jargon() -> None:
     assert any("原文验证" in item for item in failures)
 
 
+def test_public_delivery_rejects_reviewer_note_markers() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场晚报\n\n"
+            "美股期货里标普期货(2026-06-29)给出下一轮风险线。黄金、WTI原油作为风险温度。"
+            "日经225(2026-06-29)、KOSPI(2026-06-29)、DAX(2026-06-29)展示非美大盘。"
+            "688233.SH神工股份覆盖A股半导体候选管线。"
+            "\n\n主要改动：删除了事实清单外的新闻。"
+        ),
+        "pm",
+        public_delivery=True,
+    )
+
+    assert any("主要改动" in item for item in failures)
+    assert any("事实清单" in item for item in failures)
+
+
 def test_public_delivery_requires_global_context_markers() -> None:
     module = load_module()
 
@@ -331,6 +350,29 @@ def test_normalize_public_report_trims_reviewer_preamble_and_translates_jargon()
     assert "packet" not in text
     assert "JSON" not in text
     assert "MCP" not in text
+
+
+def test_normalize_public_report_removes_reviewer_change_notes() -> None:
+    module = load_module()
+
+    text = module.normalize_public_report_text(
+        (
+            "# 跨市场晚报\n\n"
+            "美股影响A股。\n\n"
+            "主要改动：\n\n"
+            "1. 删除了事实清单外的新闻。\n"
+            "2. 修正了标题。\n\n"
+            "## A股执行\n"
+            "688233.SH神工股份进入候选管线。"
+        ),
+        "pm",
+    )
+
+    assert "主要改动" not in text
+    assert "事实清单" not in text
+    assert "修正了标题" not in text
+    assert "## A股执行" in text
+    assert "688233.SH" in text
 
 
 def test_normalize_public_report_repairs_plain_title() -> None:

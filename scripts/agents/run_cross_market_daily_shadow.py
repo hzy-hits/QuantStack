@@ -1532,6 +1532,37 @@ def clean_hermes_stdout(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+REVIEWER_NOTE_PREFIXES = (
+    "主要改动",
+    "修改说明",
+    "改动说明",
+    "编辑说明",
+    "审稿说明",
+    "二审说明",
+    "本次修改",
+)
+
+
+def strip_reviewer_note_blocks(text: str) -> str:
+    lines = text.splitlines()
+    output: list[str] = []
+    idx = 0
+    while idx < len(lines):
+        stripped = lines[idx].strip().strip("*# ：:")
+        if any(stripped.startswith(prefix) for prefix in REVIEWER_NOTE_PREFIXES):
+            while output and not output[-1].strip():
+                output.pop()
+            idx += 1
+            while idx < len(lines) and not lines[idx].strip().startswith("#"):
+                idx += 1
+            if idx < len(lines) and output and output[-1].strip():
+                output.append("")
+            continue
+        output.append(lines[idx])
+        idx += 1
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip()
+
+
 def normalize_public_report_text(text: str, slot: str) -> str:
     expected_title = "# 跨市场早报" if slot == "am" else "# 跨市场晚报"
     title_token = expected_title.lstrip("# ").strip()
@@ -1549,6 +1580,7 @@ def normalize_public_report_text(text: str, slot: str) -> str:
             break
     else:
         text = f"{expected_title}\n\n{text.strip()}"
+    text = strip_reviewer_note_blocks(text)
     replacements = {
         "packet": "事实清单",
         "MCP": "数据接口",
@@ -1583,7 +1615,7 @@ def normalize_public_report_text(text: str, slot: str) -> str:
     }
     for old, new in replacements.items():
         text = re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
-    return text.strip()
+    return strip_reviewer_note_blocks(text).strip()
 
 
 def call_hermes_agent(
@@ -1917,6 +1949,14 @@ def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = Fals
             "tool",
             "工具调用",
             "工具失败",
+            "事实清单",
+            "主要改动",
+            "修改说明",
+            "改动说明",
+            "编辑说明",
+            "本次修改",
+            "待二审",
+            "最终 markdown",
             "血缘",
             "本稿状态",
             "prompt",
