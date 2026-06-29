@@ -43,7 +43,7 @@ GLOBAL_MARKET_SNAPSHOT_SYMBOLS = (
     "^GSPC,^IXIC,^DJI,^RUT,^VIX,SPY,QQQ,IWM,TLT,"
     "ES=F,NQ=F,YM=F,RTY=F,"
     "^STOXX50E,^FTSE,^GDAXI,^FCHI,"
-    "^N225,^KS11,^HSI,^TWII,^BSESN,"
+    "^N225,^KS11,^HSI,^TWII,"
     "000001.SS,399001.SZ,399006.SZ,000688.SS,"
     "GC=F,CL=F,BZ=F,GLD,USDCNH=X,DX-Y.NYB,^TNX"
 )
@@ -65,7 +65,6 @@ GLOBAL_MARKET_LABELS = {
     "^KS11": "韩国KOSPI",
     "^HSI": "香港恒生",
     "^TWII": "台湾加权",
-    "^BSESN": "印度Sensex",
     "000001.SS": "上证指数",
     "399001.SZ": "深证成指",
     "399006.SZ": "创业板指",
@@ -663,8 +662,9 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
         "public_output_rule": (
             "The public report must include returned values for: oil, gold, at least one US equity future, "
             "and several non-US country/region benchmarks when available. Mention only returned, checkable "
-            "headlines/snapshots. If a feed or symbol is unavailable, omit it; do not print a missing-data "
-            "list or tool failure note."
+            "headlines/snapshots. Every cited index or future must show its returned date, especially "
+            "cross-timezone markets. If a feed or symbol is unavailable, omit it; do not print a missing-data "
+            "list or tool failure note. Do not cite India/Sensex/Nifty indices."
         ),
     }
 
@@ -703,6 +703,10 @@ def compact_market_snapshot_rows(snapshot: dict[str, Any]) -> list[dict[str, Any
                 "close": item.get("close"),
                 "change_pct": item.get("change_pct"),
                 "source": item.get("source"),
+                "display": (
+                    f"{GLOBAL_MARKET_LABELS.get(symbol, symbol)}({item.get('date') or 'date n/a'}): "
+                    f"{item.get('close')} / {item.get('change_pct')}%"
+                ),
             }
         )
     return rows
@@ -971,8 +975,10 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
   quant_stack_validate_main_strategy_v2, quant_stack_ranker, quant_stack_symbol_context,
   get_market_snapshot, newsnow_radar, search_news, research_brief。
 - 写作前必须尝试构造“全球市场温度”:美股现货指数、美股期货(标普/纳指/道指/罗素期货),
-  欧洲主要指数(如 STOXX/DAX/FTSE/CAC),亚洲主要指数(如日经/KOSPI/恒生/台湾/印度),
+  欧洲主要指数(如 STOXX/DAX/FTSE/CAC),亚洲主要指数(如日经/KOSPI/恒生/台湾),
   VIX、油、金、美元/离岸人民币、中国主要指数和科创板/STAR 指数;只使用工具实际返回的数据。
+- 引用任何大盘指数或期货时,必须带返回日期,格式类似“德国DAX(2026-06-29)”或“纳指期货(2026-06-29)”;
+  跨时区市场尤其不能只写“今天/隔夜”。不要引用印度、Sensex 或 Nifty 指数。
 - 写作前必须尝试检索最新宏观/地缘/AI/半导体/中国市场新闻;只使用返回标题、来源或 URL 可核验的新闻。
 - A股侧不得只看主板;必须用 CN ranker 或 symbol_context 检查半导体、AI 硬件、科创板/688xxx 线索。
 - 如果工具、feed、symbol 或新闻没有返回可核验结果,公开报告里自然省略;不要写任何数据不可用、缺口、待补或工具失败说明。
@@ -1026,6 +1032,8 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
   只能从 packet/工具返回中补入,不能虚构数字。
 - 如果 packet.finance_search_prefetch 有 market_rows/news_items,优先使用这些已取回证据补齐全球温度,
   不要写成缺失、不可用或工具失败。
+- 全球温度段引用任何大盘指数或期货时必须带返回日期,尤其是欧洲/亚洲/美国期货这类跨时区市场;
+  格式类似“日经225(2026-06-29)”或“标普期货(2026-06-29)”。删除印度、Sensex、Nifty 指数。
 - 删除工具日志味、工程词和内部流程词:不要出现 MCP、packet、validator、shadow_only、production_delivery、cron、Resend、JSON、script、tool、血缘、本稿状态、prompt、system、user、draft、二审、审稿、思维过程、推理过程。
 - 删除或翻译内部研究黑话:不要出现 production、ranker、AI Infra universe、source evidence、source review、evidence_state、headline risk、beta hedge、money gate、regime、原文验证状态。
 - 删除所有数据不可用提示、缺口清单、待补证据清单、工具失败说明;没有可核验数据就自然省略。
@@ -1294,6 +1302,11 @@ def contains_marker(text: str, token: str) -> bool:
 
 def public_context_failures(text: str) -> list[str]:
     failures: list[str] = []
+    forbidden_india_index_markers = ["Sensex", "Nifty", "印度指数", "印度Sensex"]
+    for marker in forbidden_india_index_markers:
+        if contains_marker(text, marker):
+            failures.append(f"forbidden India index marker: {marker}")
+
     commodity_groups = {
         "gold": ["黄金", "gold", "GLD", "GC=F"],
         "oil": ["原油", "WTI", "Brent", "布伦特", "CL=F", "BZ=F"],
@@ -1327,8 +1340,6 @@ def public_context_failures(text: str) -> list[str]:
         "Hang Seng",
         "台湾",
         "加权指数",
-        "印度",
-        "Sensex",
         "STOXX",
         "DAX",
         "FTSE",
@@ -1344,6 +1355,46 @@ def public_context_failures(text: str) -> list[str]:
 
     if not any(contains_marker(text, marker) for marker in ["科创", "688", "STAR Market"]):
         failures.append("missing public CN semiconductor breadth: STAR/科创板 marker")
+
+    dated_market_markers = [
+        "标普500",
+        "纳斯达克综合",
+        "道琼斯",
+        "罗素2000",
+        "VIX",
+        "标普期货",
+        "纳指期货",
+        "道指期货",
+        "罗素期货",
+        "ES=F",
+        "NQ=F",
+        "YM=F",
+        "RTY=F",
+        "STOXX",
+        "DAX",
+        "FTSE",
+        "CAC",
+        "日经",
+        "Nikkei",
+        "KOSPI",
+        "恒生",
+        "Hang Seng",
+        "台湾",
+        "上证指数",
+        "深证成指",
+        "创业板指",
+        "科创50",
+    ]
+    date_pattern = re.compile(r"\b20\d{2}-\d{2}-\d{2}\b")
+    undated_lines = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if any(contains_marker(line, marker) for marker in dated_market_markers) and not date_pattern.search(line):
+            undated_lines.append(line[:120])
+    if undated_lines:
+        failures.append(f"market index/future line missing returned date: {undated_lines[0]}")
     return failures
 
 

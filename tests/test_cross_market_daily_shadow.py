@@ -198,16 +198,35 @@ def test_public_delivery_accepts_required_global_context_markers() -> None:
     failures = module.validate_shadow_report(
         (
             "# 跨市场晚报\n\n"
-            "美股期货里标普期货和纳指期货给出下一轮风险线。"
+            "美股期货里标普期货(2026-06-29)和纳指期货(2026-06-29)给出下一轮风险线。"
             "黄金、WTI原油同时作为避险和能源温度。"
-            "日经、KOSPI、恒生和DAX展示非美大盘方向。"
-            "科创板688样本覆盖A股半导体。A股和美股合并复盘。"
+            "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
+            "科创50(2026-06-29)和科创板688样本覆盖A股半导体。A股和美股合并复盘。"
         ),
         "pm",
         public_delivery=True,
     )
 
     assert failures == []
+
+
+def test_public_delivery_rejects_india_index_and_undated_index_lines() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场早报\n\n"
+            "美股影响A股。标普期货和纳指期货给出下一轮风险线。"
+            "黄金、WTI原油同时作为避险和能源温度。"
+            "日经、KOSPI、恒生、DAX和印度Sensex展示非美大盘方向。"
+            "科创板688样本覆盖A股半导体。"
+        ),
+        "am",
+        public_delivery=True,
+    )
+
+    assert any("forbidden India index marker" in item for item in failures)
+    assert any("missing returned date" in item for item in failures)
 
 
 def test_public_delivery_rejects_split_single_market_reports() -> None:
@@ -260,6 +279,9 @@ def test_normalize_public_report_trims_reviewer_preamble_and_translates_jargon()
 def test_compact_market_snapshot_rows_labels_futures_and_country_indices() -> None:
     module = load_module()
 
+    assert "^BSESN" not in module.GLOBAL_MARKET_SNAPSHOT_SYMBOLS
+    assert "印度Sensex" not in module.GLOBAL_MARKET_LABELS.values()
+
     rows = module.compact_market_snapshot_rows(
         {
             "used_symbols": ["ES=F", "NQ=F", "^N225", "^GDAXI", "GC=F", "CL=F"],
@@ -276,6 +298,7 @@ def test_compact_market_snapshot_rows_labels_futures_and_country_indices() -> No
 
     labels = {row["label"] for row in rows}
     assert {"标普期货", "纳指期货", "日本日经225", "德国DAX", "黄金期货", "WTI原油期货"} <= labels
+    assert all("2026-06-29" in row["display"] for row in rows)
 
 
 def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
