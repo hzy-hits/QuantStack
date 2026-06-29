@@ -45,6 +45,12 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("QUANT_EMAIL_PROVIDER", "gmail"),
         help="Email provider for live sends. Default: gmail.",
     )
+    parser.add_argument(
+        "--email-fallback-provider",
+        choices=["none", "gmail"],
+        default=os.environ.get("QUANT_EMAIL_FALLBACK_PROVIDER", "none"),
+        help="Fallback provider used only when the primary live send fails.",
+    )
     return parser.parse_args()
 
 
@@ -510,6 +516,7 @@ def validate_main_strategy_contract(as_of: str, market: str, extra_paths: list[P
 def send_delivery_email(
     *,
     provider: str,
+    fallback_provider: str = "none",
     effective_path: Path,
     send_to: str | None,
     send_bcc: list[str] | None,
@@ -524,7 +531,12 @@ def send_delivery_email(
         "config_path": str(QUANT_V1_ROOT / "config.yaml"),
     }
     if provider == "resend":
-        return send_report_email_resend(**kwargs)
+        try:
+            return send_report_email_resend(**kwargs)
+        except Exception as exc:
+            if fallback_provider != "gmail":
+                raise
+            print(f"warn: Resend send failed; falling back to Gmail: {exc}", file=sys.stderr)
     return send_report_email(
         **kwargs,
         credentials_path=QUANT_V1_ROOT / "credentials.json",
@@ -583,11 +595,12 @@ def main() -> None:
     print(f"Headline: {load_headline(args.date, args.market)}")
 
     if args.dry_run or args.delivery_dry_run:
-        print("Gmail send skipped")
+        print("Email send skipped")
         return
 
     msg_ids = send_delivery_email(
         provider=args.email_provider,
+        fallback_provider=args.email_fallback_provider,
         effective_path=effective_path,
         send_to=send_to,
         send_bcc=send_bcc,

@@ -170,6 +170,29 @@ class MarketReportScopeTest(unittest.TestCase):
             resend.assert_called_once()
             gmail.assert_not_called()
 
+    def test_resend_delivery_can_fallback_to_gmail(self) -> None:
+        module = load_module()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            report = Path(tmpdir) / "report.md"
+            report.write_text("# Report\n", encoding="utf-8")
+            with (
+                mock.patch.object(module, "QUANT_V1_ROOT", Path(tmpdir)),
+                mock.patch.object(module, "send_report_email_resend", side_effect=RuntimeError("resend down")) as resend,
+                mock.patch.object(module, "send_report_email", return_value=["gmail-id"]) as gmail,
+            ):
+                ids = module.send_delivery_email(
+                    provider="resend",
+                    fallback_provider="gmail",
+                    effective_path=report,
+                    send_to=None,
+                    send_bcc=None,
+                    subject="subject",
+                )
+
+            self.assertEqual(ids, ["gmail-id"])
+            resend.assert_called_once()
+            gmail.assert_called_once()
+
 def structured_us_report(as_of: str) -> str:
     table = (
         "| Symbol | Decision | Size | Entry | Risk | Hedge | Why |\n"

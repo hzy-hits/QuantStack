@@ -65,12 +65,15 @@ def render() -> str:
     lines: list[str] = [_header().rstrip(), ""]
     current_group = None
     for task_id, task in tasks(data).items():
+        schedules = task_schedules(task)
+        if not schedules:
+            continue
         group = str(task.get("group") or "misc")
         if group != current_group:
             current_group = group
             label = GROUP_LABELS.get(group, group.title())
             lines.extend(["", f"# -- {label} --"])
-        for schedule in task_schedules(task):
+        for schedule in schedules:
             lines.append(f"{schedule} cd $QUANT_STACK_ROOT && ops/run_task.sh {task_id}")
     lines.append("")
     return "\n".join(lines)

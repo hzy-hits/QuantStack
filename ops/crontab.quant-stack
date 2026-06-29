@@ -26,10 +26,6 @@ QUANT_STACK_ROOT=/home/ubuntu/quant-stack
 30 7 * * 1-6 cd $QUANT_STACK_ROOT && ops/run_task.sh daily.cross_market_am
 30 18 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh daily.cross_market_pm
 
-# -- Weekly Reports --
-30 9 * * 6 cd $QUANT_STACK_ROOT && ops/run_task.sh weekly.us
-0 10 * * 6 cd $QUANT_STACK_ROOT && ops/run_task.sh weekly.cn
-
 # -- Research --
 20 11 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ai_supply_chain_candidates
 30 11 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.ai_infra_bfs_discovery_queue

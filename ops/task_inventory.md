@@ -12,8 +12,8 @@ This inventory mirrors the active user crontab captured in
 | `cn.precompute_alpha` | `20 7 * * 1-5` | `quant-research-cn` | `QUANT_CN_REVIEW_BACKFILL_DAYS=7 bash scripts/precompute_alpha.sh` | no | `quant-research-cn/reports/logs/cron_precompute_alpha.log` |
 | `cn.morning` | `30 8 * * 1-5` | `quant-stack` | `./target/release/quant-stack daily --markets cn --session morning ...` | yes | `quant-research-cn/reports/logs/cron_morning.log` |
 | `cn.evening` | `0 18 * * 1-5` | `quant-stack` | `./target/release/quant-stack daily --markets cn --session evening ...` | yes | `quant-research-cn/reports/logs/cron_evening.log` |
-| `weekly.us` | `30 9 * * 6` | `quant-research-v1` | `./scripts/run_weekly.sh` | yes | `quant-research-v1/logs/cron_weekly.log` |
-| `weekly.cn` | `0 10 * * 6` | `quant-research-cn` | `bash scripts/weekly_pipeline.sh` | yes | `quant-research-cn/reports/logs/cron_weekly.log` |
+| `weekly.us` | manual only | `quant-research-v1` | `./scripts/run_weekly.sh` | no | `quant-research-v1/logs/cron_weekly.log` |
+| `weekly.cn` | manual only | `quant-research-cn` | `bash scripts/weekly_pipeline.sh` | no | `quant-research-cn/reports/logs/cron_weekly.log` |
 | `us.watchdog.reboot` | `@reboot` | `quant-research-v1` | `sleep 180 && uv run python scripts/cron_watchdog.py` | no | `quant-research-v1/logs/cron_watchdog.log` |
 | `us.watchdog` | `12,27,42,57 * * * *` | `quant-research-v1` | `uv run python scripts/cron_watchdog.py` | no | `quant-research-v1/logs/cron_watchdog.log` |
 

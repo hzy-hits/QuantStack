@@ -55,14 +55,25 @@ class TasklibTests(unittest.TestCase):
         self.assertEqual(morning["env"]["HERMES_BIN"], "/home/ubuntu/.local/bin/hermes")
         self.assertEqual(evening["env"]["HERMES_BIN"], "/home/ubuntu/.local/bin/hermes")
         self.assertEqual(morning["env"]["CROSS_MARKET_REVIEW_PROVIDER"], "deepseek")
-        self.assertEqual(morning["env"]["CROSS_MARKET_REVIEW_MODEL"], "deepseek-v3")
+        self.assertEqual(morning["env"]["CROSS_MARKET_REVIEW_MODEL"], "deepseek-v4-pro")
         self.assertEqual(evening["env"]["CROSS_MARKET_REVIEW_PROVIDER"], "deepseek")
-        self.assertEqual(evening["env"]["CROSS_MARKET_REVIEW_MODEL"], "deepseek-v3")
+        self.assertEqual(evening["env"]["CROSS_MARKET_REVIEW_MODEL"], "deepseek-v4-pro")
         self.assertEqual(morning["env"]["CROSS_MARKET_SEND_EMAIL"], "1")
         self.assertEqual(morning["env"]["QUANT_EMAIL_PROVIDER"], "resend")
+        self.assertEqual(morning["env"]["QUANT_EMAIL_FALLBACK_PROVIDER"], "gmail")
+        self.assertEqual(morning["env"]["QUANT_DELIVERY_MODE"], "prod")
         self.assertEqual(evening["env"]["RESEND_ENV_FILE"], "/home/ubuntu/apps/multica/.env")
         self.assertTrue(morning["sends_email"])
         self.assertTrue(evening["sends_email"])
+
+    def test_legacy_weekly_reports_are_manual_only(self) -> None:
+        us = materialize_task("weekly.us", "2026-06-26")
+        cn = materialize_task("weekly.cn", "2026-06-26")
+
+        self.assertFalse(us["schedule"])
+        self.assertFalse(cn["schedule"])
+        self.assertFalse(us["sends_email"])
+        self.assertFalse(cn["sends_email"])
 
 
 if __name__ == "__main__":

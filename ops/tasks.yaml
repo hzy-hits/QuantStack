@@ -228,11 +228,12 @@ tasks:
     env:
       HERMES_BIN: /home/ubuntu/.local/bin/hermes
       CROSS_MARKET_REVIEW_PROVIDER: deepseek
-      CROSS_MARKET_REVIEW_MODEL: deepseek-v3
+      CROSS_MARKET_REVIEW_MODEL: deepseek-v4-pro
       CROSS_MARKET_REVIEW_MAX_TURNS: "6"
       CROSS_MARKET_SEND_EMAIL: "1"
       QUANT_EMAIL_PROVIDER: resend
-      QUANT_DELIVERY_MODE: test
+      QUANT_EMAIL_FALLBACK_PROVIDER: gmail
+      QUANT_DELIVERY_MODE: prod
       QUANT_TEST_RECIPIENT: 13502448752hzy@gmail.com
       RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
     command:
@@ -266,11 +267,12 @@ tasks:
     env:
       HERMES_BIN: /home/ubuntu/.local/bin/hermes
       CROSS_MARKET_REVIEW_PROVIDER: deepseek
-      CROSS_MARKET_REVIEW_MODEL: deepseek-v3
+      CROSS_MARKET_REVIEW_MODEL: deepseek-v4-pro
       CROSS_MARKET_REVIEW_MAX_TURNS: "6"
       CROSS_MARKET_SEND_EMAIL: "1"
       QUANT_EMAIL_PROVIDER: resend
-      QUANT_DELIVERY_MODE: test
+      QUANT_EMAIL_FALLBACK_PROVIDER: gmail
+      QUANT_DELIVERY_MODE: prod
       QUANT_TEST_RECIPIENT: 13502448752hzy@gmail.com
       RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
     command:
@@ -298,33 +300,35 @@ tasks:
 
   weekly.us:
     group: weekly
-    schedule: "30 9 * * 6"
+    schedule: ""
     cwd: quant-research-v1
     command: ["./scripts/run_weekly.sh"]
     log: ops/logs/weekly.us.log
     legacy_log: quant-research-v1/logs/cron_weekly.log
     lock: ops/state/weekly.us.lock
     timeout_minutes: 180
-    sends_email: true
+    sends_email: false
     market: us
     session: weekly
     owner: us_pipeline
+    disabled_reason: "Legacy weekly email path is manual-only; Oracle scheduled delivery is Hermes cross-market daily."
     outputs:
       - quant-research-v1/reports
 
   weekly.cn:
     group: weekly
-    schedule: "0 10 * * 6"
+    schedule: ""
     cwd: quant-research-cn
     command: ["bash", "scripts/weekly_pipeline.sh"]
     log: ops/logs/weekly.cn.log
     legacy_log: quant-research-cn/reports/logs/cron_weekly.log
     lock: ops/state/weekly.cn.lock
     timeout_minutes: 180
-    sends_email: true
+    sends_email: false
     market: cn
     session: weekly
     owner: cn_pipeline
+    disabled_reason: "Legacy weekly email path is manual-only; Oracle scheduled delivery is Hermes cross-market daily."
     outputs:
       - quant-research-cn/reports
 

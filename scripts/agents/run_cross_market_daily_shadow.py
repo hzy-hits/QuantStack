@@ -153,6 +153,12 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("QUANT_EMAIL_PROVIDER", "gmail"),
     )
     parser.add_argument(
+        "--email-fallback-provider",
+        choices=["none", "gmail"],
+        default=os.environ.get("QUANT_EMAIL_FALLBACK_PROVIDER", "none"),
+        help="Fallback provider used only when the primary live send fails.",
+    )
+    parser.add_argument(
         "--delivery-mode",
         choices=["test", "prod"],
         default=os.environ.get("QUANT_DELIVERY_MODE", "test"),
@@ -424,6 +430,17 @@ def build_tool_manifest(slot: str, cn_summary: dict[str, Any], us_summary: dict[
             "agent_use": "Optional live read of frozen quant-stack state when the Hermes agent needs more context.",
         },
         {
+            "name": "finance-search.quant_stack_data_capabilities",
+            "kind": "mcp_tool",
+            "market": "US,CN,macro",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["source_map", "fetch_worker_status", "available_data_bricks"],
+            "agent_use": (
+                "Use before writing when deciding which Tushare, AkShare, US market, FRED/Fed, "
+                "and local artifact data bricks are worth loading."
+            ),
+        },
+        {
             "name": "finance-search.quant_stack_spine_triage",
             "kind": "mcp_tool",
             "market": "US,CN",
@@ -585,6 +602,13 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
     return {
         "usage": usage,
         "must_try_finance_search_tools": [
+            {
+                "tool": "finance-search.quant_stack_data_capabilities",
+                "purpose": (
+                    "Expose Quant Stack's fetch universe: Tushare/AkShare A-share workers, "
+                    "US market data, FRED/Fed macro series, SEC filings, and frozen report artifacts."
+                ),
+            },
             {
                 "tool": "finance-search.get_market_snapshot",
                 "symbols": GLOBAL_MARKET_SNAPSHOT_SYMBOLS,
@@ -1494,8 +1518,23 @@ def send_email_if_requested(path: Path, packet: dict[str, Any], args: argparse.N
         "bcc": bcc,
         "config_path": str(ROOT / "quant-research-v1" / "config.yaml"),
     }
-    sender = send_report_email_resend if args.email_provider == "resend" else send_report_email
-    ids = sender(**kwargs)
+    gmail_kwargs = {
+        **kwargs,
+        "credentials_path": ROOT / "quant-research-v1" / "credentials.json",
+        "token_path": ROOT / "quant-research-v1" / "token.json",
+    }
+    if args.email_provider == "resend":
+        try:
+            ids = send_report_email_resend(**kwargs)
+        except Exception as exc:
+            if args.email_fallback_provider != "gmail":
+                raise
+            print(f"warn: Resend send failed; falling back to Gmail: {exc}", file=sys.stderr)
+            ids = send_report_email(**gmail_kwargs)
+            print(f"cross-market email sent: provider=resend fallback=gmail ids={','.join(ids)}")
+            return ids
+    else:
+        ids = send_report_email(**gmail_kwargs)
     print(f"cross-market email sent: provider={args.email_provider} ids={','.join(ids)}")
     return ids
 

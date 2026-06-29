@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import sys
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -371,7 +373,7 @@ def test_call_hermes_reviewer_uses_review_source(tmp_path: Path) -> None:
             "# 跨市场早报\n\nMCP snapshot",
             timeout=30,
             hermes_bin="/home/ubuntu/.local/bin/hermes",
-            model="deepseek-v3",
+            model="deepseek-v4-pro",
             provider="deepseek",
             max_turns=6,
         )
@@ -380,7 +382,7 @@ def test_call_hermes_reviewer_uses_review_source(tmp_path: Path) -> None:
     assert cmd[0] == "/home/ubuntu/.local/bin/hermes"
     assert "quant-stack-reviewer" in cmd
     assert "--model" in cmd
-    assert "deepseek-v3" in cmd
+    assert "deepseek-v4-pro" in cmd
     assert "--provider" in cmd
     assert "deepseek" in cmd
     assert report.startswith("# 跨市场早报")
@@ -402,7 +404,7 @@ def test_call_hermes_reviewer_falls_back_to_writer_model(tmp_path: Path) -> None
             "# 跨市场早报\n\nMCP snapshot",
             timeout=30,
             hermes_bin="/home/ubuntu/.local/bin/hermes",
-            review_model="deepseek-v3",
+            review_model="deepseek-v4-pro",
             review_provider="deepseek",
             fallback_model="",
             fallback_provider="",
@@ -412,6 +414,56 @@ def test_call_hermes_reviewer_falls_back_to_writer_model(tmp_path: Path) -> None
     assert run.call_count == 2
     assert report.startswith("# 跨市场早报")
     assert "deepseek down" in packet["_reviewer_primary_error"]
+
+
+def test_resend_delivery_falls_back_to_gmail(tmp_path: Path) -> None:
+    module = load_module()
+    report = tmp_path / "cross_market.md"
+    report.write_text("# 跨市场早报\n", encoding="utf-8")
+    packet = {"slot": "am", "target_cn_date": "2026-06-29", "cn": {"report_date": "2026-06-29"}}
+
+    gmail_mod = types.ModuleType("quant_bot.delivery.gmail")
+    calls: list[tuple[str, dict]] = []
+
+    def fail_resend(**kwargs):
+        calls.append(("resend", kwargs))
+        raise RuntimeError("resend down")
+
+    def send_gmail(**kwargs):
+        calls.append(("gmail", kwargs))
+        return ["gmail-id"]
+
+    gmail_mod.send_report_email_resend = fail_resend
+    gmail_mod.send_report_email = send_gmail
+    quant_bot = types.ModuleType("quant_bot")
+    quant_bot.__path__ = []
+    delivery = types.ModuleType("quant_bot.delivery")
+    delivery.__path__ = []
+
+    args = argparse.Namespace(
+        send_email=True,
+        delivery_dry_run=False,
+        email_provider="resend",
+        email_fallback_provider="gmail",
+        delivery_mode="prod",
+        test_recipient="",
+    )
+    with mock.patch.dict(
+        sys.modules,
+        {
+            "quant_bot": quant_bot,
+            "quant_bot.delivery": delivery,
+            "quant_bot.delivery.gmail": gmail_mod,
+        },
+    ):
+        ids = module.send_email_if_requested(report, packet, args)
+
+    assert ids == ["gmail-id"]
+    assert [name for name, _ in calls] == ["resend", "gmail"]
+    assert calls[0][1]["to"] is None
+    assert calls[0][1]["bcc"] is None
+    assert calls[1][1]["credentials_path"].name == "credentials.json"
+    assert calls[1][1]["token_path"].name == "token.json"
 
 
 def test_fallback_report_uses_legacy_backend_only_after_primary_failure(tmp_path: Path) -> None:
