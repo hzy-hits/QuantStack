@@ -295,6 +295,14 @@ def test_normalize_public_report_trims_reviewer_preamble_and_translates_jargon()
     assert "MCP" not in text
 
 
+def test_normalize_public_report_repairs_plain_title() -> None:
+    module = load_module()
+
+    text = module.normalize_public_report_text("跨市场早报｜期货反弹但A股不追高\n\n美股影响A股。", "am")
+
+    assert text.startswith("# 跨市场早报：期货反弹但A股不追高")
+
+
 def test_compact_market_snapshot_rows_labels_futures_and_country_indices() -> None:
     module = load_module()
 
@@ -587,6 +595,26 @@ def test_resend_delivery_falls_back_to_gmail(tmp_path: Path) -> None:
     assert calls[0][1]["bcc"] is None
     assert calls[1][1]["credentials_path"].name == "credentials.json"
     assert calls[1][1]["token_path"].name == "token.json"
+
+
+def test_output_snapshot_restores_failed_validation_artifacts(tmp_path: Path) -> None:
+    module = load_module()
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir()
+    paths = module.output_paths(output_dir, "am")
+    paths["report"].write_text("# old report\n", encoding="utf-8")
+    paths["meta"].write_text('{"old": true}\n', encoding="utf-8")
+
+    snapshot = module.snapshot_existing_outputs(output_dir, "am")
+    paths["report"].write_text("# failed report\n", encoding="utf-8")
+    paths["meta"].unlink()
+    paths["packet"].write_text('{"failed": true}\n', encoding="utf-8")
+
+    module.restore_output_snapshot(snapshot)
+
+    assert paths["report"].read_text(encoding="utf-8") == "# old report\n"
+    assert paths["meta"].read_text(encoding="utf-8") == '{"old": true}\n'
+    assert not paths["packet"].exists()
 
 
 def test_fallback_report_uses_legacy_backend_only_after_primary_failure(tmp_path: Path) -> None:

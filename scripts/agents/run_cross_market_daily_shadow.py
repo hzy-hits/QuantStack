@@ -1273,11 +1273,21 @@ def clean_hermes_stdout(text: str) -> str:
 
 def normalize_public_report_text(text: str, slot: str) -> str:
     expected_title = "# 跨市场早报" if slot == "am" else "# 跨市场晚报"
+    title_token = expected_title.lstrip("# ").strip()
     lines = text.splitlines()
     for idx, line in enumerate(lines):
-        if line.strip().startswith(expected_title):
+        stripped = line.strip().strip("`")
+        if stripped.startswith(expected_title):
             text = "\n".join(lines[idx:]).strip()
             break
+        title_pos = stripped.find(title_token)
+        if title_pos >= 0:
+            suffix = stripped[title_pos + len(title_token) :].lstrip(" ：:-|｜")
+            lines[idx] = f"{expected_title}：{suffix}" if suffix else expected_title
+            text = "\n".join(lines[idx:]).strip()
+            break
+    else:
+        text = f"{expected_title}\n\n{text.strip()}"
     replacements = {
         "packet": "事实清单",
         "MCP": "数据接口",
@@ -1690,13 +1700,45 @@ def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = Fals
     return failures
 
 
+def output_paths(output_dir: Path, slot: str) -> dict[str, Path]:
+    prefix = f"cross_market_{slot}_shadow"
+    return {
+        "packet": output_dir / f"{prefix}_packet.json",
+        "trajectory": output_dir / f"{prefix}_trajectory.jsonl",
+        "report": output_dir / f"{prefix}.md",
+        "meta": output_dir / f"{prefix}.meta.json",
+    }
+
+
+def snapshot_existing_outputs(output_dir: Path, slot: str) -> dict[Path, bytes | None]:
+    snapshot: dict[Path, bytes | None] = {}
+    for path in output_paths(output_dir, slot).values():
+        try:
+            snapshot[path] = path.read_bytes()
+        except FileNotFoundError:
+            snapshot[path] = None
+    return snapshot
+
+
+def restore_output_snapshot(snapshot: dict[Path, bytes | None]) -> None:
+    for path, content in snapshot.items():
+        if content is None:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+
 def write_outputs(output_dir: Path, packet: dict[str, Any], report: str, *, agent_backend: str) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    prefix = f"cross_market_{packet['slot']}_shadow"
-    packet_path = output_dir / f"{prefix}_packet.json"
-    trajectory_path = output_dir / f"{prefix}_trajectory.jsonl"
-    report_path = output_dir / f"{prefix}.md"
-    meta_path = output_dir / f"{prefix}.meta.json"
+    paths = output_paths(output_dir, packet["slot"])
+    packet_path = paths["packet"]
+    trajectory_path = paths["trajectory"]
+    report_path = paths["report"]
+    meta_path = paths["meta"]
 
     packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     report_path.write_text(report, encoding="utf-8")
@@ -1828,6 +1870,7 @@ def main() -> int:
     output_dir = args.output_dir or report_root / cn_date
     if not output_dir.is_absolute():
         output_dir = ROOT / output_dir
+    output_snapshot = snapshot_existing_outputs(output_dir, args.slot)
 
     cn, cn_context_note = load_cn_context_artifact(report_root, args.slot, cn_date)
     us, us_context_note = load_us_context_artifact(report_root, us_date)
@@ -1900,6 +1943,7 @@ def main() -> int:
     report = ensure_market_snapshot_section(report, packet)
     failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email)
     if failures:
+        restore_output_snapshot(output_snapshot)
         raise SystemExit("cross-market shadow validation failed:\n- " + "\n- ".join(failures))
     path = write_outputs(output_dir, packet, report, agent_backend=backend_name)
     print(f"cross-market {args.slot} shadow written: {path}")
