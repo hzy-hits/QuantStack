@@ -190,6 +190,22 @@ def test_clean_hermes_stdout_removes_session_id_and_code_fence() -> None:
     assert "```" not in text
 
 
+def test_normalize_public_report_trims_reviewer_preamble_and_translates_jargon() -> None:
+    module = load_module()
+
+    text = module.normalize_public_report_text(
+        "审稿意见: draft 需要修改。\n# 跨市场早报\n\nAI Infra universe 使用 beta hedge 和 source evidence。",
+        "am",
+    )
+
+    assert text.startswith("# 跨市场早报")
+    assert "审稿" not in text
+    assert "draft" not in text
+    assert "AI Infra" not in text
+    assert "beta hedge" not in text
+    assert "source evidence" not in text
+
+
 def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)

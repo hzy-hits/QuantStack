@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -842,6 +843,41 @@ def clean_hermes_stdout(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def normalize_public_report_text(text: str, slot: str) -> str:
+    expected_title = "# 跨市场早报" if slot == "am" else "# 跨市场晚报"
+    lines = text.splitlines()
+    for idx, line in enumerate(lines):
+        if line.strip().startswith(expected_title):
+            text = "\n".join(lines[idx:]).strip()
+            break
+    replacements = {
+        "AI Infra universe": "AI基础设施观察池",
+        "AI Infra": "AI基础设施",
+        "production执行层": "正式执行清单",
+        "production layer": "正式执行清单",
+        "production": "正式执行",
+        "source evidence": "证据",
+        "source review": "来源复核",
+        "evidence_state": "证据状态",
+        "ranker": "排序清单",
+        "headline risk": "新闻风险",
+        "beta hedge": "beta 对冲",
+        "money gate": "资金门槛",
+        "regime": "市场状态",
+        "原文验证状态": "证据状态",
+        "原文验证": "证据核验",
+        "draft": "初稿",
+        "审稿": "编辑",
+        "二审": "编辑",
+        "以下是": "",
+        "我将": "",
+        "作为AI": "",
+    }
+    for old, new in replacements.items():
+        text = re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
+    return text.strip()
+
+
 def call_hermes_agent(
     packet: dict[str, Any],
     *,
@@ -1297,6 +1333,8 @@ def main() -> int:
                 raise RuntimeError(f"Hermes reviewer failed; refusing to email unreviewed report: {exc}") from exc
             print(f"warn: Hermes reviewer failed; keeping draft: {exc}", file=sys.stderr)
 
+    if args.send_email:
+        report = normalize_public_report_text(report, args.slot)
     failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email)
     if failures:
         raise SystemExit("cross-market shadow validation failed:\n- " + "\n- ".join(failures))
