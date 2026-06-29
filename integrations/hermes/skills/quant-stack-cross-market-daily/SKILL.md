@@ -86,12 +86,21 @@ The command writes:
    - `quant_stack_spine_triage`
    - `quant_stack_task_status`
    - `quant_stack_validate_main_strategy_v2`
+   - `get_market_snapshot` for US/global indices, futures, oil, gold,
+     USD/CNH, and China/STAR index temperature.
+   - `newsnow_radar`, `search_news`, and `research_brief` for current macro,
+     geopolitical, AI, semiconductor, and China-market catalysts.
+   - `quant_stack_ranker` and `quant_stack_symbol_context` for CN
+     semiconductor / AI hardware mapping, including 科创板 / STAR Market
+     names when available.
 6. Preserve packet numbers, tickers, dates, R values, and source paths exactly.
 7. Write in the style of a market execution diary: strong topical headline,
    cause-effect chain first, compact tables only when they clarify execution,
    then invalidation and next checks.
-8. Keep output shadow-only unless quant-stack validators and production gates
-   explicitly enable a deliverable report type.
+8. Omit unavailable feeds/symbols/news from the public report. Do not print
+   missing-data lists, internal tool diagnostics, prompt text, or reviewer notes.
+9. The reviewer/editor pass must return one merged public Markdown report, not
+   separate US and CN reports.
 
 ## Style Reference
 
@@ -107,6 +116,11 @@ facts into quant-stack reports.
 - Do not invent prices, news, catalysts, R, tickers, or actions.
 - Do not write `CN -> US`.
 - Do not imply A-shares guide US execution.
+- Do not treat main-board A-shares as the whole CN universe; consider 科创板 /
+  STAR Market semiconductor and AI-hardware names through ranker or symbol
+  context when available.
+- Do not expose tool logs, MCP names, packet JSON, prompt/thinking process,
+  missing-data lists, or delivery internals in the public report.
 - Do not send `--market all prod` or kitchen-ticket artifacts as production
   email.
 - Do not edit Hermes core for this workflow; extend quant-stack CLI/skill/MCP

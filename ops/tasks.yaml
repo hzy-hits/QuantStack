@@ -227,6 +227,9 @@ tasks:
     cwd: .
     env:
       HERMES_BIN: /home/ubuntu/.local/bin/hermes
+      CROSS_MARKET_REVIEW_PROVIDER: deepseek
+      CROSS_MARKET_REVIEW_MODEL: deepseek-v3
+      CROSS_MARKET_REVIEW_MAX_TURNS: "6"
       CROSS_MARKET_SEND_EMAIL: "1"
       QUANT_EMAIL_PROVIDER: resend
       QUANT_DELIVERY_MODE: test
@@ -262,6 +265,9 @@ tasks:
     cwd: .
     env:
       HERMES_BIN: /home/ubuntu/.local/bin/hermes
+      CROSS_MARKET_REVIEW_PROVIDER: deepseek
+      CROSS_MARKET_REVIEW_MODEL: deepseek-v3
+      CROSS_MARKET_REVIEW_MAX_TURNS: "6"
       CROSS_MARKET_SEND_EMAIL: "1"
       QUANT_EMAIL_PROVIDER: resend
       QUANT_DELIVERY_MODE: test

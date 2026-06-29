@@ -74,6 +74,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hermes-provider", default=os.environ.get("HERMES_PROVIDER", ""))
     parser.add_argument("--hermes-max-turns", type=int, default=int(os.environ.get("HERMES_MAX_TURNS", "16")))
     parser.add_argument(
+        "--review-model",
+        default=os.environ.get("CROSS_MARKET_REVIEW_MODEL", os.environ.get("HERMES_REVIEW_MODEL", "")),
+        help="Optional model for the editor/reviewer pass; defaults to the writer model when unset.",
+    )
+    parser.add_argument(
+        "--review-provider",
+        default=os.environ.get("CROSS_MARKET_REVIEW_PROVIDER", os.environ.get("HERMES_REVIEW_PROVIDER", "")),
+        help="Optional provider for the editor/reviewer pass; defaults to the writer provider when unset.",
+    )
+    parser.add_argument(
+        "--review-max-turns",
+        type=int,
+        default=int(os.environ.get("CROSS_MARKET_REVIEW_MAX_TURNS", "6")),
+        help="Max Hermes turns for the editor/reviewer pass.",
+    )
+    parser.add_argument(
         "--review-backend",
         choices=["off", "hermes"],
         default=os.environ.get("CROSS_MARKET_REVIEW_BACKEND", "hermes"),
@@ -385,6 +401,60 @@ def build_tool_manifest(slot: str, cn_summary: dict[str, Any], us_summary: dict[
             "returns": ["validator_result"],
             "agent_use": "Optional read-only validator guardrail before treating any report as deliverable.",
         },
+        {
+            "name": "finance-search.get_market_snapshot",
+            "kind": "mcp_tool",
+            "market": "global",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["close", "change_pct", "volume", "source"],
+            "agent_use": (
+                "Use for global market temperature: US indices/futures, VIX, oil, gold, USD/CNH, "
+                "and China broad/STAR indices when available."
+            ),
+        },
+        {
+            "name": "finance-search.newsnow_radar",
+            "kind": "mcp_tool",
+            "market": "global",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["headline_candidates", "scores", "urls"],
+            "agent_use": "Use before writing to find the few global headlines that explain risk appetite.",
+        },
+        {
+            "name": "finance-search.search_news",
+            "kind": "mcp_tool",
+            "market": "global",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["deduped_news_items", "diagnostics"],
+            "agent_use": "Use for timely macro, geopolitical, AI, semiconductor, and China market catalysts.",
+        },
+        {
+            "name": "finance-search.research_brief",
+            "kind": "mcp_tool",
+            "market": "global",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["candidates", "gdelt", "market_snapshot"],
+            "agent_use": "Optional compact evidence pack; use returned evidence, never print the internal gaps list.",
+        },
+        {
+            "name": "finance-search.quant_stack_ranker",
+            "kind": "mcp_tool",
+            "market": "US,CN",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["ranker_rows", "symbols", "scores"],
+            "agent_use": (
+                "Use CN ranker rows to avoid main-board bias and include 科创板/STAR semiconductor names "
+                "when verifiable."
+            ),
+        },
+        {
+            "name": "finance-search.quant_stack_symbol_context",
+            "kind": "mcp_tool",
+            "market": "US,CN",
+            "source": "Hermes MCP server: finance-search",
+            "returns": ["ranker_row", "gamma_context", "evidence_context"],
+            "agent_use": "Use only for selected symbols that matter to the story; do not bulk-dump symbol context.",
+        },
     ]
 
 
@@ -405,7 +475,7 @@ def build_agent_operating_mode(slot: str) -> dict[str, Any]:
             "fact sources",
             "US -> CN causal direction",
             "no invented numbers/tickers/news",
-            "shadow-only delivery state",
+            "deliverable validation gates",
         ],
         "not_fixed": [
             "section order",
@@ -428,18 +498,21 @@ def build_data_boundary() -> dict[str, Any]:
 def build_coverage_checklist(slot: str) -> list[str]:
     if slot == "am":
         return [
-            "Open with the US post-market driver that most changes CN risk for the next open.",
+            "Open with the US/global market driver that most changes CN risk for the next open.",
+            "Include a concise global market temperature when finance-search returns indices/futures/oil/gold/FX snapshots.",
             "Explain the US -> CN transmission path and where it can fail.",
+            "Map AI/semiconductor signals into A-share execution, including 科创板/STAR candidates when verifiable.",
             "Translate the driver into CN execution limits, sector priority, and watch items.",
             "Show actionable US/CN facts only when they clarify the story.",
-            "End with risk, invalidation, freshness, and data lineage checks.",
+            "End with risk, invalidation, and next-session checks in investor-readable language.",
         ]
     return [
         "Review CN post-market action as feedback on prior US-to-CN transmission.",
-        "Summarize US pre-market context from US facts, not from CN direction.",
+        "Summarize global and US pre-market context from US/global facts, not from CN direction.",
+        "Check whether 科创板/STAR semiconductor moves confirm or reject the prior US-to-CN read-through.",
         "State explicitly that CN feedback cannot raise or cut US positioning.",
         "Identify what the next US session can change for the following CN session.",
-        "End with risk, invalidation, freshness, and data lineage checks.",
+        "End with risk, invalidation, and next-session checks in investor-readable language.",
     ]
 
 
@@ -454,6 +527,75 @@ def build_style_brief() -> dict[str, Any]:
             "Blend macro, sector, positioning, leverage, and event risk into one thesis.",
             "Write like an execution diary: what changed, why it matters, what would invalidate it.",
             "Use compact bullets/tables only for trade facts or explicit scenario thresholds.",
+        ],
+    }
+
+
+def build_external_context_requirements(slot: str) -> dict[str, Any]:
+    if slot == "am":
+        usage = "Use overnight US/global facts to frame A-share pre-market execution."
+    else:
+        usage = "Use global and US pre-market facts as context; CN action is feedback only."
+    return {
+        "usage": usage,
+        "must_try_finance_search_tools": [
+            {
+                "tool": "finance-search.get_market_snapshot",
+                "symbols": (
+                    "^GSPC,^IXIC,^DJI,^RUT,^VIX,SPY,QQQ,IWM,TLT,GLD,GC=F,CL=F,"
+                    "ES=F,NQ=F,YM=F,DX-Y.NYB,USDCNH=X,000001.SS,399001.SZ,399006.SZ,000688.SS"
+                ),
+                "purpose": (
+                    "Build a concise global market thermometer: US indices/futures, VIX, rates proxy, "
+                    "oil, gold, USD/CNH, and China broad/STAR indices."
+                ),
+            },
+            {
+                "tool": "finance-search.newsnow_radar",
+                "topic": "markets",
+                "keywords": "Fed, inflation, oil, gold, China, AI, semiconductors, Nvidia, tariffs, geopolitics",
+                "purpose": "Find the few headlines that explain risk appetite and sector rotation.",
+            },
+            {
+                "tool": "finance-search.search_news",
+                "queries": [
+                    "global markets US futures oil gold Fed China AI semiconductors",
+                    "Nvidia semiconductors AI supply chain Asia stocks",
+                    "China A-share semiconductors STAR Market 科创板 半导体",
+                ],
+                "purpose": "Fill the market story with timely news only when source titles/URLs are returned.",
+            },
+            {
+                "tool": "finance-search.research_brief",
+                "topics": [
+                    "global market risk pulse for US and China equities",
+                    "AI semiconductor supply chain read-through to A-shares",
+                ],
+                "purpose": "Use only as an evidence pack; do not print its internal gaps section.",
+            },
+        ],
+        "public_output_rule": (
+            "Mention only returned, checkable headlines/snapshots. If a feed or symbol is unavailable, "
+            "omit it; do not print a missing-data list or tool failure note."
+        ),
+    }
+
+
+def build_cn_universe_requirement() -> dict[str, Any]:
+    return {
+        "scope": (
+            "A-share semiconductor and AI hardware mapping must include STAR Market/科创板 as well as "
+            "ChiNext and main-board names."
+        ),
+        "board_policy": [
+            "Do not treat main-board A-shares as the whole CN universe.",
+            "Explicitly consider 688xxx STAR Market/科创板 symbols via quant_stack_ranker or symbol_context when available.",
+            "Use sector-level language when no verifiable symbol comes back; do not publish a missing-symbol list.",
+        ],
+        "finance_search_tools": [
+            "finance-search.quant_stack_ranker(market='cn', limit=30)",
+            "finance-search.quant_stack_symbol_context(symbol='<selected_cn_symbol>', market='cn')",
+            "finance-search.search_news(query='科创板 半导体 AI 芯片 A股')",
         ],
     }
 
@@ -490,6 +632,8 @@ def build_packet(slot: str, cn: MarketArtifact, us: MarketArtifact) -> dict[str,
         "agent_operating_mode": build_agent_operating_mode(slot),
         "data_boundary": build_data_boundary(),
         "tool_manifest": build_tool_manifest(slot, cn_summary, us_summary),
+        "external_context_requirements": build_external_context_requirements(slot),
+        "cn_universe_requirement": build_cn_universe_requirement(),
         "coverage_checklist": build_coverage_checklist(slot),
         "style_brief": build_style_brief(),
         "cn": cn_summary,
@@ -608,8 +752,13 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 - 先读下面 packet。packet 是 quant-stack 已冻结的事实砖和工具清单。
 - 可以启发式使用 finance-search MCP 工具,尤其是:
   quant_stack_daily_snapshot, quant_stack_spine_triage, quant_stack_task_status,
-  quant_stack_validate_main_strategy_v2。
-- 如果 MCP 工具不可用或返回不足,继续使用 packet,但要在报告末尾的血缘里说明。
+  quant_stack_validate_main_strategy_v2, quant_stack_ranker, quant_stack_symbol_context,
+  get_market_snapshot, newsnow_radar, search_news, research_brief。
+- 写作前必须尝试构造“全球市场温度”:全球/美股指数、期货、VIX、油、金、美元/离岸人民币、
+  中国主要指数和科创板/STAR 指数;只使用工具实际返回的数据。
+- 写作前必须尝试检索最新宏观/地缘/AI/半导体/中国市场新闻;只使用返回标题、来源或 URL 可核验的新闻。
+- A股侧不得只看主板;必须用 CN ranker 或 symbol_context 检查半导体、AI 硬件、科创板/688xxx 线索。
+- 如果工具、feed、symbol 或新闻没有返回可核验结果,公开报告里自然省略;不要写任何数据不可用、缺口、待补或工具失败说明。
 - coverage_checklist 是验收清单,不是章节模板。
 - 正文结构、标题角度、叙事顺序由你按证据决定。
 
@@ -618,15 +767,16 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 - {slot_rule}
 - 因果方向固定为美股事实约束 A股策略;不得把 A股盘后反馈写成会指导美股盘前或美股策略。
 - 正文不要输出任何反向因果箭头标记。
-- 不得编造 packet/MCP 之外的价格、ticker、R、新闻、仓位和结论。
+- 不得编造给定事实或工具返回之外的价格、ticker、R、新闻、仓位和结论。
 - 不得触发邮件、cron、生产投递或文件修改;最终只输出 markdown 报告文本。
-- 生产状态必须保持 shadow_only / production_delivery disabled。
-- 如果 MCP validator 返回缺口,把它们写成“数据缺口/待补证据”,不要写成生产运行错误。
+- 公开正文不要出现工具日志、运行状态、prompt、system/user 角色、思考过程、审稿过程、JSON 或文件路径。
+- 不要输出“以下是/我将/作为AI”这类自我说明;只输出读者可直接阅读的报告。
 
 写作风格:
 - 参考 packet.style_brief 和 Boist 市场日记风格: 强主题开场,先讲市场故事和因果链,
   再讲跨市场传导、仓位/风险约束、失效条件和下一步检查。
-- 少用机械表格。表格只服务交易事实、风险阈值或血缘。
+- 少用机械表格。表格只服务交易事实、风险阈值或情景边界。
+- 少用黑话;R、Gamma、regime、money gate 第一次出现时必须用中文短语解释,否则改成中文说法。
 - 允许有判断,但每个判断必须能追溯到 packet 或 MCP 返回。
 
 packet:
@@ -653,8 +803,12 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 - {slot_rule}
 - 美股是主导变量,A股按本域门禁执行;不得把 A股反馈写成会指导美股。
 - 保留 draft/packet 里已有的 ticker、日期、R、价格线和结论;不得新增事实、价格、新闻或仓位。
-- 删除工具日志味和工程词:不要出现 MCP、packet、validator、shadow_only、production_delivery、cron、Resend、JSON、script、tool、血缘、本稿状态。
+- 把全球新闻/宏观/指数/期货/油金和 A股半导体/科创板线索整合成同一个故事;不要拆成美股报告+A股报告。
+- 删除工具日志味、工程词和内部流程词:不要出现 MCP、packet、validator、shadow_only、production_delivery、cron、Resend、JSON、script、tool、血缘、本稿状态、prompt、system、user、draft、二审、审稿、思维过程、推理过程。
+- 删除所有数据不可用提示、缺口清单、待补证据清单、工具失败说明;没有可核验数据就自然省略。
+- 不要出现“以下是”“我将”“作为AI”“根据你的要求”等自我说明。
 - 语言要像给投资人看的盘前/盘后执行日记:先讲今天市场故事,再讲跨市场传导,最后讲执行线和失效条件。
+- 少用黑话;如果必须保留 R、Gamma、regime、money gate,第一次出现时加一句中文解释。
 - 少用表格;只有交易线、仓位线或风险线必须对齐时才用。
 - 不要解释你做了什么,不要输出审稿意见,只输出最终 markdown。
 
@@ -719,6 +873,7 @@ def call_hermes_agent(
         raise RuntimeError("Hermes cross-market agent returned empty output")
     packet["_agent_backend"] = "hermes"
     packet["_agent_model"] = model or os.environ.get("HERMES_INFERENCE_MODEL", "")
+    packet["_agent_provider"] = provider or os.environ.get("HERMES_PROVIDER", "")
     packet["_agent_tooling"] = "quant-stack-cross-market-daily skill + finance-search MCP"
     return text
 
@@ -773,7 +928,49 @@ def call_hermes_reviewer(
         raise RuntimeError("Hermes cross-market reviewer returned empty output")
     packet["_reviewer_backend"] = "hermes"
     packet["_reviewer_model"] = model or os.environ.get("HERMES_INFERENCE_MODEL", "")
+    packet["_reviewer_provider"] = provider or os.environ.get("HERMES_PROVIDER", "")
     return text
+
+
+def call_hermes_reviewer_with_fallback(
+    packet: dict[str, Any],
+    draft: str,
+    *,
+    timeout: int,
+    hermes_bin: str,
+    review_model: str = "",
+    review_provider: str = "",
+    fallback_model: str = "",
+    fallback_provider: str = "",
+    max_turns: int = 6,
+) -> str:
+    try:
+        return call_hermes_reviewer(
+            packet,
+            draft,
+            timeout=timeout,
+            hermes_bin=hermes_bin,
+            model=review_model,
+            provider=review_provider,
+            max_turns=max_turns,
+        )
+    except Exception as primary_exc:
+        same_fallback = (
+            (review_model or "") == (fallback_model or "")
+            and (review_provider or "") == (fallback_provider or "")
+        )
+        if same_fallback:
+            raise
+        packet["_reviewer_primary_error"] = str(primary_exc)[-800:]
+        return call_hermes_reviewer(
+            packet,
+            draft,
+            timeout=timeout,
+            hermes_bin=hermes_bin,
+            model=fallback_model,
+            provider=fallback_provider,
+            max_turns=max(4, min(max_turns, 8)),
+        )
 
 
 def call_agent(packet: dict[str, Any], timeout: int) -> str:
@@ -808,12 +1005,21 @@ def fallback_report(packet: dict[str, Any], backend: str, timeout: int, reason: 
     raise reason
 
 
+def contains_marker(text: str, token: str) -> bool:
+    return token.lower() in text.lower()
+
+
 def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = False) -> list[str]:
     failures: list[str] = []
     if slot == "am":
         required = ["# 跨市场早报", "美股", "A股"]
+        expected_title = "# 跨市场早报"
     else:
         required = ["# 跨市场晚报", "A股", "美股"]
+        expected_title = "# 跨市场晚报"
+    first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    if not first_line.startswith(expected_title):
+        failures.append(f"first non-empty line must start with: {expected_title}")
     for token in required:
         if token not in text:
             failures.append(f"missing required token: {token}")
@@ -828,7 +1034,7 @@ def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = Fals
         "投递失败",
     ]
     for token in forbidden:
-        if token in text:
+        if contains_marker(text, token):
             failures.append(f"forbidden production marker: {token}")
     if public_delivery:
         public_forbidden = [
@@ -842,11 +1048,39 @@ def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = Fals
             "JSON",
             "script",
             "tool",
+            "工具调用",
+            "工具失败",
             "血缘",
             "本稿状态",
+            "prompt",
+            "system prompt",
+            "user prompt",
+            "用户提示",
+            "draft",
+            "chain of thought",
+            "思维过程",
+            "推理过程",
+            "作为AI",
+            "以下是",
+            "我将",
+            "审稿",
+            "二审",
+            "数据缺口",
+            "待补证据",
+            "缺失数据",
+            "数据缺失",
+            "无法获取",
+            "未获取",
+            "N/A",
+            "null",
+            "暂无数据",
+            "# 美股日报",
+            "# A股日报",
+            "## 美股报告",
+            "## A股报告",
         ]
         for token in public_forbidden:
-            if token in text:
+            if contains_marker(text, token):
                 failures.append(f"forbidden public-report marker: {token}")
     return failures
 
@@ -884,7 +1118,11 @@ def write_outputs(output_dir: Path, packet: dict[str, Any], report: str, *, agen
                 "ts": now,
                 "step": "editor_review",
                 "tool": packet["_reviewer_backend"],
-                "args": {"slot": packet["slot"]},
+                "args": {
+                    "slot": packet["slot"],
+                    "provider": packet.get("_reviewer_provider") or "",
+                    "model": packet.get("_reviewer_model") or "",
+                },
                 "result": {"report": str(report_path.relative_to(ROOT))},
             }
         )
@@ -900,8 +1138,11 @@ def write_outputs(output_dir: Path, packet: dict[str, Any], report: str, *, agen
         "us_date": packet["us"]["report_date"],
         "agent_backend": packet.get("_agent_backend") or agent_backend,
         "agent_model": packet.get("_agent_model") or "",
+        "agent_provider": packet.get("_agent_provider") or "",
         "reviewer_backend": packet.get("_reviewer_backend") or "",
         "reviewer_model": packet.get("_reviewer_model") or "",
+        "reviewer_provider": packet.get("_reviewer_provider") or "",
+        "reviewer_primary_error": packet.get("_reviewer_primary_error") or "",
         "shadow_only": True,
         "generated_at": now,
         "script": Path(__file__).name,
@@ -1009,14 +1250,16 @@ def main() -> int:
 
     if args.review_backend == "hermes" and args.agent_backend == "hermes":
         try:
-            report = call_hermes_reviewer(
+            report = call_hermes_reviewer_with_fallback(
                 packet,
                 report,
                 timeout=args.timeout,
                 hermes_bin=args.hermes_bin,
-                model=args.hermes_model,
-                provider=args.hermes_provider,
-                max_turns=max(4, min(args.hermes_max_turns, 8)),
+                review_model=args.review_model or args.hermes_model,
+                review_provider=args.review_provider or args.hermes_provider,
+                fallback_model=args.hermes_model,
+                fallback_provider=args.hermes_provider,
+                max_turns=max(4, min(args.review_max_turns, 8)),
             )
         except Exception as exc:
             if args.send_email:

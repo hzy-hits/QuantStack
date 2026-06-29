@@ -32,6 +32,7 @@ def artifact(module, market: str, report_date: str, tmp_path: Path):
             "actionable": [
                 {"market": "US", "symbol": "NVDA", "size_r": 0.125, "evidence_state": "原文已证明"},
                 {"market": "CN", "symbol": "000063.SZ", "size_r": 0.05, "evidence_state": "原文已证明"},
+                {"market": "CN", "symbol": "688981.SH", "size_r": 0.04, "evidence_state": "原文已证明"},
             ],
         },
     }
@@ -69,6 +70,11 @@ def test_pm_packet_keeps_us_to_cn_causality(tmp_path: Path) -> None:
     assert packet["data_boundary"]["fetch_workers"].startswith("Own data collection")
     assert any(tool["name"] == "select_cross_market_transmission" for tool in packet["tool_manifest"])
     assert any(tool["name"] == "finance-search.quant_stack_spine_triage" for tool in packet["tool_manifest"])
+    assert any(tool["name"] == "finance-search.get_market_snapshot" for tool in packet["tool_manifest"])
+    assert any(tool["name"] == "finance-search.search_news" for tool in packet["tool_manifest"])
+    assert any(tool["name"] == "finance-search.quant_stack_ranker" for tool in packet["tool_manifest"])
+    assert "external_context_requirements" in packet
+    assert "科创板" in module.json.dumps(packet["cn_universe_requirement"], ensure_ascii=False)
     assert packet["style_brief"]["reference_url"].startswith("https://boist.org/")
 
 
@@ -131,6 +137,32 @@ def test_public_delivery_rejects_tool_log_language() -> None:
     assert any("MCP" in item for item in failures)
 
 
+def test_public_delivery_rejects_prompt_leakage_and_missing_data_list() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        "# 跨市场早报\n\n美股影响A股。\n\n以下是我的思维过程: 数据缺口/待补证据。",
+        "am",
+        public_delivery=True,
+    )
+
+    assert any("思维过程" in item for item in failures)
+    assert any("数据缺口" in item for item in failures)
+
+
+def test_public_delivery_rejects_split_single_market_reports() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        "# 跨市场晚报\n\n## 美股报告\n美股\n\n## A股报告\nA股",
+        "pm",
+        public_delivery=True,
+    )
+
+    assert any("美股报告" in item for item in failures)
+    assert any("A股报告" in item for item in failures)
+
+
 def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
@@ -154,12 +186,17 @@ def test_hermes_prompt_retires_legacy_narrator_templates(tmp_path: Path) -> None
 
     assert "Hermes lead editor agent" in prompt
     assert "finance-search MCP" in prompt
+    assert "get_market_snapshot" in prompt
+    assert "newsnow_radar" in prompt
+    assert "search_news" in prompt
+    assert "quant_stack_ranker" in prompt
+    assert "科创板/688xxx" in prompt
     assert "不要使用 quant-research-v1/prompts" in prompt
     assert "coverage_checklist 是验收清单,不是章节模板" in prompt
     assert "不得把 A股盘后反馈写成会指导美股盘前或美股策略" in prompt
     assert "CN -> US" not in prompt
-    assert "数据缺口/待补证据" in prompt
-    assert "不要写成生产运行错误" in prompt
+    assert "自然省略" in prompt
+    assert "数据缺口/待补证据" not in prompt
     assert "投递失败" not in prompt
 
 
@@ -174,6 +211,9 @@ def test_hermes_reviewer_prompt_requires_one_merged_public_report(tmp_path: Path
     assert "二审编辑" in prompt
     assert "输出一封合并日报" in prompt
     assert "不要出现 MCP" in prompt
+    assert "prompt" in prompt
+    assert "思维过程" in prompt
+    assert "缺口清单" in prompt
     assert "只输出最终 markdown" in prompt
 
 
@@ -219,16 +259,47 @@ def test_call_hermes_reviewer_uses_review_source(tmp_path: Path) -> None:
             "# 跨市场早报\n\nMCP snapshot",
             timeout=30,
             hermes_bin="/home/ubuntu/.local/bin/hermes",
-            model="",
-            provider="",
+            model="deepseek-v3",
+            provider="deepseek",
             max_turns=6,
         )
 
     cmd = run.call_args.args[0]
     assert cmd[0] == "/home/ubuntu/.local/bin/hermes"
     assert "quant-stack-reviewer" in cmd
+    assert "--model" in cmd
+    assert "deepseek-v3" in cmd
+    assert "--provider" in cmd
+    assert "deepseek" in cmd
     assert report.startswith("# 跨市场早报")
     assert packet["_reviewer_backend"] == "hermes"
+    assert packet["_reviewer_provider"] == "deepseek"
+
+
+def test_call_hermes_reviewer_falls_back_to_writer_model(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    packet = module.build_packet("am", cn, us)
+
+    failed = mock.Mock(returncode=1, stdout="", stderr="deepseek down")
+    succeeded = mock.Mock(returncode=0, stdout="# 跨市场早报 — 2026-06-29\n\n默认 reviewer 接管。", stderr="")
+    with mock.patch.object(module.subprocess, "run", side_effect=[failed, succeeded]) as run:
+        report = module.call_hermes_reviewer_with_fallback(
+            packet,
+            "# 跨市场早报\n\nMCP snapshot",
+            timeout=30,
+            hermes_bin="/home/ubuntu/.local/bin/hermes",
+            review_model="deepseek-v3",
+            review_provider="deepseek",
+            fallback_model="",
+            fallback_provider="",
+            max_turns=6,
+        )
+
+    assert run.call_count == 2
+    assert report.startswith("# 跨市场早报")
+    assert "deepseek down" in packet["_reviewer_primary_error"]
 
 
 def test_fallback_report_uses_legacy_backend_only_after_primary_failure(tmp_path: Path) -> None:
