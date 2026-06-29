@@ -1117,6 +1117,21 @@ def insert_after_opening_paragraph(report: str, block: str) -> str:
     return "\n".join(lines[:insert_at] + ["", block, ""] + lines[insert_at:]).strip()
 
 
+def insert_after_title(report: str, block: str) -> str:
+    block = block.strip()
+    if not block:
+        return report.strip()
+
+    lines = report.strip().splitlines()
+    if not lines:
+        return block
+    title_idx = next((idx for idx, line in enumerate(lines) if line.strip().startswith("# ")), 0)
+    insert_at = title_idx + 1
+    while insert_at < len(lines) and not lines[insert_at].strip():
+        insert_at += 1
+    return "\n".join(lines[: title_idx + 1] + ["", block, ""] + lines[insert_at:]).strip()
+
+
 def insert_after_section(report: str, heading_prefix: str, block: str) -> str:
     block = block.strip()
     if not block:
@@ -1145,7 +1160,7 @@ def ensure_market_snapshot_section(report: str, packet: dict[str, Any]) -> str:
 
     text = strip_managed_report_sections(report)
     if top_blocks:
-        text = insert_after_opening_paragraph(text, "\n\n".join(top_blocks))
+        text = insert_after_title(text, "\n\n".join(top_blocks))
     if tail:
         text = "\n\n".join(part for part in (text.strip(), tail.strip()) if part)
     return text.strip()

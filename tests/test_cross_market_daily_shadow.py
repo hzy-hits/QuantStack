@@ -499,6 +499,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert "VIX(2026-06-26)收低" in report
     assert "VIX(2026-06-26)波动率" not in report
     assert "DAX(2026-06-26)" in report
+    assert report.index("## 宏观数据温度计") < report.index("美股影响A股")
     assert "## 宏观数据温度计" in report
     assert report.count("## 宏观数据温度计") == 1
     assert "## 宏观事件 Headlines" in report
