@@ -165,6 +165,37 @@ def test_public_delivery_rejects_internal_research_jargon() -> None:
     assert any("原文验证" in item for item in failures)
 
 
+def test_public_delivery_requires_global_context_markers() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        "# 跨市场早报\n\n美股影响A股。黄金和WTI原油存在波动。科创板688样本在观察。",
+        "am",
+        public_delivery=True,
+    )
+
+    assert any("US equity futures" in item for item in failures)
+    assert any("non-US country/region indices" in item for item in failures)
+
+
+def test_public_delivery_accepts_required_global_context_markers() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场晚报\n\n"
+            "美股期货里标普期货和纳指期货给出下一轮风险线。"
+            "黄金、WTI原油同时作为避险和能源温度。"
+            "日经、KOSPI、恒生和DAX展示非美大盘方向。"
+            "科创板688样本覆盖A股半导体。A股和美股合并复盘。"
+        ),
+        "pm",
+        public_delivery=True,
+    )
+
+    assert failures == []
+
+
 def test_public_delivery_rejects_split_single_market_reports() -> None:
     module = load_module()
 
@@ -233,6 +264,9 @@ def test_hermes_prompt_retires_legacy_narrator_templates(tmp_path: Path) -> None
     assert "newsnow_radar" in prompt
     assert "search_news" in prompt
     assert "quant_stack_ranker" in prompt
+    assert "美股期货" in prompt
+    assert "欧洲主要指数" in prompt
+    assert "亚洲主要指数" in prompt
     assert "科创板/688xxx" in prompt
     assert "不要使用 quant-research-v1/prompts" in prompt
     assert "coverage_checklist 是验收清单,不是章节模板" in prompt

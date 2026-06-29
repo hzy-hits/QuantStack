@@ -86,7 +86,8 @@ The command writes:
    - `quant_stack_spine_triage`
    - `quant_stack_task_status`
    - `quant_stack_validate_main_strategy_v2`
-   - `get_market_snapshot` for US/global indices, futures, oil, gold,
+   - `get_market_snapshot` for US cash indices, US equity futures
+     (S&P/Nasdaq/Dow/Russell), Europe/Asia country indices, oil, gold,
      USD/CNH, and China/STAR index temperature.
    - `newsnow_radar`, `search_news`, and `research_brief` for current macro,
      geopolitical, AI, semiconductor, and China-market catalysts.
@@ -101,6 +102,9 @@ The command writes:
    missing-data lists, internal tool diagnostics, prompt text, or reviewer notes.
 9. The reviewer/editor pass must return one merged public Markdown report, not
    separate US and CN reports.
+10. Public reports must include a compact global market temperature when the
+    data is returned: oil, gold, at least one US equity future, and several
+    non-US country/region indices.
 
 ## Style Reference
 

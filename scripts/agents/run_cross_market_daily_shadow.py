@@ -409,8 +409,8 @@ def build_tool_manifest(slot: str, cn_summary: dict[str, Any], us_summary: dict[
             "source": "Hermes MCP server: finance-search",
             "returns": ["close", "change_pct", "volume", "source"],
             "agent_use": (
-                "Use for global market temperature: US indices/futures, VIX, oil, gold, USD/CNH, "
-                "and China broad/STAR indices when available."
+                "Use for global market temperature: US cash indices, US equity futures, Europe/Asia "
+                "country indices, VIX, oil, gold, USD/CNH, and China broad/STAR indices when available."
             ),
         },
         {
@@ -543,12 +543,17 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
             {
                 "tool": "finance-search.get_market_snapshot",
                 "symbols": (
-                    "^GSPC,^IXIC,^DJI,^RUT,^VIX,SPY,QQQ,IWM,TLT,GLD,GC=F,CL=F,"
-                    "ES=F,NQ=F,YM=F,DX-Y.NYB,USDCNH=X,000001.SS,399001.SZ,399006.SZ,000688.SS"
+                    "^GSPC,^IXIC,^DJI,^RUT,^VIX,SPY,QQQ,IWM,TLT,"
+                    "ES=F,NQ=F,YM=F,RTY=F,"
+                    "^STOXX50E,^FTSE,^GDAXI,^FCHI,"
+                    "^N225,^KS11,^HSI,^TWII,^BSESN,"
+                    "000001.SS,399001.SZ,399006.SZ,000688.SS,"
+                    "GC=F,CL=F,BZ=F,GLD,USDCNH=X,DX-Y.NYB,^TNX"
                 ),
                 "purpose": (
-                    "Build a concise global market thermometer: US indices/futures, VIX, rates proxy, "
-                    "oil, gold, USD/CNH, and China broad/STAR indices."
+                    "Build a concise global market thermometer: US cash indices, S&P/Nasdaq/Dow/Russell "
+                    "futures, Europe and Asia country indices, VIX/rates proxy, oil, gold, USD/CNH, "
+                    "and China broad/STAR indices."
                 ),
             },
             {
@@ -576,8 +581,10 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
             },
         ],
         "public_output_rule": (
-            "Mention only returned, checkable headlines/snapshots. If a feed or symbol is unavailable, "
-            "omit it; do not print a missing-data list or tool failure note."
+            "The public report must include returned values for: oil, gold, at least one US equity future, "
+            "and several non-US country/region benchmarks when available. Mention only returned, checkable "
+            "headlines/snapshots. If a feed or symbol is unavailable, omit it; do not print a missing-data "
+            "list or tool failure note."
         ),
     }
 
@@ -755,8 +762,9 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
   quant_stack_daily_snapshot, quant_stack_spine_triage, quant_stack_task_status,
   quant_stack_validate_main_strategy_v2, quant_stack_ranker, quant_stack_symbol_context,
   get_market_snapshot, newsnow_radar, search_news, research_brief。
-- 写作前必须尝试构造“全球市场温度”:全球/美股指数、期货、VIX、油、金、美元/离岸人民币、
-  中国主要指数和科创板/STAR 指数;只使用工具实际返回的数据。
+- 写作前必须尝试构造“全球市场温度”:美股现货指数、美股期货(标普/纳指/道指/罗素期货),
+  欧洲主要指数(如 STOXX/DAX/FTSE/CAC),亚洲主要指数(如日经/KOSPI/恒生/台湾/印度),
+  VIX、油、金、美元/离岸人民币、中国主要指数和科创板/STAR 指数;只使用工具实际返回的数据。
 - 写作前必须尝试检索最新宏观/地缘/AI/半导体/中国市场新闻;只使用返回标题、来源或 URL 可核验的新闻。
 - A股侧不得只看主板;必须用 CN ranker 或 symbol_context 检查半导体、AI 硬件、科创板/688xxx 线索。
 - 如果工具、feed、symbol 或新闻没有返回可核验结果,公开报告里自然省略;不要写任何数据不可用、缺口、待补或工具失败说明。
@@ -806,6 +814,8 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 - 美股是主导变量,A股按本域门禁执行;不得把 A股反馈写成会指导美股。
 - 保留 draft/packet 里已有的 ticker、日期、R、价格线和结论;不得新增事实、价格、新闻或仓位。
 - 把全球新闻/宏观/指数/期货/油金和 A股半导体/科创板线索整合成同一个故事;不要拆成美股报告+A股报告。
+- 全球温度段必须保留:美股期货、油、金、至少多个非美国家/地区大盘指数;如果 draft 已遗漏,
+  只能从 packet/工具返回中补入,不能虚构数字。
 - 删除工具日志味、工程词和内部流程词:不要出现 MCP、packet、validator、shadow_only、production_delivery、cron、Resend、JSON、script、tool、血缘、本稿状态、prompt、system、user、draft、二审、审稿、思维过程、推理过程。
 - 删除或翻译内部研究黑话:不要出现 production、ranker、AI Infra universe、source evidence、source review、evidence_state、headline risk、beta hedge、money gate、regime、原文验证状态。
 - 删除所有数据不可用提示、缺口清单、待补证据清单、工具失败说明;没有可核验数据就自然省略。
@@ -1063,6 +1073,61 @@ def contains_marker(text: str, token: str) -> bool:
     return token.lower() in text.lower()
 
 
+def public_context_failures(text: str) -> list[str]:
+    failures: list[str] = []
+    commodity_groups = {
+        "gold": ["黄金", "gold", "GLD", "GC=F"],
+        "oil": ["原油", "WTI", "Brent", "布伦特", "CL=F", "BZ=F"],
+    }
+    for label, markers in commodity_groups.items():
+        if not any(contains_marker(text, marker) for marker in markers):
+            failures.append(f"missing public global-market commodity marker: {label}")
+
+    us_future_markers = [
+        "美股期货",
+        "标普期货",
+        "纳指期货",
+        "道指期货",
+        "罗素期货",
+        "S&P futures",
+        "Nasdaq futures",
+        "Dow futures",
+        "ES=F",
+        "NQ=F",
+        "YM=F",
+        "RTY=F",
+    ]
+    if not any(contains_marker(text, marker) for marker in us_future_markers):
+        failures.append("missing public global-market marker: US equity futures")
+
+    global_index_markers = [
+        "日经",
+        "Nikkei",
+        "KOSPI",
+        "恒生",
+        "Hang Seng",
+        "台湾",
+        "加权指数",
+        "印度",
+        "Sensex",
+        "STOXX",
+        "DAX",
+        "FTSE",
+        "CAC",
+        "欧洲",
+        "日本",
+        "韩国",
+        "香港",
+    ]
+    hit_count = sum(1 for marker in global_index_markers if contains_marker(text, marker))
+    if hit_count < 3:
+        failures.append("missing public global-market breadth: non-US country/region indices")
+
+    if not any(contains_marker(text, marker) for marker in ["科创", "688", "STAR Market"]):
+        failures.append("missing public CN semiconductor breadth: STAR/科创板 marker")
+    return failures
+
+
 def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = False) -> list[str]:
     failures: list[str] = []
     if slot == "am":
@@ -1149,6 +1214,7 @@ def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = Fals
         for token in public_forbidden:
             if contains_marker(text, token):
                 failures.append(f"forbidden public-report marker: {token}")
+        failures.extend(public_context_failures(text))
     return failures
 
 
