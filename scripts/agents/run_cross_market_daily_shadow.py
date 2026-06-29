@@ -77,6 +77,38 @@ GLOBAL_MARKET_LABELS = {
     "DX-Y.NYB": "美元指数",
     "^TNX": "美国10年利率",
 }
+GLOBAL_MARKET_SNAPSHOT_GROUPS = (
+    ("美股现货", ("^GSPC", "^IXIC", "^DJI", "^RUT", "^VIX")),
+    ("美股期货", ("ES=F", "NQ=F", "YM=F", "RTY=F")),
+    ("欧洲大盘", ("^STOXX50E", "^GDAXI", "^FTSE", "^FCHI")),
+    ("亚洲大盘", ("^N225", "^KS11", "^HSI", "^TWII")),
+    ("A股大盘", ("000001.SS", "399001.SZ", "399006.SZ", "000688.SS")),
+    ("商品/汇率", ("CL=F", "BZ=F", "GC=F", "GLD", "USDCNH=X", "DX-Y.NYB", "^TNX")),
+)
+FORBIDDEN_PUBLIC_INDEX_MARKERS = ("Sensex", "Nifty", "印度指数", "印度Sensex", "印度")
+GLOBAL_MARKET_LABEL_ALIASES = {
+    "^GSPC": ("标普500",),
+    "^IXIC": ("纳斯达克综合",),
+    "^DJI": ("道琼斯",),
+    "^RUT": ("罗素2000",),
+    "^VIX": ("VIX",),
+    "ES=F": ("标普期货",),
+    "NQ=F": ("纳指期货",),
+    "YM=F": ("道指期货",),
+    "RTY=F": ("罗素期货",),
+    "^STOXX50E": ("欧洲STOXX50", "STOXX50"),
+    "^FTSE": ("英国FTSE100", "FTSE100"),
+    "^GDAXI": ("德国DAX", "DAX"),
+    "^FCHI": ("法国CAC40", "CAC40"),
+    "^N225": ("日本日经225", "日经225"),
+    "^KS11": ("韩国KOSPI", "KOSPI"),
+    "^HSI": ("香港恒生", "恒生"),
+    "^TWII": ("台湾加权",),
+    "000001.SS": ("上证指数",),
+    "399001.SZ": ("深证成指",),
+    "399006.SZ": ("创业板指",),
+    "000688.SS": ("科创50",),
+}
 
 
 @dataclass(frozen=True)
@@ -710,6 +742,139 @@ def compact_market_snapshot_rows(snapshot: dict[str, Any]) -> list[dict[str, Any
             }
         )
     return rows
+
+
+def public_index_marker_allowed(row: dict[str, Any]) -> bool:
+    text = " ".join(str(row.get(key) or "") for key in ("symbol", "label", "display"))
+    return not any(marker.lower() in text.lower() for marker in FORBIDDEN_PUBLIC_INDEX_MARKERS)
+
+
+def fmt_market_value(value: Any) -> str:
+    if value is None:
+        return "-"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        return text or "-"
+    if abs(number) < 10:
+        text = f"{number:.4f}"
+    else:
+        text = f"{number:.2f}"
+    return text.rstrip("0").rstrip(".")
+
+
+def fmt_market_change_pct(value: Any) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return "-"
+        if text.endswith("%"):
+            return text
+        try:
+            value = float(text)
+        except ValueError:
+            return text
+    try:
+        return f"{float(value):+.2f}%"
+    except (TypeError, ValueError):
+        text = str(value).strip()
+        return text or "-"
+
+
+def render_market_snapshot_section(packet: dict[str, Any]) -> str:
+    prefetch = packet.get("finance_search_prefetch") if isinstance(packet.get("finance_search_prefetch"), dict) else {}
+    raw_rows = prefetch.get("market_rows") if isinstance(prefetch.get("market_rows"), list) else []
+    rows = [row for row in raw_rows if isinstance(row, dict) and row.get("date") and public_index_marker_allowed(row)]
+    if not rows:
+        return ""
+
+    by_symbol = {str(row.get("symbol") or ""): row for row in rows}
+    consumed: set[str] = set()
+    lines = [
+        "## 全球市场温度",
+        "| 类别 | 指标 | 日期 | 最新/收盘 | 涨跌幅 |",
+        "|---|---|---|---:|---:|",
+    ]
+    for group, symbols in GLOBAL_MARKET_SNAPSHOT_GROUPS:
+        for symbol in symbols:
+            row = by_symbol.get(symbol)
+            if not row:
+                continue
+            consumed.add(symbol)
+            lines.append(
+                "| {group} | {label} | {date} | {close} | {change} |".format(
+                    group=group,
+                    label=fmt(row.get("label") or symbol),
+                    date=fmt(row.get("date")),
+                    close=fmt_market_value(row.get("close")),
+                    change=fmt_market_change_pct(row.get("change_pct")),
+                )
+            )
+    for row in rows:
+        symbol = str(row.get("symbol") or "")
+        if symbol in consumed:
+            continue
+        lines.append(
+            "| 其他 | {label} | {date} | {close} | {change} |".format(
+                label=fmt(row.get("label") or symbol),
+                date=fmt(row.get("date")),
+                close=fmt_market_value(row.get("close")),
+                change=fmt_market_change_pct(row.get("change_pct")),
+            )
+        )
+    return "\n".join(lines)
+
+
+def market_snapshot_date_map(packet: dict[str, Any]) -> dict[str, str]:
+    prefetch = packet.get("finance_search_prefetch") if isinstance(packet.get("finance_search_prefetch"), dict) else {}
+    raw_rows = prefetch.get("market_rows") if isinstance(prefetch.get("market_rows"), list) else []
+    date_map: dict[str, str] = {}
+    for row in raw_rows:
+        if not isinstance(row, dict) or not row.get("date") or not public_index_marker_allowed(row):
+            continue
+        symbol = str(row.get("symbol") or "")
+        aliases = list(GLOBAL_MARKET_LABEL_ALIASES.get(symbol, ()))
+        label = str(row.get("label") or "").strip()
+        if label:
+            aliases.append(label)
+        for alias in aliases:
+            if alias:
+                date_map[alias] = str(row["date"])
+    return dict(sorted(date_map.items(), key=lambda item: len(item[0]), reverse=True))
+
+
+def annotate_market_snapshot_dates(report: str, packet: dict[str, Any]) -> str:
+    date_map = market_snapshot_date_map(packet)
+    if not date_map:
+        return report.strip()
+    text = report.strip()
+    for marker, marker_date in date_map.items():
+        pattern = re.compile(rf"{re.escape(marker)}(?!\(\b20\d{{2}}-\d{{2}}-\d{{2}}\b\))")
+        text = pattern.sub(f"{marker}({marker_date})", text)
+    return text
+
+
+def ensure_market_snapshot_section(report: str, packet: dict[str, Any]) -> str:
+    section = render_market_snapshot_section(packet)
+    if not section or "| 类别 | 指标 | 日期 | 最新/收盘 | 涨跌幅 |" in report:
+        return report.strip()
+
+    lines = report.strip().splitlines()
+    if not lines:
+        return section
+    title_idx = next((idx for idx, line in enumerate(lines) if line.strip().startswith("# ")), 0)
+    para_start = title_idx + 1
+    while para_start < len(lines) and not lines[para_start].strip():
+        para_start += 1
+    if para_start >= len(lines):
+        return "\n".join([lines[title_idx], "", section]).strip()
+    insert_at = para_start + 1
+    while insert_at < len(lines) and lines[insert_at].strip():
+        insert_at += 1
+    return "\n".join(lines[:insert_at] + ["", section, ""] + lines[insert_at:]).strip()
 
 
 def fetch_finance_search_prefetch(*, window: str, timeout: int = 90) -> dict[str, Any]:
@@ -1696,6 +1861,8 @@ def main() -> int:
 
     if args.send_email:
         report = normalize_public_report_text(report, args.slot)
+    report = annotate_market_snapshot_dates(report, packet)
+    report = ensure_market_snapshot_section(report, packet)
     failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email)
     if failures:
         raise SystemExit("cross-market shadow validation failed:\n- " + "\n- ".join(failures))

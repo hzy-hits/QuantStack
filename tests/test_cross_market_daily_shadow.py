@@ -320,6 +320,66 @@ def test_compact_market_snapshot_rows_labels_futures_and_country_indices() -> No
     assert all("2026-06-29" in row["display"] for row in rows)
 
 
+def test_market_snapshot_section_filters_india_and_keeps_dates(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-26", tmp_path)
+    packet = module.build_packet("am", cn, us)
+    packet["finance_search_prefetch"] = {
+        "market_rows": [
+            {"symbol": "ES=F", "label": "标普期货", "date": "2026-06-29", "close": 7000, "change_pct": 0.5},
+            {"symbol": "^GDAXI", "label": "德国DAX", "date": "2026-06-26", "close": 18000, "change_pct": -1.2},
+            {"symbol": "^BSESN", "label": "印度Sensex", "date": "2026-06-26", "close": 80000, "change_pct": 1.0},
+        ]
+    }
+
+    section = module.render_market_snapshot_section(packet)
+
+    assert "标普期货 | 2026-06-29" in section
+    assert "德国DAX | 2026-06-26" in section
+    assert "印度" not in section
+    assert "Sensex" not in section
+
+
+def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-26", tmp_path)
+    packet = module.build_packet("am", cn, us)
+    packet["finance_search_prefetch"] = {
+        "market_rows": [
+            {"symbol": "^GSPC", "label": "标普500", "date": "2026-06-26", "close": 6088.9, "change_pct": -0.05},
+            {"symbol": "^VIX", "label": "VIX波动率", "date": "2026-06-26", "close": 18.41, "change_pct": -2.54},
+            {"symbol": "ES=F", "label": "标普期货", "date": "2026-06-29", "close": 6120, "change_pct": 0.4},
+            {"symbol": "NQ=F", "label": "纳指期货", "date": "2026-06-29", "close": 22400, "change_pct": 0.35},
+            {"symbol": "^GDAXI", "label": "德国DAX", "date": "2026-06-26", "close": 18000, "change_pct": -1.29},
+            {"symbol": "^N225", "label": "日本日经225", "date": "2026-06-29", "close": 41000, "change_pct": -1.04},
+            {"symbol": "^KS11", "label": "韩国KOSPI", "date": "2026-06-29", "close": 3000, "change_pct": -1.56},
+            {"symbol": "^HSI", "label": "香港恒生", "date": "2026-06-26", "close": 24000, "change_pct": -1.76},
+            {"symbol": "000001.SS", "label": "上证指数", "date": "2026-06-26", "close": 3300, "change_pct": -2.26},
+            {"symbol": "000688.SS", "label": "科创50", "date": "2026-06-29", "close": 950, "change_pct": 0.2},
+            {"symbol": "GC=F", "label": "黄金期货", "date": "2026-06-29", "close": 4074, "change_pct": -0.12},
+            {"symbol": "CL=F", "label": "WTI原油期货", "date": "2026-06-29", "close": 70.12, "change_pct": 1.29},
+        ]
+    }
+    report = (
+        "# 跨市场早报：测试\n\n"
+        "美股影响A股，标普500 -0.05%，VIX收低，标普期货和纳指期货修复。"
+        "德国DAX、日本日经225、KOSPI、恒生同步给出压力。"
+        "A股看上证指数和科创50，科创板688样本继续观察。黄金和WTI原油作为风险温度。"
+    )
+
+    report = module.annotate_market_snapshot_dates(report, packet)
+    report = module.ensure_market_snapshot_section(report, packet)
+    failures = module.validate_shadow_report(report, "am", public_delivery=True)
+
+    assert "标普500(2026-06-26)" in report
+    assert "VIX(2026-06-26)" in report
+    assert "DAX(2026-06-26)" in report
+    assert "## 全球市场温度" in report
+    assert failures == []
+
+
 def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
