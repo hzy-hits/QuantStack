@@ -852,15 +852,50 @@ def annotate_market_snapshot_dates(report: str, packet: dict[str, Any]) -> str:
         return report.strip()
     text = report.strip()
     for marker, marker_date in date_map.items():
-        pattern = re.compile(rf"{re.escape(marker)}(?!\(\b20\d{{2}}-\d{{2}}-\d{{2}}\b\))")
+        suffix_guard = "波动率" if marker == "VIX" else ""
+        suffix_guard_pattern = rf"(?!{re.escape(suffix_guard)})" if suffix_guard else ""
+        pattern = re.compile(
+            rf"{re.escape(marker)}{suffix_guard_pattern}(?!\(\b20\d{{2}}-\d{{2}}-\d{{2}}\b\))"
+        )
         text = pattern.sub(f"{marker}({marker_date})", text)
     return text
 
 
+def replace_market_snapshot_sections(report: str, section: str) -> str:
+    lines = report.strip().splitlines()
+    if not lines:
+        return section
+    section_lines = section.splitlines()
+    output: list[str] = []
+    inserted = False
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        if line.strip().startswith("## 全球市场温度"):
+            if not inserted:
+                if output and output[-1].strip():
+                    output.append("")
+                output.extend(section_lines)
+                output.append("")
+                inserted = True
+            idx += 1
+            while idx < len(lines) and not lines[idx].strip():
+                idx += 1
+            if idx < len(lines) and lines[idx].lstrip().startswith("|"):
+                while idx < len(lines) and (not lines[idx].strip() or lines[idx].lstrip().startswith("|")):
+                    idx += 1
+            continue
+        output.append(line)
+        idx += 1
+    return "\n".join(output).strip()
+
+
 def ensure_market_snapshot_section(report: str, packet: dict[str, Any]) -> str:
     section = render_market_snapshot_section(packet)
-    if not section or "| 类别 | 指标 | 日期 | 最新/收盘 | 涨跌幅 |" in report:
+    if not section:
         return report.strip()
+    if "## 全球市场温度" in report:
+        return replace_market_snapshot_sections(report, section)
 
     lines = report.strip().splitlines()
     if not lines:

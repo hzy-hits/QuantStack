@@ -367,6 +367,11 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
         "美股影响A股，标普500 -0.05%，VIX收低，标普期货和纳指期货修复。"
         "德国DAX、日本日经225、KOSPI、恒生同步给出压力。"
         "A股看上证指数和科创50，科创板688样本继续观察。黄金和WTI原油作为风险温度。"
+        "\n\n## 全球市场温度：模型草稿\n\n"
+        "| 资产/指数 | 返回日期 | 读数 |\n"
+        "|---|---:|---:|\n"
+        "| VIX波动率 | 2026-06-26 | 18.41 |\n\n"
+        "油价段落应该保留。"
     )
 
     report = module.annotate_market_snapshot_dates(report, packet)
@@ -374,9 +379,13 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     failures = module.validate_shadow_report(report, "am", public_delivery=True)
 
     assert "标普500(2026-06-26)" in report
-    assert "VIX(2026-06-26)" in report
+    assert "VIX波动率(2026-06-26)" in report
+    assert "VIX(2026-06-26)波动率" not in report
     assert "DAX(2026-06-26)" in report
     assert "## 全球市场温度" in report
+    assert report.count("## 全球市场温度") == 1
+    assert "资产/指数" not in report
+    assert "油价段落应该保留。" in report
     assert failures == []
 
 
