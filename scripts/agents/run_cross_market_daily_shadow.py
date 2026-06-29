@@ -18,6 +18,7 @@ to let the lead editor agent rewrite the same packet.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -197,6 +198,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-recipient", default=os.environ.get("QUANT_TEST_RECIPIENT"))
     parser.add_argument("--delivery-dry-run", action="store_true")
     parser.add_argument(
+        "--allow-duplicate-email",
+        action="store_true",
+        default=os.environ.get("QUANT_ALLOW_DUPLICATE_EMAIL", "").lower() in {"1", "true", "yes"},
+        help="Bypass the slot/date/recipient delivery ledger. Use only for deliberate manual resends.",
+    )
+    parser.add_argument(
         "--finance-search-prefetch",
         choices=["on", "off"],
         default=os.environ.get("CROSS_MARKET_FINANCE_SEARCH_PREFETCH", "on"),
@@ -350,6 +357,65 @@ def market_actions(payload: dict[str, Any], market: str) -> list[dict[str, Any]]
     return [row for row in rows if str(row.get("market") or "").upper() == wanted]
 
 
+def is_cn_star_symbol(symbol: Any) -> bool:
+    return str(symbol or "").upper().startswith("688")
+
+
+def cn_star_priority(row: dict[str, Any]) -> tuple[int, int, float, str]:
+    tier = str(row.get("production_tier") or row.get("tier") or "").lower()
+    action = str(row.get("production_action") or row.get("action") or "").lower()
+    if tier in {"top_stock_trade", "secondary_stock_trade"} or action.startswith("buy"):
+        bucket = 0
+    elif tier == "active_watch":
+        bucket = 1
+    elif tier == "ranked_watch":
+        bucket = 2
+    else:
+        bucket = 3
+    try:
+        rank = int(row.get("rank") or 999)
+    except (TypeError, ValueError):
+        rank = 999
+    try:
+        score = float(row.get("rank_score") or row.get("score") or 0.0)
+    except (TypeError, ValueError):
+        score = 0.0
+    return bucket, rank, -score, str(row.get("symbol") or "")
+
+
+def compact_cn_star_candidate(row: dict[str, Any]) -> dict[str, Any]:
+    symbol = str(row.get("symbol") or "").upper()
+    return {
+        "symbol": symbol,
+        "name": row.get("name") or symbol,
+        "board": "科创板",
+        "pipeline_stage": row.get("production_tier") or row.get("tier") or "",
+        "action": row.get("production_action") or row.get("action") or row.get("lifecycle_action") or "",
+        "rank": row.get("rank"),
+        "rank_score": row.get("rank_score") or row.get("score"),
+        "pct_chg": row.get("pct_chg"),
+        "ret_5d_pct": row.get("ret_5d_pct"),
+        "size_hint": row.get("size_hint") or row.get("size_r"),
+        "entry": row.get("entry") or row.get("observation_entry_zone"),
+        "handling_line": row.get("handling_line") or row.get("handle"),
+        "target": row.get("first_target") or row.get("target"),
+        "reason": row.get("reason") or row.get("gate_summary") or row.get("trigger"),
+    }
+
+
+def select_cn_star_pipeline_candidates(payload: dict[str, Any], *, limit: int = 8) -> list[dict[str, Any]]:
+    ranker = payload.get("cn_opportunity_ranker") if isinstance(payload.get("cn_opportunity_ranker"), dict) else {}
+    rows = ranker.get("all_rows") if isinstance(ranker.get("all_rows"), list) else []
+    if not rows:
+        rows = get_path(payload, "cn", "current", default=[])
+    candidates = [
+        row for row in rows
+        if isinstance(row, dict) and is_cn_star_symbol(row.get("symbol"))
+    ]
+    candidates.sort(key=cn_star_priority)
+    return [compact_cn_star_candidate(row) for row in candidates[:limit]]
+
+
 def fmt(value: Any, default: str = "-") -> str:
     if value is None:
         return default
@@ -374,7 +440,7 @@ def summarize_artifact(artifact: MarketArtifact) -> dict[str, Any]:
     regime = payload.get(regime_key) if isinstance(payload.get(regime_key), dict) else {}
     report_dates = payload.get("report_dates") if isinstance(payload.get("report_dates"), dict) else {}
     actions = market_actions(payload, artifact.market)
-    return {
+    out = {
         "market": artifact.market.upper(),
         "report_date": artifact.report_date,
         "source_markdown": relative_display(artifact.markdown_path) if artifact.markdown_path else "",
@@ -387,6 +453,9 @@ def summarize_artifact(artifact: MarketArtifact) -> dict[str, Any]:
         "actions": actions[:12],
         "markdown_excerpt": excerpt(artifact.markdown),
     }
+    if market_key == "cn":
+        out["star_pipeline_candidates"] = select_cn_star_pipeline_candidates(payload)
+    return out
 
 
 def excerpt(text: str, *, limit: int = 2600) -> str:
@@ -704,13 +773,15 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
 def build_cn_universe_requirement() -> dict[str, Any]:
     return {
         "scope": (
-            "A-share semiconductor and AI hardware mapping must include STAR Market/科创板 as well as "
-            "ChiNext and main-board names."
+            "A-share semiconductor and AI hardware mapping must include concrete STAR Market/科创板 "
+            "688xxx candidates as part of the CN selection pipeline, not merely as an index thermometer."
         ),
         "board_policy": [
             "Do not treat main-board A-shares as the whole CN universe.",
-            "Explicitly consider 688xxx STAR Market/科创板 symbols via quant_stack_ranker or symbol_context when available.",
-            "Use sector-level language when no verifiable symbol comes back; do not publish a missing-symbol list.",
+            "Select concrete 688xxx.SH names from packet.cn.star_pipeline_candidates when available.",
+            "Use 0R/active_watch language when a STAR name is not executable yet, but still keep it in the A-share pipeline.",
+            "Do not describe 科创板 only as a temperature gauge; tie it to named candidates and execution/watch stages.",
+            "Use sector-level language only when no verifiable 688xxx symbol comes back; do not publish a missing-symbol list.",
         ],
         "finance_search_tools": [
             "finance-search.quant_stack_ranker(market='cn', limit=30)",
@@ -1180,7 +1251,9 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 - 引用任何大盘指数或期货时,必须带返回日期,格式类似“德国DAX(2026-06-29)”或“纳指期货(2026-06-29)”;
   跨时区市场尤其不能只写“今天/隔夜”。不要引用印度、Sensex 或 Nifty 指数。
 - 写作前必须尝试检索最新宏观/地缘/AI/半导体/中国市场新闻;只使用返回标题、来源或 URL 可核验的新闻。
-- A股侧不得只看主板;必须用 CN ranker 或 symbol_context 检查半导体、AI 硬件、科创板/688xxx 线索。
+- A股侧不得只看主板;必须用 packet.cn.star_pipeline_candidates 或 CN ranker/symbol_context
+  选择具体科创板/688xxx.SH 标的。科创板不是温度计,它是 A股候选管线的一部分;
+  如果候选仍是 active_watch/0R,也要写清具体代码、名称、等待条件和不能执行的原因。
 - 如果工具、feed、symbol 或新闻没有返回可核验结果,公开报告里自然省略;不要写任何数据不可用、缺口、待补或工具失败说明。
 - coverage_checklist 是验收清单,不是章节模板。
 - 正文结构、标题角度、叙事顺序由你按证据决定。
@@ -1234,6 +1307,8 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
   不要写成缺失、不可用或工具失败。
 - 全球温度段引用任何大盘指数或期货时必须带返回日期,尤其是欧洲/亚洲/美国期货这类跨时区市场;
   格式类似“日经225(2026-06-29)”或“标普期货(2026-06-29)”。删除印度、Sensex、Nifty 指数。
+- A股执行段必须从 packet.cn.star_pipeline_candidates 中选择至少一个具体 688xxx.SH 科创板标的;
+  不得把科创板只写成“温度计”“观察指数”或泛泛的板块背景。
 - 删除工具日志味、工程词和内部流程词:不要出现 MCP、packet、validator、shadow_only、production_delivery、cron、Resend、JSON、script、tool、血缘、本稿状态、prompt、system、user、draft、二审、审稿、思维过程、推理过程。
 - 删除或翻译内部研究黑话:不要出现 production、ranker、AI Infra universe、source evidence、source review、evidence_state、headline risk、beta hedge、money gate、regime、原文验证状态。
 - 删除所有数据不可用提示、缺口清单、待补证据清单、工具失败说明;没有可核验数据就自然省略。
@@ -1563,8 +1638,13 @@ def public_context_failures(text: str) -> list[str]:
     if hit_count < 3:
         failures.append("missing public global-market breadth: non-US country/region indices")
 
-    if not any(contains_marker(text, marker) for marker in ["科创", "688", "STAR Market"]):
-        failures.append("missing public CN semiconductor breadth: STAR/科创板 marker")
+    if not re.search(r"(?<!\d)688\d{3}\.SH(?![A-Z0-9])", text):
+        failures.append("missing concrete public CN STAR/科创板 ticker: 688xxx.SH")
+    for raw in text.splitlines():
+        line = raw.strip()
+        if contains_marker(line, "科创") and contains_marker(line, "温度计"):
+            failures.append("STAR/科创板 must be an A-share candidate pipeline, not only a thermometer")
+            break
 
     dated_market_markers = [
         "标普500",
@@ -1811,6 +1891,84 @@ def email_subject(packet: dict[str, Any], delivery_mode: str) -> str:
     return f"{prefix}Hermes 跨市场{slot_label} - {target_date}"
 
 
+def delivery_state_dir() -> Path:
+    return Path(os.environ.get("CROSS_MARKET_DELIVERY_STATE_DIR", str(ROOT / "ops" / "state" / "cross_market_delivery")))
+
+
+def delivery_recipient_key(delivery_mode: str, to: str | None, bcc: list[str] | None) -> str:
+    if delivery_mode == "test":
+        recipients = [to or "", *(bcc or [])]
+        return "test:" + ",".join(sorted(part for part in recipients if part))
+    return "prod:config-recipients"
+
+
+def delivery_identity(packet: dict[str, Any], args: argparse.Namespace, subject: str, to: str | None, bcc: list[str] | None) -> dict[str, Any]:
+    return {
+        "slot": packet["slot"],
+        "target_cn_date": packet.get("target_cn_date") or packet["cn"]["report_date"],
+        "target_us_date": packet.get("target_us_date") or packet.get("us", {}).get("report_date"),
+        "delivery_mode": args.delivery_mode,
+        "recipient_key": delivery_recipient_key(args.delivery_mode, to, bcc),
+        "subject": subject,
+    }
+
+
+def delivery_key(identity: dict[str, Any]) -> str:
+    raw = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+
+
+def reserve_delivery_once(packet: dict[str, Any], args: argparse.Namespace, subject: str, to: str | None, bcc: list[str] | None) -> tuple[Path | None, str, bool]:
+    identity = delivery_identity(packet, args, subject, to, bcc)
+    key = delivery_key(identity)
+    if getattr(args, "allow_duplicate_email", False):
+        return None, key, True
+    state_dir = delivery_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    path = state_dir / f"{key}.json"
+    record = {
+        **identity,
+        "key": key,
+        "status": "reserved",
+        "reserved_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+    }
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return path, key, False
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        json.dump(record, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        fh.write("\n")
+    return path, key, True
+
+
+def complete_delivery_reservation(path: Path | None, *, ids: list[str], provider: str) -> None:
+    if path is None:
+        return
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        record = {}
+    record.update(
+        {
+            "status": "sent",
+            "provider": provider,
+            "message_ids": ids,
+            "sent_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        }
+    )
+    path.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def release_delivery_reservation(path: Path | None) -> None:
+    if path is None:
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
 def send_email_if_requested(path: Path, packet: dict[str, Any], args: argparse.Namespace) -> list[str]:
     if not args.send_email:
         return []
@@ -1822,9 +1980,6 @@ def send_email_if_requested(path: Path, packet: dict[str, Any], args: argparse.N
         )
         return []
 
-    sys.path.insert(0, str(ROOT / "quant-research-v1" / "src"))
-    from quant_bot.delivery.gmail import send_report_email, send_report_email_resend
-
     recipients = split_recipients(args.test_recipient)
     to = None
     bcc: list[str] | None = None
@@ -1833,12 +1988,20 @@ def send_email_if_requested(path: Path, packet: dict[str, Any], args: argparse.N
             raise SystemExit("test delivery needs --test-recipient or QUANT_TEST_RECIPIENT")
         to = recipients[0]
         bcc = recipients[1:]
+    subject = email_subject(packet, args.delivery_mode)
+    reservation_path, dedupe_key, should_send = reserve_delivery_once(packet, args, subject, to, bcc)
+    if not should_send:
+        print(f"cross-market email skipped: duplicate_delivery key={dedupe_key} record={reservation_path}")
+        return []
+
+    sys.path.insert(0, str(ROOT / "quant-research-v1" / "src"))
+    from quant_bot.delivery.gmail import send_report_email, send_report_email_resend
 
     kwargs = {
         "report_path": path,
         "chart_paths": [],
         "to": to,
-        "subject": email_subject(packet, args.delivery_mode),
+        "subject": subject,
         "bcc": bcc,
         "config_path": str(ROOT / "quant-research-v1" / "config.yaml"),
     }
@@ -1852,13 +2015,24 @@ def send_email_if_requested(path: Path, packet: dict[str, Any], args: argparse.N
             ids = send_report_email_resend(**kwargs)
         except Exception as exc:
             if args.email_fallback_provider != "gmail":
+                release_delivery_reservation(reservation_path)
                 raise
             print(f"warn: Resend send failed; falling back to Gmail: {exc}", file=sys.stderr)
-            ids = send_report_email(**gmail_kwargs)
+            try:
+                ids = send_report_email(**gmail_kwargs)
+            except Exception:
+                release_delivery_reservation(reservation_path)
+                raise
+            complete_delivery_reservation(reservation_path, ids=ids, provider="gmail")
             print(f"cross-market email sent: provider=resend fallback=gmail ids={','.join(ids)}")
             return ids
     else:
-        ids = send_report_email(**gmail_kwargs)
+        try:
+            ids = send_report_email(**gmail_kwargs)
+        except Exception:
+            release_delivery_reservation(reservation_path)
+            raise
+    complete_delivery_reservation(reservation_path, ids=ids, provider=args.email_provider)
     print(f"cross-market email sent: provider={args.email_provider} ids={','.join(ids)}")
     return ids
 

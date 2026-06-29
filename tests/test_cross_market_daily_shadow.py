@@ -80,6 +80,25 @@ def test_pm_packet_keeps_us_to_cn_causality(tmp_path: Path) -> None:
     assert packet["style_brief"]["reference_url"].startswith("https://boist.org/")
 
 
+def test_cn_summary_promotes_star_candidates_into_pipeline(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    cn.payload["cn_opportunity_ranker"] = {
+        "all_rows": [
+            {"symbol": "688535.SH", "name": "华海诚科", "production_tier": "active_watch", "rank": 20, "rank_score": 70.7},
+            {"symbol": "688233.SH", "name": "神工股份", "production_tier": "active_watch", "rank": 18, "rank_score": 70.87},
+            {"symbol": "688019.SH", "name": "安集科技", "production_tier": "bench_ranked", "rank": 50, "rank_score": 60.1},
+            {"symbol": "600519.SH", "name": "主板样本", "production_tier": "active_watch", "rank": 1, "rank_score": 99.0},
+        ]
+    }
+
+    summary = module.summarize_artifact(cn)
+
+    assert [row["symbol"] for row in summary["star_pipeline_candidates"][:2]] == ["688233.SH", "688535.SH"]
+    assert summary["star_pipeline_candidates"][0]["board"] == "科创板"
+    assert summary["star_pipeline_candidates"][0]["pipeline_stage"] == "active_watch"
+
+
 def test_am_uses_previous_cn_context_when_target_day_payload_is_missing(tmp_path: Path) -> None:
     module = load_module()
     artifact(module, "cn", "2026-06-26", tmp_path)
@@ -201,7 +220,7 @@ def test_public_delivery_accepts_required_global_context_markers() -> None:
             "美股期货里标普期货(2026-06-29)和纳指期货(2026-06-29)给出下一轮风险线。"
             "黄金、WTI原油同时作为避险和能源温度。"
             "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
-            "科创50(2026-06-29)和科创板688样本覆盖A股半导体。A股和美股合并复盘。"
+            "科创50(2026-06-29)和688233.SH神工股份覆盖A股半导体候选管线。A股和美股合并复盘。"
         ),
         "pm",
         public_delivery=True,
@@ -219,7 +238,7 @@ def test_public_delivery_rejects_india_index_and_undated_index_lines() -> None:
             "美股影响A股。标普期货和纳指期货给出下一轮风险线。"
             "黄金、WTI原油同时作为避险和能源温度。"
             "日经、KOSPI、恒生、DAX和印度Sensex展示非美大盘方向。"
-            "科创板688样本覆盖A股半导体。"
+            "688233.SH神工股份覆盖A股半导体。"
         ),
         "am",
         public_delivery=True,
@@ -239,13 +258,32 @@ def test_public_delivery_allows_single_news_context_marker_without_market_quote(
             "黄金、WTI原油同时作为避险和能源温度。"
             "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
             "新闻背景里提到纳指期货曾受利率预期影响。"
-            "科创50(2026-06-29)和科创板688样本覆盖A股半导体。"
+            "科创50(2026-06-29)和688233.SH神工股份覆盖A股半导体候选管线。"
         ),
         "am",
         public_delivery=True,
     )
 
     assert failures == []
+
+
+def test_public_delivery_rejects_star_as_thermometer_without_concrete_ticker() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场早报\n\n"
+            "美股影响A股。标普期货(2026-06-29)和纳指期货(2026-06-29)给出下一轮风险线。"
+            "黄金、WTI原油同时作为避险和能源温度。"
+            "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
+            "科创板只做温度计，不进入A股候选管线。"
+        ),
+        "am",
+        public_delivery=True,
+    )
+
+    assert any("688xxx.SH" in item for item in failures)
+    assert any("thermometer" in item for item in failures)
 
 
 def test_public_delivery_rejects_split_single_market_reports() -> None:
@@ -374,7 +412,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
         "# 跨市场早报：测试\n\n"
         "美股影响A股，标普500 -0.05%，VIX收低，标普期货和纳指期货修复。"
         "德国DAX、日本日经225、KOSPI、恒生同步给出压力。"
-        "A股看上证指数和科创50，科创板688样本继续观察。黄金和WTI原油作为风险温度。"
+        "A股看上证指数和科创50，688233.SH神工股份进入候选管线。黄金和WTI原油作为风险温度。"
         "\n\n## 全球市场温度：模型草稿\n\n"
         "| 资产/指数 | 返回日期 | 读数 |\n"
         "|---|---:|---:|\n"
@@ -547,8 +585,9 @@ def test_call_hermes_reviewer_falls_back_to_writer_model(tmp_path: Path) -> None
     assert "deepseek down" in packet["_reviewer_primary_error"]
 
 
-def test_resend_delivery_falls_back_to_gmail(tmp_path: Path) -> None:
+def test_resend_delivery_falls_back_to_gmail(tmp_path: Path, monkeypatch) -> None:
     module = load_module()
+    monkeypatch.setenv("CROSS_MARKET_DELIVERY_STATE_DIR", str(tmp_path / "delivery_state"))
     report = tmp_path / "cross_market.md"
     report.write_text("# 跨市场早报\n", encoding="utf-8")
     packet = {"slot": "am", "target_cn_date": "2026-06-29", "cn": {"report_date": "2026-06-29"}}
@@ -595,6 +634,53 @@ def test_resend_delivery_falls_back_to_gmail(tmp_path: Path) -> None:
     assert calls[0][1]["bcc"] is None
     assert calls[1][1]["credentials_path"].name == "credentials.json"
     assert calls[1][1]["token_path"].name == "token.json"
+    records = list((tmp_path / "delivery_state").glob("*.json"))
+    assert len(records) == 1
+    assert module.json.loads(records[0].read_text(encoding="utf-8"))["status"] == "sent"
+
+
+def test_delivery_ledger_skips_duplicate_send(tmp_path: Path, monkeypatch) -> None:
+    module = load_module()
+    monkeypatch.setenv("CROSS_MARKET_DELIVERY_STATE_DIR", str(tmp_path / "delivery_state"))
+    report = tmp_path / "cross_market.md"
+    report.write_text("# 跨市场早报\n", encoding="utf-8")
+    packet = {"slot": "am", "target_cn_date": "2026-06-29", "cn": {"report_date": "2026-06-29"}}
+
+    gmail_mod = types.ModuleType("quant_bot.delivery.gmail")
+    calls: list[dict] = []
+
+    def send_resend(**kwargs):
+        calls.append(kwargs)
+        return [f"resend-{len(calls)}"]
+
+    gmail_mod.send_report_email_resend = send_resend
+    gmail_mod.send_report_email = mock.Mock(return_value=["gmail-id"])
+    quant_bot = types.ModuleType("quant_bot")
+    quant_bot.__path__ = []
+    delivery = types.ModuleType("quant_bot.delivery")
+    delivery.__path__ = []
+    args = argparse.Namespace(
+        send_email=True,
+        delivery_dry_run=False,
+        email_provider="resend",
+        email_fallback_provider="gmail",
+        delivery_mode="test",
+        test_recipient="first@example.com,second@example.com",
+    )
+    with mock.patch.dict(
+        sys.modules,
+        {
+            "quant_bot": quant_bot,
+            "quant_bot.delivery": delivery,
+            "quant_bot.delivery.gmail": gmail_mod,
+        },
+    ):
+        first = module.send_email_if_requested(report, packet, args)
+        second = module.send_email_if_requested(report, packet, args)
+
+    assert first == ["resend-1"]
+    assert second == []
+    assert len(calls) == 1
 
 
 def test_output_snapshot_restores_failed_validation_artifacts(tmp_path: Path) -> None:
