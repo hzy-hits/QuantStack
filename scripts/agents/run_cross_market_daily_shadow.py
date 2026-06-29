@@ -86,6 +86,37 @@ GLOBAL_MARKET_SNAPSHOT_GROUPS = (
     ("A股大盘", ("000001.SS", "399001.SZ", "399006.SZ", "000688.SS")),
     ("商品/汇率", ("CL=F", "BZ=F", "GC=F", "GLD", "USDCNH=X", "DX-Y.NYB", "^TNX")),
 )
+MARKET_THERMOMETER_GROUPS = (
+    ("美股大盘", ("^GSPC", "^IXIC", "^DJI", "^RUT")),
+    ("A股大盘", ("000001.SS", "399001.SZ", "399006.SZ")),
+    ("日韩大盘", ("^KS11", "^N225")),
+)
+MARKET_THERMOMETER_SYMBOLS = {
+    symbol for _, symbols in MARKET_THERMOMETER_GROUPS for symbol in symbols
+}
+MARKET_TAIL_GROUPS = (
+    ("美股波动/ETF", ("^VIX", "SPY", "QQQ", "IWM", "TLT")),
+    ("美股期货", ("ES=F", "NQ=F", "YM=F", "RTY=F")),
+    ("欧洲大盘", ("^STOXX50E", "^GDAXI", "^FTSE", "^FCHI")),
+    ("亚洲补充", ("^HSI", "^TWII")),
+    ("A股/科创参考", ("000688.SS",)),
+    ("商品/汇率/利率", ("CL=F", "BZ=F", "GC=F", "GLD", "USDCNH=X", "DX-Y.NYB", "^TNX")),
+)
+MANAGED_REPORT_SECTION_PREFIXES = (
+    "## 全球市场温度",
+    "## 全球温度",
+    "## 宏观数据温度计",
+    "## 宏观事件 Headlines",
+    "## 附表：其他跨市场数据",
+    "## A股科创板候选管线",
+)
+STAR_STAGE_LABELS = {
+    "active_watch": "观察候选",
+    "bench_ranked": "备选候选",
+    "candidate": "候选",
+    "watch": "观察",
+    "0r": "0R观察",
+}
 FORBIDDEN_PUBLIC_INDEX_MARKERS = ("Sensex", "Nifty", "印度指数", "印度Sensex", "印度")
 GLOBAL_MARKET_LABEL_ALIASES = {
     "^GSPC": ("标普500",),
@@ -589,8 +620,9 @@ def build_tool_manifest(slot: str, cn_summary: dict[str, Any], us_summary: dict[
             "source": "Hermes MCP server: finance-search",
             "returns": ["close", "change_pct", "volume", "source"],
             "agent_use": (
-                "Use for global market temperature: US cash indices, US equity futures, Europe/Asia "
-                "country indices, VIX, oil, gold, USD/CNH, and China broad/STAR indices when available."
+                "Use for the managed market snapshot: top thermometer is limited to US broad indices, "
+                "CN broad indices, KOSPI, and Nikkei 225; futures, Europe, VIX, oil, gold, FX, rates, "
+                "and STAR index data belong in the tail appendix table when available."
             ),
         },
         {
@@ -680,7 +712,7 @@ def build_coverage_checklist(slot: str) -> list[str]:
     if slot == "am":
         return [
             "Open with the US/global market driver that most changes CN risk for the next open.",
-            "Include a concise global market temperature when finance-search returns indices/futures/oil/gold/FX snapshots.",
+            "Include the managed macro thermometer: top only US broad indices, CN broad indices, KOSPI, Nikkei 225; put all other snapshots in the tail table.",
             "Explain the US -> CN transmission path and where it can fail.",
             "Map AI/semiconductor signals into A-share execution, including 科创板/STAR candidates when verifiable.",
             "Translate the driver into CN execution limits, sector priority, and watch items.",
@@ -689,7 +721,7 @@ def build_coverage_checklist(slot: str) -> list[str]:
         ]
     return [
         "Review CN post-market action as feedback on prior US-to-CN transmission.",
-        "Summarize global and US pre-market context from US/global facts, not from CN direction.",
+        "Summarize global and US pre-market context from US/global facts, not from CN direction; use the managed top thermometer plus tail appendix shape.",
         "Check whether 科创板/STAR semiconductor moves confirm or reject the prior US-to-CN read-through.",
         "State explicitly that CN feedback cannot raise or cut US positioning.",
         "Identify what the next US session can change for the following CN session.",
@@ -731,9 +763,9 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
                 "tool": "finance-search.get_market_snapshot",
                 "symbols": GLOBAL_MARKET_SNAPSHOT_SYMBOLS,
                 "purpose": (
-                    "Build a concise global market thermometer: US cash indices, S&P/Nasdaq/Dow/Russell "
-                    "futures, Europe and Asia country indices, VIX/rates proxy, oil, gold, USD/CNH, "
-                    "and China broad/STAR indices."
+                    "Build the managed market snapshot: top thermometer only has US broad indices, CN broad "
+                    "indices, KOSPI, and Nikkei 225; US futures, Europe, VIX/rates proxy, oil, gold, USD/CNH, "
+                    "Hong Kong/Taiwan, and STAR index data go to the report-tail appendix table."
                 ),
             },
             {
@@ -761,11 +793,13 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
             },
         ],
         "public_output_rule": (
-            "The public report must include returned values for: oil, gold, at least one US equity future, "
-            "and several non-US country/region benchmarks when available. Mention only returned, checkable "
-            "headlines/snapshots. Every cited index or future must show its returned date, especially "
-            "cross-timezone markets. If a feed or symbol is unavailable, omit it; do not print a missing-data "
-            "list or tool failure note. Do not cite India/Sensex/Nifty indices."
+            "The public report must keep the top macro thermometer narrow: US broad indices, CN broad "
+            "indices, KOSPI, and Nikkei 225 only. Returned values for oil, gold, at least one US equity "
+            "future, Europe/other Asia, VIX, FX, rates, and STAR index data belong in the report-tail "
+            "appendix table. Put macro/news headlines immediately under the thermometer when source "
+            "titles are returned. Every cited index or future must show its returned date, especially "
+            "cross-timezone markets. If a feed or symbol is unavailable, omit it; do not print a "
+            "missing-data list or tool failure note. Do not cite India/Sensex/Nifty indices."
         ),
     }
 
@@ -855,57 +889,152 @@ def fmt_market_change_pct(value: Any) -> str:
         return text or "-"
 
 
-def render_market_snapshot_section(packet: dict[str, Any]) -> str:
+def market_snapshot_public_rows(packet: dict[str, Any]) -> list[dict[str, Any]]:
     prefetch = packet.get("finance_search_prefetch") if isinstance(packet.get("finance_search_prefetch"), dict) else {}
     raw_rows = prefetch.get("market_rows") if isinstance(prefetch.get("market_rows"), list) else []
-    rows = [row for row in raw_rows if isinstance(row, dict) and row.get("date") and public_index_marker_allowed(row)]
+    return [
+        row for row in raw_rows
+        if isinstance(row, dict) and row.get("date") and public_index_marker_allowed(row)
+    ]
+
+
+def render_market_row(group: str, row: dict[str, Any]) -> str:
+    symbol = str(row.get("symbol") or "")
+    return "| {group} | {label} | {date} | {close} | {change} |".format(
+        group=group,
+        label=fmt(row.get("label") or symbol),
+        date=fmt(row.get("date")),
+        close=fmt_market_value(row.get("close")),
+        change=fmt_market_change_pct(row.get("change_pct")),
+    )
+
+
+def render_market_table(title: str, grouped_symbols: tuple[tuple[str, tuple[str, ...]], ...], rows: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
 
     by_symbol = {str(row.get("symbol") or ""): row for row in rows}
     consumed: set[str] = set()
     lines = [
-        "## 全球市场温度",
+        title,
         "| 类别 | 指标 | 日期 | 最新/收盘 | 涨跌幅 |",
         "|---|---|---|---:|---:|",
     ]
-    for group, symbols in GLOBAL_MARKET_SNAPSHOT_GROUPS:
+    for group, symbols in grouped_symbols:
         for symbol in symbols:
             row = by_symbol.get(symbol)
             if not row:
                 continue
             consumed.add(symbol)
-            lines.append(
-                "| {group} | {label} | {date} | {close} | {change} |".format(
-                    group=group,
-                    label=fmt(row.get("label") or symbol),
-                    date=fmt(row.get("date")),
-                    close=fmt_market_value(row.get("close")),
-                    change=fmt_market_change_pct(row.get("change_pct")),
-                )
-            )
+            lines.append(render_market_row(group, row))
     for row in rows:
         symbol = str(row.get("symbol") or "")
         if symbol in consumed:
             continue
+        lines.append(render_market_row("其他", row))
+    if len(lines) == 3:
+        return ""
+    return "\n".join(lines)
+
+
+def render_market_snapshot_section(packet: dict[str, Any]) -> str:
+    rows = [
+        row for row in market_snapshot_public_rows(packet)
+        if str(row.get("symbol") or "") in MARKET_THERMOMETER_SYMBOLS
+    ]
+    return render_market_table("## 宏观数据温度计", MARKET_THERMOMETER_GROUPS, rows)
+
+
+def render_market_tail_section(packet: dict[str, Any]) -> str:
+    rows = [
+        row for row in market_snapshot_public_rows(packet)
+        if str(row.get("symbol") or "") not in MARKET_THERMOMETER_SYMBOLS
+    ]
+    return render_market_table("## 附表：其他跨市场数据", MARKET_TAIL_GROUPS, rows)
+
+
+def public_cell(value: Any, default: str = "-") -> str:
+    text = fmt(value, default=default)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.replace("|", "/")
+
+
+def render_macro_headline_section(packet: dict[str, Any]) -> str:
+    prefetch = packet.get("finance_search_prefetch") if isinstance(packet.get("finance_search_prefetch"), dict) else {}
+    raw_items = prefetch.get("news_items") if isinstance(prefetch.get("news_items"), list) else []
+    items = [item for item in raw_items if isinstance(item, dict) and item.get("title")]
+    if not items:
+        return ""
+
+    lines = ["## 宏观事件 Headlines"]
+    for item in items[:5]:
+        title = public_cell(item.get("title"))
+        source = public_cell(item.get("source"), default="")
+        published_at = public_cell(item.get("published_at"), default="")
+        meta = " / ".join(part for part in (source, published_at) if part)
+        suffix = f"（{meta}）" if meta else ""
+        lines.append(f"- {title}{suffix}")
+    return "\n".join(lines)
+
+
+def public_star_stage(value: Any) -> str:
+    key = str(value or "").strip()
+    return STAR_STAGE_LABELS.get(key.lower(), public_cell(key))
+
+
+def public_star_action(row: dict[str, Any]) -> str:
+    text = (
+        row.get("handling_line")
+        or row.get("reason")
+        or row.get("target")
+        or "等待A股本域价格、量能和证据门同时确认，不能因美股映射单独执行。"
+    )
+    replacements = {
+        "production": "正式执行",
+        "ranker": "候选排序",
+        "evidence_state": "证据状态",
+        "source evidence": "证据",
+        "source review": "来源复核",
+        "money gate": "资金门槛",
+        "regime": "市场状态",
+    }
+    clean = public_cell(text)
+    for old, new in replacements.items():
+        clean = re.sub(re.escape(old), new, clean, flags=re.IGNORECASE)
+    return clean
+
+
+def render_cn_star_pipeline_section(packet: dict[str, Any]) -> str:
+    cn = packet.get("cn") if isinstance(packet.get("cn"), dict) else {}
+    candidates = cn.get("star_pipeline_candidates") if isinstance(cn.get("star_pipeline_candidates"), list) else []
+    candidates = [row for row in candidates if isinstance(row, dict) and is_cn_star_symbol(row.get("symbol"))]
+    if not candidates:
+        return ""
+
+    lines = [
+        "## A股科创板候选管线",
+        "科创板按A股候选管线处理，必须落到具体688标的、阶段、排序和等待条件。",
+        "",
+        "| 代码 | 名称 | 阶段 | 排序 | 分数 | 处理 |",
+        "|---|---|---|---:|---:|---|",
+    ]
+    for row in candidates[:5]:
         lines.append(
-            "| 其他 | {label} | {date} | {close} | {change} |".format(
-                label=fmt(row.get("label") or symbol),
-                date=fmt(row.get("date")),
-                close=fmt_market_value(row.get("close")),
-                change=fmt_market_change_pct(row.get("change_pct")),
+            "| {symbol} | {name} | {stage} | {rank} | {score} | {action} |".format(
+                symbol=public_cell(row.get("symbol")),
+                name=public_cell(row.get("name")),
+                stage=public_star_stage(row.get("pipeline_stage")),
+                rank=public_cell(row.get("rank")),
+                score=public_cell(row.get("rank_score")),
+                action=public_star_action(row),
             )
         )
     return "\n".join(lines)
 
 
 def market_snapshot_date_map(packet: dict[str, Any]) -> dict[str, str]:
-    prefetch = packet.get("finance_search_prefetch") if isinstance(packet.get("finance_search_prefetch"), dict) else {}
-    raw_rows = prefetch.get("market_rows") if isinstance(prefetch.get("market_rows"), list) else []
     date_map: dict[str, str] = {}
-    for row in raw_rows:
-        if not isinstance(row, dict) or not row.get("date") or not public_index_marker_allowed(row):
-            continue
+    for row in market_snapshot_public_rows(packet):
         symbol = str(row.get("symbol") or "")
         aliases = list(GLOBAL_MARKET_LABEL_ALIASES.get(symbol, ()))
         label = str(row.get("label") or "").strip()
@@ -932,55 +1061,111 @@ def annotate_market_snapshot_dates(report: str, packet: dict[str, Any]) -> str:
     return text
 
 
-def replace_market_snapshot_sections(report: str, section: str) -> str:
+def report_heading_matches(line: str, prefixes: tuple[str, ...]) -> bool:
+    stripped = line.strip()
+    return any(stripped.startswith(prefix) for prefix in prefixes)
+
+
+def strip_managed_report_sections(
+    report: str,
+    prefixes: tuple[str, ...] = MANAGED_REPORT_SECTION_PREFIXES,
+) -> str:
     lines = report.strip().splitlines()
-    if not lines:
-        return section
-    section_lines = section.splitlines()
     output: list[str] = []
-    inserted = False
     idx = 0
     while idx < len(lines):
         line = lines[idx]
-        if line.strip().startswith("## 全球市场温度"):
-            if not inserted:
-                if output and output[-1].strip():
-                    output.append("")
-                output.extend(section_lines)
-                output.append("")
-                inserted = True
+        if report_heading_matches(line, prefixes):
             idx += 1
-            while idx < len(lines) and not lines[idx].strip():
+            while idx < len(lines):
+                next_line = lines[idx]
+                if next_line.strip().startswith("## ") and not report_heading_matches(next_line, prefixes):
+                    break
                 idx += 1
-            if idx < len(lines) and lines[idx].lstrip().startswith("|"):
-                while idx < len(lines) and (not lines[idx].strip() or lines[idx].lstrip().startswith("|")):
-                    idx += 1
             continue
         output.append(line)
         idx += 1
-    return "\n".join(output).strip()
+    text = "\n".join(output).strip()
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 
-def ensure_market_snapshot_section(report: str, packet: dict[str, Any]) -> str:
-    section = render_market_snapshot_section(packet)
-    if not section:
+def insert_after_opening_paragraph(report: str, block: str) -> str:
+    block = block.strip()
+    if not block:
         return report.strip()
-    if "## 全球市场温度" in report:
-        return replace_market_snapshot_sections(report, section)
 
     lines = report.strip().splitlines()
     if not lines:
-        return section
+        return block
     title_idx = next((idx for idx, line in enumerate(lines) if line.strip().startswith("# ")), 0)
     para_start = title_idx + 1
     while para_start < len(lines) and not lines[para_start].strip():
         para_start += 1
     if para_start >= len(lines):
-        return "\n".join([lines[title_idx], "", section]).strip()
+        return "\n".join([lines[title_idx], "", block]).strip()
     insert_at = para_start + 1
     while insert_at < len(lines) and lines[insert_at].strip():
         insert_at += 1
-    return "\n".join(lines[:insert_at] + ["", section, ""] + lines[insert_at:]).strip()
+    return "\n".join(lines[:insert_at] + ["", block, ""] + lines[insert_at:]).strip()
+
+
+def insert_after_section(report: str, heading_prefix: str, block: str) -> str:
+    block = block.strip()
+    if not block:
+        return report.strip()
+    lines = report.strip().splitlines()
+    heading_idx = next((idx for idx, line in enumerate(lines) if line.strip().startswith(heading_prefix)), None)
+    if heading_idx is None:
+        return insert_after_opening_paragraph(report, block)
+    insert_at = heading_idx + 1
+    while insert_at < len(lines) and not lines[insert_at].strip().startswith("## "):
+        insert_at += 1
+    return "\n".join(lines[:insert_at] + ["", block, ""] + lines[insert_at:]).strip()
+
+
+def ensure_market_snapshot_section(report: str, packet: dict[str, Any]) -> str:
+    top_blocks = [
+        block for block in (
+            render_market_snapshot_section(packet),
+            render_macro_headline_section(packet),
+        )
+        if block
+    ]
+    tail = render_market_tail_section(packet)
+    if not top_blocks and not tail:
+        return strip_managed_report_sections(report)
+
+    text = strip_managed_report_sections(report)
+    if top_blocks:
+        text = insert_after_opening_paragraph(text, "\n\n".join(top_blocks))
+    if tail:
+        text = "\n\n".join(part for part in (text.strip(), tail.strip()) if part)
+    return text.strip()
+
+
+def repair_star_pipeline_language(report: str, *, add_replacement: bool = True) -> str:
+    output: list[str] = []
+    replacement_added = False
+    for raw in report.splitlines():
+        line = raw.strip()
+        if contains_marker(line, "科创") and contains_marker(line, "温度计"):
+            if add_replacement and not replacement_added:
+                output.append("科创板按A股候选管线处理，必须落到具体688标的、阶段和等待条件。")
+                replacement_added = True
+            continue
+        output.append(raw)
+    return "\n".join(output).strip()
+
+
+def ensure_cn_star_pipeline_section(report: str, packet: dict[str, Any]) -> str:
+    section = render_cn_star_pipeline_section(packet)
+    text = strip_managed_report_sections(report, prefixes=("## A股科创板候选管线",))
+    text = repair_star_pipeline_language(text, add_replacement=not bool(section))
+    if not section:
+        return text.strip()
+    if "## 宏观事件 Headlines" in text:
+        return insert_after_section(text, "## 宏观事件 Headlines", section)
+    return insert_after_section(text, "## 宏观数据温度计", section)
 
 
 def fetch_finance_search_prefetch(*, window: str, timeout: int = 90) -> dict[str, Any]:
@@ -1239,18 +1424,18 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 
 工作方式:
 - 先读下面 packet。packet 是 quant-stack 已冻结的事实砖和工具清单。
-- 如果 packet.finance_search_prefetch.ok=true,必须优先使用其中的 market_rows 和 news_items 写全球市场温度;
+- 如果 packet.finance_search_prefetch.ok=true,必须优先使用其中的 market_rows 和 news_items 写宏观数据温度计和宏观事件 headlines;
   这些是脚本侧已经从 finance-search 取回的证据,不要再写成缺失或工具失败。
 - 可以启发式使用 finance-search MCP 工具,尤其是:
   quant_stack_daily_snapshot, quant_stack_spine_triage, quant_stack_task_status,
   quant_stack_validate_main_strategy_v2, quant_stack_ranker, quant_stack_symbol_context,
   get_market_snapshot, newsnow_radar, search_news, research_brief。
-- 写作前必须尝试构造“全球市场温度”:美股现货指数、美股期货(标普/纳指/道指/罗素期货),
-  欧洲主要指数(如 STOXX/DAX/FTSE/CAC),亚洲主要指数(如日经/KOSPI/恒生/台湾),
-  VIX、油、金、美元/离岸人民币、中国主要指数和科创板/STAR 指数;只使用工具实际返回的数据。
+- 写作前必须构造“宏观数据温度计”:顶部只放美股大盘、A股大盘、KOSPI、日经225;
+  美股期货、欧洲、恒生/台湾、VIX、油、金、美元/离岸人民币、利率和科创50等其他数据放报告尾部附表。
 - 引用任何大盘指数或期货时,必须带返回日期,格式类似“德国DAX(2026-06-29)”或“纳指期货(2026-06-29)”;
   跨时区市场尤其不能只写“今天/隔夜”。不要引用印度、Sensex 或 Nifty 指数。
-- 写作前必须尝试检索最新宏观/地缘/AI/半导体/中国市场新闻;只使用返回标题、来源或 URL 可核验的新闻。
+- 写作前必须尝试检索最新宏观/地缘/AI/半导体/中国市场新闻;只使用返回标题、来源或 URL 可核验的新闻,
+  并把宏观事件 headlines 放在顶部温度计之后。
 - A股侧不得只看主板;必须用 packet.cn.star_pipeline_candidates 或 CN ranker/symbol_context
   选择具体科创板/688xxx.SH 标的。科创板不是温度计,它是 A股候选管线的一部分;
   如果候选仍是 active_watch/0R,也要写清具体代码、名称、等待条件和不能执行的原因。
@@ -1301,11 +1486,12 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 - 美股是主导变量,A股按本域门禁执行;不得把 A股反馈写成会指导美股。
 - 保留 draft/packet 里已有的 ticker、日期、R、价格线和结论;不得新增事实、价格、新闻或仓位。
 - 把全球新闻/宏观/指数/期货/油金和 A股半导体/科创板线索整合成同一个故事;不要拆成美股报告+A股报告。
-- 全球温度段必须保留:美股期货、油、金、至少多个非美国家/地区大盘指数;如果 draft 已遗漏,
+- 宏观数据温度计顶部只能保留美股大盘、A股大盘、KOSPI、日经225;美股期货、油、金、
+  欧洲/其他亚洲、VIX、汇率、利率和科创50等只能放报告尾部附表。如果 draft 已遗漏,
   只能从 packet/工具返回中补入,不能虚构数字。
-- 如果 packet.finance_search_prefetch 有 market_rows/news_items,优先使用这些已取回证据补齐全球温度,
+- 如果 packet.finance_search_prefetch 有 market_rows/news_items,优先使用这些已取回证据补齐温度计、宏观 headlines 和尾部附表,
   不要写成缺失、不可用或工具失败。
-- 全球温度段引用任何大盘指数或期货时必须带返回日期,尤其是欧洲/亚洲/美国期货这类跨时区市场;
+- 温度计和尾部附表引用任何大盘指数或期货时必须带返回日期,尤其是欧洲/亚洲/美国期货这类跨时区市场;
   格式类似“日经225(2026-06-29)”或“标普期货(2026-06-29)”。删除印度、Sensex、Nifty 指数。
 - A股执行段必须从 packet.cn.star_pipeline_candidates 中选择至少一个具体 688xxx.SH 科创板标的;
   不得把科创板只写成“温度计”“观察指数”或泛泛的板块背景。
@@ -2115,6 +2301,7 @@ def main() -> int:
         report = normalize_public_report_text(report, args.slot)
     report = annotate_market_snapshot_dates(report, packet)
     report = ensure_market_snapshot_section(report, packet)
+    report = ensure_cn_star_pipeline_section(report, packet)
     failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email)
     if failures:
         restore_output_snapshot(output_snapshot)

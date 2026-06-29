@@ -373,6 +373,10 @@ def test_market_snapshot_section_filters_india_and_keeps_dates(tmp_path: Path) -
     packet = module.build_packet("am", cn, us)
     packet["finance_search_prefetch"] = {
         "market_rows": [
+            {"symbol": "^GSPC", "label": "标普500", "date": "2026-06-26", "close": 6088.9, "change_pct": -0.05},
+            {"symbol": "000001.SS", "label": "上证指数", "date": "2026-06-29", "close": 3300, "change_pct": 0.3},
+            {"symbol": "^KS11", "label": "韩国KOSPI", "date": "2026-06-29", "close": 3000, "change_pct": -1.56},
+            {"symbol": "^N225", "label": "日本日经225", "date": "2026-06-29", "close": 41000, "change_pct": -1.04},
             {"symbol": "ES=F", "label": "标普期货", "date": "2026-06-29", "close": 7000, "change_pct": 0.5},
             {"symbol": "^GDAXI", "label": "德国DAX", "date": "2026-06-26", "close": 18000, "change_pct": -1.2},
             {"symbol": "^BSESN", "label": "印度Sensex", "date": "2026-06-26", "close": 80000, "change_pct": 1.0},
@@ -380,11 +384,21 @@ def test_market_snapshot_section_filters_india_and_keeps_dates(tmp_path: Path) -
     }
 
     section = module.render_market_snapshot_section(packet)
+    tail = module.render_market_tail_section(packet)
 
-    assert "标普期货 | 2026-06-29" in section
-    assert "德国DAX | 2026-06-26" in section
+    assert "## 宏观数据温度计" in section
+    assert "标普500 | 2026-06-26" in section
+    assert "上证指数 | 2026-06-29" in section
+    assert "韩国KOSPI | 2026-06-29" in section
+    assert "日本日经225 | 2026-06-29" in section
+    assert "标普期货" not in section
+    assert "德国DAX" not in section
+    assert "标普期货 | 2026-06-29" in tail
+    assert "德国DAX | 2026-06-26" in tail
     assert "印度" not in section
     assert "Sensex" not in section
+    assert "印度" not in tail
+    assert "Sensex" not in tail
 
 
 def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_path: Path) -> None:
@@ -406,8 +420,22 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
             {"symbol": "000688.SS", "label": "科创50", "date": "2026-06-29", "close": 950, "change_pct": 0.2},
             {"symbol": "GC=F", "label": "黄金期货", "date": "2026-06-29", "close": 4074, "change_pct": -0.12},
             {"symbol": "CL=F", "label": "WTI原油期货", "date": "2026-06-29", "close": 70.12, "change_pct": 1.29},
-        ]
+        ],
+        "news_items": [
+            {"title": "Fed officials keep rate-cut timing in focus", "source": "Reuters", "published_at": "2026-06-29"},
+            {"title": "AI chip supply chain leads Asia trading", "source": "NewsNow", "published_at": "2026-06-29"},
+        ],
     }
+    packet["cn"]["star_pipeline_candidates"] = [
+        {
+            "symbol": "688233.SH",
+            "name": "神工股份",
+            "pipeline_stage": "active_watch",
+            "rank": 20,
+            "rank_score": 70.18,
+            "reason": "等待A股本域价格和量能确认",
+        }
+    ]
     report = (
         "# 跨市场早报：测试\n\n"
         "美股影响A股，标普500 -0.05%，VIX收低，标普期货和纳指期货修复。"
@@ -417,21 +445,30 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
         "| 资产/指数 | 返回日期 | 读数 |\n"
         "|---|---:|---:|\n"
         "| VIX波动率 | 2026-06-26 | 18.41 |\n\n"
-        "油价段落应该保留。"
+        "科创板只做温度计，不进入A股候选管线。"
     )
 
     report = module.annotate_market_snapshot_dates(report, packet)
     report = module.ensure_market_snapshot_section(report, packet)
+    report = module.ensure_cn_star_pipeline_section(report, packet)
     failures = module.validate_shadow_report(report, "am", public_delivery=True)
 
     assert "标普500(2026-06-26)" in report
     assert "VIX(2026-06-26)收低" in report
     assert "VIX(2026-06-26)波动率" not in report
     assert "DAX(2026-06-26)" in report
-    assert "## 全球市场温度" in report
-    assert report.count("## 全球市场温度") == 1
+    assert "## 宏观数据温度计" in report
+    assert report.count("## 宏观数据温度计") == 1
+    assert "## 宏观事件 Headlines" in report
+    assert "Fed officials keep rate-cut timing in focus" in report
+    assert "## A股科创板候选管线" in report
+    assert "688233.SH" in report
+    assert "## 附表：其他跨市场数据" in report
     assert "资产/指数" not in report
-    assert "油价段落应该保留。" in report
+    assert "科创板只做温度计" not in report
+    assert report.index("## 宏观数据温度计") < report.index("## 宏观事件 Headlines")
+    assert report.index("## 宏观事件 Headlines") < report.index("## A股科创板候选管线")
+    assert report.rfind("## 附表：其他跨市场数据") > report.index("## A股科创板候选管线")
     assert failures == []
 
 
@@ -463,8 +500,8 @@ def test_hermes_prompt_retires_legacy_narrator_templates(tmp_path: Path) -> None
     assert "search_news" in prompt
     assert "quant_stack_ranker" in prompt
     assert "美股期货" in prompt
-    assert "欧洲主要指数" in prompt
-    assert "亚洲主要指数" in prompt
+    assert "顶部只放美股大盘、A股大盘、KOSPI、日经225" in prompt
+    assert "报告尾部附表" in prompt
     assert "科创板/688xxx" in prompt
     assert "不要使用 quant-research-v1/prompts" in prompt
     assert "coverage_checklist 是验收清单,不是章节模板" in prompt
