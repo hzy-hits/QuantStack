@@ -118,13 +118,6 @@ MANAGED_REPORT_SECTION_PREFIXES = (
     "## 科创板候选",
     "## 科创板不是",
 )
-STAR_STAGE_LABELS = {
-    "active_watch": "观察候选",
-    "bench_ranked": "备选候选",
-    "candidate": "候选",
-    "watch": "观察",
-    "0r": "0R观察",
-}
 FORBIDDEN_PUBLIC_INDEX_MARKERS = ("Sensex", "Nifty", "印度指数", "印度Sensex", "印度")
 GLOBAL_MARKET_LABEL_ALIASES = {
     "^GSPC": ("标普500",),
@@ -400,7 +393,7 @@ def is_cn_star_symbol(symbol: Any) -> bool:
     return str(symbol or "").upper().startswith("688")
 
 
-def cn_star_priority(row: dict[str, Any]) -> tuple[int, int, float, str]:
+def cn_pipeline_priority(row: dict[str, Any]) -> tuple[int, int, float, str]:
     tier = str(row.get("production_tier") or row.get("tier") or "").lower()
     action = str(row.get("production_action") or row.get("action") or "").lower()
     if tier in {"top_stock_trade", "secondary_stock_trade"} or action.startswith("buy"):
@@ -422,12 +415,12 @@ def cn_star_priority(row: dict[str, Any]) -> tuple[int, int, float, str]:
     return bucket, rank, -score, str(row.get("symbol") or "")
 
 
-def compact_cn_star_candidate(row: dict[str, Any]) -> dict[str, Any]:
+def compact_cn_pipeline_candidate(row: dict[str, Any]) -> dict[str, Any]:
     symbol = str(row.get("symbol") or "").upper()
     return {
         "symbol": symbol,
         "name": row.get("name") or symbol,
-        "board": "科创板",
+        "board": "科创板" if is_cn_star_symbol(symbol) else row.get("board") or "",
         "pipeline_stage": row.get("production_tier") or row.get("tier") or "",
         "action": row.get("production_action") or row.get("action") or row.get("lifecycle_action") or "",
         "rank": row.get("rank"),
@@ -442,17 +435,19 @@ def compact_cn_star_candidate(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def select_cn_star_pipeline_candidates(payload: dict[str, Any], *, limit: int = 8) -> list[dict[str, Any]]:
+def select_cn_pipeline_candidates(payload: dict[str, Any], *, limit: int = 12) -> list[dict[str, Any]]:
     ranker = payload.get("cn_opportunity_ranker") if isinstance(payload.get("cn_opportunity_ranker"), dict) else {}
     rows = ranker.get("all_rows") if isinstance(ranker.get("all_rows"), list) else []
     if not rows:
         rows = get_path(payload, "cn", "current", default=[])
-    candidates = [
-        row for row in rows
-        if isinstance(row, dict) and is_cn_star_symbol(row.get("symbol"))
-    ]
-    candidates.sort(key=cn_star_priority)
-    return [compact_cn_star_candidate(row) for row in candidates[:limit]]
+    candidates = [row for row in rows if isinstance(row, dict) and row.get("symbol")]
+    candidates.sort(key=cn_pipeline_priority)
+    selected = candidates[:limit]
+    if not any(is_cn_star_symbol(row.get("symbol")) for row in selected):
+        star_rows = [row for row in candidates if is_cn_star_symbol(row.get("symbol"))]
+        if star_rows:
+            selected = (selected[: max(limit - 1, 0)] + star_rows[:1])[:limit]
+    return [compact_cn_pipeline_candidate(row) for row in selected]
 
 
 def fmt(value: Any, default: str = "-") -> str:
@@ -493,7 +488,7 @@ def summarize_artifact(artifact: MarketArtifact) -> dict[str, Any]:
         "markdown_excerpt": excerpt(artifact.markdown),
     }
     if market_key == "cn":
-        out["star_pipeline_candidates"] = select_cn_star_pipeline_candidates(payload)
+        out["pipeline_candidates"] = select_cn_pipeline_candidates(payload)
     return out
 
 
@@ -816,13 +811,13 @@ def build_cn_universe_requirement() -> dict[str, Any]:
     return {
         "scope": (
             "A-share semiconductor and AI hardware mapping must include concrete STAR Market/科创板 "
-            "688xxx candidates as part of the CN selection pipeline, not merely as an index thermometer."
+            "688xxx candidates inside the ordinary CN selection pipeline, not as a separate STAR-only block."
         ),
         "board_policy": [
             "Do not treat main-board A-shares as the whole CN universe.",
-            "Select concrete 688xxx.SH names from packet.cn.star_pipeline_candidates when available.",
-            "Use 0R/active_watch language when a STAR name is not executable yet, but still keep it in the A-share pipeline.",
-            "Do not describe 科创板 only as a temperature gauge; tie it to named candidates and execution/watch stages.",
+            "Select concrete 688xxx.SH names from packet.cn.actions and packet.cn.pipeline_candidates when available.",
+            "Use 0R/active_watch language when a STAR name is not executable yet, but narrate it as part of the A-share pipeline.",
+            "Do not describe 科创板 only as a temperature gauge; tie it to named candidates inside the A-share execution/watch story.",
             "Use sector-level language only when no verifiable 688xxx symbol comes back; do not publish a missing-symbol list.",
         ],
         "finance_search_tools": [
@@ -985,61 +980,6 @@ def render_macro_headline_section(packet: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def public_star_stage(value: Any) -> str:
-    key = str(value or "").strip()
-    return STAR_STAGE_LABELS.get(key.lower(), public_cell(key))
-
-
-def public_star_action(row: dict[str, Any]) -> str:
-    text = (
-        row.get("handling_line")
-        or row.get("reason")
-        or row.get("target")
-        or "等待A股本域价格、量能和证据门同时确认，不能因美股映射单独执行。"
-    )
-    replacements = {
-        "production": "正式执行",
-        "ranker": "候选排序",
-        "evidence_state": "证据状态",
-        "source evidence": "证据",
-        "source review": "来源复核",
-        "money gate": "资金门槛",
-        "regime": "市场状态",
-    }
-    clean = public_cell(text)
-    for old, new in replacements.items():
-        clean = re.sub(re.escape(old), new, clean, flags=re.IGNORECASE)
-    return clean
-
-
-def render_cn_star_pipeline_section(packet: dict[str, Any]) -> str:
-    cn = packet.get("cn") if isinstance(packet.get("cn"), dict) else {}
-    candidates = cn.get("star_pipeline_candidates") if isinstance(cn.get("star_pipeline_candidates"), list) else []
-    candidates = [row for row in candidates if isinstance(row, dict) and is_cn_star_symbol(row.get("symbol"))]
-    if not candidates:
-        return ""
-
-    lines = [
-        "## A股科创板候选管线",
-        "科创板按A股候选管线处理，必须落到具体688标的、阶段、排序和等待条件。",
-        "",
-        "| 代码 | 名称 | 阶段 | 排序 | 分数 | 处理 |",
-        "|---|---|---|---:|---:|---|",
-    ]
-    for row in candidates[:5]:
-        lines.append(
-            "| {symbol} | {name} | {stage} | {rank} | {score} | {action} |".format(
-                symbol=public_cell(row.get("symbol")),
-                name=public_cell(row.get("name")),
-                stage=public_star_stage(row.get("pipeline_stage")),
-                rank=public_cell(row.get("rank")),
-                score=public_cell(row.get("rank_score")),
-                action=public_star_action(row),
-            )
-        )
-    return "\n".join(lines)
-
-
 def market_snapshot_date_map(packet: dict[str, Any]) -> dict[str, str]:
     date_map: dict[str, str] = {}
     for row in market_snapshot_public_rows(packet):
@@ -1180,15 +1120,9 @@ def repair_star_pipeline_language(report: str, *, add_replacement: bool = True) 
     return "\n".join(output).strip()
 
 
-def ensure_cn_star_pipeline_section(report: str, packet: dict[str, Any]) -> str:
-    section = render_cn_star_pipeline_section(packet)
+def ensure_cn_pipeline_language(report: str, packet: dict[str, Any]) -> str:
     text = strip_managed_report_sections(report, prefixes=("## A股科创板候选管线",))
-    text = repair_star_pipeline_language(text, add_replacement=not bool(section))
-    if not section:
-        return text.strip()
-    if "## 宏观事件 Headlines" in text:
-        return insert_after_section(text, "## 宏观事件 Headlines", section)
-    return insert_after_section(text, "## 宏观数据温度计", section)
+    return repair_star_pipeline_language(text, add_replacement=False).strip()
 
 
 def fetch_finance_search_prefetch(*, window: str, timeout: int = 90) -> dict[str, Any]:
@@ -1459,9 +1393,9 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
   跨时区市场尤其不能只写“今天/隔夜”。不要引用印度、Sensex 或 Nifty 指数。
 - 写作前必须尝试检索最新宏观/地缘/AI/半导体/中国市场新闻;只使用返回标题、来源或 URL 可核验的新闻,
   并把宏观事件 headlines 放在顶部温度计之后。
-- A股侧不得只看主板;必须用 packet.cn.star_pipeline_candidates 或 CN ranker/symbol_context
-  选择具体科创板/688xxx.SH 标的。科创板不是温度计,它是 A股候选管线的一部分;
-  如果候选仍是 active_watch/0R,也要写清具体代码、名称、等待条件和不能执行的原因。
+- A股侧不得只看主板;必须用 packet.cn.actions、packet.cn.pipeline_candidates 或 CN ranker/symbol_context
+  选择具体科创板/688xxx.SH 标的。科创板不是单独章节或温度计,它是 A股候选管线的一部分;
+  如果候选仍是 active_watch/0R,也要在 A股执行/观察叙事里写清具体代码、名称、等待条件和不能执行的原因。
 - 如果工具、feed、symbol 或新闻没有返回可核验结果,公开报告里自然省略;不要写任何数据不可用、缺口、待补或工具失败说明。
 - coverage_checklist 是验收清单,不是章节模板。
 - 正文结构、标题角度、叙事顺序由你按证据决定。
@@ -1516,7 +1450,8 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
   不要写成缺失、不可用或工具失败。
 - 温度计和尾部附表引用任何大盘指数或期货时必须带返回日期,尤其是欧洲/亚洲/美国期货这类跨时区市场;
   格式类似“日经225(2026-06-29)”或“标普期货(2026-06-29)”。删除印度、Sensex、Nifty 指数。
-- A股执行段必须从 packet.cn.star_pipeline_candidates 中选择至少一个具体 688xxx.SH 科创板标的;
+- A股执行段必须从 packet.cn.actions、packet.cn.pipeline_candidates 或 CN ranker/symbol_context 中选择至少一个具体
+  688xxx.SH 科创板标的,并把它融合进 A股执行/观察叙事;不要另起一张固定“科创板候选管线”表。
   不得把科创板只写成“温度计”“观察指数”或泛泛的板块背景。
 - 删除工具日志味、工程词和内部流程词:不要出现 MCP、packet、validator、shadow_only、production_delivery、cron、Resend、JSON、script、tool、血缘、本稿状态、prompt、system、user、draft、二审、审稿、思维过程、推理过程。
 - 删除或翻译内部研究黑话:不要出现 production、ranker、AI Infra universe、source evidence、source review、evidence_state、headline risk、beta hedge、money gate、regime、原文验证状态。
@@ -2384,7 +2319,7 @@ def main() -> int:
         report = normalize_public_report_text(report, args.slot)
     report = annotate_market_snapshot_dates(report, packet)
     report = ensure_market_snapshot_section(report, packet)
-    report = ensure_cn_star_pipeline_section(report, packet)
+    report = ensure_cn_pipeline_language(report, packet)
     failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email)
     if failures:
         restore_output_snapshot(output_snapshot)

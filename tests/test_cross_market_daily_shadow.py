@@ -80,7 +80,7 @@ def test_pm_packet_keeps_us_to_cn_causality(tmp_path: Path) -> None:
     assert packet["style_brief"]["reference_url"].startswith("https://boist.org/")
 
 
-def test_cn_summary_promotes_star_candidates_into_pipeline(tmp_path: Path) -> None:
+def test_cn_summary_mixes_star_candidates_into_cn_pipeline(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
     cn.payload["cn_opportunity_ranker"] = {
@@ -94,9 +94,13 @@ def test_cn_summary_promotes_star_candidates_into_pipeline(tmp_path: Path) -> No
 
     summary = module.summarize_artifact(cn)
 
-    assert [row["symbol"] for row in summary["star_pipeline_candidates"][:2]] == ["688233.SH", "688535.SH"]
-    assert summary["star_pipeline_candidates"][0]["board"] == "科创板"
-    assert summary["star_pipeline_candidates"][0]["pipeline_stage"] == "active_watch"
+    symbols = [row["symbol"] for row in summary["pipeline_candidates"]]
+    assert symbols[0] == "600519.SH"
+    assert "688233.SH" in symbols
+    assert "688535.SH" in symbols
+    star = next(row for row in summary["pipeline_candidates"] if row["symbol"] == "688233.SH")
+    assert star["board"] == "科创板"
+    assert star["pipeline_stage"] == "active_watch"
 
 
 def test_am_uses_previous_cn_context_when_target_day_payload_is_missing(tmp_path: Path) -> None:
@@ -496,7 +500,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
             {"title": "AI chip supply chain leads Asia trading", "source": "NewsNow", "published_at": "2026-06-29"},
         ],
     }
-    packet["cn"]["star_pipeline_candidates"] = [
+    packet["cn"]["pipeline_candidates"] = [
         {
             "symbol": "688233.SH",
             "name": "神工股份",
@@ -520,7 +524,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
 
     report = module.annotate_market_snapshot_dates(report, packet)
     report = module.ensure_market_snapshot_section(report, packet)
-    report = module.ensure_cn_star_pipeline_section(report, packet)
+    report = module.ensure_cn_pipeline_language(report, packet)
     failures = module.validate_shadow_report(report, "am", public_delivery=True)
 
     assert "标普500(2026-06-26)" in report
@@ -532,14 +536,13 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert report.count("## 宏观数据温度计") == 1
     assert "## 宏观事件 Headlines" in report
     assert "Fed officials keep rate-cut timing in focus" in report
-    assert "## A股科创板候选管线" in report
+    assert "## A股科创板候选管线" not in report
     assert "688233.SH" in report
     assert "## 附表：其他跨市场数据" in report
     assert "资产/指数" not in report
     assert "科创板只做温度计" not in report
     assert report.index("## 宏观数据温度计") < report.index("## 宏观事件 Headlines")
-    assert report.index("## 宏观事件 Headlines") < report.index("## A股科创板候选管线")
-    assert report.rfind("## 附表：其他跨市场数据") > report.index("## A股科创板候选管线")
+    assert report.rfind("## 附表：其他跨市场数据") > report.index("688233.SH")
     assert failures == []
 
 
@@ -574,7 +577,7 @@ def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: P
     )
 
     report = module.ensure_market_snapshot_section(report, packet)
-    report = module.ensure_cn_star_pipeline_section(report, packet)
+    report = module.ensure_cn_pipeline_language(report, packet)
 
     assert "旧顶部表" not in report
     assert "幻觉新闻" not in report
