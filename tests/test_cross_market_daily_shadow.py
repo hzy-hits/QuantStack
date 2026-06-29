@@ -703,6 +703,19 @@ def test_output_snapshot_restores_failed_validation_artifacts(tmp_path: Path) ->
     assert not paths["packet"].exists()
 
 
+def test_write_outputs_allows_output_dir_outside_repo(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path / "artifacts")
+    us = artifact(module, "us", "2026-06-26", tmp_path / "artifacts")
+    packet = module.build_packet("am", cn, us)
+
+    path = module.write_outputs(tmp_path / "outside", packet, "# 跨市场早报\n\n美股 A股", agent_backend="test")
+
+    assert path.exists()
+    trajectory = (tmp_path / "outside" / "cross_market_am_shadow_trajectory.jsonl").read_text(encoding="utf-8")
+    assert str(path) in trajectory
+
+
 def test_fallback_report_uses_legacy_backend_only_after_primary_failure(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)

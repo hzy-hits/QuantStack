@@ -1836,7 +1836,7 @@ def write_outputs(output_dir: Path, packet: dict[str, Any], report: str, *, agen
             "step": "lead_editor",
             "tool": agent_backend,
             "args": {"slot": packet["slot"], "direction": packet["direction"]},
-            "result": {"report": str(report_path.relative_to(ROOT))},
+            "result": {"report": relative_display(report_path)},
         },
     ]
     if packet.get("_reviewer_backend"):
@@ -1850,7 +1850,7 @@ def write_outputs(output_dir: Path, packet: dict[str, Any], report: str, *, agen
                     "provider": packet.get("_reviewer_provider") or "",
                     "model": packet.get("_reviewer_model") or "",
                 },
-                "result": {"report": str(report_path.relative_to(ROOT))},
+                "result": {"report": relative_display(report_path)},
             }
         )
     trajectory_path.write_text(
