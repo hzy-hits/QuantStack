@@ -102,6 +102,18 @@ def test_am_saturday_uses_friday_cn_context(tmp_path: Path) -> None:
     assert note is not None
 
 
+def test_us_context_falls_back_to_latest_frozen_artifact(tmp_path: Path) -> None:
+    module = load_module()
+    artifact(module, "us", "2026-06-26", tmp_path)
+
+    us, note = module.load_us_context_artifact(tmp_path, "2026-06-29")
+
+    assert us.report_date == "2026-06-26"
+    assert note is not None
+    assert "2026-06-29" in note
+    assert "2026-06-26" in note
+
+
 def test_pm_report_does_not_claim_cn_guides_us(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)

@@ -277,6 +277,24 @@ def load_cn_context_artifact(report_root: Path, slot: str, target_cn_date: str) 
     return cn, None
 
 
+def load_us_context_artifact(report_root: Path, target_us_date: str) -> tuple[MarketArtifact, str | None]:
+    us = load_market_artifact(report_root, "us", target_us_date)
+    if artifact_ready(us):
+        return us, None
+
+    cur = previous_session(parse_ymd(target_us_date), "XNYS")
+    for _ in range(10):
+        fallback = load_market_artifact(report_root, "us", cur.isoformat())
+        if artifact_ready(fallback):
+            note = (
+                f"US target {target_us_date} has no frozen payload yet; "
+                f"using latest available US session context {fallback.report_date}."
+            )
+            return fallback, note
+        cur = previous_session(cur, "XNYS")
+    return us, None
+
+
 def relative_display(path: Path) -> str:
     try:
         return str(path.relative_to(ROOT))
@@ -832,11 +850,22 @@ def build_packet(slot: str, cn: MarketArtifact, us: MarketArtifact) -> dict[str,
     }
 
 
-def annotate_target_context(packet: dict[str, Any], *, target_cn_date: str, cn_context_note: str | None) -> None:
+def annotate_target_context(
+    packet: dict[str, Any],
+    *,
+    target_cn_date: str,
+    target_us_date: str,
+    cn_context_note: str | None,
+    us_context_note: str | None,
+) -> None:
     packet["target_cn_date"] = target_cn_date
+    packet["target_us_date"] = target_us_date
     packet["cn_context_date"] = packet["cn"]["report_date"]
+    packet["us_context_date"] = packet["us"]["report_date"]
     if cn_context_note:
         packet["cn_context_note"] = cn_context_note
+    if us_context_note:
+        packet["us_context_note"] = us_context_note
 
 
 def deterministic_report(packet: dict[str, Any]) -> str:
@@ -1548,7 +1577,7 @@ def main() -> int:
         output_dir = ROOT / output_dir
 
     cn, cn_context_note = load_cn_context_artifact(report_root, args.slot, cn_date)
-    us = load_market_artifact(report_root, "us", us_date)
+    us, us_context_note = load_us_context_artifact(report_root, us_date)
     missing = []
     if not cn.payload:
         missing.append(f"CN payload missing for {cn.report_date}: {cn.report_dir / 'main_strategy_v2_backtest.json'}")
@@ -1562,7 +1591,13 @@ def main() -> int:
         raise SystemExit("\n".join(missing))
 
     packet = build_packet(args.slot, cn, us)
-    annotate_target_context(packet, target_cn_date=cn_date, cn_context_note=cn_context_note)
+    annotate_target_context(
+        packet,
+        target_cn_date=cn_date,
+        target_us_date=us_date,
+        cn_context_note=cn_context_note,
+        us_context_note=us_context_note,
+    )
     if args.finance_search_prefetch == "on" and args.agent_backend == "hermes":
         attach_finance_search_prefetch(packet, target_cn_date=cn_date)
     if args.agent_backend == "off":

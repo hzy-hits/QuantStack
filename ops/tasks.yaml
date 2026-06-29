@@ -7,7 +7,7 @@ defaults:
 tasks:
   us.premarket:
     group: us
-    schedule: "0 20 * * 1-5"
+    schedule: ""
     cwd: quant-research-v1
     command: ["./scripts/run_full.sh", "--prod", "--delivery-dry-run", "--premarket", "{ny_date}"]
     log: ops/logs/us.premarket.log
@@ -18,13 +18,14 @@ tasks:
     market: us
     session: premarket
     owner: us_pipeline
+    disabled_reason: "Legacy standalone report cron is manual-only; scheduled report delivery is Hermes cross-market daily."
     outputs:
       - quant-research-v1/reports
       - quant-research-v1/logs
 
   us.postmarket:
     group: us
-    schedule: "0 5 * * 2-6"
+    schedule: ""
     cwd: quant-research-v1
     command: ["./scripts/run_full.sh", "--prod", "--delivery-dry-run", "{ny_date}"]
     log: ops/logs/us.postmarket.log
@@ -35,6 +36,7 @@ tasks:
     market: us
     session: postmarket
     owner: us_pipeline
+    disabled_reason: "Legacy standalone report cron is manual-only; scheduled report delivery is Hermes cross-market daily."
     outputs:
       - quant-research-v1/reports
       - quant-research-v1/logs
@@ -80,7 +82,7 @@ tasks:
 
   cn.morning:
     group: cn
-    schedule: "30 8 * * 1-5"
+    schedule: ""
     cwd: .
     command:
       - ./target/release/quant-stack
@@ -105,12 +107,13 @@ tasks:
     market: cn
     session: morning
     owner: cn_pipeline
+    disabled_reason: "Legacy standalone report cron is manual-only; scheduled report delivery is Hermes cross-market daily."
     outputs:
       - quant-research-cn/reports
 
   cn.evening:
     group: cn
-    schedule: "0 18 * * 1-5"
+    schedule: ""
     cwd: .
     command:
       - ./target/release/quant-stack
@@ -135,6 +138,7 @@ tasks:
     market: cn
     session: evening
     owner: cn_pipeline
+    disabled_reason: "Legacy standalone report cron is manual-only; scheduled report delivery is Hermes cross-market daily."
     outputs:
       - quant-research-cn/reports
 
@@ -222,7 +226,6 @@ tasks:
 
   daily.cross_market_am:
     group: daily
-    depends_on: [us.postmarket]
     schedule: "30 7 * * 1-6"
     cwd: .
     env:

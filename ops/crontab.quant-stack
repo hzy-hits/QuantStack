@@ -8,15 +8,11 @@ QUANT_STACK_ROOT=/home/ubuntu/quant-stack
 
 
 # -- US Pipeline --
-0 20 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh us.premarket
-0 5 * * 2-6 cd $QUANT_STACK_ROOT && ops/run_task.sh us.postmarket
 */30 21-23 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh intraday.index_refresh
 */30 0-5 * * 2-6 cd $QUANT_STACK_ROOT && ops/run_task.sh intraday.index_refresh
 
 # -- CN Pipeline --
 20 7 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh cn.precompute_alpha
-30 8 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh cn.morning
-0 18 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh cn.evening
 0 16 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh cn.fetch.tushare
 5 16 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh cn.fetch.akshare
 30 16 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh cn.consolidate

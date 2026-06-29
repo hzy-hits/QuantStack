@@ -14,10 +14,12 @@ from tasklib import materialize_task  # noqa: E402
 
 
 class TasklibTests(unittest.TestCase):
-    def test_us_daily_tasks_pass_date_override_to_run_full(self) -> None:
+    def test_legacy_us_daily_report_tasks_are_manual_only(self) -> None:
         postmarket = materialize_task("us.postmarket", "2026-06-26")
         premarket = materialize_task("us.premarket", "2026-06-26")
 
+        self.assertFalse(postmarket["schedule"])
+        self.assertFalse(premarket["schedule"])
         self.assertEqual(
             postmarket["command"],
             ["./scripts/run_full.sh", "--prod", "--delivery-dry-run", "2026-06-26"],
@@ -29,10 +31,12 @@ class TasklibTests(unittest.TestCase):
         self.assertFalse(postmarket["sends_email"])
         self.assertFalse(premarket["sends_email"])
 
-    def test_legacy_cn_daily_tasks_do_not_send_email_by_default(self) -> None:
+    def test_legacy_cn_daily_report_tasks_are_manual_only(self) -> None:
         morning = materialize_task("cn.morning", "2026-06-26")
         evening = materialize_task("cn.evening", "2026-06-26")
 
+        self.assertFalse(morning["schedule"])
+        self.assertFalse(evening["schedule"])
         self.assertNotIn("--send-reports", morning["command"])
         self.assertNotIn("--send-reports", evening["command"])
         self.assertFalse(morning["sends_email"])
@@ -50,7 +54,7 @@ class TasklibTests(unittest.TestCase):
         self.assertIn("hermes", morning["command"])
         self.assertIn("--fallback-backend", evening["command"])
         self.assertIn("auto", evening["command"])
-        self.assertIn("us.postmarket", morning["depends_on"])
+        self.assertNotIn("us.postmarket", morning["depends_on"])
         self.assertIn("research.main_strategy_v2_report", evening["depends_on"])
         self.assertEqual(morning["env"]["HERMES_BIN"], "/home/ubuntu/.local/bin/hermes")
         self.assertEqual(evening["env"]["HERMES_BIN"], "/home/ubuntu/.local/bin/hermes")
@@ -65,6 +69,25 @@ class TasklibTests(unittest.TestCase):
         self.assertEqual(evening["env"]["RESEND_ENV_FILE"], "/home/ubuntu/apps/multica/.env")
         self.assertTrue(morning["sends_email"])
         self.assertTrue(evening["sends_email"])
+
+    def test_only_cross_market_tasks_send_scheduled_reports(self) -> None:
+        task_ids = [
+            "us.premarket",
+            "us.postmarket",
+            "cn.morning",
+            "cn.evening",
+            "daily.cross_market_am",
+            "daily.cross_market_pm",
+            "weekly.us",
+            "weekly.cn",
+        ]
+        active_senders = [
+            task_id
+            for task_id in task_ids
+            if materialize_task(task_id, "2026-06-26")["schedule"]
+            and materialize_task(task_id, "2026-06-26")["sends_email"]
+        ]
+        self.assertEqual(active_senders, ["daily.cross_market_am", "daily.cross_market_pm"])
 
     def test_legacy_weekly_reports_are_manual_only(self) -> None:
         us = materialize_task("weekly.us", "2026-06-26")
