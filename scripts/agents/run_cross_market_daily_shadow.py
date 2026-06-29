@@ -771,6 +771,7 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 - 不得触发邮件、cron、生产投递或文件修改;最终只输出 markdown 报告文本。
 - 公开正文不要出现工具日志、运行状态、prompt、system/user 角色、思考过程、审稿过程、JSON 或文件路径。
 - 不要输出“以下是/我将/作为AI”这类自我说明;只输出读者可直接阅读的报告。
+- 不要输出内部研究状态词: production、ranker、AI Infra universe、source evidence、source review、headline risk、beta hedge、money gate、regime、原文验证状态。
 
 写作风格:
 - 参考 packet.style_brief 和 Boist 市场日记风格: 强主题开场,先讲市场故事和因果链,
@@ -805,10 +806,11 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 - 保留 draft/packet 里已有的 ticker、日期、R、价格线和结论;不得新增事实、价格、新闻或仓位。
 - 把全球新闻/宏观/指数/期货/油金和 A股半导体/科创板线索整合成同一个故事;不要拆成美股报告+A股报告。
 - 删除工具日志味、工程词和内部流程词:不要出现 MCP、packet、validator、shadow_only、production_delivery、cron、Resend、JSON、script、tool、血缘、本稿状态、prompt、system、user、draft、二审、审稿、思维过程、推理过程。
+- 删除或翻译内部研究黑话:不要出现 production、ranker、AI Infra universe、source evidence、source review、evidence_state、headline risk、beta hedge、money gate、regime、原文验证状态。
 - 删除所有数据不可用提示、缺口清单、待补证据清单、工具失败说明;没有可核验数据就自然省略。
 - 不要出现“以下是”“我将”“作为AI”“根据你的要求”等自我说明。
 - 语言要像给投资人看的盘前/盘后执行日记:先讲今天市场故事,再讲跨市场传导,最后讲执行线和失效条件。
-- 少用黑话;如果必须保留 R、Gamma、regime、money gate,第一次出现时加一句中文解释。
+- 少用黑话;如果必须保留 R 或 Gamma,第一次出现时加一句中文解释,其他英文内部状态改成中文。
 - 少用表格;只有交易线、仓位线或风险线必须对齐时才用。
 - 不要解释你做了什么,不要输出审稿意见,只输出最终 markdown。
 
@@ -1090,6 +1092,19 @@ def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = Fals
             "N/A",
             "null",
             "暂无数据",
+            "production",
+            "source evidence",
+            "source review",
+            "evidence_state",
+            "AI Infra universe",
+            "AI Infra",
+            "ranker",
+            "headline risk",
+            "beta hedge",
+            "money gate",
+            "regime",
+            "原文验证状态",
+            "原文验证",
             "# 美股日报",
             "# A股日报",
             "## 美股报告",

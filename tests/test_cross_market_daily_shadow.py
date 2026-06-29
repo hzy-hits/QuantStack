@@ -150,6 +150,21 @@ def test_public_delivery_rejects_prompt_leakage_and_missing_data_list() -> None:
     assert any("数据缺口" in item for item in failures)
 
 
+def test_public_delivery_rejects_internal_research_jargon() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        "# 跨市场早报\n\n美股影响A股。AI Infra universe production执行层 source evidence 原文验证状态。",
+        "am",
+        public_delivery=True,
+    )
+
+    assert any("AI Infra" in item for item in failures)
+    assert any("production" in item for item in failures)
+    assert any("source evidence" in item for item in failures)
+    assert any("原文验证" in item for item in failures)
+
+
 def test_public_delivery_rejects_split_single_market_reports() -> None:
     module = load_module()
 
