@@ -683,8 +683,18 @@ window = sys.argv[3]
 sys.path.insert(0, root)
 import server  # noqa: E402
 
+def batched_snapshot(symbols_arg):
+    requested = [s.strip() for s in symbols_arg.split(",") if s.strip()]
+    merged = {"symbols": {}, "requested_symbols": symbols_arg, "used_symbols": []}
+    for idx in range(0, len(requested), 10):
+        chunk = requested[idx:idx + 10]
+        data = server.get_market_snapshot(symbols=",".join(chunk), period="5d")
+        merged["symbols"].update(data.get("symbols") or {})
+        merged["used_symbols"].extend(data.get("used_symbols") or chunk)
+    return merged
+
 async def main():
-    snapshot = server.get_market_snapshot(symbols=symbols, period="5d")
+    snapshot = batched_snapshot(symbols)
     try:
         news = await server.search_news(
             query="global markets US futures oil gold Fed China AI semiconductors",
