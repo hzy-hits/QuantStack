@@ -1120,8 +1120,30 @@ def repair_star_pipeline_language(report: str, *, add_replacement: bool = True) 
     return "\n".join(output).strip()
 
 
+def strip_star_only_tables(report: str) -> str:
+    lines = report.splitlines()
+    output: list[str] = []
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        stripped = line.strip()
+        if line.startswith("|") and contains_marker(line, "科创板候选"):
+            idx += 1
+            while idx < len(lines) and lines[idx].strip().startswith("|"):
+                idx += 1
+            while output and not output[-1].strip():
+                output.pop()
+            if idx < len(lines) and output and output[-1].strip():
+                output.append("")
+            continue
+        output.append(line)
+        idx += 1
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip()
+
+
 def ensure_cn_pipeline_language(report: str, packet: dict[str, Any]) -> str:
     text = strip_managed_report_sections(report, prefixes=("## A股科创板候选管线",))
+    text = strip_star_only_tables(text)
     return repair_star_pipeline_language(text, add_replacement=False).strip()
 
 
@@ -1837,6 +1859,9 @@ def public_context_failures(text: str) -> list[str]:
         line = raw.strip()
         if raw.startswith("+"):
             failures.append("public report contains diff artifact line")
+            break
+        if line.startswith("|") and contains_marker(line, "科创板候选"):
+            failures.append("STAR/科创板 must be integrated into the A-share pipeline narrative, not a standalone table")
             break
         if contains_marker(line, "科创") and contains_marker(line, "温度计"):
             failures.append("STAR/科创板 must be an A-share candidate pipeline, not only a thermometer")

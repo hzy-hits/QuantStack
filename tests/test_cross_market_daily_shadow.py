@@ -260,6 +260,25 @@ def test_public_delivery_accepts_required_global_context_markers() -> None:
     assert failures == []
 
 
+def test_public_delivery_rejects_standalone_star_candidate_table() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场晚报\n\n"
+            "美股期货里标普期货(2026-06-29)和纳指期货(2026-06-29)给出下一轮风险线。"
+            "黄金、WTI原油同时作为避险和能源温度。"
+            "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
+            "A股管线里688233.SH神工股份仍是观察候选。"
+            "\n\n| 科创板候选 | 状态 |\n|---|---|\n| 688233.SH | 观察 |"
+        ),
+        "pm",
+        public_delivery=True,
+    )
+
+    assert any("standalone table" in item for item in failures)
+
+
 def test_public_delivery_rejects_india_index_and_undated_index_lines() -> None:
     module = load_module()
 
@@ -519,6 +538,9 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
         "| 资产/指数 | 返回日期 | 读数 |\n"
         "|---|---:|---:|\n"
         "| VIX波动率 | 2026-06-26 | 18.41 |\n\n"
+        "| 科创板候选 | 状态 |\n"
+        "|---|---|\n"
+        "| 688233.SH | 观察 |\n\n"
         "科创板只做温度计，不进入A股候选管线。"
     )
 
@@ -540,6 +562,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert "688233.SH" in report
     assert "## 附表：其他跨市场数据" in report
     assert "资产/指数" not in report
+    assert "| 科创板候选 |" not in report
     assert "科创板只做温度计" not in report
     assert report.index("## 宏观数据温度计") < report.index("## 宏观事件 Headlines")
     assert report.rfind("## 附表：其他跨市场数据") > report.index("688233.SH")
