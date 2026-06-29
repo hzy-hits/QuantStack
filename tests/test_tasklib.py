@@ -18,11 +18,25 @@ class TasklibTests(unittest.TestCase):
         postmarket = materialize_task("us.postmarket", "2026-06-26")
         premarket = materialize_task("us.premarket", "2026-06-26")
 
-        self.assertEqual(postmarket["command"], ["./scripts/run_full.sh", "--prod", "2026-06-26"])
+        self.assertEqual(
+            postmarket["command"],
+            ["./scripts/run_full.sh", "--prod", "--delivery-dry-run", "2026-06-26"],
+        )
         self.assertEqual(
             premarket["command"],
-            ["./scripts/run_full.sh", "--prod", "--premarket", "2026-06-26"],
+            ["./scripts/run_full.sh", "--prod", "--delivery-dry-run", "--premarket", "2026-06-26"],
         )
+        self.assertFalse(postmarket["sends_email"])
+        self.assertFalse(premarket["sends_email"])
+
+    def test_legacy_cn_daily_tasks_do_not_send_email_by_default(self) -> None:
+        morning = materialize_task("cn.morning", "2026-06-26")
+        evening = materialize_task("cn.evening", "2026-06-26")
+
+        self.assertNotIn("--send-reports", morning["command"])
+        self.assertNotIn("--send-reports", evening["command"])
+        self.assertFalse(morning["sends_email"])
+        self.assertFalse(evening["sends_email"])
 
     def test_cross_market_tasks_use_hermes_with_fallback(self) -> None:
         morning = materialize_task("daily.cross_market_am", "2026-06-26")

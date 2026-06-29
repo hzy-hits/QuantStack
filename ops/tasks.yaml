@@ -9,12 +9,12 @@ tasks:
     group: us
     schedule: "0 20 * * 1-5"
     cwd: quant-research-v1
-    command: ["./scripts/run_full.sh", "--prod", "--premarket", "{ny_date}"]
+    command: ["./scripts/run_full.sh", "--prod", "--delivery-dry-run", "--premarket", "{ny_date}"]
     log: ops/logs/us.premarket.log
     legacy_log: quant-research-v1/logs/cron_premarket.log
     lock: ops/state/us.premarket.lock
     timeout_minutes: 240
-    sends_email: true
+    sends_email: false
     market: us
     session: premarket
     owner: us_pipeline
@@ -26,12 +26,12 @@ tasks:
     group: us
     schedule: "0 5 * * 2-6"
     cwd: quant-research-v1
-    command: ["./scripts/run_full.sh", "--prod", "{ny_date}"]
+    command: ["./scripts/run_full.sh", "--prod", "--delivery-dry-run", "{ny_date}"]
     log: ops/logs/us.postmarket.log
     legacy_log: quant-research-v1/logs/cron_postmarket.log
     lock: ops/state/us.postmarket.lock
     timeout_minutes: 240
-    sends_email: true
+    sends_email: false
     market: us
     session: postmarket
     owner: us_pipeline
@@ -93,7 +93,6 @@ tasks:
       - morning
       - --run-producers
       - --with-narrative
-      - --send-reports
       - --delivery-mode
       - prod
       - --stack-root
@@ -102,7 +101,7 @@ tasks:
     legacy_log: quant-research-cn/reports/logs/cron_morning.log
     lock: ops/state/cn.morning.lock
     timeout_minutes: 240
-    sends_email: true
+    sends_email: false
     market: cn
     session: morning
     owner: cn_pipeline
@@ -124,7 +123,6 @@ tasks:
       - evening
       - --run-producers
       - --with-narrative
-      - --send-reports
       - --delivery-mode
       - prod
       - --stack-root
@@ -133,7 +131,7 @@ tasks:
     legacy_log: quant-research-cn/reports/logs/cron_evening.log
     lock: ops/state/cn.evening.lock
     timeout_minutes: 240
-    sends_email: true
+    sends_email: false
     market: cn
     session: evening
     owner: cn_pipeline

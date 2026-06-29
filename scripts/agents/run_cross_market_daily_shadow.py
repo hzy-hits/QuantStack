@@ -74,6 +74,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hermes-provider", default=os.environ.get("HERMES_PROVIDER", ""))
     parser.add_argument("--hermes-max-turns", type=int, default=int(os.environ.get("HERMES_MAX_TURNS", "16")))
     parser.add_argument(
+        "--review-backend",
+        choices=["off", "hermes"],
+        default=os.environ.get("CROSS_MARKET_REVIEW_BACKEND", "hermes"),
+        help="Optional second-pass editor/reviewer. Required for emailed Hermes reports.",
+    )
+    parser.add_argument(
         "--fallback-backend",
         choices=["none", "auto", "off"],
         default=os.environ.get("CROSS_MARKET_AGENT_FALLBACK", "auto"),
@@ -630,6 +636,40 @@ packet:
 """.strip()
 
 
+def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
+    if packet["slot"] == "am":
+        title_rule = "# 跨市场早报"
+        slot_rule = "美股盘后事实约束 A股盘前计划。"
+    else:
+        title_rule = "# 跨市场晚报"
+        slot_rule = "A股盘后只复盘上一轮美股到中国资产的传导,不指导美股盘前。"
+    packet_json = json.dumps(packet, ensure_ascii=False, indent=2)
+    return f"""
+你是 quant-stack 跨市场日报的二审编辑。你不是继续分析,而是把下面 draft 改成可直接发送的一封中文日报。
+
+二审目标:
+- 输出一封合并日报,不是美股一封、A股一封,也不是多封邮件。
+- 第一行必须以 `{title_rule}` 开头。
+- {slot_rule}
+- 美股是主导变量,A股按本域门禁执行;不得把 A股反馈写成会指导美股。
+- 保留 draft/packet 里已有的 ticker、日期、R、价格线和结论;不得新增事实、价格、新闻或仓位。
+- 删除工具日志味和工程词:不要出现 MCP、packet、validator、shadow_only、production_delivery、cron、Resend、JSON、script、tool、血缘、本稿状态。
+- 语言要像给投资人看的盘前/盘后执行日记:先讲今天市场故事,再讲跨市场传导,最后讲执行线和失效条件。
+- 少用表格;只有交易线、仓位线或风险线必须对齐时才用。
+- 不要解释你做了什么,不要输出审稿意见,只输出最终 markdown。
+
+参考事实 packet:
+```json
+{packet_json}
+```
+
+待二审 draft:
+```markdown
+{draft}
+```
+""".strip()
+
+
 def call_hermes_agent(
     packet: dict[str, Any],
     *,
@@ -683,6 +723,59 @@ def call_hermes_agent(
     return text
 
 
+def call_hermes_reviewer(
+    packet: dict[str, Any],
+    draft: str,
+    *,
+    timeout: int,
+    hermes_bin: str,
+    model: str = "",
+    provider: str = "",
+    max_turns: int = 8,
+) -> str:
+    prompt = build_hermes_review_prompt(packet, draft)
+    cmd = [
+        hermes_bin,
+        "chat",
+        "-Q",
+        "-q",
+        prompt,
+        "--skills",
+        "quant-stack-cross-market-daily",
+        "--accept-hooks",
+        "--max-turns",
+        str(max_turns),
+        "--source",
+        "quant-stack-reviewer",
+    ]
+    if model:
+        cmd.extend(["--model", model])
+    if provider:
+        cmd.extend(["--provider", provider])
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"Hermes cross-market reviewer timed out after {timeout}s") from exc
+    except OSError as exc:
+        raise RuntimeError(f"Hermes cross-market reviewer launch failed: {exc}") from exc
+    if result.returncode != 0:
+        tail = ((result.stderr or "") + "\n" + (result.stdout or ""))[-1600:]
+        raise RuntimeError(f"Hermes cross-market reviewer failed with exit={result.returncode}: {tail}")
+    text = (result.stdout or "").strip()
+    if not text:
+        raise RuntimeError("Hermes cross-market reviewer returned empty output")
+    packet["_reviewer_backend"] = "hermes"
+    packet["_reviewer_model"] = model or os.environ.get("HERMES_INFERENCE_MODEL", "")
+    return text
+
+
 def call_agent(packet: dict[str, Any], timeout: int) -> str:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from codex_backend import call_llm, runtime_backend_summary, runtime_model_summary
@@ -715,7 +808,7 @@ def fallback_report(packet: dict[str, Any], backend: str, timeout: int, reason: 
     raise reason
 
 
-def validate_shadow_report(text: str, slot: str) -> list[str]:
+def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = False) -> list[str]:
     failures: list[str] = []
     if slot == "am":
         required = ["# 跨市场早报", "美股", "A股"]
@@ -737,6 +830,24 @@ def validate_shadow_report(text: str, slot: str) -> list[str]:
     for token in forbidden:
         if token in text:
             failures.append(f"forbidden production marker: {token}")
+    if public_delivery:
+        public_forbidden = [
+            "MCP",
+            "packet",
+            "validator",
+            "shadow_only",
+            "production_delivery",
+            "cron",
+            "Resend",
+            "JSON",
+            "script",
+            "tool",
+            "血缘",
+            "本稿状态",
+        ]
+        for token in public_forbidden:
+            if token in text:
+                failures.append(f"forbidden public-report marker: {token}")
     return failures
 
 
@@ -767,6 +878,16 @@ def write_outputs(output_dir: Path, packet: dict[str, Any], report: str, *, agen
             "result": {"report": str(report_path.relative_to(ROOT))},
         },
     ]
+    if packet.get("_reviewer_backend"):
+        trajectory.append(
+            {
+                "ts": now,
+                "step": "editor_review",
+                "tool": packet["_reviewer_backend"],
+                "args": {"slot": packet["slot"]},
+                "result": {"report": str(report_path.relative_to(ROOT))},
+            }
+        )
     trajectory_path.write_text(
         "\n".join(json.dumps(row, ensure_ascii=False) for row in trajectory) + "\n",
         encoding="utf-8",
@@ -779,6 +900,8 @@ def write_outputs(output_dir: Path, packet: dict[str, Any], report: str, *, agen
         "us_date": packet["us"]["report_date"],
         "agent_backend": packet.get("_agent_backend") or agent_backend,
         "agent_model": packet.get("_agent_model") or "",
+        "reviewer_backend": packet.get("_reviewer_backend") or "",
+        "reviewer_model": packet.get("_reviewer_model") or "",
         "shadow_only": True,
         "generated_at": now,
         "script": Path(__file__).name,
@@ -883,7 +1006,24 @@ def main() -> int:
     else:
         report = call_agent(packet, args.timeout)
         backend_name = packet.get("_agent_backend") or "agent"
-    failures = validate_shadow_report(report, args.slot)
+
+    if args.review_backend == "hermes" and args.agent_backend == "hermes":
+        try:
+            report = call_hermes_reviewer(
+                packet,
+                report,
+                timeout=args.timeout,
+                hermes_bin=args.hermes_bin,
+                model=args.hermes_model,
+                provider=args.hermes_provider,
+                max_turns=max(4, min(args.hermes_max_turns, 8)),
+            )
+        except Exception as exc:
+            if args.send_email:
+                raise RuntimeError(f"Hermes reviewer failed; refusing to email unreviewed report: {exc}") from exc
+            print(f"warn: Hermes reviewer failed; keeping draft: {exc}", file=sys.stderr)
+
+    failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email)
     if failures:
         raise SystemExit("cross-market shadow validation failed:\n- " + "\n- ".join(failures))
     path = write_outputs(output_dir, packet, report, agent_backend=backend_name)

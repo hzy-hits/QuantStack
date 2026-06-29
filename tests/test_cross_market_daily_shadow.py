@@ -123,6 +123,14 @@ def test_validator_rejects_delivery_failure_language() -> None:
     assert any("validator | 未通过" in item for item in failures)
 
 
+def test_public_delivery_rejects_tool_log_language() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report("# 跨市场晚报\n\nA股\n美股\nMCP snapshot\n", "pm", public_delivery=True)
+
+    assert any("MCP" in item for item in failures)
+
+
 def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
@@ -155,6 +163,20 @@ def test_hermes_prompt_retires_legacy_narrator_templates(tmp_path: Path) -> None
     assert "投递失败" not in prompt
 
 
+def test_hermes_reviewer_prompt_requires_one_merged_public_report(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    packet = module.build_packet("am", cn, us)
+
+    prompt = module.build_hermes_review_prompt(packet, "# 跨市场早报\n\nMCP snapshot")
+
+    assert "二审编辑" in prompt
+    assert "输出一封合并日报" in prompt
+    assert "不要出现 MCP" in prompt
+    assert "只输出最终 markdown" in prompt
+
+
 def test_call_hermes_agent_uses_hermes_skill(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
@@ -182,6 +204,31 @@ def test_call_hermes_agent_uses_hermes_skill(tmp_path: Path) -> None:
     assert "quant-stack-cron" in cmd
     assert report.startswith("# 跨市场早报")
     assert packet["_agent_backend"] == "hermes"
+
+
+def test_call_hermes_reviewer_uses_review_source(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    packet = module.build_packet("am", cn, us)
+
+    completed = mock.Mock(returncode=0, stdout="# 跨市场早报 — 2026-06-29\n\n编辑后的一封合并日报。", stderr="")
+    with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
+        report = module.call_hermes_reviewer(
+            packet,
+            "# 跨市场早报\n\nMCP snapshot",
+            timeout=30,
+            hermes_bin="/home/ubuntu/.local/bin/hermes",
+            model="",
+            provider="",
+            max_turns=6,
+        )
+
+    cmd = run.call_args.args[0]
+    assert cmd[0] == "/home/ubuntu/.local/bin/hermes"
+    assert "quant-stack-reviewer" in cmd
+    assert report.startswith("# 跨市场早报")
+    assert packet["_reviewer_backend"] == "hermes"
 
 
 def test_fallback_report_uses_legacy_backend_only_after_primary_failure(tmp_path: Path) -> None:
