@@ -225,7 +225,10 @@ def test_normalize_public_report_trims_reviewer_preamble_and_translates_jargon()
     module = load_module()
 
     text = module.normalize_public_report_text(
-        "审稿意见: draft 需要修改。\n# 跨市场早报\n\nAI Infra universe 使用 beta hedge 和 source evidence。",
+        (
+            "审稿意见: draft 需要修改。\n# 跨市场早报\n\n"
+            "packet 里的 AI Infra universe 使用 beta hedge、source evidence、JSON 和 MCP。"
+        ),
         "am",
     )
 
@@ -235,6 +238,9 @@ def test_normalize_public_report_trims_reviewer_preamble_and_translates_jargon()
     assert "AI Infra" not in text
     assert "beta hedge" not in text
     assert "source evidence" not in text
+    assert "packet" not in text
+    assert "JSON" not in text
+    assert "MCP" not in text
 
 
 def test_compact_market_snapshot_rows_labels_futures_and_country_indices() -> None:

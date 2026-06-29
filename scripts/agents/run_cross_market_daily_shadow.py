@@ -1018,6 +1018,15 @@ def normalize_public_report_text(text: str, slot: str) -> str:
             text = "\n".join(lines[idx:]).strip()
             break
     replacements = {
+        "packet": "事实清单",
+        "MCP": "数据接口",
+        "validator": "校验",
+        "shadow_only": "",
+        "production_delivery": "",
+        "Resend": "邮件服务",
+        "JSON": "结构化数据",
+        "script": "流程",
+        "tool": "数据接口",
         "AI Infra universe": "AI基础设施观察池",
         "AI Infra": "AI基础设施",
         "production执行层": "正式执行清单",
