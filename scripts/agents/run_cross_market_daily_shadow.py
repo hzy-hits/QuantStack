@@ -464,6 +464,124 @@ def fmt_r(value: Any) -> str:
         return "-"
 
 
+def compact_float(value: Any, digits: int = 4) -> float | None:
+    try:
+        return round(float(value), digits)
+    except (TypeError, ValueError):
+        return None
+
+
+def compact_numeric_range(value: Any) -> list[float] | None:
+    if not isinstance(value, list) or len(value) < 2:
+        return None
+    low = compact_float(value[0], 2)
+    high = compact_float(value[1], 2)
+    if low is None or high is None:
+        return None
+    return [low, high]
+
+
+def compact_gamma_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": row.get("symbol"),
+        "state": row.get("state"),
+        "curve_state": row.get("gex_curve_state"),
+        "flip_regime": row.get("gex_flip_regime"),
+        "spot": compact_float(row.get("spot"), 2),
+        "spot_date": row.get("spot_price_date"),
+        "zero_gamma_band": compact_numeric_range(row.get("zero_gamma_band")),
+        "positive_pin_zone": compact_numeric_range(row.get("positive_gex_pin_zone")),
+        "negative_accel_zone": compact_numeric_range(row.get("negative_gex_accel_zone")),
+        "call_wall": compact_float(row.get("call_wall_strike"), 2),
+        "put_wall": compact_float(row.get("put_wall_strike"), 2),
+        "dealer_pressure_proxy": compact_float(row.get("dealer_pressure_proxy"), 4),
+        "management_signal": row.get("management_signal"),
+    }
+
+
+def compact_option_verdict(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "symbol": symbol,
+        "effective_date": row.get("effective_date") or row.get("requested_date"),
+        "verdict": row.get("verdict"),
+        "iv_ann": compact_float(row.get("iv_ann"), 4),
+        "iv_hv": compact_float(row.get("iv_hv"), 4),
+        "pc_ratio_z": compact_float(row.get("pc_ratio_z"), 4),
+        "skew_z": compact_float(row.get("skew_z"), 4),
+    }
+
+
+def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, Any]], *, limit: int = 10) -> dict[str, Any]:
+    action_symbols = [
+        str(row.get("symbol") or "").upper()
+        for row in actions
+        if row.get("symbol")
+    ]
+    requested_symbols = []
+    for symbol in ["SPY", "QQQ", "SMH", *action_symbols]:
+        if symbol and symbol not in requested_symbols:
+            requested_symbols.append(symbol)
+
+    gamma = payload.get("gamma_spring") if isinstance(payload.get("gamma_spring"), dict) else {}
+    gamma_rows = gamma.get("rows") if isinstance(gamma.get("rows"), list) else []
+    gamma_by_symbol = {
+        str(row.get("symbol") or "").upper(): row
+        for row in gamma_rows
+        if isinstance(row, dict) and row.get("symbol")
+    }
+    selected_gamma = [
+        compact_gamma_row(gamma_by_symbol[symbol])
+        for symbol in requested_symbols
+        if symbol in gamma_by_symbol
+    ][:limit]
+
+    ledger = payload.get("option_shadow_ledger") if isinstance(payload.get("option_shadow_ledger"), dict) else {}
+    ledger_summary = ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {}
+    all_real = (
+        ledger_summary.get("all_options_alpha_real_bid_ask")
+        if isinstance(ledger_summary.get("all_options_alpha_real_bid_ask"), dict)
+        else {}
+    )
+    overall_long = ledger_summary.get("overall_long") if isinstance(ledger_summary.get("overall_long"), dict) else {}
+
+    anomaly_rows = payload.get("options_anomaly_rows") if isinstance(payload.get("options_anomaly_rows"), list) else []
+    tenor_signals = payload.get("options_tenor_signals") if isinstance(payload.get("options_tenor_signals"), list) else []
+
+    verdicts = payload.get("options_verdicts") if isinstance(payload.get("options_verdicts"), dict) else {}
+    selected_verdicts = []
+    for symbol in requested_symbols:
+        row = verdicts.get(symbol)
+        if isinstance(row, dict):
+            selected_verdicts.append(compact_option_verdict(symbol, row))
+        if len(selected_verdicts) >= limit:
+            break
+
+    return {
+        "contract": "US options and Gamma data are stock risk/entry context, not option trade instructions.",
+        "gamma_effective_date": gamma.get("effective_date") or gamma.get("as_of"),
+        "gamma_sign_convention": gamma.get("sign_convention"),
+        "gamma_rows": selected_gamma,
+        "option_shadow_ledger": {
+            "status": ledger.get("status"),
+            "rows_with_legs": ledger.get("rows_with_legs"),
+            "all_real_bid_ask_resolved_count": ledger.get("all_real_bid_ask_resolved_count"),
+            "all_real_bid_ask_unresolved_count": ledger.get("all_real_bid_ask_unresolved_count"),
+            "overall_long_lcb80_pct": compact_float(overall_long.get("lcb80_pct"), 2),
+            "all_options_alpha_lcb80_pct": compact_float(all_real.get("lcb80_pct"), 2),
+            "all_options_alpha_win_rate": compact_float(all_real.get("win_rate"), 4),
+        },
+        "options_anomaly_radar": {
+            "row_count": len(anomaly_rows),
+            "status": "no_trigger" if not anomaly_rows else "triggered",
+        },
+        "options_tenor_radar": {
+            "signal_count": len(tenor_signals),
+            "status": "no_signal" if not tenor_signals else "triggered",
+        },
+        "options_verdicts": selected_verdicts,
+    }
+
+
 def summarize_artifact(artifact: MarketArtifact) -> dict[str, Any]:
     payload = artifact.payload
     summary = get_path(payload, "production_decision_summary", "summary", default={})
@@ -489,6 +607,8 @@ def summarize_artifact(artifact: MarketArtifact) -> dict[str, Any]:
     }
     if market_key == "cn":
         out["pipeline_candidates"] = select_cn_pipeline_candidates(payload)
+    if market_key == "us":
+        out["option_context"] = compact_us_option_context(payload, actions)
     return out
 
 
@@ -520,6 +640,70 @@ def action_table(actions: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def option_context_markdown(context: dict[str, Any]) -> str:
+    if not isinstance(context, dict) or not context:
+        return "-"
+
+    ledger = context.get("option_shadow_ledger") if isinstance(context.get("option_shadow_ledger"), dict) else {}
+    anomaly = context.get("options_anomaly_radar") if isinstance(context.get("options_anomaly_radar"), dict) else {}
+    tenor = context.get("options_tenor_radar") if isinstance(context.get("options_tenor_radar"), dict) else {}
+    lines = [
+        f"- Gamma 数据日: {fmt(context.get('gamma_effective_date'))}; 期权/Gamma 只作股票仓位、入场和风险节奏上下文。",
+        (
+            "- 期权验证: "
+            f"legs={fmt(ledger.get('rows_with_legs'))}, "
+            f"resolved={fmt(ledger.get('all_real_bid_ask_resolved_count'))}, "
+            f"unresolved={fmt(ledger.get('all_real_bid_ask_unresolved_count'))}, "
+            f"LCB80={fmt(ledger.get('all_options_alpha_lcb80_pct'))}%。"
+        ),
+        (
+            "- 异常/tenor: "
+            f"远 OTM 异常={fmt(anomaly.get('row_count'))}; "
+            f"跨 tenor 信号={fmt(tenor.get('signal_count'))}。"
+        ),
+    ]
+    gamma_rows = context.get("gamma_rows") if isinstance(context.get("gamma_rows"), list) else []
+    if gamma_rows:
+        lines.extend([
+            "",
+            "| Symbol | Gamma state | Curve | Spot | Zero gamma | Walls | Mgmt |",
+            "|---|---|---|---:|---|---|---|",
+        ])
+        for row in gamma_rows[:8]:
+            zero = row.get("zero_gamma_band")
+            zero_text = "-".join(str(item) for item in zero) if isinstance(zero, list) else "-"
+            walls = f"{fmt(row.get('call_wall'))}/{fmt(row.get('put_wall'))}"
+            lines.append(
+                "| {symbol} | {state} | {curve} | {spot} | {zero} | {walls} | {signal} |".format(
+                    symbol=fmt(row.get("symbol")),
+                    state=fmt(row.get("state")),
+                    curve=fmt(row.get("curve_state")),
+                    spot=fmt(row.get("spot")),
+                    zero=zero_text,
+                    walls=walls,
+                    signal=fmt(row.get("management_signal")),
+                )
+            )
+    verdicts = context.get("options_verdicts") if isinstance(context.get("options_verdicts"), list) else []
+    if verdicts:
+        lines.extend([
+            "",
+            "| Symbol | 期权定位 | 日期 | IV/HV | Skew z |",
+            "|---|---|---|---:|---:|",
+        ])
+        for row in verdicts[:8]:
+            lines.append(
+                "| {symbol} | {verdict} | {date} | {iv_hv} | {skew} |".format(
+                    symbol=fmt(row.get("symbol")),
+                    verdict=fmt(row.get("verdict")),
+                    date=fmt(row.get("effective_date")),
+                    iv_hv=fmt(row.get("iv_hv")),
+                    skew=fmt(row.get("skew_z")),
+                )
+            )
+    return "\n".join(lines)
+
+
 def build_tool_manifest(slot: str, cn_summary: dict[str, Any], us_summary: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         {
@@ -527,8 +711,8 @@ def build_tool_manifest(slot: str, cn_summary: dict[str, Any], us_summary: dict[
             "kind": "compute_brick",
             "market": "US",
             "source": us_summary.get("source_payload"),
-            "returns": ["gross_r", "actions", "risk_regime", "data_dates"],
-            "agent_use": "Find the US drivers that can constrain or relax the next CN session.",
+            "returns": ["gross_r", "actions", "risk_regime", "data_dates", "option_context"],
+            "agent_use": "Find the US drivers, including options/Gamma context, that can constrain or relax the next CN session.",
         },
         {
             "name": "read_cn_main_strategy_v2_payload",
@@ -716,6 +900,7 @@ def build_coverage_checklist(slot: str) -> list[str]:
         return [
             "Open with the US/global market driver that most changes CN risk for the next open.",
             "Include the managed macro thermometer: top only US broad indices, CN broad indices, KOSPI, Nikkei 225; put all other snapshots in the tail table.",
+            "Use packet.us.option_context to explain US options/Gamma pressure, signal absence, and stock risk limits.",
             "Explain the US -> CN transmission path and where it can fail.",
             "Map AI/semiconductor signals into A-share execution, including 科创板/STAR candidates when verifiable.",
             "Translate the driver into CN execution limits, sector priority, and watch items.",
@@ -725,6 +910,7 @@ def build_coverage_checklist(slot: str) -> list[str]:
     return [
         "Review CN post-market action as feedback on prior US-to-CN transmission.",
         "Summarize global and US pre-market context from US/global facts, not from CN direction; use the managed top thermometer plus tail appendix shape.",
+        "Use packet.us.option_context to explain US options/Gamma pressure, signal absence, and stock risk limits.",
         "Check whether 科创板/STAR semiconductor moves confirm or reject the prior US-to-CN read-through.",
         "State explicitly that CN feedback cannot raise or cut US positioning.",
         "Identify what the next US session can change for the following CN session.",
@@ -1341,6 +1527,9 @@ def deterministic_report(packet: dict[str, Any]) -> str:
 ## 美股交易事实
 {action_table(us.get('actions') or [])}
 
+## 美股期权/Gamma 上下文
+{option_context_markdown(us.get('option_context') or {})}
+
 ## A股交易事实
 {action_table(cn.get('actions') or [])}
 
@@ -1405,6 +1594,8 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 - 先读下面 packet。packet 是 quant-stack 已冻结的事实砖和工具清单。
 - 如果 packet.finance_search_prefetch.ok=true,必须优先使用其中的 market_rows 和 news_items 写宏观数据温度计和宏观事件 headlines;
   这些是脚本侧已经从 finance-search 取回的证据,不要再写成缺失或工具失败。
+- 必须读取 packet.us.option_context。美股段要覆盖期权/Gamma 对股票仓位、入场节奏、止损收紧和风险预算的影响;
+  如果 options_anomaly_radar 或 options_tenor_radar 是 no_trigger/no_signal,要自然写成“没有新增异常/tenor确认”,不要写成数据没跑。
 - 可以启发式使用 finance-search MCP 工具,尤其是:
   quant_stack_daily_snapshot, quant_stack_spine_triage, quant_stack_task_status,
   quant_stack_validate_main_strategy_v2, quant_stack_ranker, quant_stack_symbol_context,
@@ -1465,6 +1656,8 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 - 美股是主导变量,A股按本域门禁执行;不得把 A股反馈写成会指导美股。
 - 保留 draft/packet 里已有的 ticker、日期、R、价格线和结论;不得新增事实、价格、新闻或仓位。
 - 把全球新闻/宏观/指数/期货/油金和 A股半导体/科创板线索整合成同一个故事;不要拆成美股报告+A股报告。
+- 美股段必须融合 packet.us.option_context,包括 Gamma/期权定位/异常与 tenor 是否触发;它们是股票仓位和风险节奏证据,
+  不是期权交易指令。如果 anomaly/tenor 为 0,写成没有新增确认,不要省略成“美股没发完”。
 - 宏观数据温度计顶部只能保留美股大盘、A股大盘、KOSPI、日经225;美股期货、油、金、
   欧洲/其他亚洲、VIX、汇率、利率和科创50等只能放报告尾部附表。如果 draft 已遗漏,
   只能从 packet/工具返回中补入,不能虚构数字。
@@ -1852,6 +2045,9 @@ def public_context_failures(text: str) -> list[str]:
     hit_count = sum(1 for marker in global_index_markers if contains_marker(text, marker))
     if hit_count < 3:
         failures.append("missing public global-market breadth: non-US country/region indices")
+
+    if not any(contains_marker(text, marker) for marker in ("期权", "Gamma", "gamma")):
+        failures.append("missing public US options/Gamma context")
 
     if not re.search(r"(?<!\d)688\d{3}\.SH(?![A-Z0-9])", text):
         failures.append("missing concrete public CN STAR/科创板 ticker: 688xxx.SH")

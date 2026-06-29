@@ -103,6 +103,69 @@ def test_cn_summary_mixes_star_candidates_into_cn_pipeline(tmp_path: Path) -> No
     assert star["pipeline_stage"] == "active_watch"
 
 
+def test_us_summary_includes_compact_option_context(tmp_path: Path) -> None:
+    module = load_module()
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    us.payload["production_decision_summary"]["actionable"].append(
+        {"market": "US", "symbol": "NVDA", "size_r": 0.05, "evidence_state": "期权确认"}
+    )
+    us.payload["gamma_spring"] = {
+        "effective_date": "2026-06-26",
+        "sign_convention": "calls_positive_puts_negative",
+        "rows": [
+            {
+                "symbol": "SPY",
+                "state": "MIXED_GAMMA_FIELD",
+                "gex_curve_state": "NEGATIVE_GEX_ACCEL_ZONE",
+                "gex_flip_regime": "negative_acceleration_risk_off",
+                "spot": 728.99,
+                "spot_price_date": "2026-06-26",
+                "zero_gamma_band": [742.0432, 749.3331],
+                "positive_gex_pin_zone": [750.8597, 874.788],
+                "negative_gex_accel_zone": [583.192, 743.5698],
+                "call_wall_strike": 733,
+                "put_wall_strike": 732,
+                "dealer_pressure_proxy": 0.2077,
+                "management_signal": "reduce_or_tighten_stop",
+            },
+            {"symbol": "NVDA", "state": "ZERO_GAMMA_TRANSITION", "spot": 192.53},
+        ],
+    }
+    us.payload["option_shadow_ledger"] = {
+        "status": "ok",
+        "rows_with_legs": 1676,
+        "all_real_bid_ask_resolved_count": 1676,
+        "all_real_bid_ask_unresolved_count": 429,
+        "summary": {
+            "overall_long": {"lcb80_pct": -44.78},
+            "all_options_alpha_real_bid_ask": {"lcb80_pct": -72.75, "win_rate": 0.1282},
+        },
+    }
+    us.payload["options_anomaly_rows"] = []
+    us.payload["options_tenor_signals"] = []
+    us.payload["options_verdicts"] = {
+        "NVDA": {
+            "effective_date": "2026-06-26",
+            "verdict": "定位中性",
+            "iv_ann": 0.2798,
+            "iv_hv": 0.594,
+            "pc_ratio_z": 0.1245,
+            "skew_z": -0.1612,
+        }
+    }
+
+    summary = module.summarize_artifact(us)
+    option_context = summary["option_context"]
+
+    assert option_context["gamma_effective_date"] == "2026-06-26"
+    assert option_context["gamma_rows"][0]["symbol"] == "SPY"
+    assert option_context["gamma_rows"][0]["zero_gamma_band"] == [742.04, 749.33]
+    assert option_context["option_shadow_ledger"]["all_options_alpha_lcb80_pct"] == -72.75
+    assert option_context["options_anomaly_radar"]["status"] == "no_trigger"
+    assert option_context["options_tenor_radar"]["status"] == "no_signal"
+    assert option_context["options_verdicts"][0]["symbol"] == "NVDA"
+
+
 def test_am_uses_previous_cn_context_when_target_day_payload_is_missing(tmp_path: Path) -> None:
     module = load_module()
     artifact(module, "cn", "2026-06-26", tmp_path)
@@ -251,6 +314,7 @@ def test_public_delivery_accepts_required_global_context_markers() -> None:
             "美股期货里标普期货(2026-06-29)和纳指期货(2026-06-29)给出下一轮风险线。"
             "黄金、WTI原油同时作为避险和能源温度。"
             "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
+            "期权Gamma显示指数仓位仍需收紧止损。"
             "科创50(2026-06-29)和688233.SH神工股份覆盖A股半导体候选管线。A股和美股合并复盘。"
         ),
         "pm",
@@ -258,6 +322,24 @@ def test_public_delivery_accepts_required_global_context_markers() -> None:
     )
 
     assert failures == []
+
+
+def test_public_delivery_rejects_missing_us_options_context() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场晚报\n\n"
+            "美股期货里标普期货(2026-06-29)和纳指期货(2026-06-29)给出下一轮风险线。"
+            "黄金、WTI原油同时作为避险和能源温度。"
+            "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
+            "科创50(2026-06-29)和688233.SH神工股份覆盖A股半导体候选管线。"
+        ),
+        "pm",
+        public_delivery=True,
+    )
+
+    assert any("options/Gamma" in item for item in failures)
 
 
 def test_public_delivery_rejects_standalone_star_candidate_table() -> None:
@@ -308,6 +390,7 @@ def test_public_delivery_allows_single_news_context_marker_without_market_quote(
             "黄金、WTI原油同时作为避险和能源温度。"
             "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
             "新闻背景里提到纳指期货曾受利率预期影响。"
+            "期权Gamma没有新增异常信号，但仍约束美股股票仓位。"
             "科创50(2026-06-29)和688233.SH神工股份覆盖A股半导体候选管线。"
         ),
         "am",
@@ -533,6 +616,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
         "# 跨市场早报：测试\n\n"
         "美股影响A股，标普500 -0.05%，VIX收低，标普期货和纳指期货修复。"
         "德国DAX、日本日经225、KOSPI、恒生同步给出压力。"
+        "期权Gamma要求美股股票仓位收紧止损。"
         "A股看上证指数和科创50，688233.SH神工股份进入候选管线。黄金和WTI原油作为风险温度。"
         "\n\n## 全球市场温度：模型草稿\n\n"
         "| 资产/指数 | 返回日期 | 读数 |\n"
