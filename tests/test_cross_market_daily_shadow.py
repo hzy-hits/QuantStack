@@ -170,6 +170,14 @@ def test_public_delivery_rejects_tool_log_language() -> None:
     assert any("MCP" in item for item in failures)
 
 
+def test_public_delivery_rejects_diff_artifacts() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report("# 跨市场晚报\n\nA股\n美股\n+## diff block\n", "pm", public_delivery=True)
+
+    assert any("diff artifact" in item for item in failures)
+
+
 def test_public_delivery_rejects_prompt_leakage_and_missing_data_list() -> None:
     module = load_module()
 
@@ -373,6 +381,26 @@ def test_normalize_public_report_removes_reviewer_change_notes() -> None:
     assert "修正了标题" not in text
     assert "## A股执行" in text
     assert "688233.SH" in text
+
+
+def test_normalize_public_report_strips_diff_artifacts() -> None:
+    module = load_module()
+
+    text = module.normalize_public_report_text(
+        (
+            "+# 跨市场晚报\n"
+            "+\n"
+            "+## 宏观数据温度计\n"
+            "+旧表格。\n"
+            "+## 正文\n"
+            "+美股影响A股，A股不反向约束美股。"
+        ),
+        "pm",
+    )
+
+    assert text.startswith("# 跨市场晚报")
+    assert all(not line.startswith("+") for line in text.splitlines())
+    assert "旧表格" in text
 
 
 def test_normalize_public_report_repairs_plain_title() -> None:

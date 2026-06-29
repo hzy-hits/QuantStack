@@ -1586,7 +1586,24 @@ def strip_reviewer_note_blocks(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip()
 
 
+def strip_diff_artifact_markers(text: str) -> str:
+    lines = text.splitlines()
+    if sum(1 for line in lines if line.startswith("+")) < 5:
+        return text.strip()
+
+    output: list[str] = []
+    for line in lines:
+        if line == "+":
+            output.append("")
+        elif line.startswith("+") and not line.startswith("+++"):
+            output.append(line[1:])
+        else:
+            output.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip()
+
+
 def normalize_public_report_text(text: str, slot: str) -> str:
+    text = strip_diff_artifact_markers(text)
     expected_title = "# 跨市场早报" if slot == "am" else "# 跨市场晚报"
     title_token = expected_title.lstrip("# ").strip()
     lines = text.splitlines()
@@ -1883,6 +1900,9 @@ def public_context_failures(text: str) -> list[str]:
         failures.append("missing concrete public CN STAR/科创板 ticker: 688xxx.SH")
     for raw in text.splitlines():
         line = raw.strip()
+        if raw.startswith("+"):
+            failures.append("public report contains diff artifact line")
+            break
         if contains_marker(line, "科创") and contains_marker(line, "温度计"):
             failures.append("STAR/科创板 must be an A-share candidate pipeline, not only a thermometer")
             break
