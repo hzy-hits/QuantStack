@@ -379,7 +379,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     failures = module.validate_shadow_report(report, "am", public_delivery=True)
 
     assert "标普500(2026-06-26)" in report
-    assert "VIX波动率(2026-06-26)" in report
+    assert "VIX(2026-06-26)收低" in report
     assert "VIX(2026-06-26)波动率" not in report
     assert "DAX(2026-06-26)" in report
     assert "## 全球市场温度" in report
