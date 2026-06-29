@@ -235,7 +235,7 @@ tasks:
       QUANT_TEST_RECIPIENT: 13502448752hzy@gmail.com
       RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
     command:
-      - python3
+      - quant-research-v1/.venv/bin/python
       - scripts/agents/run_cross_market_daily_shadow.py
       - --slot
       - am
@@ -270,7 +270,7 @@ tasks:
       QUANT_TEST_RECIPIENT: 13502448752hzy@gmail.com
       RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
     command:
-      - python3
+      - quant-research-v1/.venv/bin/python
       - scripts/agents/run_cross_market_daily_shadow.py
       - --slot
       - pm

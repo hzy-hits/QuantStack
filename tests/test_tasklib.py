@@ -30,6 +30,8 @@ class TasklibTests(unittest.TestCase):
 
         self.assertEqual(morning["schedule"], "30 7 * * 1-6")
         self.assertEqual(evening["schedule"], "30 18 * * 1-5")
+        self.assertEqual(morning["command"][0], "quant-research-v1/.venv/bin/python")
+        self.assertEqual(evening["command"][0], "quant-research-v1/.venv/bin/python")
         self.assertIn("--agent-backend", morning["command"])
         self.assertIn("hermes", morning["command"])
         self.assertIn("--fallback-backend", evening["command"])
