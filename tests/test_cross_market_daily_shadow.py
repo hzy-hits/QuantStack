@@ -163,6 +163,18 @@ def test_public_delivery_rejects_split_single_market_reports() -> None:
     assert any("A股报告" in item for item in failures)
 
 
+def test_clean_hermes_stdout_removes_session_id_and_code_fence() -> None:
+    module = load_module()
+
+    text = module.clean_hermes_stdout(
+        "\nsession_id: 20260629_085722_8ca7b6\n```markdown\n# 跨市场早报\n\n美股影响A股。\n```\n"
+    )
+
+    assert text.startswith("# 跨市场早报")
+    assert "session_id:" not in text
+    assert "```" not in text
+
+
 def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
@@ -223,7 +235,11 @@ def test_call_hermes_agent_uses_hermes_skill(tmp_path: Path) -> None:
     us = artifact(module, "us", "2026-06-29", tmp_path)
     packet = module.build_packet("am", cn, us)
 
-    completed = mock.Mock(returncode=0, stdout="# 跨市场早报 — 2026-06-29\n\n美股影响A股。", stderr="")
+    completed = mock.Mock(
+        returncode=0,
+        stdout="session_id: 20260629_085722_8ca7b6\n# 跨市场早报 — 2026-06-29\n\n美股影响A股。",
+        stderr="",
+    )
     with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
         report = module.call_hermes_agent(
             packet,
@@ -252,7 +268,11 @@ def test_call_hermes_reviewer_uses_review_source(tmp_path: Path) -> None:
     us = artifact(module, "us", "2026-06-29", tmp_path)
     packet = module.build_packet("am", cn, us)
 
-    completed = mock.Mock(returncode=0, stdout="# 跨市场早报 — 2026-06-29\n\n编辑后的一封合并日报。", stderr="")
+    completed = mock.Mock(
+        returncode=0,
+        stdout="session_id: 20260629_085722_8ca7b6\n# 跨市场早报 — 2026-06-29\n\n编辑后的一封合并日报。",
+        stderr="",
+    )
     with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
         report = module.call_hermes_reviewer(
             packet,

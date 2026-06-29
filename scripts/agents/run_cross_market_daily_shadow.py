@@ -824,6 +824,22 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 """.strip()
 
 
+def clean_hermes_stdout(text: str) -> str:
+    lines = [line.rstrip() for line in (text or "").splitlines()]
+    lines = [line for line in lines if not line.strip().startswith("session_id:")]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if lines and lines[0].strip().startswith("```"):
+        lines.pop(0)
+        while lines and not lines[0].strip():
+            lines.pop(0)
+        if lines and lines[-1].strip() == "```":
+            lines.pop()
+    return "\n".join(lines).strip()
+
+
 def call_hermes_agent(
     packet: dict[str, Any],
     *,
@@ -868,7 +884,7 @@ def call_hermes_agent(
     if result.returncode != 0:
         tail = ((result.stderr or "") + "\n" + (result.stdout or ""))[-1600:]
         raise RuntimeError(f"Hermes cross-market agent failed with exit={result.returncode}: {tail}")
-    text = (result.stdout or "").strip()
+    text = clean_hermes_stdout(result.stdout or "")
     if not text:
         raise RuntimeError("Hermes cross-market agent returned empty output")
     packet["_agent_backend"] = "hermes"
@@ -923,7 +939,7 @@ def call_hermes_reviewer(
     if result.returncode != 0:
         tail = ((result.stderr or "") + "\n" + (result.stdout or ""))[-1600:]
         raise RuntimeError(f"Hermes cross-market reviewer failed with exit={result.returncode}: {tail}")
-    text = (result.stdout or "").strip()
+    text = clean_hermes_stdout(result.stdout or "")
     if not text:
         raise RuntimeError("Hermes cross-market reviewer returned empty output")
     packet["_reviewer_backend"] = "hermes"
