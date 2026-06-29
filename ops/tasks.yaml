@@ -225,10 +225,15 @@ tasks:
   daily.cross_market_am:
     group: daily
     depends_on: [us.postmarket]
-    schedule: "30 7 * * 1-5"
+    schedule: "30 7 * * 1-6"
     cwd: .
     env:
       HERMES_BIN: /home/ubuntu/.local/bin/hermes
+      CROSS_MARKET_SEND_EMAIL: "1"
+      QUANT_EMAIL_PROVIDER: resend
+      QUANT_DELIVERY_MODE: test
+      QUANT_TEST_RECIPIENT: 13502448752hzy@gmail.com
+      RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
     command:
       - python3
       - scripts/agents/run_cross_market_daily_shadow.py
@@ -245,7 +250,7 @@ tasks:
     log: ops/logs/daily.cross_market_am.log
     lock: ops/state/daily.cross_market_am.lock
     timeout_minutes: 30
-    sends_email: false
+    sends_email: true
     market: all
     session: cross_market_am
     owner: hermes_daily
@@ -259,6 +264,11 @@ tasks:
     cwd: .
     env:
       HERMES_BIN: /home/ubuntu/.local/bin/hermes
+      CROSS_MARKET_SEND_EMAIL: "1"
+      QUANT_EMAIL_PROVIDER: resend
+      QUANT_DELIVERY_MODE: test
+      QUANT_TEST_RECIPIENT: 13502448752hzy@gmail.com
+      RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
     command:
       - python3
       - scripts/agents/run_cross_market_daily_shadow.py
@@ -275,7 +285,7 @@ tasks:
     log: ops/logs/daily.cross_market_pm.log
     lock: ops/state/daily.cross_market_pm.lock
     timeout_minutes: 30
-    sends_email: false
+    sends_email: true
     market: all
     session: cross_market_pm
     owner: hermes_daily

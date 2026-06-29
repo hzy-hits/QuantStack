@@ -28,7 +28,7 @@ class TasklibTests(unittest.TestCase):
         morning = materialize_task("daily.cross_market_am", "2026-06-26")
         evening = materialize_task("daily.cross_market_pm", "2026-06-26")
 
-        self.assertEqual(morning["schedule"], "30 7 * * 1-5")
+        self.assertEqual(morning["schedule"], "30 7 * * 1-6")
         self.assertEqual(evening["schedule"], "30 18 * * 1-5")
         self.assertIn("--agent-backend", morning["command"])
         self.assertIn("hermes", morning["command"])
@@ -38,6 +38,11 @@ class TasklibTests(unittest.TestCase):
         self.assertIn("research.main_strategy_v2_report", evening["depends_on"])
         self.assertEqual(morning["env"]["HERMES_BIN"], "/home/ubuntu/.local/bin/hermes")
         self.assertEqual(evening["env"]["HERMES_BIN"], "/home/ubuntu/.local/bin/hermes")
+        self.assertEqual(morning["env"]["CROSS_MARKET_SEND_EMAIL"], "1")
+        self.assertEqual(morning["env"]["QUANT_EMAIL_PROVIDER"], "resend")
+        self.assertEqual(evening["env"]["RESEND_ENV_FILE"], "/home/ubuntu/apps/multica/.env")
+        self.assertTrue(morning["sends_email"])
+        self.assertTrue(evening["sends_email"])
 
 
 if __name__ == "__main__":

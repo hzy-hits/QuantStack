@@ -37,6 +37,10 @@ def artifact(module, market: str, report_date: str, tmp_path: Path):
     }
     report_dir = tmp_path / report_date
     report_dir.mkdir(parents=True, exist_ok=True)
+    (report_dir / "main_strategy_v2_backtest.json").write_text(
+        module.json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
     md_path = report_dir / f"{market}_daily_report.md"
     md_path.write_text(f"# {market} report\n\nfixture", encoding="utf-8")
     return module.MarketArtifact(
@@ -66,6 +70,28 @@ def test_pm_packet_keeps_us_to_cn_causality(tmp_path: Path) -> None:
     assert any(tool["name"] == "select_cross_market_transmission" for tool in packet["tool_manifest"])
     assert any(tool["name"] == "finance-search.quant_stack_spine_triage" for tool in packet["tool_manifest"])
     assert packet["style_brief"]["reference_url"].startswith("https://boist.org/")
+
+
+def test_am_uses_previous_cn_context_when_target_day_payload_is_missing(tmp_path: Path) -> None:
+    module = load_module()
+    artifact(module, "cn", "2026-06-26", tmp_path)
+
+    cn, note = module.load_cn_context_artifact(tmp_path, "am", "2026-06-29")
+
+    assert cn.report_date == "2026-06-26"
+    assert note is not None
+    assert "2026-06-29" in note
+    assert "2026-06-26" in note
+
+
+def test_am_saturday_uses_friday_cn_context(tmp_path: Path) -> None:
+    module = load_module()
+    artifact(module, "cn", "2026-06-26", tmp_path)
+
+    cn, note = module.load_cn_context_artifact(tmp_path, "am", "2026-06-27")
+
+    assert cn.report_date == "2026-06-26"
+    assert note is not None
 
 
 def test_pm_report_does_not_claim_cn_guides_us(tmp_path: Path) -> None:

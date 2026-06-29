@@ -79,6 +79,24 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("CROSS_MARKET_AGENT_FALLBACK", "auto"),
         help="Fallback when --agent-backend hermes fails: auto=legacy LLM packet writer, off=deterministic.",
     )
+    parser.add_argument(
+        "--send-email",
+        action="store_true",
+        default=os.environ.get("CROSS_MARKET_SEND_EMAIL", "").lower() in {"1", "true", "yes"},
+        help="Send the generated cross-market report after writing it.",
+    )
+    parser.add_argument(
+        "--email-provider",
+        choices=["gmail", "resend"],
+        default=os.environ.get("QUANT_EMAIL_PROVIDER", "gmail"),
+    )
+    parser.add_argument(
+        "--delivery-mode",
+        choices=["test", "prod"],
+        default=os.environ.get("QUANT_DELIVERY_MODE", "test"),
+    )
+    parser.add_argument("--test-recipient", default=os.environ.get("QUANT_TEST_RECIPIENT"))
+    parser.add_argument("--delivery-dry-run", action="store_true")
     return parser.parse_args()
 
 
@@ -163,6 +181,26 @@ def load_market_artifact(report_root: Path, market: str, report_date: str) -> Ma
         markdown=markdown,
         markdown_path=markdown_path,
     )
+
+
+def artifact_ready(artifact: MarketArtifact) -> bool:
+    return bool(artifact.payload and artifact.markdown)
+
+
+def load_cn_context_artifact(report_root: Path, slot: str, target_cn_date: str) -> tuple[MarketArtifact, str | None]:
+    cn = load_market_artifact(report_root, "cn", target_cn_date)
+    if slot != "am" or artifact_ready(cn):
+        return cn, None
+
+    fallback_day = previous_session(parse_ymd(target_cn_date), "XSHG")
+    fallback = load_market_artifact(report_root, "cn", fallback_day.isoformat())
+    if artifact_ready(fallback):
+        note = (
+            f"AM target {target_cn_date} has no same-day CN payload yet; "
+            f"using previous CN session context {fallback.report_date}."
+        )
+        return fallback, note
+    return cn, None
 
 
 def relative_display(path: Path) -> str:
@@ -459,6 +497,13 @@ def build_packet(slot: str, cn: MarketArtifact, us: MarketArtifact) -> dict[str,
     }
 
 
+def annotate_target_context(packet: dict[str, Any], *, target_cn_date: str, cn_context_note: str | None) -> None:
+    packet["target_cn_date"] = target_cn_date
+    packet["cn_context_date"] = packet["cn"]["report_date"]
+    if cn_context_note:
+        packet["cn_context_note"] = cn_context_note
+
+
 def deterministic_report(packet: dict[str, Any]) -> str:
     slot = packet["slot"]
     cn = packet["cn"]
@@ -729,6 +774,7 @@ def write_outputs(output_dir: Path, packet: dict[str, Any], report: str, *, agen
     meta = {
         "slot": packet["slot"],
         "direction": packet["direction"],
+        "target_cn_date": packet.get("target_cn_date") or packet["cn"]["report_date"],
         "cn_date": packet["cn"]["report_date"],
         "us_date": packet["us"]["report_date"],
         "agent_backend": packet.get("_agent_backend") or agent_backend,
@@ -741,6 +787,56 @@ def write_outputs(output_dir: Path, packet: dict[str, Any], report: str, *, agen
     return report_path
 
 
+def split_recipients(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def email_subject(packet: dict[str, Any], delivery_mode: str) -> str:
+    slot_label = "早报" if packet["slot"] == "am" else "晚报"
+    target_date = packet.get("target_cn_date") or packet["cn"]["report_date"]
+    prefix = "[TEST] " if delivery_mode == "test" else ""
+    return f"{prefix}Hermes 跨市场{slot_label} - {target_date}"
+
+
+def send_email_if_requested(path: Path, packet: dict[str, Any], args: argparse.Namespace) -> list[str]:
+    if not args.send_email:
+        return []
+    if args.delivery_dry_run:
+        print(
+            "delivery dry-run: "
+            f"provider={args.email_provider} mode={args.delivery_mode} report={path}",
+            file=sys.stderr,
+        )
+        return []
+
+    sys.path.insert(0, str(ROOT / "quant-research-v1" / "src"))
+    from quant_bot.delivery.gmail import send_report_email, send_report_email_resend
+
+    recipients = split_recipients(args.test_recipient)
+    to = None
+    bcc: list[str] | None = None
+    if args.delivery_mode == "test":
+        if not recipients:
+            raise SystemExit("test delivery needs --test-recipient or QUANT_TEST_RECIPIENT")
+        to = recipients[0]
+        bcc = recipients[1:]
+
+    kwargs = {
+        "report_path": path,
+        "chart_paths": [],
+        "to": to,
+        "subject": email_subject(packet, args.delivery_mode),
+        "bcc": bcc,
+        "config_path": str(ROOT / "quant-research-v1" / "config.yaml"),
+    }
+    sender = send_report_email_resend if args.email_provider == "resend" else send_report_email
+    ids = sender(**kwargs)
+    print(f"cross-market email sent: provider={args.email_provider} ids={','.join(ids)}")
+    return ids
+
+
 def main() -> int:
     args = parse_args()
     cn_date, us_date = resolve_dates(args.slot, args.cn_date, args.us_date)
@@ -749,21 +845,22 @@ def main() -> int:
     if not output_dir.is_absolute():
         output_dir = ROOT / output_dir
 
-    cn = load_market_artifact(report_root, "cn", cn_date)
+    cn, cn_context_note = load_cn_context_artifact(report_root, args.slot, cn_date)
     us = load_market_artifact(report_root, "us", us_date)
     missing = []
     if not cn.payload:
-        missing.append(f"CN payload missing for {cn_date}: {cn.report_dir / 'main_strategy_v2_backtest.json'}")
+        missing.append(f"CN payload missing for {cn.report_date}: {cn.report_dir / 'main_strategy_v2_backtest.json'}")
     if not us.payload:
         missing.append(f"US payload missing for {us_date}: {us.report_dir / 'main_strategy_v2_backtest.json'}")
     if not cn.markdown:
-        missing.append(f"CN markdown missing for {cn_date}: {cn.report_dir}")
+        missing.append(f"CN markdown missing for {cn.report_date}: {cn.report_dir}")
     if not us.markdown:
         missing.append(f"US markdown missing for {us_date}: {us.report_dir}")
     if missing:
         raise SystemExit("\n".join(missing))
 
     packet = build_packet(args.slot, cn, us)
+    annotate_target_context(packet, target_cn_date=cn_date, cn_context_note=cn_context_note)
     if args.agent_backend == "off":
         report = deterministic_report(packet)
         backend_name = "deterministic_shadow"
@@ -791,6 +888,7 @@ def main() -> int:
         raise SystemExit("cross-market shadow validation failed:\n- " + "\n- ".join(failures))
     path = write_outputs(output_dir, packet, report, agent_backend=backend_name)
     print(f"cross-market {args.slot} shadow written: {path}")
+    send_email_if_requested(path, packet, args)
     return 0
 
 

@@ -23,7 +23,7 @@ QUANT_STACK_ROOT=/home/ubuntu/quant-stack
 25 8 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh cn.freshness_gate
 
 # -- Cross-Market Daily --
-30 7 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh daily.cross_market_am
+30 7 * * 1-6 cd $QUANT_STACK_ROOT && ops/run_task.sh daily.cross_market_am
 30 18 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh daily.cross_market_pm
 
 # -- Weekly Reports --
