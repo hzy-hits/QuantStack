@@ -1391,7 +1391,9 @@ def public_context_failures(text: str) -> list[str]:
         line = raw.strip()
         if not line:
             continue
-        if any(contains_marker(line, marker) for marker in dated_market_markers) and not date_pattern.search(line):
+        marker_hits = sum(1 for marker in dated_market_markers if contains_marker(line, marker))
+        market_data_context = bool(re.search(r"[%％]|涨|跌|收|报|点|close|change", line, re.IGNORECASE))
+        if marker_hits and (marker_hits >= 2 or market_data_context) and not date_pattern.search(line):
             undated_lines.append(line[:120])
     if undated_lines:
         failures.append(f"market index/future line missing returned date: {undated_lines[0]}")

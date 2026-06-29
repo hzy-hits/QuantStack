@@ -229,6 +229,25 @@ def test_public_delivery_rejects_india_index_and_undated_index_lines() -> None:
     assert any("missing returned date" in item for item in failures)
 
 
+def test_public_delivery_allows_single_news_context_marker_without_market_quote() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场早报\n\n"
+            "美股影响A股。标普期货(2026-06-29)和纳指期货(2026-06-29)给出下一轮风险线。"
+            "黄金、WTI原油同时作为避险和能源温度。"
+            "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
+            "新闻背景里提到纳指期货曾受利率预期影响。"
+            "科创50(2026-06-29)和科创板688样本覆盖A股半导体。"
+        ),
+        "am",
+        public_delivery=True,
+    )
+
+    assert failures == []
+
+
 def test_public_delivery_rejects_split_single_market_reports() -> None:
     module = load_module()
 
