@@ -39,6 +39,45 @@ STYLE_REFERENCE_URL = (
     "%e8%82%a1%e5%b8%82%e5%86%8d%e5%88%9b%e7%ba%aa%e5%bd%95%ef%bc%8c"
     "%e6%9d%a0%e6%9d%86etf%e5%a6%82%e6%97%a5%e4%b8%ad%e5%a4%a9%ef%bc%9btokenmaxxi/"
 )
+GLOBAL_MARKET_SNAPSHOT_SYMBOLS = (
+    "^GSPC,^IXIC,^DJI,^RUT,^VIX,SPY,QQQ,IWM,TLT,"
+    "ES=F,NQ=F,YM=F,RTY=F,"
+    "^STOXX50E,^FTSE,^GDAXI,^FCHI,"
+    "^N225,^KS11,^HSI,^TWII,^BSESN,"
+    "000001.SS,399001.SZ,399006.SZ,000688.SS,"
+    "GC=F,CL=F,BZ=F,GLD,USDCNH=X,DX-Y.NYB,^TNX"
+)
+GLOBAL_MARKET_LABELS = {
+    "^GSPC": "标普500",
+    "^IXIC": "纳斯达克综合",
+    "^DJI": "道琼斯",
+    "^RUT": "罗素2000",
+    "^VIX": "VIX波动率",
+    "ES=F": "标普期货",
+    "NQ=F": "纳指期货",
+    "YM=F": "道指期货",
+    "RTY=F": "罗素期货",
+    "^STOXX50E": "欧洲STOXX50",
+    "^FTSE": "英国FTSE100",
+    "^GDAXI": "德国DAX",
+    "^FCHI": "法国CAC40",
+    "^N225": "日本日经225",
+    "^KS11": "韩国KOSPI",
+    "^HSI": "香港恒生",
+    "^TWII": "台湾加权",
+    "^BSESN": "印度Sensex",
+    "000001.SS": "上证指数",
+    "399001.SZ": "深证成指",
+    "399006.SZ": "创业板指",
+    "000688.SS": "科创50",
+    "GC=F": "黄金期货",
+    "CL=F": "WTI原油期货",
+    "BZ=F": "布伦特原油期货",
+    "GLD": "黄金ETF",
+    "USDCNH=X": "美元/离岸人民币",
+    "DX-Y.NYB": "美元指数",
+    "^TNX": "美国10年利率",
+}
 
 
 @dataclass(frozen=True)
@@ -120,6 +159,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--test-recipient", default=os.environ.get("QUANT_TEST_RECIPIENT"))
     parser.add_argument("--delivery-dry-run", action="store_true")
+    parser.add_argument(
+        "--finance-search-prefetch",
+        choices=["on", "off"],
+        default=os.environ.get("CROSS_MARKET_FINANCE_SEARCH_PREFETCH", "on"),
+        help="Best-effort direct finance-search prefetch for global markets/news before Hermes writes.",
+    )
     return parser.parse_args()
 
 
@@ -542,14 +587,7 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
         "must_try_finance_search_tools": [
             {
                 "tool": "finance-search.get_market_snapshot",
-                "symbols": (
-                    "^GSPC,^IXIC,^DJI,^RUT,^VIX,SPY,QQQ,IWM,TLT,"
-                    "ES=F,NQ=F,YM=F,RTY=F,"
-                    "^STOXX50E,^FTSE,^GDAXI,^FCHI,"
-                    "^N225,^KS11,^HSI,^TWII,^BSESN,"
-                    "000001.SS,399001.SZ,399006.SZ,000688.SS,"
-                    "GC=F,CL=F,BZ=F,GLD,USDCNH=X,DX-Y.NYB,^TNX"
-                ),
+                "symbols": GLOBAL_MARKET_SNAPSHOT_SYMBOLS,
                 "purpose": (
                     "Build a concise global market thermometer: US cash indices, S&P/Nasdaq/Dow/Russell "
                     "futures, Europe and Asia country indices, VIX/rates proxy, oil, gold, USD/CNH, "
@@ -605,6 +643,111 @@ def build_cn_universe_requirement() -> dict[str, Any]:
             "finance-search.quant_stack_symbol_context(symbol='<selected_cn_symbol>', market='cn')",
             "finance-search.search_news(query='科创板 半导体 AI 芯片 A股')",
         ],
+    }
+
+
+def compact_market_snapshot_rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+    symbols = snapshot.get("symbols") if isinstance(snapshot.get("symbols"), dict) else {}
+    rows: list[dict[str, Any]] = []
+    for symbol in snapshot.get("used_symbols") or []:
+        item = symbols.get(symbol) if isinstance(symbols, dict) else None
+        if not isinstance(item, dict) or not item.get("ok"):
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "label": GLOBAL_MARKET_LABELS.get(symbol, symbol),
+                "date": item.get("date"),
+                "close": item.get("close"),
+                "change_pct": item.get("change_pct"),
+                "source": item.get("source"),
+            }
+        )
+    return rows
+
+
+def fetch_finance_search_prefetch(*, window: str, timeout: int = 90) -> dict[str, Any]:
+    root = Path(os.environ.get("FINANCE_SEARCH_AGENT_ROOT", "/home/ubuntu/services/finance-search-agent"))
+    python = Path(os.environ.get("FINANCE_SEARCH_PYTHON", str(root / ".venv" / "bin" / "python")))
+    server = root / "server.py"
+    if not python.exists() or not server.exists():
+        return {"ok": False, "error": "finance-search agent runtime not found"}
+    code = r"""
+import asyncio
+import json
+import sys
+
+root = sys.argv[1]
+symbols = sys.argv[2]
+window = sys.argv[3]
+sys.path.insert(0, root)
+import server  # noqa: E402
+
+async def main():
+    snapshot = server.get_market_snapshot(symbols=symbols, period="5d")
+    try:
+        news = await server.search_news(
+            query="global markets US futures oil gold Fed China AI semiconductors",
+            window=window,
+            limit=8,
+            sources="newsnow,tavily,searxng,gdelt",
+        )
+    except Exception as exc:
+        news = {"items": [], "error": str(exc)}
+    print(json.dumps({"ok": True, "market_snapshot": snapshot, "news": news}, ensure_ascii=False))
+
+asyncio.run(main())
+"""
+    try:
+        result = subprocess.run(
+            [str(python), "-c", code, str(root), GLOBAL_MARKET_SNAPSHOT_SYMBOLS, window],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": str(exc)}
+    if result.returncode != 0:
+        return {"ok": False, "error": ((result.stderr or "") + (result.stdout or ""))[-800:]}
+    try:
+        payload = json.loads((result.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "error": f"invalid finance-search JSON: {exc}"}
+    snapshot = payload.get("market_snapshot") if isinstance(payload.get("market_snapshot"), dict) else {}
+    payload["market_rows"] = compact_market_snapshot_rows(snapshot)
+    news = payload.get("news") if isinstance(payload.get("news"), dict) else {}
+    items = news.get("items") if isinstance(news.get("items"), list) else []
+    payload["news_items"] = [
+        {
+            "title": item.get("title"),
+            "source": item.get("source") or item.get("provider"),
+            "published_at": item.get("published_at") or item.get("date"),
+            "url": item.get("url"),
+        }
+        for item in items[:8]
+        if isinstance(item, dict) and item.get("title")
+    ]
+    payload.pop("news", None)
+    payload.pop("market_snapshot", None)
+    return payload
+
+
+def attach_finance_search_prefetch(packet: dict[str, Any], *, target_cn_date: str) -> None:
+    target = parse_ymd(target_cn_date)
+    window = "72h" if target.weekday() in {0, 5} else "24h"
+    payload = fetch_finance_search_prefetch(window=window)
+    packet["finance_search_prefetch"] = {
+        "window": window,
+        "source": "finance-search local agent read",
+        "ok": bool(payload.get("ok")),
+        "market_rows": payload.get("market_rows") or [],
+        "news_items": payload.get("news_items") or [],
+        "error": payload.get("error") if not payload.get("ok") else "",
+        "public_use": (
+            "Use market_rows and news_items as already-fetched evidence for the global market temperature. "
+            "Do not mention this prefetch source, diagnostics, or errors in the public report."
+        ),
     }
 
 
@@ -758,6 +901,8 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 
 工作方式:
 - 先读下面 packet。packet 是 quant-stack 已冻结的事实砖和工具清单。
+- 如果 packet.finance_search_prefetch.ok=true,必须优先使用其中的 market_rows 和 news_items 写全球市场温度;
+  这些是脚本侧已经从 finance-search 取回的证据,不要再写成缺失或工具失败。
 - 可以启发式使用 finance-search MCP 工具,尤其是:
   quant_stack_daily_snapshot, quant_stack_spine_triage, quant_stack_task_status,
   quant_stack_validate_main_strategy_v2, quant_stack_ranker, quant_stack_symbol_context,
@@ -816,6 +961,8 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 - 把全球新闻/宏观/指数/期货/油金和 A股半导体/科创板线索整合成同一个故事;不要拆成美股报告+A股报告。
 - 全球温度段必须保留:美股期货、油、金、至少多个非美国家/地区大盘指数;如果 draft 已遗漏,
   只能从 packet/工具返回中补入,不能虚构数字。
+- 如果 packet.finance_search_prefetch 有 market_rows/news_items,优先使用这些已取回证据补齐全球温度,
+  不要写成缺失、不可用或工具失败。
 - 删除工具日志味、工程词和内部流程词:不要出现 MCP、packet、validator、shadow_only、production_delivery、cron、Resend、JSON、script、tool、血缘、本稿状态、prompt、system、user、draft、二审、审稿、思维过程、推理过程。
 - 删除或翻译内部研究黑话:不要出现 production、ranker、AI Infra universe、source evidence、source review、evidence_state、headline risk、beta hedge、money gate、regime、原文验证状态。
 - 删除所有数据不可用提示、缺口清单、待补证据清单、工具失败说明;没有可核验数据就自然省略。
@@ -1358,6 +1505,8 @@ def main() -> int:
 
     packet = build_packet(args.slot, cn, us)
     annotate_target_context(packet, target_cn_date=cn_date, cn_context_note=cn_context_note)
+    if args.finance_search_prefetch == "on" and args.agent_backend == "hermes":
+        attach_finance_search_prefetch(packet, target_cn_date=cn_date)
     if args.agent_backend == "off":
         report = deterministic_report(packet)
         backend_name = "deterministic_shadow"

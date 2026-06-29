@@ -237,6 +237,27 @@ def test_normalize_public_report_trims_reviewer_preamble_and_translates_jargon()
     assert "source evidence" not in text
 
 
+def test_compact_market_snapshot_rows_labels_futures_and_country_indices() -> None:
+    module = load_module()
+
+    rows = module.compact_market_snapshot_rows(
+        {
+            "used_symbols": ["ES=F", "NQ=F", "^N225", "^GDAXI", "GC=F", "CL=F"],
+            "symbols": {
+                "ES=F": {"ok": True, "date": "2026-06-29", "close": 7000, "change_pct": 0.5, "source": "yfinance"},
+                "NQ=F": {"ok": True, "date": "2026-06-29", "close": 25000, "change_pct": 0.8, "source": "yfinance"},
+                "^N225": {"ok": True, "date": "2026-06-29", "close": 41000, "change_pct": -0.2, "source": "yfinance"},
+                "^GDAXI": {"ok": True, "date": "2026-06-29", "close": 18000, "change_pct": 0.1, "source": "yfinance"},
+                "GC=F": {"ok": True, "date": "2026-06-29", "close": 3300, "change_pct": 0.3, "source": "yfinance"},
+                "CL=F": {"ok": True, "date": "2026-06-29", "close": 70, "change_pct": 1.0, "source": "yfinance"},
+            },
+        }
+    )
+
+    labels = {row["label"] for row in rows}
+    assert {"标普期货", "纳指期货", "日本日经225", "德国DAX", "黄金期货", "WTI原油期货"} <= labels
+
+
 def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
