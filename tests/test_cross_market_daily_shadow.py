@@ -514,6 +514,49 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert failures == []
 
 
+def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-26", tmp_path)
+    packet = module.build_packet("pm", cn, us)
+    packet["finance_search_prefetch"] = {
+        "market_rows": [
+            {"symbol": "^GSPC", "label": "标普500", "date": "2026-06-26", "close": 6088.9, "change_pct": -0.05},
+            {"symbol": "^N225", "label": "日本日经225", "date": "2026-06-29", "close": 41000, "change_pct": -1.04},
+            {"symbol": "^KS11", "label": "韩国KOSPI", "date": "2026-06-29", "close": 3000, "change_pct": -1.56},
+            {"symbol": "000001.SS", "label": "上证指数", "date": "2026-06-29", "close": 3300, "change_pct": 0.2},
+            {"symbol": "ES=F", "label": "标普期货", "date": "2026-06-29", "close": 7000, "change_pct": 0.5},
+        ],
+        "news_items": [{"title": "Fed rate risk remains in focus", "source": "Reuters", "published_at": "2026-06-29"}],
+    }
+    report = (
+        "# 跨市场晚报\n\n"
+        "美股影响A股。\n\n"
+        "## 顶部宏观数据温度计\n"
+        "旧顶部表。\n\n"
+        "## 宏观与产业 headlines\n"
+        "- 幻觉新闻。\n\n"
+        "## 科创板不是温度计，是下一轮候选管线\n"
+        "旧科创段。\n\n"
+        "## 市场主线\n"
+        "正文保留。\n\n"
+        "## 附表：全球风险与跨资产读数\n"
+        "旧尾表。"
+    )
+
+    report = module.ensure_market_snapshot_section(report, packet)
+    report = module.ensure_cn_star_pipeline_section(report, packet)
+
+    assert "旧顶部表" not in report
+    assert "幻觉新闻" not in report
+    assert "旧科创段" not in report
+    assert "旧尾表" not in report
+    assert "正文保留" in report
+    assert "## 宏观数据温度计" in report
+    assert "## 宏观事件 Headlines" in report
+    assert "## 附表：其他跨市场数据" in report
+
+
 def test_agent_prompt_is_heuristic_not_fixed_template(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
