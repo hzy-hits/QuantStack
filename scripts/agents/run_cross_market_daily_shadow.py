@@ -108,8 +108,12 @@ MANAGED_REPORT_SECTION_PREFIXES = (
     "## 宏观数据温度计",
     "## 顶部宏观数据温度计",
     "## 宏观事件 Headlines",
+    "## 宏观事件与产业新闻",
     "## 宏观与产业",
+    "## 美股执行标的",
+    "## 美股标的",
     "## 附表：其他跨市场数据",
+    "## 附表：外围资产",
     "## 附表：全球风险",
     "## 附表：全球市场",
     "## 尾部市场附表",
@@ -1148,21 +1152,166 @@ def public_cell(value: Any, default: str = "-") -> str:
     return text.replace("|", "/")
 
 
+CONTENTFUL_NEWS_MARKERS = (
+    "fed",
+    "rate",
+    "inflation",
+    "ai",
+    "chip",
+    "semiconductor",
+    "openai",
+    "data center",
+    "datacenter",
+    "earnings",
+    "gold",
+    "silver",
+    "oil",
+    "tariff",
+    "china",
+    "chinese",
+    "geopolit",
+)
+
+
+def is_contentful_macro_news(title: str) -> bool:
+    lower = title.lower()
+    if not any(marker in lower for marker in CONTENTFUL_NEWS_MARKERS):
+        return False
+    pure_move_patterns = (
+        r"stock market today:?\s*(dow|s&p|nasdaq|futures|stocks)",
+        r"^(dow|s&p 500|nasdaq|stock)\s+futures\s+(rise|fall|drop|dip|slip|edge)",
+    )
+    if any(re.search(pattern, lower) for pattern in pure_move_patterns):
+        return any(marker in lower for marker in ("fed", "ai", "chip", "openai", "gold", "oil", "china", "data center"))
+    return True
+
+
+def translate_macro_news_title(title: Any) -> str:
+    text = public_cell(title, default="")
+    lower = text.lower()
+    if "ai buildout costs" in lower and "fed" in lower:
+        return "AI 建设成本和美联储利率预期压制科技风险偏好，纳指期货承压"
+    if "chip rout" in lower and "openai" in lower:
+        return "芯片链抛售叠加 OpenAI IPO 延后，科技股盘前继续承压"
+    if "chip stock selloff" in lower:
+        tickers = re.findall(r"\b[A-Z]{2,5}\b", text)
+        suffix = f"，焦点股包括 {'/'.join(tickers[:5])}" if tickers else ""
+        return f"芯片股抛售后的修复交易回到盘前视野{suffix}"
+    if "megacap tech selloff" in lower:
+        return "大型科技股抛售后，美股期货仍受 AI 和高估值压力牵制"
+    if "chinese stocks" in lower and "data center" in lower:
+        return "美国数据中心建设把部分中国供应链股票重新推到产业映射视野"
+    if "stock market outlook" in lower and "ai earnings" in lower:
+        return "美股后续方向仍取决于 AI 业绩兑现和美联储利率风险"
+    if "gold falls" in lower and "macro" in lower:
+        return "黄金回落，但利率和美元等宏观压力仍未消退"
+    if "gold" in lower and "silver" in lower and "fed" in lower:
+        return "美联储利率重定价压过避险需求，金银同步走弱"
+    if "oil" in lower and ("brent" in lower or "wti" in lower):
+        return "原油价格波动继续影响通胀预期和成长股估值"
+    if "fed" in lower:
+        return "美联储利率路径仍是全球风险资产的核心变量"
+    if "rate" in lower or "inflation" in lower:
+        return "利率和通胀预期继续影响风险资产定价"
+    if "earnings" in lower:
+        return "企业财报预期成为市场风险偏好的关键变量"
+    if "ai" in lower or "semiconductor" in lower or "chip" in lower:
+        return "AI 和半导体链条仍是跨市场风险偏好的主线"
+    if "china" in lower or "chinese" in lower:
+        return "中国资产和海外产业链映射进入外部新闻焦点"
+    return "外部宏观和产业新闻继续影响跨市场风险偏好"
+
+
 def render_macro_headline_section(packet: dict[str, Any]) -> str:
     prefetch = packet.get("finance_search_prefetch") if isinstance(packet.get("finance_search_prefetch"), dict) else {}
     raw_items = prefetch.get("news_items") if isinstance(prefetch.get("news_items"), list) else []
     items = [item for item in raw_items if isinstance(item, dict) and item.get("title")]
+    filtered = [item for item in items if is_contentful_macro_news(str(item.get("title") or ""))]
+    if filtered:
+        items = filtered
     if not items:
         return ""
 
-    lines = ["## 宏观事件 Headlines"]
-    for item in items[:5]:
-        title = public_cell(item.get("title"))
+    lines = ["## 宏观事件与产业新闻"]
+    seen: set[str] = set()
+    for item in items:
+        title = translate_macro_news_title(item.get("title"))
+        key = re.sub(r"\W+", "", title.lower())
+        if not title or key in seen:
+            continue
+        seen.add(key)
         source = public_cell(item.get("source"), default="")
         published_at = public_cell(item.get("published_at"), default="")
         meta = " / ".join(part for part in (source, published_at) if part)
         suffix = f"（{meta}）" if meta else ""
         lines.append(f"- {title}{suffix}")
+        if len(lines) >= 6:
+            break
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)
+
+
+def public_us_action(value: Any) -> str:
+    text = str(value or "").lower()
+    if "gamma" in text:
+        return "买入/持有，Gamma入场"
+    if "options" in text:
+        return "买入/持有，期权确认"
+    if "buy" in text:
+        return "买入/持有"
+    return public_cell(value)
+
+
+def extract_stop_target(risk_plan: Any) -> tuple[str, str]:
+    text = str(risk_plan or "")
+    match = re.search(r"stop\s+([0-9.]+);\s*target\s+([0-9.]+)", text, re.IGNORECASE)
+    if not match:
+        return "-", "-"
+    return match.group(1), match.group(2)
+
+
+def public_us_constraint(row: dict[str, Any]) -> str:
+    source = str(row.get("source") or "")
+    if "gamma" in source.lower() or "gamma" in str(row.get("action") or "").lower():
+        prefix = "Gamma入场"
+    elif "options" in str(row.get("action") or "").lower():
+        prefix = "期权确认"
+    else:
+        prefix = "核心池"
+    hedge = public_cell(row.get("hedge"), default="")
+    hedge_r = fmt_r(row.get("hedge_notional_r")) if row.get("hedge_notional_r") is not None else ""
+    hedge_text = f"; 对冲 {hedge} {hedge_r}".strip() if hedge else ""
+    return public_cell(f"{prefix}{hedge_text}")
+
+
+def render_us_action_section(packet: dict[str, Any]) -> str:
+    us = packet.get("us") if isinstance(packet.get("us"), dict) else {}
+    actions = us.get("actions") if isinstance(us.get("actions"), list) else []
+    actions = [row for row in actions if isinstance(row, dict) and row.get("symbol")]
+    if not actions:
+        return ""
+
+    lines = [
+        "## 美股执行标的",
+        "美股标的沿用 US 管线；A股只能接受美股风险和主线约束，不能反向升降美股仓位。",
+        "",
+        "| Ticker | 动作 | R | 入口 | 止损 | 目标 | 期权/Gamma/对冲约束 |",
+        "|---|---|---:|---:|---:|---:|---|",
+    ]
+    for row in actions[:10]:
+        stop, target = extract_stop_target(row.get("risk_plan"))
+        lines.append(
+            "| {symbol} | {action} | {size} | {entry} | {stop} | {target} | {constraint} |".format(
+                symbol=public_cell(row.get("symbol")),
+                action=public_us_action(row.get("action")),
+                size=fmt_r(row.get("size_r")),
+                entry=public_cell(row.get("entry")),
+                stop=public_cell(stop),
+                target=public_cell(target),
+                constraint=public_us_constraint(row),
+            )
+        )
     return "\n".join(lines)
 
 
@@ -1290,6 +1439,18 @@ def ensure_market_snapshot_section(report: str, packet: dict[str, Any]) -> str:
     if tail:
         text = "\n\n".join(part for part in (text.strip(), tail.strip()) if part)
     return text.strip()
+
+
+def ensure_us_action_section(report: str, packet: dict[str, Any]) -> str:
+    section = render_us_action_section(packet)
+    text = strip_managed_report_sections(report, prefixes=("## 美股执行标的", "## 美股标的"))
+    if not section:
+        return text.strip()
+    if "## 宏观事件与产业新闻" in text:
+        return insert_after_section(text, "## 宏观事件与产业新闻", section)
+    if "## 宏观事件 Headlines" in text:
+        return insert_after_section(text, "## 宏观事件 Headlines", section)
+    return insert_after_section(text, "## 宏观数据温度计", section)
 
 
 def repair_star_pipeline_language(report: str, *, add_replacement: bool = True) -> str:
@@ -1993,7 +2154,7 @@ def contains_marker(text: str, token: str) -> bool:
     return token.lower() in text.lower()
 
 
-def public_context_failures(text: str) -> list[str]:
+def public_context_failures(text: str, packet: dict[str, Any] | None = None) -> list[str]:
     failures: list[str] = []
     forbidden_india_index_markers = ["Sensex", "Nifty", "印度指数", "印度Sensex"]
     for marker in forbidden_india_index_markers:
@@ -2048,6 +2209,18 @@ def public_context_failures(text: str) -> list[str]:
 
     if not any(contains_marker(text, marker) for marker in ("期权", "Gamma", "gamma")):
         failures.append("missing public US options/Gamma context")
+
+    if packet:
+        us = packet.get("us") if isinstance(packet.get("us"), dict) else {}
+        actions = us.get("actions") if isinstance(us.get("actions"), list) else []
+        us_symbols = [
+            str(row.get("symbol") or "").upper()
+            for row in actions
+            if isinstance(row, dict) and row.get("symbol")
+        ]
+        missing_us_symbols = [symbol for symbol in us_symbols if symbol and symbol not in text]
+        if missing_us_symbols:
+            failures.append("missing public US action ticker(s): " + ", ".join(missing_us_symbols[:5]))
 
     if not re.search(r"(?<!\d)688\d{3}\.SH(?![A-Z0-9])", text):
         failures.append("missing concrete public CN STAR/科创板 ticker: 688xxx.SH")
@@ -2107,7 +2280,13 @@ def public_context_failures(text: str) -> list[str]:
     return failures
 
 
-def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = False) -> list[str]:
+def validate_shadow_report(
+    text: str,
+    slot: str,
+    *,
+    public_delivery: bool = False,
+    packet: dict[str, Any] | None = None,
+) -> list[str]:
     failures: list[str] = []
     if slot == "am":
         required = ["# 跨市场早报", "美股", "A股"]
@@ -2201,7 +2380,7 @@ def validate_shadow_report(text: str, slot: str, *, public_delivery: bool = Fals
         for token in public_forbidden:
             if contains_marker(text, token):
                 failures.append(f"forbidden public-report marker: {token}")
-        failures.extend(public_context_failures(text))
+        failures.extend(public_context_failures(text, packet))
     return failures
 
 
@@ -2540,8 +2719,9 @@ def main() -> int:
         report = normalize_public_report_text(report, args.slot)
     report = annotate_market_snapshot_dates(report, packet)
     report = ensure_market_snapshot_section(report, packet)
+    report = ensure_us_action_section(report, packet)
     report = ensure_cn_pipeline_language(report, packet)
-    failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email)
+    failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email, packet=packet)
     if failures:
         restore_output_snapshot(output_snapshot)
         raise SystemExit("cross-market shadow validation failed:\n- " + "\n- ".join(failures))

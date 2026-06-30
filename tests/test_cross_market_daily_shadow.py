@@ -342,6 +342,29 @@ def test_public_delivery_rejects_missing_us_options_context() -> None:
     assert any("options/Gamma" in item for item in failures)
 
 
+def test_public_delivery_rejects_missing_us_action_tickers(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    packet = module.build_packet("am", cn, us)
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场早报\n\n"
+            "美股影响A股。标普期货(2026-06-29)和纳指期货(2026-06-29)给出下一轮风险线。"
+            "黄金、WTI原油同时作为避险和能源温度。"
+            "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
+            "期权Gamma没有新增异常信号，但仍约束美股股票仓位。"
+            "科创50(2026-06-29)和688233.SH神工股份覆盖A股半导体候选管线。"
+        ),
+        "am",
+        public_delivery=True,
+        packet=packet,
+    )
+
+    assert any("missing public US action ticker" in item for item in failures)
+
+
 def test_public_delivery_rejects_standalone_star_candidate_table() -> None:
     module = load_module()
 
@@ -630,8 +653,9 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
 
     report = module.annotate_market_snapshot_dates(report, packet)
     report = module.ensure_market_snapshot_section(report, packet)
+    report = module.ensure_us_action_section(report, packet)
     report = module.ensure_cn_pipeline_language(report, packet)
-    failures = module.validate_shadow_report(report, "am", public_delivery=True)
+    failures = module.validate_shadow_report(report, "am", public_delivery=True, packet=packet)
 
     assert "标普500(2026-06-26)" in report
     assert "VIX(2026-06-26)收低" in report
@@ -640,15 +664,19 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert report.index("## 宏观数据温度计") < report.index("美股影响A股")
     assert "## 宏观数据温度计" in report
     assert report.count("## 宏观数据温度计") == 1
-    assert "## 宏观事件 Headlines" in report
-    assert "Fed officials keep rate-cut timing in focus" in report
+    assert "## 宏观事件与产业新闻" in report
+    assert "美联储利率路径仍是全球风险资产的核心变量" in report
+    assert "Fed officials keep rate-cut timing in focus" not in report
+    assert "## 美股执行标的" in report
+    assert "NVDA" in report
     assert "## A股科创板候选管线" not in report
     assert "688233.SH" in report
     assert "## 附表：其他跨市场数据" in report
     assert "资产/指数" not in report
     assert "| 科创板候选 |" not in report
     assert "科创板只做温度计" not in report
-    assert report.index("## 宏观数据温度计") < report.index("## 宏观事件 Headlines")
+    assert report.index("## 宏观数据温度计") < report.index("## 宏观事件与产业新闻")
+    assert report.index("## 宏观事件与产业新闻") < report.index("## 美股执行标的")
     assert report.rfind("## 附表：其他跨市场数据") > report.index("688233.SH")
     assert failures == []
 
@@ -677,6 +705,8 @@ def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: P
         "- 幻觉新闻。\n\n"
         "## 科创板不是温度计，是下一轮候选管线\n"
         "旧科创段。\n\n"
+        "## 附表：外围资产与风险参考\n"
+        "旧外围表。\n\n"
         "## 市场主线\n"
         "正文保留。\n\n"
         "## 附表：全球风险与跨资产读数\n"
@@ -689,10 +719,11 @@ def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: P
     assert "旧顶部表" not in report
     assert "幻觉新闻" not in report
     assert "旧科创段" not in report
+    assert "旧外围表" not in report
     assert "旧尾表" not in report
     assert "正文保留" in report
     assert "## 宏观数据温度计" in report
-    assert "## 宏观事件 Headlines" in report
+    assert "## 宏观事件与产业新闻" in report
     assert "## 附表：其他跨市场数据" in report
 
 
