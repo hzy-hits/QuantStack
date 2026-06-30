@@ -657,6 +657,15 @@ def merge_option_attention_rows(rows: list[dict[str, Any]], *, limit: int) -> li
             return any(reason.startswith(base) for reason in existing_reasons)
         return False
 
+    def refine_reasons(existing_reasons: list[str], new_reason: str) -> list[str]:
+        if new_reason.startswith("LEAPS IV 低位"):
+            existing_reasons = [reason for reason in existing_reasons if reason != "LEAPS IV 排行"]
+        if new_reason.startswith("OTM skew 偏离"):
+            existing_reasons = [reason for reason in existing_reasons if reason != "OTM skew 排行"]
+        if new_reason and not duplicate_reason(existing_reasons, new_reason):
+            existing_reasons.append(new_reason)
+        return existing_reasons
+
     merged: dict[str, dict[str, Any]] = {}
     for row in sorted(rows, key=lambda item: (item.get("_priority", 999), -float(item.get("_score") or 0.0), item["symbol"])):
         symbol = str(row.get("symbol") or "").upper()
@@ -668,9 +677,8 @@ def merge_option_attention_rows(rows: list[dict[str, Any]], *, limit: int) -> li
             continue
         reasons = [part.strip() for part in str(existing.get("reason") or "").split("/") if part.strip()]
         new_reason = str(row.get("reason") or "").strip()
-        if new_reason and not duplicate_reason(reasons, new_reason):
-            reasons.append(new_reason)
-            existing["reason"] = " / ".join(reasons)
+        reasons = refine_reasons(reasons, new_reason)
+        existing["reason"] = " / ".join(reasons)
         reading = str(row.get("reading") or "").strip()
         if reading and reading not in str(existing.get("reading") or ""):
             existing["reading"] = f"{existing.get('reading')}; {reading}"
