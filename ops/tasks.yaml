@@ -247,6 +247,7 @@ tasks:
       QUANT_OPENCLAW_IDENTITY_FILE: /home/ubuntu/.ssh/id_ed25519_quant_pi
       QUANT_OPENCLAW_AGENT: main
       QUANT_OPENCLAW_AGENT_TIMEOUT: "180"
+      QUANT_OPENCLAW_AGENT_DELIVER: "1"
     command:
       - quant-research-v1/.venv/bin/python
       - scripts/agents/run_cross_market_daily_shadow.py
@@ -294,6 +295,7 @@ tasks:
       QUANT_OPENCLAW_IDENTITY_FILE: /home/ubuntu/.ssh/id_ed25519_quant_pi
       QUANT_OPENCLAW_AGENT: main
       QUANT_OPENCLAW_AGENT_TIMEOUT: "180"
+      QUANT_OPENCLAW_AGENT_DELIVER: "1"
     command:
       - quant-research-v1/.venv/bin/python
       - scripts/agents/run_cross_market_daily_shadow.py

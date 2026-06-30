@@ -77,7 +77,8 @@ class TasklibTests(unittest.TestCase):
         self.assertEqual(morning["env"]["QUANT_OPENCLAW_IDENTITY_FILE"], "/home/ubuntu/.ssh/id_ed25519_quant_pi")
         self.assertEqual(evening["env"]["QUANT_OPENCLAW_PUBLISH"], "1")
         self.assertEqual(evening["env"]["QUANT_OPENCLAW_MODE"], "agent")
-        self.assertNotIn("QUANT_OPENCLAW_AGENT_DELIVER", morning["env"])
+        self.assertEqual(morning["env"]["QUANT_OPENCLAW_AGENT_DELIVER"], "1")
+        self.assertEqual(evening["env"]["QUANT_OPENCLAW_AGENT_DELIVER"], "1")
         self.assertTrue(morning["sends_email"])
         self.assertTrue(evening["sends_email"])
 
