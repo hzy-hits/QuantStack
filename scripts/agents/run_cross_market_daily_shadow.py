@@ -990,7 +990,10 @@ def merge_option_attention_rows(rows: list[dict[str, Any]], *, limit: int) -> li
         if new_reason.startswith(("LEAPS IV 低位", "远月 IV 低位")):
             existing_reasons = [
                 reason for reason in existing_reasons
-                if reason not in {"LEAPS IV 排行", "远月 IV 排行"}
+                if not (
+                    reason.endswith("排行")
+                    and (reason.startswith("LEAPS IV") or reason.startswith("远月 IV"))
+                )
             ]
         if new_reason.startswith("OTM skew 偏离"):
             existing_reasons = [reason for reason in existing_reasons if reason != "OTM skew 排行"]
