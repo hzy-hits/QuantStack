@@ -25,6 +25,7 @@ GLOBAL_BUSY_PATTERNS = (
     "bash scripts/daily_pipeline.sh",
     "bash scripts/weekly_pipeline.sh",
 )
+TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,10 @@ def resolve_stack_roots(project_dir: Path) -> tuple[Path, Path]:
     return us_root, cn_root
 
 
+def env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in TRUE_VALUES
+
+
 @lru_cache(maxsize=None)
 def get_calendar(name: str):
     return xcals.get_calendar(name)
@@ -148,6 +153,9 @@ def scheduled_logical_date(local_day: date, task: TaskConfig) -> date:
 
 
 def build_default_tasks(project_dir: Path) -> tuple[TaskConfig, ...]:
+    if not env_flag("QUANT_ENABLE_LEGACY_REPORT_WATCHDOG"):
+        return ()
+
     us_root, cn_root = resolve_stack_roots(project_dir)
     stack_root = Path(os.environ["QUANT_STACK_ROOT"]).resolve() if os.environ.get("QUANT_STACK_ROOT") else us_root.parent
 

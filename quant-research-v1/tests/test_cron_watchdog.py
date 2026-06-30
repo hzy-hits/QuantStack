@@ -94,6 +94,7 @@ def test_root_runner_us_postmarket_missing_report_is_due(tmp_path: Path, monkeyp
     (us_root / "reports").mkdir(parents=True)
     (stack_root / "quant-research-cn").mkdir(parents=True)
     monkeypatch.setenv("QUANT_STACK_ROOT", str(stack_root))
+    monkeypatch.setenv("QUANT_ENABLE_LEGACY_REPORT_WATCHDOG", "1")
 
     tasks = {task.name: task for task in build_default_tasks(us_root)}
     task = tasks["us-postmarket"]
@@ -188,7 +189,8 @@ def test_task_completed_uses_log_markers(tmp_path: Path):
     assert task_completed(due) is True
 
 
-def test_default_cn_tasks_use_slot_specific_report_files():
+def test_default_cn_tasks_use_slot_specific_report_files(monkeypatch):
+    monkeypatch.setenv("QUANT_ENABLE_LEGACY_REPORT_WATCHDOG", "1")
     tasks = {task.name: task for task in build_default_tasks(REPO_ROOT)}
 
     morning = tasks["cn-morning"].completion
@@ -206,6 +208,19 @@ def test_default_tasks_do_not_schedule_autoresearch():
     assert "autoresearch-cn-06" not in tasks
     assert "autoresearch-am" not in tasks
     assert "autoresearch-pm" not in tasks
+
+
+def test_default_tasks_do_not_schedule_legacy_standalone_reports(monkeypatch):
+    monkeypatch.delenv("QUANT_ENABLE_LEGACY_REPORT_WATCHDOG", raising=False)
+
+    tasks = {task.name for task in build_default_tasks(REPO_ROOT)}
+
+    assert "us-premarket" not in tasks
+    assert "us-postmarket" not in tasks
+    assert "cn-morning" not in tasks
+    assert "cn-evening" not in tasks
+    assert "us-weekly" not in tasks
+    assert "cn-weekly" not in tasks
 
 
 def test_default_tasks_do_not_schedule_retired_factor_lab_or_paper_tasks():

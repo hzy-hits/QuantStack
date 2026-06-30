@@ -716,6 +716,13 @@ fn send_alert(ctx: &UsPipelineContext, subject: &str, body: &str) {
         println!("dry-run: would send alert '{subject}' to {}", ctx.alert_to);
         return;
     }
+    if ctx.delivery_dry_run {
+        println!(
+            "delivery-dry-run: suppressing alert '{subject}' to {}",
+            ctx.alert_to
+        );
+        return;
+    }
     let mut cmd = ProcessCommand::new("uv");
     cmd.arg("run")
         .arg("python")

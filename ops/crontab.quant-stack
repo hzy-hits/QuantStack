@@ -61,8 +61,6 @@ QUANT_STACK_ROOT=/home/ubuntu/quant-stack
 50 12 * * 1-5 cd $QUANT_STACK_ROOT && ops/run_task.sh research.universe_membership_snapshot
 
 # -- Watchdog --
-@reboot cd $QUANT_STACK_ROOT && ops/run_task.sh us.watchdog.reboot
-12,27,42,57 * * * * cd $QUANT_STACK_ROOT && ops/run_task.sh us.watchdog
 5,20,35,50 * * * * cd $QUANT_STACK_ROOT && ops/run_task.sh ops.catch_up
 
 # -- Weekly Maintenance --

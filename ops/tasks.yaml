@@ -1121,7 +1121,7 @@ tasks:
 
   us.watchdog.reboot:
     group: watchdog
-    schedule: "@reboot"
+    schedule: ""
     sleep_seconds: 180
     cwd: quant-research-v1
     command: ["uv", "run", "python", "scripts/cron_watchdog.py"]
@@ -1133,12 +1133,13 @@ tasks:
     market: us
     session: watchdog
     owner: us_pipeline
+    disabled_reason: "Legacy standalone report watchdog is manual-only; scheduled report delivery is Hermes cross-market daily."
     outputs:
       - quant-research-v1/logs/cron_watchdog_state.json
 
   us.watchdog:
     group: watchdog
-    schedule: "12,27,42,57 * * * *"
+    schedule: ""
     cwd: quant-research-v1
     command: ["uv", "run", "python", "scripts/cron_watchdog.py"]
     log: ops/logs/us.watchdog.log
@@ -1149,6 +1150,7 @@ tasks:
     market: us
     session: watchdog
     owner: us_pipeline
+    disabled_reason: "Legacy standalone report watchdog is manual-only; scheduled report delivery is Hermes cross-market daily."
     outputs:
       - quant-research-v1/logs/cron_watchdog_state.json
 
@@ -1156,7 +1158,8 @@ tasks:
     # Catch-up runner for missed scheduled tasks. WSL2 suspends when idle and
     # cron does not replay missed jobs on resume; this re-runs research /
     # factor / paper tasks that were due earlier TODAY but
-    # never succeeded. Runs every 15 min, offset from us.watchdog.
+    # never succeeded. Runs every 15 min and intentionally excludes market
+    # pipeline/report tasks.
     group: watchdog
     schedule: "5,20,35,50 * * * *"
     cwd: .

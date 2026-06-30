@@ -122,6 +122,15 @@ class TasklibTests(unittest.TestCase):
         self.assertFalse(us["sends_email"])
         self.assertFalse(cn["sends_email"])
 
+    def test_legacy_report_watchdog_is_manual_only(self) -> None:
+        reboot = materialize_task("us.watchdog.reboot", "2026-06-26")
+        interval = materialize_task("us.watchdog", "2026-06-26")
+
+        self.assertFalse(reboot["schedule"])
+        self.assertFalse(interval["schedule"])
+        self.assertFalse(reboot["sends_email"])
+        self.assertFalse(interval["sends_email"])
+
 
 if __name__ == "__main__":
     unittest.main()
