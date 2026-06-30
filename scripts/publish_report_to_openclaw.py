@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -88,6 +89,23 @@ def scp_base(args: argparse.Namespace) -> list[str]:
         cmd.extend(["-i", args.identity_file])
     cmd.extend(["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=accept-new"])
     return cmd
+
+
+def ssh_python(
+    args: argparse.Namespace,
+    code: str,
+    argv: list[str],
+    *,
+    timeout: int,
+    dry_run: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
+    bootstrap = "import base64,sys; exec(base64.b64decode(sys.argv[1]).decode('utf-8'))"
+    return run(
+        ssh_base(args) + ["python3", "-c", bootstrap, encoded, *argv],
+        timeout=timeout,
+        dry_run=dry_run,
+    )
 
 
 def remote_report_dir(args: argparse.Namespace) -> PurePosixPath:
@@ -219,15 +237,10 @@ if manifest.get("slot"):
 (inbox / f"latest_{suffix}.json").write_text(line + "\n", encoding="utf-8")
 print(json.dumps({"latest": str(inbox / "latest.json"), "duplicate": seen and not allow_duplicate}, ensure_ascii=False))
 """
-    result = run(
-        ssh_base(args) + [
-            "python3",
-            "-c",
-            code,
-            remote_manifest,
-            args.remote_root,
-            "1" if args.allow_duplicate_event else "0",
-        ],
+    result = ssh_python(
+        args,
+        code,
+        [remote_manifest, args.remote_root, "1" if args.allow_duplicate_event else "0"],
         timeout=args.timeout,
         dry_run=args.dry_run,
     )
@@ -290,12 +303,10 @@ sys.stdout.write(result.stdout)
 sys.stderr.write(result.stderr)
 sys.exit(result.returncode)
 """
-    run(
-        ssh_base(args)
-        + [
-            "python3",
-            "-c",
-            code,
+    ssh_python(
+        args,
+        code,
+        [
             args.openclaw_bin,
             args.agent,
             session_key,
