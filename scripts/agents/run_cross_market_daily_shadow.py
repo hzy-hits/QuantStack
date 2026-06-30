@@ -102,6 +102,7 @@ MARKET_TAIL_GROUPS = (
     ("A股/科创参考", ("000688.SS",)),
     ("商品/汇率/利率", ("CL=F", "BZ=F", "GC=F", "GLD", "USDCNH=X", "DX-Y.NYB", "^TNX")),
 )
+MIN_PUBLIC_IV_RANK_OBS = 30
 MANAGED_REPORT_SECTION_PREFIXES = (
     "## 全球市场温度",
     "## 全球温度",
@@ -661,6 +662,17 @@ def option_verdict_long_tenor(row: dict[str, Any]) -> bool:
     return any(marker in verdict for marker in ("信仰久期长", "远月", "LEAPS", "leaps"))
 
 
+def option_iv_rank_observation_count(row: dict[str, Any]) -> int:
+    try:
+        return int(row.get("iv_rank_n") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def option_iv_rank_public_reliable(row: dict[str, Any]) -> bool:
+    return option_iv_rank_observation_count(row) >= MIN_PUBLIC_IV_RANK_OBS
+
+
 def option_attention_verdict_reason(symbol: str, row: dict[str, Any]) -> list[str]:
     reasons: list[str] = []
     skew_z = compact_float(row.get("skew_z"), 4)
@@ -668,11 +680,14 @@ def option_attention_verdict_reason(symbol: str, row: dict[str, Any]) -> list[st
     iv_hv = compact_float(row.get("iv_hv"), 4)
     if skew_z is not None and abs(skew_z) >= 1.0:
         reasons.append("OTM skew 偏离")
-    if iv_rank is not None and iv_rank <= 20:
+    if iv_rank is not None and iv_rank <= 20 and option_iv_rank_public_reliable(row):
         reasons.append("LEAPS IV 低位")
     if option_verdict_long_tenor(row):
         reasons.append("远月 LEAPS 久期")
-    if (iv_rank is not None and iv_rank >= 70) or (iv_hv is not None and iv_hv >= 1.25):
+    if (
+        (iv_rank is not None and iv_rank >= 70 and option_iv_rank_public_reliable(row))
+        or (iv_hv is not None and iv_hv >= 1.25)
+    ):
         reasons.append("高 IV 等回落")
     return reasons
 
@@ -681,6 +696,7 @@ def option_attention_reading(reason: str, row: dict[str, Any]) -> str:
     skew_z = compact_float(row.get("skew_z"), 4)
     iv_rank = compact_float(row.get("iv_rank_pct"), 2)
     iv_hv = compact_float(row.get("iv_hv"), 4)
+    iv_rank_n = option_iv_rank_observation_count(row)
     if "OTM skew" in reason:
         if skew_z is not None and skew_z >= 1.0:
             return "put skew 抬升，仓位要等价格确认并收紧止损"
@@ -689,10 +705,14 @@ def option_attention_reading(reason: str, row: dict[str, Any]) -> str:
         return "skew 偏离，作为入场节奏约束"
     if "LEAPS IV" in reason:
         suffix = f"IV rank {iv_rank:.0f}%" if iv_rank is not None else "IV 低位"
+        if iv_rank_n:
+            suffix = f"{suffix}，样本N={iv_rank_n}"
         return f"{suffix}，只作远月方向成本观察"
     if "远月" in reason:
         return "远月久期存在，作为趋势信念观察"
     if "高 IV" in reason:
+        if iv_rank is not None and iv_rank_n >= MIN_PUBLIC_IV_RANK_OBS:
+            return f"IV rank {iv_rank:.0f}%（样本N={iv_rank_n}），等回落或用股票表达"
         if iv_hv is not None:
             return f"IV/HV {iv_hv:.2f}x，等波动回落或用股票表达"
         return "IV 分位偏高，避免把股票观点写成期权追价"
@@ -719,6 +739,7 @@ def option_attention_candidate(
         "effective_date": row.get("effective_date") or row.get("requested_date") or row.get("as_of"),
         "iv_ann": compact_float(row.get("iv_ann"), 4),
         "iv_rank_pct": compact_float(row.get("iv_rank_pct"), 2),
+        "iv_rank_n": option_iv_rank_observation_count(row) or None,
         "iv_hv": compact_float(row.get("iv_hv"), 4),
         "pc_ratio_z": compact_float(row.get("pc_ratio_z"), 4),
         "skew_z": compact_float(row.get("skew_z"), 4),
@@ -760,7 +781,7 @@ def merge_option_attention_rows(rows: list[dict[str, Any]], *, limit: int) -> li
         reading = str(row.get("reading") or "").strip()
         if reading and reading not in str(existing.get("reading") or ""):
             existing["reading"] = f"{existing.get('reading')}; {reading}"
-        for key in ("effective_date", "iv_ann", "iv_rank_pct", "iv_hv", "pc_ratio_z", "skew_z"):
+        for key in ("effective_date", "iv_ann", "iv_rank_pct", "iv_rank_n", "iv_hv", "pc_ratio_z", "skew_z"):
             if existing.get(key) is None and row.get(key) is not None:
                 existing[key] = row.get(key)
     selected = list(merged.values())[:limit]
@@ -863,6 +884,8 @@ def select_us_options_attention(
                 (str(symbol).upper(), row, compact_float(row.get("iv_rank_pct"), 2))
                 for symbol, row in verdicts.items()
                 if isinstance(row, dict) and compact_float(row.get("iv_rank_pct"), 2) is not None
+                and option_iv_rank_public_reliable(row)
+                and float(compact_float(row.get("iv_rank_pct"), 2) or 999.0) <= 20.0
             ),
             key=lambda item: item[2] if item[2] is not None else 999.0,
         )
@@ -881,7 +904,9 @@ def select_us_options_attention(
             (
                 (str(symbol).upper(), row, abs(compact_float(row.get("skew_z"), 4) or 0.0))
                 for symbol, row in verdicts.items()
-                if isinstance(row, dict) and compact_float(row.get("skew_z"), 4) is not None
+                if isinstance(row, dict)
+                and compact_float(row.get("skew_z"), 4) is not None
+                and abs(float(compact_float(row.get("skew_z"), 4) or 0.0)) >= 1.0
             ),
             key=lambda item: -item[2],
         )
@@ -1791,6 +1816,15 @@ def fmt_public_percent(value: Any) -> str:
     return f"{number:.0f}%"
 
 
+def fmt_public_iv_rank_sample(value: Any) -> str:
+    count = option_iv_rank_observation_count({"iv_rank_n": value})
+    if count <= 0:
+        return "-"
+    if count < MIN_PUBLIC_IV_RANK_OBS:
+        return f"N={count}，仅参考"
+    return f"N={count}"
+
+
 def fmt_public_ratio(value: Any) -> str:
     number = compact_float(value, 2)
     if number is None:
@@ -1926,19 +1960,21 @@ def render_us_options_attention_section(packet: dict[str, Any]) -> str:
         (
             f"当日 far-OTM 异常 {fmt(anomaly.get('row_count'))} 条，"
             f"跨 tenor/LEAPS 信号 {fmt(tenor.get('signal_count'))} 条；"
-            "没有触发时仍保留 skew/IV 排行观察。"
+            f"没有触发时仍保留 skew/IV 排行观察。IV rank 至少需要 {MIN_PUBLIC_IV_RANK_OBS} 个历史点，"
+            "不足时只作背景，不作为低位/高位结论。"
         ),
         "",
-        "| Ticker | 关注点 | 日期 | IV rank | IV/HV | PC z | Skew z | 处理 |",
-        "|---|---|---|---:|---:|---:|---:|---|",
+        "| Ticker | 关注点 | 日期 | IV rank | 样本 | IV/HV | PC z | Skew z | 处理 |",
+        "|---|---|---|---:|---|---:|---:|---:|---|",
     ]
     for row in rows[:10]:
         lines.append(
-            "| {symbol} | {reason} | {date} | {iv_rank} | {iv_hv} | {pc_z} | {skew_z} | {reading} |".format(
+            "| {symbol} | {reason} | {date} | {iv_rank} | {iv_rank_n} | {iv_hv} | {pc_z} | {skew_z} | {reading} |".format(
                 symbol=public_cell(row.get("symbol")),
                 reason=public_cell(row.get("reason")),
                 date=public_cell(row.get("effective_date")),
                 iv_rank=fmt_public_percent(row.get("iv_rank_pct")),
+                iv_rank_n=fmt_public_iv_rank_sample(row.get("iv_rank_n")),
                 iv_hv=fmt_public_ratio(row.get("iv_hv")),
                 pc_z=fmt_public_signed(row.get("pc_ratio_z")),
                 skew_z=fmt_public_signed(row.get("skew_z")),

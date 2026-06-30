@@ -179,6 +179,7 @@ def test_us_summary_includes_compact_option_context(tmp_path: Path) -> None:
             "verdict": "定位中性",
             "iv_ann": 0.2798,
             "iv_rank_pct": 12.0,
+            "iv_rank_n": 35,
             "iv_hv": 0.594,
             "pc_ratio_z": 0.1245,
             "skew_z": -0.1612,
@@ -229,6 +230,7 @@ def test_us_options_attention_section_includes_otm_skew_and_leaps_iv(tmp_path: P
             "verdict": "put 偏空 | 信仰久期中",
             "iv_ann": 0.2464,
             "iv_rank_pct": 16,
+            "iv_rank_n": 35,
             "iv_hv": 0.8355,
             "pc_ratio_z": 1.8,
             "skew_z": 3.2,
@@ -238,6 +240,7 @@ def test_us_options_attention_section_includes_otm_skew_and_leaps_iv(tmp_path: P
             "verdict": "定位中性 | 信仰久期长(远月堆积)",
             "iv_ann": 0.9971,
             "iv_rank_pct": 20,
+            "iv_rank_n": 35,
             "iv_hv": 0.9332,
             "pc_ratio_z": 0.1,
             "skew_z": 1.6,
@@ -253,6 +256,58 @@ def test_us_options_attention_section_includes_otm_skew_and_leaps_iv(tmp_path: P
     assert "远 OTM 异常" in section
     assert "LEAPS tenor 异动" in section
     assert "0R context" in section
+
+
+def test_us_options_attention_does_not_promote_low_iv_rank_with_short_history(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    us.payload["options_verdicts"] = {
+        "BTBT": {
+            "effective_date": "2026-06-29",
+            "verdict": "定位中性 | IV 110%·贵(IV>实际波动)·IV/HV 1.18x | 下行恐惧高(put skew 抬升)",
+            "iv_ann": 1.0989,
+            "iv_rank_pct": 0,
+            "iv_rank_n": 10,
+            "iv_hv": 1.1764,
+            "pc_ratio_z": -0.1355,
+            "skew_z": 1.3744,
+        },
+        "RDDT": {
+            "effective_date": "2026-06-29",
+            "verdict": "定位中性 | IV 69%·便宜(IV<实际波动)·IV/HV 0.86x | 信仰久期中",
+            "iv_ann": 0.6927,
+            "iv_rank_pct": 0,
+            "iv_rank_n": 6,
+            "iv_hv": 0.8627,
+            "pc_ratio_z": 0.4637,
+            "skew_z": 0.4458,
+        },
+        "NVDA": {
+            "effective_date": "2026-06-29",
+            "verdict": "定位中性",
+            "iv_ann": 0.2798,
+            "iv_rank_pct": 12,
+            "iv_rank_n": 40,
+            "iv_hv": 0.594,
+            "pc_ratio_z": 0.1245,
+            "skew_z": -0.1612,
+        },
+    }
+    packet = module.build_packet("am", cn, us)
+    watch = packet["us"]["option_context"]["options_attention_watchlist"]
+    by_symbol = {row["symbol"]: row for row in watch}
+
+    assert "BTBT" in by_symbol
+    assert "OTM skew 偏离" in by_symbol["BTBT"]["reason"]
+    assert "LEAPS IV 低位" not in by_symbol["BTBT"]["reason"]
+    assert "RDDT" not in by_symbol
+    assert "NVDA" in by_symbol
+    assert "LEAPS IV 低位" in by_symbol["NVDA"]["reason"]
+
+    section = module.render_us_options_attention_section(packet)
+    assert "N=10，仅参考" in section
+    assert "IV rank 至少需要 30 个历史点" in section
 
 
 def test_am_uses_previous_cn_context_when_target_day_payload_is_missing(tmp_path: Path) -> None:
