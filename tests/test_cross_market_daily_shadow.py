@@ -1295,8 +1295,8 @@ def test_openclaw_publish_invokes_helper(tmp_path: Path) -> None:
         openclaw_agent_timeout=180,
         openclaw_agent_deliver=True,
         openclaw_reply_channel="openclaw-weixin",
-        openclaw_reply_account="912f45c70aa5-im-bot",
-        openclaw_reply_to="o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat",
+        openclaw_reply_account="912f45c70aa5-im-bot,86fb46c4a557-im-bot",
+        openclaw_reply_to="o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat",
         openclaw_message_channel="",
         openclaw_message_target="",
         openclaw_allow_duplicate_event=False,
@@ -1315,8 +1315,11 @@ def test_openclaw_publish_invokes_helper(tmp_path: Path) -> None:
     assert cmd[cmd.index("--mode") + 1] == "agent"
     assert "--agent-deliver" in cmd
     assert cmd[cmd.index("--reply-channel") + 1] == "openclaw-weixin"
-    assert cmd[cmd.index("--reply-account") + 1] == "912f45c70aa5-im-bot"
-    assert cmd[cmd.index("--reply-to") + 1] == "o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat"
+    assert cmd[cmd.index("--reply-account") + 1] == "912f45c70aa5-im-bot,86fb46c4a557-im-bot"
+    assert (
+        cmd[cmd.index("--reply-to") + 1]
+        == "o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat"
+    )
     assert cmd[cmd.index("--packet-path") + 1].endswith("cross_market_am_shadow_packet.json")
     assert cmd[cmd.index("--meta-path") + 1].endswith("cross_market_am_shadow.meta.json")
 

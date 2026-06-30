@@ -248,8 +248,8 @@ tasks:
       QUANT_OPENCLAW_AGENT_TIMEOUT: "180"
       QUANT_OPENCLAW_AGENT_DELIVER: "1"
       QUANT_OPENCLAW_REPLY_CHANNEL: openclaw-weixin
-      QUANT_OPENCLAW_REPLY_ACCOUNT: 912f45c70aa5-im-bot
-      QUANT_OPENCLAW_REPLY_TO: o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat
+      QUANT_OPENCLAW_REPLY_ACCOUNT: 912f45c70aa5-im-bot,86fb46c4a557-im-bot
+      QUANT_OPENCLAW_REPLY_TO: o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat
     command:
       - quant-research-v1/.venv/bin/python
       - scripts/agents/run_cross_market_daily_shadow.py
@@ -298,8 +298,8 @@ tasks:
       QUANT_OPENCLAW_AGENT_TIMEOUT: "180"
       QUANT_OPENCLAW_AGENT_DELIVER: "1"
       QUANT_OPENCLAW_REPLY_CHANNEL: openclaw-weixin
-      QUANT_OPENCLAW_REPLY_ACCOUNT: 912f45c70aa5-im-bot
-      QUANT_OPENCLAW_REPLY_TO: o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat
+      QUANT_OPENCLAW_REPLY_ACCOUNT: 912f45c70aa5-im-bot,86fb46c4a557-im-bot
+      QUANT_OPENCLAW_REPLY_TO: o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat
     command:
       - quant-research-v1/.venv/bin/python
       - scripts/agents/run_cross_market_daily_shadow.py

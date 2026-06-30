@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import socket
 import subprocess
@@ -98,6 +99,34 @@ def scp_base(args: argparse.Namespace) -> list[str]:
 
 def shell_join(argv: list[str]) -> str:
     return " ".join(shlex.quote(str(part)) for part in argv)
+
+
+def split_multi_value(value: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[,;\n]+", value or "") if part.strip()]
+
+
+def expand_multi_value(name: str, values: list[str], count: int) -> list[str]:
+    if not values:
+        return [""] * count
+    if len(values) == 1:
+        return values * count
+    if len(values) == count:
+        return values
+    raise ValueError(f"--{name} must contain either 1 entry or {count} entries; got {len(values)}")
+
+
+def reply_destinations(args: argparse.Namespace) -> list[dict[str, str]]:
+    channels = split_multi_value(args.reply_channel)
+    accounts = split_multi_value(args.reply_account)
+    targets = split_multi_value(args.reply_to)
+    count = max(len(channels), len(accounts), len(targets), 1)
+    channels = expand_multi_value("reply-channel", channels, count)
+    accounts = expand_multi_value("reply-account", accounts, count)
+    targets = expand_multi_value("reply-to", targets, count)
+    return [
+        {"reply_channel": channel, "reply_account": account, "reply_to": target}
+        for channel, account, target in zip(channels, accounts, targets, strict=True)
+    ]
 
 
 def ssh_command(
@@ -301,7 +330,7 @@ def write_prompt(manifest: dict[str, Any], report_path: Path) -> str:
     )
 
 
-def notify_agent(args: argparse.Namespace, manifest: dict[str, Any], prompt_path: Path) -> None:
+def notify_agent(args: argparse.Namespace, manifest: dict[str, Any], prompt_path: Path) -> list[dict[str, str]]:
     remote_prompt = PurePosixPath(manifest["remote_dir"]) / prompt_path.name
     run(
         scp_base(args) + [str(prompt_path), f"{args.remote_user}@{args.remote_host}:{remote_prompt}"],
@@ -330,25 +359,32 @@ sys.stdout.write(result.stdout)
 sys.stderr.write(result.stderr)
 sys.exit(result.returncode)
 """
-    run_remote_python_script(
-        args,
-        code,
-        PurePosixPath(manifest["remote_dir"]),
-        "openclaw_notify_agent.py",
-        [
-            args.openclaw_bin,
-            args.agent,
-            session_key,
-            str(args.agent_timeout),
-            "1" if args.agent_deliver else "0",
-            args.reply_channel,
-            args.reply_account,
-            args.reply_to,
-            str(remote_prompt),
-        ],
-        timeout=max(args.timeout, args.agent_timeout + 15),
-        dry_run=args.dry_run,
-    )
+    destinations = reply_destinations(args) if args.agent_deliver else [
+        {"reply_channel": "", "reply_account": "", "reply_to": ""}
+    ]
+    deliveries: list[dict[str, str]] = []
+    for destination in destinations:
+        run_remote_python_script(
+            args,
+            code,
+            PurePosixPath(manifest["remote_dir"]),
+            "openclaw_notify_agent.py",
+            [
+                args.openclaw_bin,
+                args.agent,
+                session_key,
+                str(args.agent_timeout),
+                "1" if args.agent_deliver else "0",
+                destination["reply_channel"],
+                destination["reply_account"],
+                destination["reply_to"],
+                str(remote_prompt),
+            ],
+            timeout=max(args.timeout, args.agent_timeout + 15),
+            dry_run=args.dry_run,
+        )
+        deliveries.append(destination)
+    return deliveries
 
 
 def send_message(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
@@ -401,12 +437,23 @@ def main() -> int:
             dry_run=args.dry_run,
         )
         is_new_event = install_manifest(args, manifest["remote_manifest_path"])
+        agent_deliveries: list[dict[str, str]] = []
         if args.mode in {"agent", "all"} and is_new_event:
             prompt_path.write_text(write_prompt(manifest, args.report_path), encoding="utf-8")
-            notify_agent(args, manifest, prompt_path)
+            agent_deliveries = notify_agent(args, manifest, prompt_path)
         if args.mode in {"message", "all"} and is_new_event:
             send_message(args, manifest)
-        print(json.dumps({"ok": True, "new_event": is_new_event, "manifest": manifest}, ensure_ascii=False, sort_keys=True))
+        print(json.dumps(
+            {
+                "ok": True,
+                "new_event": is_new_event,
+                "agent_delivery_count": len(agent_deliveries),
+                "agent_deliveries": agent_deliveries,
+                "manifest": manifest,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ))
     return 0
 
 
