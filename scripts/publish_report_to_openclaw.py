@@ -7,6 +7,7 @@ import base64
 import hashlib
 import json
 import os
+import shlex
 import socket
 import subprocess
 import sys
@@ -66,7 +67,11 @@ def run(cmd: list[str], *, timeout: int, dry_run: bool = False) -> subprocess.Co
     if dry_run:
         print("dry-run:", " ".join(cmd))
         return subprocess.CompletedProcess(cmd, 0, "", "")
-    return subprocess.run(cmd, check=True, text=True, capture_output=True, timeout=timeout)
+    result = subprocess.run(cmd, check=False, text=True, capture_output=True, timeout=timeout)
+    if result.returncode != 0:
+        tail = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()[-1600:]
+        raise RuntimeError(f"command failed exit={result.returncode}: {tail}")
+    return result
 
 
 def ssh_base(args: argparse.Namespace) -> list[str]:
@@ -91,6 +96,20 @@ def scp_base(args: argparse.Namespace) -> list[str]:
     return cmd
 
 
+def shell_join(argv: list[str]) -> str:
+    return " ".join(shlex.quote(str(part)) for part in argv)
+
+
+def ssh_command(
+    args: argparse.Namespace,
+    remote_argv: list[str],
+    *,
+    timeout: int,
+    dry_run: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    return run(ssh_base(args) + [shell_join(remote_argv)], timeout=timeout, dry_run=dry_run)
+
+
 def ssh_python(
     args: argparse.Namespace,
     code: str,
@@ -101,11 +120,7 @@ def ssh_python(
 ) -> subprocess.CompletedProcess[str]:
     encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
     bootstrap = "import base64,sys; exec(base64.b64decode(sys.argv[1]).decode('utf-8'))"
-    return run(
-        ssh_base(args) + ["python3", "-c", bootstrap, encoded, *argv],
-        timeout=timeout,
-        dry_run=dry_run,
-    )
+    return ssh_command(args, ["python3", "-c", bootstrap, encoded, *argv], timeout=timeout, dry_run=dry_run)
 
 
 def remote_report_dir(args: argparse.Namespace) -> PurePosixPath:
@@ -181,8 +196,7 @@ def copy_artifacts(args: argparse.Namespace) -> tuple[PurePosixPath, dict[str, s
         raise FileNotFoundError(args.report_path)
 
     remote_dir = remote_report_dir(args)
-    mkdir_cmd = ssh_base(args) + ["mkdir", "-p", str(remote_dir), str(PurePosixPath(args.remote_root) / "inbox")]
-    run(mkdir_cmd, timeout=args.timeout, dry_run=args.dry_run)
+    ssh_command(args, ["mkdir", "-p", str(remote_dir), str(PurePosixPath(args.remote_root) / "inbox")], timeout=args.timeout, dry_run=args.dry_run)
 
     files: list[tuple[str, Path]] = [("report", args.report_path)]
     if args.packet_path and args.packet_path.exists():
@@ -345,7 +359,7 @@ def send_message(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
         "--json",
     ]
     code = "import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:]).returncode)"
-    run(ssh_base(args) + ["python3", "-c", code, *cmd], timeout=args.timeout, dry_run=args.dry_run)
+    ssh_python(args, code, cmd, timeout=args.timeout, dry_run=args.dry_run)
 
 
 def main() -> int:
