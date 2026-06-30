@@ -2407,7 +2407,22 @@ def normalize_public_report_text(text: str, slot: str) -> str:
     }
     for old, new in replacements.items():
         text = re.sub(re.escape(old), new, text, flags=re.IGNORECASE)
-    return strip_reviewer_note_blocks(text).strip()
+    text = strip_reviewer_note_blocks(text)
+    text = strip_duplicate_report_titles(text, slot)
+    return text.strip()
+
+
+def strip_duplicate_report_titles(text: str, slot: str) -> str:
+    expected_title = "# 跨市场早报" if slot == "am" else "# 跨市场晚报"
+    output: list[str] = []
+    seen_title = False
+    for line in text.splitlines():
+        if line.strip().startswith(expected_title):
+            if seen_title:
+                continue
+            seen_title = True
+        output.append(line)
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip()
 
 
 def call_hermes_agent(
@@ -2762,6 +2777,9 @@ def validate_shadow_report(
     first_line = next((line.strip() for line in text.splitlines() if line.strip()), "")
     if not first_line.startswith(expected_title):
         failures.append(f"first non-empty line must start with: {expected_title}")
+    title_count = sum(1 for line in text.splitlines() if line.strip().startswith(expected_title))
+    if title_count > 1:
+        failures.append(f"public report contains duplicate top-level title: {expected_title}")
     for token in required:
         if token not in text:
             failures.append(f"missing required token: {token}")
@@ -3188,6 +3206,7 @@ def main() -> int:
     report = ensure_us_options_attention_section(report, packet)
     report = ensure_cn_pipeline_language(report, packet)
     report = strip_diff_artifact_markers(report)
+    report = strip_duplicate_report_titles(report, args.slot)
     failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email, packet=packet)
     if failures:
         restore_output_snapshot(output_snapshot)

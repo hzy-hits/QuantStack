@@ -625,6 +625,23 @@ def test_normalize_public_report_strips_diff_artifacts() -> None:
     assert "旧表格" in text
 
 
+def test_normalize_public_report_removes_duplicate_top_level_title() -> None:
+    module = load_module()
+
+    text = module.normalize_public_report_text(
+        (
+            "# 跨市场早报：先看美股\n\n"
+            "宏观温度。\n\n"
+            "# 跨市场早报\n\n"
+            "正文继续。"
+        ),
+        "am",
+    )
+
+    assert text.count("# 跨市场早报") == 1
+    assert "正文继续" in text
+
+
 def test_normalize_public_report_strips_reviewer_delete_diff_artifacts() -> None:
     module = load_module()
 
@@ -655,6 +672,7 @@ def test_normalize_public_report_strips_reviewer_delete_diff_artifacts() -> None
     )
 
     assert text.startswith("# 跨市场早报")
+    assert text.count("# 跨市场早报") == 1
     assert not any(line.startswith("-|") for line in text.splitlines())
     assert not any(line.startswith("-##") for line in text.splitlines())
     assert "被审稿删除的旧段" not in text
@@ -683,6 +701,26 @@ def test_public_delivery_rejects_reviewer_diff_artifacts() -> None:
     )
 
     assert any("diff artifact" in item for item in failures)
+
+
+def test_public_delivery_rejects_duplicate_top_level_title() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场早报\n\n"
+            "美股影响A股，标普期货(2026-06-29)和纳指期货(2026-06-29)修复。"
+            "黄金(2026-06-29)、WTI原油(2026-06-29)、日经225(2026-06-29)、"
+            "KOSPI(2026-06-29)、恒生(2026-06-29)、DAX(2026-06-29)。"
+            "期权Gamma约束美股仓位。688233.SH进入A股候选管线。\n\n"
+            "# 跨市场早报\n\n"
+            "重复标题。"
+        ),
+        "am",
+        public_delivery=True,
+    )
+
+    assert any("duplicate top-level title" in item for item in failures)
 
 
 def test_normalize_public_report_repairs_plain_title() -> None:
