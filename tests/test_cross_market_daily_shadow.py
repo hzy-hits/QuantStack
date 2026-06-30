@@ -75,6 +75,7 @@ def test_pm_packet_keeps_us_to_cn_causality(tmp_path: Path) -> None:
     assert any(tool["name"] == "finance-search.get_market_snapshot" for tool in packet["tool_manifest"])
     assert any(tool["name"] == "finance-search.search_news" for tool in packet["tool_manifest"])
     assert any(tool["name"] == "finance-search.quant_stack_ranker" for tool in packet["tool_manifest"])
+    assert any(tool["name"] == "finance-search.quant_stack_sec_13f_recent" for tool in packet["tool_manifest"])
     assert "external_context_requirements" in packet
     assert "科创板" in module.json.dumps(packet["cn_universe_requirement"], ensure_ascii=False)
     assert packet["style_brief"]["reference_url"].startswith("https://boist.org/")
@@ -485,6 +486,36 @@ def test_public_delivery_rejects_missing_us_options_watch_tickers(tmp_path: Path
     )
 
     assert any("missing public US options watch ticker" in item for item in failures)
+
+
+def test_sec_13f_section_renders_recent_holding_changes() -> None:
+    module = load_module()
+    packet = {
+        "sec_13f_recent": {
+            "lookback_hours": 12,
+            "recent_file_count": 1,
+            "filings": [
+                {
+                    "manager": "TEST MANAGER",
+                    "filing_date": "2026-06-30",
+                    "report_date": "2026-03-31",
+                    "holding_count": 3,
+                    "new_positions_top5": [{"issuer": "NEW AI CO", "cusip": "999999999", "value_usd": 200_000_000}],
+                    "increases_top5": [{"issuer": "APPLE INC", "cusip": "037833100", "value_delta_usd": 75_000_000}],
+                    "decreases_top5": [{"issuer": "OLD CO", "cusip": "000000001", "value_delta_usd": -50_000_000}],
+                }
+            ],
+        }
+    }
+
+    section = module.render_sec_13f_section(packet)
+
+    assert "SEC 13F 机构持仓快照" in section
+    assert "TEST MANAGER" in section
+    assert "NEW AI CO" in section
+    assert "APPLE INC" in section
+    assert "OLD CO" in section
+    assert "季度滞后" in section
 
 
 def test_public_delivery_rejects_standalone_star_candidate_table() -> None:

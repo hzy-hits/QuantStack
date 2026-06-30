@@ -118,6 +118,7 @@ MANAGED_REPORT_SECTION_PREFIXES = (
     "## 美股期权关注标的",
     "## 美股期权观察标的",
     "## 美股 OTM skew",
+    "## SEC 13F 机构持仓快照",
     "## 附表：其他跨市场数据",
     "## 附表：外围资产",
     "## 附表：全球风险",
@@ -257,6 +258,17 @@ def parse_args() -> argparse.Namespace:
         choices=["on", "off"],
         default=os.environ.get("CROSS_MARKET_FINANCE_SEARCH_PREFETCH", "on"),
         help="Best-effort direct finance-search prefetch for global markets/news before Hermes writes.",
+    )
+    parser.add_argument(
+        "--sec-13f-prefetch",
+        choices=["on", "off"],
+        default=os.environ.get("CROSS_MARKET_SEC_13F_PREFETCH", "on"),
+        help="Best-effort local SEC 13F file summary for filings added in the recent window.",
+    )
+    parser.add_argument(
+        "--sec-13f-lookback-hours",
+        type=float,
+        default=float(os.environ.get("CROSS_MARKET_SEC_13F_LOOKBACK_HOURS", "12")),
     )
     parser.add_argument(
         "--publish-openclaw",
@@ -1234,6 +1246,17 @@ def build_tool_manifest(slot: str, cn_summary: dict[str, Any], us_summary: dict[
             "returns": ["ranker_row", "gamma_context", "evidence_context"],
             "agent_use": "Use only for selected symbols that matter to the story; do not bulk-dump symbol context.",
         },
+        {
+            "name": "finance-search.quant_stack_sec_13f_recent",
+            "kind": "mcp_tool",
+            "market": "US institutional holdings",
+            "source": "Hermes MCP server: finance-search + local SEC 13F files",
+            "returns": ["recent_13f_files", "new_positions_top5", "increases_top5", "decreases_top5"],
+            "agent_use": (
+                "Read local 13F information tables added in the last 12 hours. "
+                "Use only as delayed institutional positioning context; do not treat 13F changes as real-time flow."
+            ),
+        },
     ]
 
 
@@ -1359,6 +1382,14 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
                 ],
                 "purpose": "Use only as an evidence pack; do not print its internal gaps section.",
             },
+            {
+                "tool": "finance-search.quant_stack_sec_13f_recent",
+                "window": "12h",
+                "purpose": (
+                    "Read local SEC 13F information-table files added in the last 12 hours and summarize "
+                    "new positions, increases, and decreases top 5 by manager."
+                ),
+            },
         ],
         "public_output_rule": (
             "The public report must keep the top macro thermometer narrow: US broad indices, CN broad "
@@ -1367,7 +1398,8 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
             "appendix table. Put macro/news headlines immediately under the thermometer when source "
             "titles are returned. Every cited index or future must show its returned date, especially "
             "cross-timezone markets. If a feed or symbol is unavailable, omit it; do not print a "
-            "missing-data list or tool failure note. Do not cite India/Sensex/Nifty indices."
+            "missing-data list or tool failure note. Do not cite India/Sensex/Nifty indices. If recent "
+            "13F data is present, attach it as delayed institutional positioning context, not a trade signal."
         ),
     }
 
@@ -1768,6 +1800,78 @@ def render_us_action_section(packet: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def fmt_public_money(value: Any) -> str:
+    number = compact_float(value, 2)
+    if number is None:
+        return "-"
+    sign = "-" if number < 0 else ""
+    number = abs(number)
+    if number >= 1_000_000_000:
+        return f"{sign}${number / 1_000_000_000:.2f}B"
+    if number >= 1_000_000:
+        return f"{sign}${number / 1_000_000:.1f}M"
+    if number >= 1_000:
+        return f"{sign}${number / 1_000:.1f}K"
+    return f"{sign}${number:.0f}"
+
+
+def render_13f_items(rows: list[dict[str, Any]], *, change_key: str = "") -> str:
+    parts: list[str] = []
+    for row in rows[:5]:
+        label = public_cell(row.get("issuer") or row.get("cusip"))
+        value = fmt_public_money(row.get(change_key) if change_key else row.get("value_usd"))
+        if label and value != "-":
+            parts.append(f"{label}({value})")
+    return "; ".join(parts) or "-"
+
+
+def render_sec_13f_section(packet: dict[str, Any]) -> str:
+    payload = packet.get("sec_13f_recent") if isinstance(packet.get("sec_13f_recent"), dict) else {}
+    filings = payload.get("filings") if isinstance(payload.get("filings"), list) else []
+    filings = [row for row in filings if isinstance(row, dict)]
+    if not filings:
+        return ""
+
+    lookback = compact_float(payload.get("lookback_hours"), 1) or 12.0
+    lines = [
+        "## SEC 13F 机构持仓快照",
+        (
+            f"过去 {lookback:g} 小时本地新增 {fmt(payload.get('recent_file_count'))} 个 13F 持仓文件；"
+            "13F 有季度滞后，只作为机构仓位线索，不当作实时资金流。"
+        ),
+        "",
+        "| Manager | Filing/Report | Holdings | 新增Top5 | 增持Top5 | 减持Top5 |",
+        "|---|---|---:|---|---|---|",
+    ]
+    for filing in filings[:6]:
+        filing_date = public_cell(filing.get("filing_date"), default="")
+        report_date = public_cell(filing.get("report_date"), default="")
+        date_text = " / ".join(part for part in (filing_date, report_date) if part) or "-"
+        lines.append(
+            "| {manager} | {date} | {count} | {new} | {inc} | {dec} |".format(
+                manager=public_cell(filing.get("manager")),
+                date=date_text,
+                count=public_cell(filing.get("holding_count")),
+                new=public_cell(render_13f_items(filing.get("new_positions_top5") or [])),
+                inc=public_cell(render_13f_items(filing.get("increases_top5") or [], change_key="value_delta_usd")),
+                dec=public_cell(render_13f_items(filing.get("decreases_top5") or [], change_key="value_delta_usd")),
+            )
+        )
+    return "\n".join(lines)
+
+
+def ensure_sec_13f_section(report: str, packet: dict[str, Any]) -> str:
+    section = render_sec_13f_section(packet)
+    text = strip_managed_report_sections(report, prefixes=("## SEC 13F 机构持仓快照",))
+    if not section:
+        return text.strip()
+    if "## 美股执行标的" in text:
+        return insert_after_section(text, "## 美股执行标的", section)
+    if "## 宏观事件与产业新闻" in text:
+        return insert_after_section(text, "## 宏观事件与产业新闻", section)
+    return insert_after_section(text, "## 宏观数据温度计", section)
+
+
 def render_us_options_attention_section(packet: dict[str, Any]) -> str:
     us = packet.get("us") if isinstance(packet.get("us"), dict) else {}
     context = us.get("option_context") if isinstance(us.get("option_context"), dict) else {}
@@ -2113,6 +2217,48 @@ def attach_finance_search_prefetch(packet: dict[str, Any], *, target_cn_date: st
     }
 
 
+def fetch_sec_13f_recent_summary(*, lookback_hours: float, timeout: int = 45) -> dict[str, Any]:
+    script = ROOT / "scripts" / "sec_13f_recent_summary.py"
+    if not script.exists():
+        return {"ok": False, "error": "sec 13f summary script not found", "filings": []}
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                "--lookback-hours",
+                str(lookback_hours),
+                "--json",
+            ],
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            cwd=ROOT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "error": str(exc), "filings": []}
+    if result.returncode != 0:
+        return {"ok": False, "error": ((result.stderr or "") + (result.stdout or ""))[-800:], "filings": []}
+    try:
+        payload = json.loads((result.stdout or "").strip())
+    except json.JSONDecodeError as exc:
+        return {"ok": False, "error": f"invalid sec 13f JSON: {exc}", "filings": []}
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "invalid sec 13f payload", "filings": []}
+    payload["ok"] = True
+    payload["public_use"] = (
+        "If filings is non-empty, summarize new positions, increases, and decreases as delayed 13F institutional "
+        "positioning context. If filings is empty, omit this topic from the public report."
+    )
+    return payload
+
+
+def attach_sec_13f_recent(packet: dict[str, Any], *, lookback_hours: float) -> None:
+    payload = fetch_sec_13f_recent_summary(lookback_hours=lookback_hours)
+    packet["sec_13f_recent"] = payload
+
+
 def build_packet(slot: str, cn: MarketArtifact, us: MarketArtifact) -> dict[str, Any]:
     cn_summary = summarize_artifact(cn)
     us_summary = summarize_artifact(us)
@@ -2282,10 +2428,12 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 - 必须读取 packet.us.option_context。美股段要覆盖期权/Gamma 对股票仓位、入场节奏、止损收紧和风险预算的影响;
   如果有 options_attention_watchlist,要写出 OTM skew / LEAPS IV 值得关注的具体美股标的;
   如果 options_anomaly_radar 或 options_tenor_radar 是 no_trigger/no_signal,要自然写成“没有新增异常/tenor确认”,不要写成数据没跑。
+- 如果 packet.sec_13f_recent.filings 非空,必须把过去12小时新增的 SEC 13F 文件解读为“季度滞后的机构仓位线索”,
+  覆盖每个 manager 的新增持仓、增持、减持 Top5;如果为空,公开报告自然省略,不要写缺失提示。
 - 可以启发式使用 finance-search MCP 工具,尤其是:
   quant_stack_daily_snapshot, quant_stack_spine_triage, quant_stack_task_status,
   quant_stack_validate_main_strategy_v2, quant_stack_ranker, quant_stack_symbol_context,
-  get_market_snapshot, newsnow_radar, search_news, research_brief。
+  quant_stack_sec_13f_recent, get_market_snapshot, newsnow_radar, search_news, research_brief。
 - 写作前必须构造“宏观数据温度计”:顶部只放美股大盘、A股大盘、KOSPI、日经225;
   美股期货、欧洲、恒生/台湾、VIX、油、金、美元/离岸人民币、利率和科创50等其他数据放报告尾部附表。
 - 引用任何大盘指数或期货时,必须带返回日期,格式类似“德国DAX(2026-06-29)”或“纳指期货(2026-06-29)”;
@@ -2345,6 +2493,8 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 - 美股段必须融合 packet.us.option_context,包括 Gamma/期权定位/异常与 tenor 是否触发;它们是股票仓位和风险节奏证据,
   不是期权交易指令。如果 packet.us.option_context 有 options_attention_watchlist,保留其中 OTM skew / LEAPS IV 关注标的。
   如果 anomaly/tenor 为 0,写成没有新增确认,不要省略成“美股没发完”。
+- 如果 packet.sec_13f_recent.filings 非空,保留 SEC 13F 机构持仓快照:每个 manager 的新增持仓、增持、减持 Top5。
+  必须说明 13F 是季度滞后数据,只能作为机构仓位背景,不能写成实时资金流或今日买卖。
 - 宏观数据温度计顶部只能保留美股大盘、A股大盘、KOSPI、日经225;美股期货、油、金、
   欧洲/其他亚洲、VIX、汇率、利率和科创50等只能放报告尾部附表。如果 draft 已遗漏,
   只能从 packet/工具返回中补入,不能虚构数字。
@@ -3375,6 +3525,8 @@ def main() -> int:
     )
     if args.finance_search_prefetch == "on" and args.agent_backend == "hermes":
         attach_finance_search_prefetch(packet, target_cn_date=cn_date)
+    if args.sec_13f_prefetch == "on" and args.agent_backend == "hermes":
+        attach_sec_13f_recent(packet, lookback_hours=args.sec_13f_lookback_hours)
     if args.agent_backend == "off":
         report = deterministic_report(packet)
         backend_name = "deterministic_shadow"
@@ -3421,6 +3573,7 @@ def main() -> int:
     report = annotate_market_snapshot_dates(report, packet)
     report = ensure_market_snapshot_section(report, packet)
     report = ensure_us_action_section(report, packet)
+    report = ensure_sec_13f_section(report, packet)
     report = ensure_us_options_attention_section(report, packet)
     report = ensure_cn_pipeline_section(report, packet)
     report = ensure_cn_pipeline_language(report, packet)
