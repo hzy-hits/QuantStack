@@ -811,6 +811,8 @@ def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: P
         "旧顶部表。\n\n"
         "## 宏观与产业 headlines\n"
         "- 幻觉新闻。\n\n"
+        "## 可核验宏观与产业 headlines\n"
+        "- 旧英文新闻。\n\n"
         "## 科创板不是温度计，是下一轮候选管线\n"
         "旧科创段。\n\n"
         "## 附表：外围资产与风险参考\n"
@@ -826,6 +828,8 @@ def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: P
 
     assert "旧顶部表" not in report
     assert "幻觉新闻" not in report
+    assert "旧英文新闻" not in report
+    assert "可核验宏观与产业" not in report
     assert "旧科创段" not in report
     assert "旧外围表" not in report
     assert "旧尾表" not in report
