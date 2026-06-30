@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import hashlib
 import json
 import os
@@ -110,17 +109,26 @@ def ssh_command(
     return run(ssh_base(args) + [shell_join(remote_argv)], timeout=timeout, dry_run=dry_run)
 
 
-def ssh_python(
+def run_remote_python_script(
     args: argparse.Namespace,
     code: str,
+    remote_dir: PurePosixPath,
+    script_name: str,
     argv: list[str],
     *,
     timeout: int,
     dry_run: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    encoded = base64.b64encode(code.encode("utf-8")).decode("ascii")
-    bootstrap = "import base64,sys; exec(base64.b64decode(sys.argv[1]).decode('utf-8'))"
-    return ssh_command(args, ["python3", "-c", bootstrap, encoded, *argv], timeout=timeout, dry_run=dry_run)
+    remote_script = remote_dir / script_name
+    with tempfile.TemporaryDirectory(prefix="openclaw-remote-script-") as tmp:
+        local_script = Path(tmp) / script_name
+        local_script.write_text(code.strip() + "\n", encoding="utf-8")
+        run(
+            scp_base(args) + [str(local_script), f"{args.remote_user}@{args.remote_host}:{remote_script}"],
+            timeout=timeout,
+            dry_run=dry_run,
+        )
+    return ssh_command(args, ["python3", str(remote_script), *argv], timeout=timeout, dry_run=dry_run)
 
 
 def remote_report_dir(args: argparse.Namespace) -> PurePosixPath:
@@ -251,9 +259,11 @@ if manifest.get("slot"):
 (inbox / f"latest_{suffix}.json").write_text(line + "\n", encoding="utf-8")
 print(json.dumps({"latest": str(inbox / "latest.json"), "duplicate": seen and not allow_duplicate}, ensure_ascii=False))
 """
-    result = ssh_python(
+    result = run_remote_python_script(
         args,
         code,
+        PurePosixPath(remote_manifest).parent,
+        "openclaw_install_manifest.py",
         [remote_manifest, args.remote_root, "1" if args.allow_duplicate_event else "0"],
         timeout=args.timeout,
         dry_run=args.dry_run,
@@ -317,9 +327,11 @@ sys.stdout.write(result.stdout)
 sys.stderr.write(result.stderr)
 sys.exit(result.returncode)
 """
-    ssh_python(
+    run_remote_python_script(
         args,
         code,
+        PurePosixPath(manifest["remote_dir"]),
+        "openclaw_notify_agent.py",
         [
             args.openclaw_bin,
             args.agent,
@@ -359,7 +371,15 @@ def send_message(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
         "--json",
     ]
     code = "import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:]).returncode)"
-    ssh_python(args, code, cmd, timeout=args.timeout, dry_run=args.dry_run)
+    run_remote_python_script(
+        args,
+        code,
+        PurePosixPath(manifest["remote_dir"]),
+        "openclaw_send_message.py",
+        cmd,
+        timeout=args.timeout,
+        dry_run=args.dry_run,
+    )
 
 
 def main() -> int:
