@@ -1606,6 +1606,63 @@ def public_us_constraint(row: dict[str, Any]) -> str:
     return public_cell(f"{prefix}{hedge_text}")
 
 
+def public_cn_stage(row: dict[str, Any]) -> str:
+    stage = str(row.get("pipeline_stage") or row.get("action") or "").lower()
+    if stage in {"top_stock_trade", "secondary_stock_trade"} or stage.startswith("buy"):
+        return "执行候选"
+    if stage == "active_watch":
+        return "观察候选"
+    if stage in {"ranked_watch", "bench_ranked"}:
+        return "备选候选"
+    if stage:
+        return public_cell(stage)
+    return "候选"
+
+
+def public_cn_wait_condition(row: dict[str, Any]) -> str:
+    parts = [
+        public_cell(row.get("reason"), default=""),
+        public_cell(row.get("entry"), default=""),
+        public_cell(row.get("handling_line"), default=""),
+        public_cell(row.get("target"), default=""),
+    ]
+    labels = ["", "入场", "处理", "目标"]
+    output = []
+    for label, value in zip(labels, parts):
+        if not value:
+            continue
+        output.append(f"{label}{value}" if not label else f"{label}: {value}")
+    return "; ".join(output) or "等待A股本域价格和量能确认"
+
+
+def render_cn_pipeline_section(packet: dict[str, Any]) -> str:
+    cn = packet.get("cn") if isinstance(packet.get("cn"), dict) else {}
+    candidates = cn.get("pipeline_candidates") if isinstance(cn.get("pipeline_candidates"), list) else []
+    rows = [row for row in candidates if isinstance(row, dict) and row.get("symbol")]
+    if not rows:
+        return ""
+
+    lines = [
+        "## A股执行与候选管线",
+        "美股只能给A股风险预算、行业顺风和节奏约束；A股标的仍按本域管线的阶段、排序和等待条件处理。",
+        "",
+        "| 代码 | 名称 | 阶段 | 排序 | 分数 | 处理/等待条件 |",
+        "|---|---|---|---:|---:|---|",
+    ]
+    for row in rows[:10]:
+        lines.append(
+            "| {symbol} | {name} | {stage} | {rank} | {score} | {condition} |".format(
+                symbol=public_cell(row.get("symbol")),
+                name=public_cell(row.get("name")),
+                stage=public_cn_stage(row),
+                rank=public_cell(row.get("rank")),
+                score=public_cell(row.get("rank_score")),
+                condition=public_cell(public_cn_wait_condition(row)),
+            )
+        )
+    return "\n".join(lines)
+
+
 def fmt_public_percent(value: Any) -> str:
     number = compact_float(value, 2)
     if number is None:
@@ -1849,6 +1906,21 @@ def ensure_us_options_attention_section(report: str, packet: dict[str, Any]) -> 
     if "## 宏观事件与产业新闻" in text:
         return insert_after_section(text, "## 宏观事件与产业新闻", section)
     return insert_after_section(text, "## 宏观数据温度计", section)
+
+
+def ensure_cn_pipeline_section(report: str, packet: dict[str, Any]) -> str:
+    section = render_cn_pipeline_section(packet)
+    text = strip_managed_report_sections(
+        report,
+        prefixes=("## A股执行与候选管线", "## A股执行观察", "## A股候选管线"),
+    )
+    if not section:
+        return text.strip()
+    if "## 美股期权关注标的" in text:
+        return insert_after_section(text, "## 美股期权关注标的", section)
+    if "## 美股执行标的" in text:
+        return insert_after_section(text, "## 美股执行标的", section)
+    return insert_after_section(text, "## 宏观事件与产业新闻", section)
 
 
 def repair_star_pipeline_language(report: str, *, add_replacement: bool = True) -> str:
@@ -3204,6 +3276,7 @@ def main() -> int:
     report = ensure_market_snapshot_section(report, packet)
     report = ensure_us_action_section(report, packet)
     report = ensure_us_options_attention_section(report, packet)
+    report = ensure_cn_pipeline_section(report, packet)
     report = ensure_cn_pipeline_language(report, packet)
     report = strip_diff_artifact_markers(report)
     report = strip_duplicate_report_titles(report, args.slot)

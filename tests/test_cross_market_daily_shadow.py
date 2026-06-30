@@ -103,6 +103,35 @@ def test_cn_summary_mixes_star_candidates_into_cn_pipeline(tmp_path: Path) -> No
     assert star["pipeline_stage"] == "active_watch"
 
 
+def test_cn_pipeline_section_renders_star_inside_a_share_pipeline(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    cn.payload["cn_opportunity_ranker"] = {
+        "all_rows": [
+            {
+                "symbol": "688233.SH",
+                "name": "神工股份",
+                "production_tier": "active_watch",
+                "rank": 20,
+                "rank_score": 70.18,
+                "observation_entry_zone": "194.33-198.22",
+                "handling_line": "回落后重新站回入场区",
+            }
+        ]
+    }
+    packet = module.build_packet("am", cn, us)
+
+    section = module.render_cn_pipeline_section(packet)
+
+    assert "## A股执行与候选管线" in section
+    assert "688233.SH" in section
+    assert "神工股份" in section
+    assert "观察候选" in section
+    assert "194.33-198.22" in section
+    assert "## A股科创板候选管线" not in section
+
+
 def test_us_summary_includes_compact_option_context(tmp_path: Path) -> None:
     module = load_module()
     us = artifact(module, "us", "2026-06-29", tmp_path)
@@ -857,6 +886,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     report = module.ensure_market_snapshot_section(report, packet)
     report = module.ensure_us_action_section(report, packet)
     report = module.ensure_us_options_attention_section(report, packet)
+    report = module.ensure_cn_pipeline_section(report, packet)
     report = module.ensure_cn_pipeline_language(report, packet)
     failures = module.validate_shadow_report(report, "am", public_delivery=True, packet=packet)
 
@@ -875,6 +905,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert "## 美股期权关注标的" in report
     assert "DLR" in report
     assert report.index("## 美股执行标的") < report.index("## 美股期权关注标的")
+    assert "## A股执行与候选管线" in report
     assert "## A股科创板候选管线" not in report
     assert "688233.SH" in report
     assert "## 附表：其他跨市场数据" in report
