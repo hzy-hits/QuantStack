@@ -326,6 +326,21 @@ def test_public_delivery_rejects_tool_log_language() -> None:
     assert any("MCP" in item for item in failures)
 
 
+def test_public_delivery_cron_marker_does_not_reject_micron() -> None:
+    module = load_module()
+
+    base = (
+        "# 跨市场晚报\n\n"
+        "A股 美股 期权 Gamma 黄金 WTI原油 标普期货(2026-06-30) "
+        "日经225(2026-06-30) KOSPI(2026-06-30) 德国DAX(2026-06-30) 688233.SH "
+    )
+    micron_failures = module.validate_shadow_report(base + "Micron 带动芯片链。", "pm", public_delivery=True)
+    cron_failures = module.validate_shadow_report(base + "cron 状态不应出现在正文。", "pm", public_delivery=True)
+
+    assert not any("cron" in item for item in micron_failures)
+    assert any("cron" in item for item in cron_failures)
+
+
 def test_public_delivery_rejects_diff_artifacts() -> None:
     module = load_module()
 

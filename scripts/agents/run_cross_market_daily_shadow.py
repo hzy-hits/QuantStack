@@ -3167,8 +3167,12 @@ def validate_shadow_report(
             "## A股报告",
         ]
         for token in public_forbidden:
-            if contains_marker(text, token):
-                failures.append(f"forbidden public-report marker: {token}")
+            if token == "cron":
+                if not re.search(r"(?<![A-Za-z])cron(?![A-Za-z])", text, flags=re.IGNORECASE):
+                    continue
+            elif not contains_marker(text, token):
+                continue
+            failures.append(f"forbidden public-report marker: {token}")
         failures.extend(public_context_failures(text, packet))
     return failures
 
