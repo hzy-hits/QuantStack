@@ -103,6 +103,9 @@ MARKET_TAIL_GROUPS = (
     ("商品/汇率/利率", ("CL=F", "BZ=F", "GC=F", "GLD", "USDCNH=X", "DX-Y.NYB", "^TNX")),
 )
 MIN_PUBLIC_IV_RANK_OBS = 30
+LEAPS_MIN_DTE = 365
+LONG_DATED_MIN_DTE = 221
+DEFAULT_US_OPTIONS_DB = ROOT / "quant-research-v1" / "data" / "quant.duckdb"
 MANAGED_REPORT_SECTION_PREFIXES = (
     "## 全球市场温度",
     "## 全球温度",
@@ -673,15 +676,229 @@ def option_iv_rank_public_reliable(row: dict[str, Any]) -> bool:
     return option_iv_rank_observation_count(row) >= MIN_PUBLIC_IV_RANK_OBS
 
 
-def option_attention_verdict_reason(symbol: str, row: dict[str, Any]) -> list[str]:
+def percentile_rank(values: list[float], current: float) -> float | None:
+    if len(values) < 2:
+        return None
+    lower = sum(1 for value in values if value < current)
+    equal = sum(1 for value in values if value == current)
+    return ((lower + 0.5 * max(equal - 1, 0)) / (len(values) - 1)) * 100.0
+
+
+def infer_options_effective_date(payload: dict[str, Any]) -> str | None:
+    verdicts = payload.get("options_verdicts") if isinstance(payload.get("options_verdicts"), dict) else {}
+    dates = sorted(
+        {
+            str(row.get("effective_date") or row.get("requested_date"))
+            for row in verdicts.values()
+            if isinstance(row, dict) and (row.get("effective_date") or row.get("requested_date"))
+        }
+    )
+    if dates:
+        return dates[-1]
+    gamma = payload.get("gamma_spring") if isinstance(payload.get("gamma_spring"), dict) else {}
+    return gamma.get("effective_date") or gamma.get("as_of") or payload.get("as_of")
+
+
+def fetch_long_dated_iv_history(
+    symbols: list[str],
+    as_of: str | None,
+    *,
+    db_path: Path = DEFAULT_US_OPTIONS_DB,
+    lookback_days: int = 400,
+) -> dict[str, dict[str, Any]]:
+    symbols = sorted({str(symbol or "").upper() for symbol in symbols if symbol})
+    if not symbols or not as_of or not db_path.exists():
+        return {}
+    try:
+        import duckdb
+    except ImportError:
+        return {}
+
+    try:
+        con = duckdb.connect(str(db_path), read_only=True)
+    except Exception:
+        return {}
+    try:
+        placeholders = ", ".join("?" for _ in symbols)
+        coverage_rows = con.execute(
+            f"""
+            SELECT symbol, MAX(days_to_exp) AS max_dte, COUNT(DISTINCT expiry) AS expiry_count
+            FROM options_chain_quotes
+            WHERE symbol IN ({placeholders})
+              AND as_of = CAST(? AS DATE)
+              AND implied_volatility IS NOT NULL
+            GROUP BY symbol
+            """,
+            [*symbols, as_of],
+        ).fetchall()
+        modes: dict[str, dict[str, Any]] = {}
+        for symbol, max_dte, expiry_count in coverage_rows:
+            symbol_key = str(symbol).upper()
+            parsed_max = int(max_dte or 0)
+            if parsed_max >= LEAPS_MIN_DTE:
+                modes[symbol_key] = {
+                    "tenor": "LEAPS",
+                    "min_dte": LEAPS_MIN_DTE,
+                    "target_dte": LEAPS_MIN_DTE,
+                    "max_dte": parsed_max,
+                    "expiry_count": int(expiry_count or 0),
+                }
+            elif parsed_max >= LONG_DATED_MIN_DTE:
+                modes[symbol_key] = {
+                    "tenor": "远月",
+                    "min_dte": LONG_DATED_MIN_DTE,
+                    "target_dte": LONG_DATED_MIN_DTE,
+                    "max_dte": parsed_max,
+                    "expiry_count": int(expiry_count or 0),
+                }
+        if not modes:
+            return {}
+
+        def sql_quote(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        values_sql = ", ".join(
+            f"({sql_quote(symbol)}, {mode['target_dte']}, {mode['min_dte']})"
+            for symbol, mode in modes.items()
+        )
+        rows = con.execute(
+            f"""
+            WITH modes(symbol, target_dte, min_dte) AS (
+              VALUES {values_sql}
+            ),
+            base AS (
+              SELECT
+                q.symbol,
+                q.as_of,
+                q.expiry,
+                q.days_to_exp,
+                q.option_type,
+                q.implied_volatility,
+                q.volume,
+                q.open_interest,
+                ABS(q.days_to_exp - m.target_dte) AS dte_diff,
+                ABS(q.strike - q.current_price) / NULLIF(q.current_price, 0) AS moneyness_diff
+              FROM options_chain_quotes q
+              JOIN modes m ON q.symbol = m.symbol
+              WHERE q.as_of <= CAST(? AS DATE)
+                AND q.as_of >= (CAST(? AS DATE) - INTERVAL {int(lookback_days)} DAY)
+                AND q.implied_volatility IS NOT NULL
+                AND q.days_to_exp >= m.min_dte
+                AND q.current_price IS NOT NULL
+                AND q.current_price > 0
+                AND q.strike IS NOT NULL
+            ),
+            ranked AS (
+              SELECT *,
+                ROW_NUMBER() OVER (
+                  PARTITION BY symbol, as_of, option_type
+                  ORDER BY dte_diff ASC, moneyness_diff ASC, days_to_exp ASC
+                ) AS rn
+              FROM base
+            )
+            SELECT
+              symbol,
+              as_of,
+              AVG(implied_volatility) AS atm_iv,
+              AVG(days_to_exp) AS avg_dte,
+              COUNT(*) AS legs,
+              SUM(COALESCE(volume, 0)) AS volume,
+              SUM(COALESCE(open_interest, 0)) AS open_interest
+            FROM ranked
+            WHERE rn = 1
+            GROUP BY symbol, as_of
+            ORDER BY symbol, as_of
+            """,
+            [as_of, as_of],
+        ).fetchall()
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+    series: dict[str, list[dict[str, Any]]] = {}
+    for symbol, row_date, atm_iv, avg_dte, legs, volume, open_interest in rows:
+        symbol_key = str(symbol).upper()
+        if atm_iv is None:
+            continue
+        series.setdefault(symbol_key, []).append(
+            {
+                "date": str(row_date),
+                "atm_iv": float(atm_iv),
+                "avg_dte": float(avg_dte or 0.0),
+                "legs": int(legs or 0),
+                "volume": int(volume or 0),
+                "open_interest": int(open_interest or 0),
+            }
+        )
+
+    out: dict[str, dict[str, Any]] = {}
+    for symbol, history in series.items():
+        current = next((row for row in reversed(history) if row["date"] <= as_of), None)
+        if not current:
+            continue
+        values = [row["atm_iv"] for row in history if row["date"] <= current["date"]]
+        rank = percentile_rank(values, current["atm_iv"])
+        mode = modes.get(symbol, {})
+        out[symbol] = {
+            "symbol": symbol,
+            "tenor": mode.get("tenor") or "远月",
+            "effective_date": current["date"],
+            "atm_iv": round(current["atm_iv"], 4),
+            "avg_dte": round(current["avg_dte"], 1),
+            "rank_pct": round(rank, 2) if rank is not None else None,
+            "rank_n": len(values),
+            "min_dte": mode.get("min_dte"),
+            "target_dte": mode.get("target_dte"),
+            "max_dte": mode.get("max_dte"),
+            "expiry_count": mode.get("expiry_count"),
+            "volume": current["volume"],
+            "open_interest": current["open_interest"],
+            "coverage_status": "ok" if len(values) >= MIN_PUBLIC_IV_RANK_OBS else "short_history",
+        }
+    return out
+
+
+def long_dated_iv_public_reliable(row: dict[str, Any] | None) -> bool:
+    if not isinstance(row, dict):
+        return False
+    try:
+        return int(row.get("rank_n") or 0) >= MIN_PUBLIC_IV_RANK_OBS and row.get("rank_pct") is not None
+    except (TypeError, ValueError):
+        return False
+
+
+def long_dated_iv_reason(row: dict[str, Any]) -> str:
+    tenor = str(row.get("tenor") or "远月")
+    return "LEAPS IV 低位" if tenor.upper() == "LEAPS" else "远月 IV 低位"
+
+
+def long_dated_iv_reading(row: dict[str, Any]) -> str:
+    tenor = str(row.get("tenor") or "远月")
+    rank = compact_float(row.get("rank_pct"), 2)
+    rank_n = row.get("rank_n")
+    atm_iv = compact_float(row.get("atm_iv"), 4)
+    dte = compact_float(row.get("avg_dte"), 1)
+    rank_text = f"{rank:.0f}%" if rank is not None else "-"
+    iv_text = f"，ATM IV {atm_iv * 100:.0f}%" if atm_iv is not None else ""
+    dte_text = f"，DTE约{dte:.0f}" if dte is not None else ""
+    return f"{tenor} IV rank {rank_text}，样本N={fmt(rank_n)}{dte_text}{iv_text}，只作股票方向成本观察"
+
+
+def option_attention_verdict_reason(
+    symbol: str,
+    row: dict[str, Any],
+    long_iv: dict[str, Any] | None = None,
+) -> list[str]:
     reasons: list[str] = []
     skew_z = compact_float(row.get("skew_z"), 4)
     iv_rank = compact_float(row.get("iv_rank_pct"), 2)
     iv_hv = compact_float(row.get("iv_hv"), 4)
     if skew_z is not None and abs(skew_z) >= 1.0:
         reasons.append("OTM skew 偏离")
-    if iv_rank is not None and iv_rank <= 20 and option_iv_rank_public_reliable(row):
-        reasons.append("LEAPS IV 低位")
+    if long_dated_iv_public_reliable(long_iv) and compact_float(long_iv.get("rank_pct"), 2) is not None:
+        if float(long_iv.get("rank_pct") or 0.0) <= 20.0:
+            reasons.append(long_dated_iv_reason(long_iv))
     if option_verdict_long_tenor(row):
         reasons.append("远月 LEAPS 久期")
     if (
@@ -728,10 +945,11 @@ def option_attention_candidate(
     score: float = 0.0,
     reading: str | None = None,
     extra: dict[str, Any] | None = None,
+    long_iv: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     verdict = verdicts.get(symbol) if isinstance(verdicts.get(symbol), dict) else {}
     row = {**verdict, **(extra or {})}
-    return {
+    candidate = {
         "_priority": priority,
         "_score": score,
         "symbol": symbol,
@@ -745,6 +963,18 @@ def option_attention_candidate(
         "skew_z": compact_float(row.get("skew_z"), 4),
         "reading": reading or option_attention_reading(reason, row),
     }
+    if isinstance(long_iv, dict):
+        candidate.update(
+            {
+                "long_iv_tenor": long_iv.get("tenor"),
+                "long_iv_rank_pct": compact_float(long_iv.get("rank_pct"), 2),
+                "long_iv_rank_n": long_iv.get("rank_n"),
+                "long_iv_atm_iv": compact_float(long_iv.get("atm_iv"), 4),
+                "long_iv_dte": compact_float(long_iv.get("avg_dte"), 1),
+                "long_iv_effective_date": long_iv.get("effective_date"),
+            }
+        )
+    return candidate
 
 
 def merge_option_attention_rows(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
@@ -757,8 +987,11 @@ def merge_option_attention_rows(rows: list[dict[str, Any]], *, limit: int) -> li
         return False
 
     def refine_reasons(existing_reasons: list[str], new_reason: str) -> list[str]:
-        if new_reason.startswith("LEAPS IV 低位"):
-            existing_reasons = [reason for reason in existing_reasons if reason != "LEAPS IV 排行"]
+        if new_reason.startswith(("LEAPS IV 低位", "远月 IV 低位")):
+            existing_reasons = [
+                reason for reason in existing_reasons
+                if reason not in {"LEAPS IV 排行", "远月 IV 排行"}
+            ]
         if new_reason.startswith("OTM skew 偏离"):
             existing_reasons = [reason for reason in existing_reasons if reason != "OTM skew 排行"]
         if new_reason and not duplicate_reason(existing_reasons, new_reason):
@@ -781,7 +1014,21 @@ def merge_option_attention_rows(rows: list[dict[str, Any]], *, limit: int) -> li
         reading = str(row.get("reading") or "").strip()
         if reading and reading not in str(existing.get("reading") or ""):
             existing["reading"] = f"{existing.get('reading')}; {reading}"
-        for key in ("effective_date", "iv_ann", "iv_rank_pct", "iv_rank_n", "iv_hv", "pc_ratio_z", "skew_z"):
+        for key in (
+            "effective_date",
+            "iv_ann",
+            "iv_rank_pct",
+            "iv_rank_n",
+            "iv_hv",
+            "pc_ratio_z",
+            "skew_z",
+            "long_iv_tenor",
+            "long_iv_rank_pct",
+            "long_iv_rank_n",
+            "long_iv_atm_iv",
+            "long_iv_dte",
+            "long_iv_effective_date",
+        ):
             if existing.get(key) is None and row.get(key) is not None:
                 existing[key] = row.get(key)
     selected = list(merged.values())[:limit]
@@ -796,8 +1043,10 @@ def select_us_options_attention(
     actions: list[dict[str, Any]],
     *,
     limit: int = 10,
+    long_iv_history: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     verdicts = payload.get("options_verdicts") if isinstance(payload.get("options_verdicts"), dict) else {}
+    long_iv_history = long_iv_history or {}
     candidates: list[dict[str, Any]] = []
 
     anomaly_rows = payload.get("options_anomaly_rows") if isinstance(payload.get("options_anomaly_rows"), list) else []
@@ -850,16 +1099,17 @@ def select_us_options_attention(
         symbol_key = str(symbol or "").upper()
         if not symbol_key:
             continue
-        reasons = option_attention_verdict_reason(symbol_key, raw)
+        long_iv = long_iv_history.get(symbol_key)
+        reasons = option_attention_verdict_reason(symbol_key, raw, long_iv)
         for reason in reasons:
             priority = 20
             score = 0.0
             if reason.startswith("OTM skew"):
                 priority = 10
                 score = abs(compact_float(raw.get("skew_z"), 4) or 0.0)
-            elif reason.startswith("LEAPS IV"):
+            elif reason.startswith(("LEAPS IV", "远月 IV")):
                 priority = 15
-                iv_rank = compact_float(raw.get("iv_rank_pct"), 2)
+                iv_rank = compact_float((long_iv or {}).get("rank_pct"), 2)
                 score = 100.0 - (iv_rank if iv_rank is not None else 100.0)
             elif reason.startswith("远月"):
                 priority = 18
@@ -874,30 +1124,35 @@ def select_us_options_attention(
                     reason,
                     priority=priority,
                     score=score,
-                    reading=option_attention_reading(reason, raw),
+                    reading=long_dated_iv_reading(long_iv) if reason.startswith(("LEAPS IV", "远月 IV")) and long_iv else option_attention_reading(reason, raw),
+                    long_iv=long_iv,
                 )
             )
 
     if verdicts:
-        ranked_by_iv = sorted(
+        ranked_by_long_iv = sorted(
             (
-                (str(symbol).upper(), row, compact_float(row.get("iv_rank_pct"), 2))
+                (str(symbol).upper(), row, long_iv, compact_float(long_iv.get("rank_pct"), 2))
                 for symbol, row in verdicts.items()
-                if isinstance(row, dict) and compact_float(row.get("iv_rank_pct"), 2) is not None
-                and option_iv_rank_public_reliable(row)
-                and float(compact_float(row.get("iv_rank_pct"), 2) or 999.0) <= 20.0
+                for long_iv in [long_iv_history.get(str(symbol).upper())]
+                if isinstance(row, dict)
+                and long_dated_iv_public_reliable(long_iv)
+                and compact_float(long_iv.get("rank_pct"), 2) is not None
+                and float(compact_float(long_iv.get("rank_pct"), 2) or 999.0) <= 20.0
             ),
-            key=lambda item: item[2] if item[2] is not None else 999.0,
+            key=lambda item: item[3] if item[3] is not None else 999.0,
         )
-        for symbol, row, iv_rank in ranked_by_iv[:5]:
+        for symbol, row, long_iv, iv_rank in ranked_by_long_iv[:5]:
+            reason = long_dated_iv_reason(long_iv)
             candidates.append(
                 option_attention_candidate(
                     symbol,
                     verdicts,
-                    "LEAPS IV 排行",
+                    f"{reason} 排行",
                     priority=9,
                     score=100.0 - float(iv_rank or 100.0),
-                    reading=option_attention_reading("LEAPS IV 排行", row),
+                    reading=long_dated_iv_reading(long_iv),
+                    long_iv=long_iv,
                 )
             )
         ranked_by_skew = sorted(
@@ -962,6 +1217,16 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
     tenor_signals = payload.get("options_tenor_signals") if isinstance(payload.get("options_tenor_signals"), list) else []
 
     verdicts = payload.get("options_verdicts") if isinstance(payload.get("options_verdicts"), dict) else {}
+    effective_options_date = infer_options_effective_date(payload)
+    precomputed_long_iv = (
+        payload.get("long_dated_iv_history")
+        if isinstance(payload.get("long_dated_iv_history"), dict)
+        else {}
+    )
+    long_iv_history = precomputed_long_iv or fetch_long_dated_iv_history(
+        list(verdicts.keys()),
+        effective_options_date,
+    )
     selected_verdicts = []
     for symbol in requested_symbols:
         row = verdicts.get(symbol)
@@ -1003,7 +1268,17 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
             if isinstance(row, dict) and option_row_symbol(row)
         ][:limit],
         "options_verdicts": selected_verdicts,
-        "options_attention_watchlist": select_us_options_attention(payload, actions, limit=limit),
+        "long_dated_iv_history": {
+            symbol: row
+            for symbol, row in long_iv_history.items()
+            if symbol in requested_symbols or long_dated_iv_public_reliable(row)
+        },
+        "options_attention_watchlist": select_us_options_attention(
+            payload,
+            actions,
+            limit=limit,
+            long_iv_history=long_iv_history,
+        ),
     }
 
 
@@ -1825,6 +2100,30 @@ def fmt_public_iv_rank_sample(value: Any) -> str:
     return f"N={count}"
 
 
+def fmt_public_long_iv_rank(row: dict[str, Any]) -> str:
+    rank = compact_float(row.get("long_iv_rank_pct"), 2)
+    tenor = public_cell(row.get("long_iv_tenor"), default="")
+    if rank is None:
+        return "-"
+    prefix = f"{tenor} " if tenor and tenor != "-" else ""
+    return f"{prefix}{rank:.0f}%"
+
+
+def fmt_public_long_iv_sample(row: dict[str, Any]) -> str:
+    count = option_iv_rank_observation_count({"iv_rank_n": row.get("long_iv_rank_n")})
+    if count <= 0:
+        return "-"
+    suffix = "，仅参考" if count < MIN_PUBLIC_IV_RANK_OBS else ""
+    return f"N={count}{suffix}"
+
+
+def fmt_public_long_iv_dte(row: dict[str, Any]) -> str:
+    dte = compact_float(row.get("long_iv_dte"), 1)
+    if dte is None:
+        return "-"
+    return f"{dte:.0f}"
+
+
 def fmt_public_ratio(value: Any) -> str:
     number = compact_float(value, 2)
     if number is None:
@@ -1960,21 +2259,22 @@ def render_us_options_attention_section(packet: dict[str, Any]) -> str:
         (
             f"当日 far-OTM 异常 {fmt(anomaly.get('row_count'))} 条，"
             f"跨 tenor/LEAPS 信号 {fmt(tenor.get('signal_count'))} 条；"
-            f"没有触发时仍保留 skew/IV 排行观察。IV rank 至少需要 {MIN_PUBLIC_IV_RANK_OBS} 个历史点，"
-            "不足时只作背景，不作为低位/高位结论。"
+            f"没有触发时仍保留 skew/真实远月IV观察。LEAPS/远月 IV rank 来自逐合约链，"
+            f"至少需要 {MIN_PUBLIC_IV_RANK_OBS} 个历史点；不足时只作背景，不作为低位/高位结论。"
         ),
         "",
-        "| Ticker | 关注点 | 日期 | IV rank | 样本 | IV/HV | PC z | Skew z | 处理 |",
-        "|---|---|---|---:|---|---:|---:|---:|---|",
+        "| Ticker | 关注点 | 日期 | LEAPS/远月 IV rank | 样本 | DTE | IV/HV | PC z | Skew z | 处理 |",
+        "|---|---|---|---:|---|---:|---:|---:|---:|---|",
     ]
     for row in rows[:10]:
         lines.append(
-            "| {symbol} | {reason} | {date} | {iv_rank} | {iv_rank_n} | {iv_hv} | {pc_z} | {skew_z} | {reading} |".format(
+            "| {symbol} | {reason} | {date} | {long_iv_rank} | {long_iv_n} | {long_iv_dte} | {iv_hv} | {pc_z} | {skew_z} | {reading} |".format(
                 symbol=public_cell(row.get("symbol")),
                 reason=public_cell(row.get("reason")),
-                date=public_cell(row.get("effective_date")),
-                iv_rank=fmt_public_percent(row.get("iv_rank_pct")),
-                iv_rank_n=fmt_public_iv_rank_sample(row.get("iv_rank_n")),
+                date=public_cell(row.get("long_iv_effective_date") or row.get("effective_date")),
+                long_iv_rank=fmt_public_long_iv_rank(row),
+                long_iv_n=fmt_public_long_iv_sample(row),
+                long_iv_dte=fmt_public_long_iv_dte(row),
                 iv_hv=fmt_public_ratio(row.get("iv_hv")),
                 pc_z=fmt_public_signed(row.get("pc_ratio_z")),
                 skew_z=fmt_public_signed(row.get("skew_z")),

@@ -543,6 +543,48 @@ def _bias_signal(skew: Optional[float], pc_ratio: Optional[float]) -> str:
     return "neutral"
 
 
+def _select_expiries_for_coverage(expiries: list[str], as_of: date, max_expiries: int) -> list[str]:
+    """Select near expiries plus long-dated anchors without exceeding max_expiries."""
+    pairs: list[tuple[str, int]] = []
+    for exp_str in sorted(expiries):
+        try:
+            dte = _days_to_expiry(exp_str, as_of)
+        except ValueError:
+            continue
+        if dte >= 1:
+            pairs.append((exp_str, dte))
+    if max_expiries <= 0 or len(pairs) <= max_expiries:
+        return [exp for exp, _ in pairs]
+
+    selected: list[tuple[str, int]] = []
+
+    def add(pair: tuple[str, int] | None) -> None:
+        if pair is None:
+            return
+        if pair not in selected and len(selected) < max_expiries:
+            selected.append(pair)
+
+    # Keep near-dated coverage for gamma/event work, but reserve space for
+    # structural tenors so liquid weekly chains do not crowd out LEAPS.
+    near_count = max(4, max_expiries - 6)
+    for pair in pairs[:near_count]:
+        add(pair)
+
+    for anchor in (90, 180, 221, 365, 540, 730):
+        if len(selected) >= max_expiries:
+            break
+        candidates = [pair for pair in pairs if pair not in selected and pair[1] >= anchor]
+        if candidates:
+            add(min(candidates, key=lambda pair: (abs(pair[1] - anchor), pair[1])))
+
+    for pair in pairs:
+        if len(selected) >= max_expiries:
+            break
+        add(pair)
+
+    return [exp for exp, _ in sorted(selected, key=lambda pair: pair[1])]
+
+
 def _process_symbol(
     sym: str, as_of: date, max_expiries: int
 ) -> tuple[list[dict], list[dict], list[dict]]:
@@ -562,16 +604,7 @@ def _process_symbol(
     data = raw.get("data", raw)
     current_price = data.get("current_price", 0)
 
-    # Sort expiries, skip past dates, pick nearest max_expiries
-    valid_expiries = []
-    for exp_str in sorted(expiry_data.keys()):
-        try:
-            dte = _days_to_expiry(exp_str, as_of)
-            if dte >= 1:
-                valid_expiries.append(exp_str)
-        except ValueError:
-            continue
-    valid_expiries = valid_expiries[:max_expiries]
+    valid_expiries = _select_expiries_for_coverage(list(expiry_data.keys()), as_of, max_expiries)
 
     for exp_str in valid_expiries:
         calls, puts, price = expiry_data[exp_str]

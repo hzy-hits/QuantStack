@@ -185,6 +185,17 @@ def test_us_summary_includes_compact_option_context(tmp_path: Path) -> None:
             "skew_z": -0.1612,
         }
     }
+    us.payload["long_dated_iv_history"] = {
+        "NVDA": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-26",
+            "atm_iv": 0.30,
+            "avg_dte": 370,
+            "rank_pct": 12.0,
+            "rank_n": 35,
+            "coverage_status": "ok",
+        }
+    }
 
     summary = module.summarize_artifact(us)
     option_context = summary["option_context"]
@@ -246,6 +257,26 @@ def test_us_options_attention_section_includes_otm_skew_and_leaps_iv(tmp_path: P
             "skew_z": 1.6,
         },
     }
+    us.payload["long_dated_iv_history"] = {
+        "DLR": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.25,
+            "avg_dte": 365,
+            "rank_pct": 16,
+            "rank_n": 35,
+            "coverage_status": "ok",
+        },
+        "ALAB": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.99,
+            "avg_dte": 390,
+            "rank_pct": 20,
+            "rank_n": 35,
+            "coverage_status": "ok",
+        },
+    }
     packet = module.build_packet("am", cn, us)
 
     section = module.render_us_options_attention_section(packet)
@@ -294,6 +325,35 @@ def test_us_options_attention_does_not_promote_low_iv_rank_with_short_history(tm
             "skew_z": -0.1612,
         },
     }
+    us.payload["long_dated_iv_history"] = {
+        "BTBT": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 1.10,
+            "avg_dte": 570,
+            "rank_pct": 0,
+            "rank_n": 10,
+            "coverage_status": "short_history",
+        },
+        "RDDT": {
+            "tenor": "远月",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.69,
+            "avg_dte": 207,
+            "rank_pct": 0,
+            "rank_n": 6,
+            "coverage_status": "short_history",
+        },
+        "NVDA": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.28,
+            "avg_dte": 365,
+            "rank_pct": 12,
+            "rank_n": 40,
+            "coverage_status": "ok",
+        },
+    }
     packet = module.build_packet("am", cn, us)
     watch = packet["us"]["option_context"]["options_attention_watchlist"]
     by_symbol = {row["symbol"]: row for row in watch}
@@ -307,7 +367,7 @@ def test_us_options_attention_does_not_promote_low_iv_rank_with_short_history(tm
 
     section = module.render_us_options_attention_section(packet)
     assert "N=10，仅参考" in section
-    assert "IV rank 至少需要 30 个历史点" in section
+    assert "LEAPS/远月 IV rank 来自逐合约链" in section
 
 
 def test_am_uses_previous_cn_context_when_target_day_payload_is_missing(tmp_path: Path) -> None:
