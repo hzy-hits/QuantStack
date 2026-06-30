@@ -154,6 +154,13 @@ GLOBAL_MARKET_LABEL_ALIASES = {
 }
 
 
+def env_flag(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class MarketArtifact:
     market: str
@@ -250,6 +257,53 @@ def parse_args() -> argparse.Namespace:
         choices=["on", "off"],
         default=os.environ.get("CROSS_MARKET_FINANCE_SEARCH_PREFETCH", "on"),
         help="Best-effort direct finance-search prefetch for global markets/news before Hermes writes.",
+    )
+    parser.add_argument(
+        "--publish-openclaw",
+        action="store_true",
+        default=env_flag("QUANT_OPENCLAW_PUBLISH"),
+        help="Publish the finished report to a remote OpenClaw inbox after validation.",
+    )
+    parser.add_argument(
+        "--openclaw-mode",
+        choices=["file", "agent", "message", "all"],
+        default=os.environ.get("QUANT_OPENCLAW_MODE", "file"),
+        help="OpenClaw publish mode. agent registers the report in an OpenClaw agent session.",
+    )
+    parser.add_argument("--openclaw-host", default=os.environ.get("QUANT_OPENCLAW_HOST", "100.109.146.30"))
+    parser.add_argument("--openclaw-user", default=os.environ.get("QUANT_OPENCLAW_USER", "ivena"))
+    parser.add_argument(
+        "--openclaw-root",
+        default=os.environ.get("QUANT_OPENCLAW_REMOTE_ROOT", "/home/ivena/.openclaw/quant-stack"),
+    )
+    parser.add_argument("--openclaw-identity-file", default=os.environ.get("QUANT_OPENCLAW_IDENTITY_FILE", ""))
+    parser.add_argument("--openclaw-agent", default=os.environ.get("QUANT_OPENCLAW_AGENT", "main"))
+    parser.add_argument("--openclaw-agent-session-key", default=os.environ.get("QUANT_OPENCLAW_AGENT_SESSION_KEY", ""))
+    parser.add_argument(
+        "--openclaw-agent-timeout",
+        type=int,
+        default=int(os.environ.get("QUANT_OPENCLAW_AGENT_TIMEOUT", "180")),
+    )
+    parser.add_argument(
+        "--openclaw-agent-deliver",
+        action="store_true",
+        default=env_flag("QUANT_OPENCLAW_AGENT_DELIVER"),
+        help="Allow OpenClaw agent replies to be delivered to a configured channel.",
+    )
+    parser.add_argument("--openclaw-reply-channel", default=os.environ.get("QUANT_OPENCLAW_REPLY_CHANNEL", ""))
+    parser.add_argument("--openclaw-reply-to", default=os.environ.get("QUANT_OPENCLAW_REPLY_TO", ""))
+    parser.add_argument("--openclaw-message-channel", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_CHANNEL", ""))
+    parser.add_argument("--openclaw-message-target", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_TARGET", ""))
+    parser.add_argument(
+        "--openclaw-allow-duplicate-event",
+        action="store_true",
+        default=env_flag("QUANT_OPENCLAW_ALLOW_DUPLICATE_EVENT"),
+    )
+    parser.add_argument(
+        "--openclaw-required",
+        action="store_true",
+        default=env_flag("QUANT_OPENCLAW_REQUIRED"),
+        help="Fail the daily task if OpenClaw publishing fails.",
     )
     return parser.parse_args()
 
@@ -3196,6 +3250,98 @@ def send_email_if_requested(path: Path, packet: dict[str, Any], args: argparse.N
     return ids
 
 
+def report_title(path: Path) -> str:
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            text = line.strip()
+            if text:
+                return text.lstrip("#").strip()
+    except FileNotFoundError:
+        return ""
+    return ""
+
+
+def publish_openclaw_if_requested(path: Path, packet: dict[str, Any], args: argparse.Namespace) -> None:
+    if not getattr(args, "publish_openclaw", False):
+        return
+    if args.delivery_dry_run:
+        print(f"openclaw dry-run: mode={args.openclaw_mode} report={path}", file=sys.stderr)
+        return
+
+    helper = ROOT / "scripts" / "publish_report_to_openclaw.py"
+    paths = output_paths(path.parent, packet["slot"])
+    target_date = packet.get("target_cn_date") or packet["cn"]["report_date"]
+    cmd = [
+        sys.executable,
+        str(helper),
+        "--report-path",
+        str(path),
+        "--kind",
+        "cross_market_daily",
+        "--slot",
+        packet["slot"],
+        "--date",
+        str(target_date),
+        "--title",
+        report_title(path),
+        "--packet-path",
+        str(paths["packet"]),
+        "--meta-path",
+        str(paths["meta"]),
+        "--remote-host",
+        args.openclaw_host,
+        "--remote-user",
+        args.openclaw_user,
+        "--remote-root",
+        args.openclaw_root,
+        "--mode",
+        args.openclaw_mode,
+        "--agent",
+        args.openclaw_agent,
+        "--agent-timeout",
+        str(args.openclaw_agent_timeout),
+    ]
+    if args.openclaw_identity_file:
+        cmd.extend(["--identity-file", args.openclaw_identity_file])
+    if args.openclaw_agent_session_key:
+        cmd.extend(["--agent-session-key", args.openclaw_agent_session_key])
+    if args.openclaw_agent_deliver:
+        cmd.append("--agent-deliver")
+    if args.openclaw_reply_channel:
+        cmd.extend(["--reply-channel", args.openclaw_reply_channel])
+    if args.openclaw_reply_to:
+        cmd.extend(["--reply-to", args.openclaw_reply_to])
+    if args.openclaw_message_channel:
+        cmd.extend(["--message-channel", args.openclaw_message_channel])
+    if args.openclaw_message_target:
+        cmd.extend(["--message-target", args.openclaw_message_target])
+    if args.openclaw_allow_duplicate_event:
+        cmd.append("--allow-duplicate-event")
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            timeout=max(60, int(args.openclaw_agent_timeout) + 30),
+            check=False,
+        )
+    except Exception as exc:
+        if args.openclaw_required:
+            raise
+        print(f"warn: OpenClaw publish failed: {exc}", file=sys.stderr)
+        return
+    if result.returncode != 0:
+        message = ((result.stderr or "") + "\n" + (result.stdout or "")).strip()[-1200:]
+        if args.openclaw_required:
+            raise RuntimeError(f"OpenClaw publish failed with exit={result.returncode}: {message}")
+        print(f"warn: OpenClaw publish failed with exit={result.returncode}: {message}", file=sys.stderr)
+        return
+    tail = (result.stdout or "").strip().splitlines()[-1:] or ["ok"]
+    print(f"cross-market openclaw published: {tail[0]}")
+
+
 def main() -> int:
     args = parse_args()
     cn_date, us_date = resolve_dates(args.slot, args.cn_date, args.us_date)
@@ -3289,6 +3435,7 @@ def main() -> int:
     path = write_outputs(output_dir, packet, report, agent_backend=backend_name)
     print(f"cross-market {args.slot} shadow written: {path}")
     send_email_if_requested(path, packet, args)
+    publish_openclaw_if_requested(path, packet, args)
     return 0
 
 

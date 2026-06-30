@@ -1220,6 +1220,59 @@ def test_delivery_ledger_skips_duplicate_send(tmp_path: Path, monkeypatch) -> No
     assert len(calls) == 1
 
 
+def test_openclaw_publish_invokes_helper(tmp_path: Path) -> None:
+    module = load_module()
+    report = tmp_path / "cross_market_am_shadow.md"
+    report.write_text("# 跨市场早报 — 2026-06-30\n\n美股 A股", encoding="utf-8")
+    (tmp_path / "cross_market_am_shadow_packet.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "cross_market_am_shadow.meta.json").write_text("{}\n", encoding="utf-8")
+    packet = {"slot": "am", "target_cn_date": "2026-06-30", "cn": {"report_date": "2026-06-30"}}
+    args = argparse.Namespace(
+        publish_openclaw=True,
+        delivery_dry_run=False,
+        openclaw_mode="agent",
+        openclaw_host="100.109.146.30",
+        openclaw_user="ivena",
+        openclaw_root="/home/ivena/.openclaw/quant-stack",
+        openclaw_identity_file="/home/ubuntu/.ssh/id_ed25519_quant_pi",
+        openclaw_agent="main",
+        openclaw_agent_session_key="",
+        openclaw_agent_timeout=180,
+        openclaw_agent_deliver=False,
+        openclaw_reply_channel="",
+        openclaw_reply_to="",
+        openclaw_message_channel="",
+        openclaw_message_target="",
+        openclaw_allow_duplicate_event=False,
+        openclaw_required=True,
+    )
+
+    completed = mock.Mock(returncode=0, stdout='{"ok": true}\n', stderr="")
+    with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
+        module.publish_openclaw_if_requested(report, packet, args)
+
+    cmd = run.call_args.args[0]
+    assert str(module.ROOT / "scripts" / "publish_report_to_openclaw.py") in cmd
+    assert cmd[cmd.index("--kind") + 1] == "cross_market_daily"
+    assert cmd[cmd.index("--slot") + 1] == "am"
+    assert cmd[cmd.index("--date") + 1] == "2026-06-30"
+    assert cmd[cmd.index("--mode") + 1] == "agent"
+    assert cmd[cmd.index("--packet-path") + 1].endswith("cross_market_am_shadow_packet.json")
+    assert cmd[cmd.index("--meta-path") + 1].endswith("cross_market_am_shadow.meta.json")
+
+
+def test_openclaw_publish_skips_external_call_on_delivery_dry_run(tmp_path: Path) -> None:
+    module = load_module()
+    report = tmp_path / "cross_market_pm_shadow.md"
+    report.write_text("# 跨市场晚报 — 2026-06-30\n", encoding="utf-8")
+    args = argparse.Namespace(publish_openclaw=True, delivery_dry_run=True, openclaw_mode="agent")
+
+    with mock.patch.object(module.subprocess, "run") as run:
+        module.publish_openclaw_if_requested(report, {"slot": "pm", "cn": {"report_date": "2026-06-30"}}, args)
+
+    run.assert_not_called()
+
+
 def test_output_snapshot_restores_failed_validation_artifacts(tmp_path: Path) -> None:
     module = load_module()
     output_dir = tmp_path / "reports"

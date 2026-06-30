@@ -239,6 +239,14 @@ tasks:
       QUANT_DELIVERY_MODE: test
       QUANT_TEST_RECIPIENT: 13502448752hzy@gmail.com
       RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
+      QUANT_OPENCLAW_PUBLISH: "1"
+      QUANT_OPENCLAW_MODE: agent
+      QUANT_OPENCLAW_HOST: 100.109.146.30
+      QUANT_OPENCLAW_USER: ivena
+      QUANT_OPENCLAW_REMOTE_ROOT: /home/ivena/.openclaw/quant-stack
+      QUANT_OPENCLAW_IDENTITY_FILE: /home/ubuntu/.ssh/id_ed25519_quant_pi
+      QUANT_OPENCLAW_AGENT: main
+      QUANT_OPENCLAW_AGENT_TIMEOUT: "180"
     command:
       - quant-research-v1/.venv/bin/python
       - scripts/agents/run_cross_market_daily_shadow.py
@@ -278,6 +286,14 @@ tasks:
       QUANT_DELIVERY_MODE: test
       QUANT_TEST_RECIPIENT: 13502448752hzy@gmail.com
       RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
+      QUANT_OPENCLAW_PUBLISH: "1"
+      QUANT_OPENCLAW_MODE: agent
+      QUANT_OPENCLAW_HOST: 100.109.146.30
+      QUANT_OPENCLAW_USER: ivena
+      QUANT_OPENCLAW_REMOTE_ROOT: /home/ivena/.openclaw/quant-stack
+      QUANT_OPENCLAW_IDENTITY_FILE: /home/ubuntu/.ssh/id_ed25519_quant_pi
+      QUANT_OPENCLAW_AGENT: main
+      QUANT_OPENCLAW_AGENT_TIMEOUT: "180"
     command:
       - quant-research-v1/.venv/bin/python
       - scripts/agents/run_cross_market_daily_shadow.py
