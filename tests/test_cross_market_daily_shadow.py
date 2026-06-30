@@ -351,7 +351,11 @@ def test_public_delivery_rejects_internal_research_jargon() -> None:
     module = load_module()
 
     failures = module.validate_shadow_report(
-        "# 跨市场早报\n\n美股影响A股。AI Infra universe production执行层 source evidence 原文验证状态。",
+        (
+            "# 跨市场早报\n\n"
+            "美股影响A股。AI Infra universe production执行层 source evidence 原文验证状态。"
+            "BFS universe member; rank by price, flow, news, options and risk before any R."
+        ),
         "am",
         public_delivery=True,
     )
@@ -360,6 +364,8 @@ def test_public_delivery_rejects_internal_research_jargon() -> None:
     assert any("production" in item for item in failures)
     assert any("source evidence" in item for item in failures)
     assert any("原文验证" in item for item in failures)
+    assert any("BFS universe" in item for item in failures)
+    assert any("rank by price" in item for item in failures)
 
 
 def test_public_delivery_rejects_reviewer_note_markers() -> None:
@@ -894,7 +900,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
             "pipeline_stage": "active_watch",
             "rank": 20,
             "rank_score": 70.18,
-            "reason": "AI Infra BFS universe member; 等待A股本域价格和量能确认",
+            "reason": "AI Infra BFS universe member; rank by price, flow, news, options and risk before any R.; 等待A股本域价格和量能确认",
         }
     ]
     report = (
@@ -943,6 +949,9 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert "## A股科创板候选管线" not in report
     assert "688233.SH" in report
     assert "AI Infra" not in report
+    assert "BFS universe" not in report
+    assert "rank by price" not in report
+    assert "等待A股本域价格和量能确认" in report
     assert "## 附表：其他跨市场数据" in report
     assert "资产/指数" not in report
     assert "| 科创板候选 |" not in report

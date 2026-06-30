@@ -1705,9 +1705,35 @@ def public_cn_stage(row: dict[str, Any]) -> str:
     return "候选"
 
 
+def public_cn_reason(value: Any) -> str:
+    text = public_cell(value, default="")
+    if not text:
+        return ""
+    text = re.sub(r"\bAI\s+Infra\b", "AI基础设施", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bBFS\s+universe\s+member\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"rank\s+by\s+price,\s*flow,\s*news,\s*options\s+and\s+risk\s+before\s+any\s+R\.?",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    chunks: list[str] = []
+    for raw in re.split(r"[;；/]+", text):
+        chunk = raw.strip(" .。;；")
+        lower = chunk.lower()
+        if not chunk:
+            continue
+        if any(marker in lower for marker in ("bfs universe", "universe member", "rank by price", "before any r")):
+            continue
+        if chunk in {"AI基础设施", "AI基础设施观察池"}:
+            chunk = "AI算力链候选"
+        chunks.append(chunk)
+    return "; ".join(dict.fromkeys(chunks))
+
+
 def public_cn_wait_condition(row: dict[str, Any]) -> str:
     parts = [
-        public_cell(row.get("reason"), default=""),
+        public_cn_reason(row.get("reason")),
         public_cell(row.get("entry"), default=""),
         public_cell(row.get("handling_line"), default=""),
         public_cell(row.get("target"), default=""),
@@ -3124,6 +3150,10 @@ def validate_shadow_report(
             "evidence_state",
             "AI Infra universe",
             "AI Infra",
+            "BFS universe",
+            "universe member",
+            "rank by price",
+            "before any R",
             "ranker",
             "headline risk",
             "beta hedge",
