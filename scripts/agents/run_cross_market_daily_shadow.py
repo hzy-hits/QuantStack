@@ -303,6 +303,7 @@ def parse_args() -> argparse.Namespace:
         help="Allow OpenClaw agent replies to be delivered to a configured channel.",
     )
     parser.add_argument("--openclaw-reply-channel", default=os.environ.get("QUANT_OPENCLAW_REPLY_CHANNEL", ""))
+    parser.add_argument("--openclaw-reply-account", default=os.environ.get("QUANT_OPENCLAW_REPLY_ACCOUNT", ""))
     parser.add_argument("--openclaw-reply-to", default=os.environ.get("QUANT_OPENCLAW_REPLY_TO", ""))
     parser.add_argument("--openclaw-message-channel", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_CHANNEL", ""))
     parser.add_argument("--openclaw-message-target", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_TARGET", ""))
@@ -3493,6 +3494,8 @@ def publish_openclaw_if_requested(path: Path, packet: dict[str, Any], args: argp
         cmd.append("--agent-deliver")
     if args.openclaw_reply_channel:
         cmd.extend(["--reply-channel", args.openclaw_reply_channel])
+    if args.openclaw_reply_account:
+        cmd.extend(["--reply-account", args.openclaw_reply_account])
     if args.openclaw_reply_to:
         cmd.extend(["--reply-to", args.openclaw_reply_to])
     if args.openclaw_message_channel:

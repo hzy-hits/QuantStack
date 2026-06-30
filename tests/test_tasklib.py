@@ -79,6 +79,12 @@ class TasklibTests(unittest.TestCase):
         self.assertEqual(evening["env"]["QUANT_OPENCLAW_MODE"], "agent")
         self.assertEqual(morning["env"]["QUANT_OPENCLAW_AGENT_DELIVER"], "1")
         self.assertEqual(evening["env"]["QUANT_OPENCLAW_AGENT_DELIVER"], "1")
+        self.assertEqual(morning["env"]["QUANT_OPENCLAW_REPLY_CHANNEL"], "openclaw-weixin")
+        self.assertEqual(morning["env"]["QUANT_OPENCLAW_REPLY_ACCOUNT"], "912f45c70aa5-im-bot")
+        self.assertEqual(morning["env"]["QUANT_OPENCLAW_REPLY_TO"], "o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat")
+        self.assertEqual(evening["env"]["QUANT_OPENCLAW_REPLY_CHANNEL"], "openclaw-weixin")
+        self.assertEqual(evening["env"]["QUANT_OPENCLAW_REPLY_ACCOUNT"], "912f45c70aa5-im-bot")
+        self.assertEqual(evening["env"]["QUANT_OPENCLAW_REPLY_TO"], "o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat")
         self.assertTrue(morning["sends_email"])
         self.assertTrue(evening["sends_email"])
 

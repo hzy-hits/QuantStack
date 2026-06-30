@@ -49,6 +49,7 @@ def parse_args() -> argparse.Namespace:
         default=os.environ.get("QUANT_OPENCLAW_AGENT_DELIVER", "").lower() in {"1", "true", "yes"},
     )
     parser.add_argument("--reply-channel", default=os.environ.get("QUANT_OPENCLAW_REPLY_CHANNEL", ""))
+    parser.add_argument("--reply-account", default=os.environ.get("QUANT_OPENCLAW_REPLY_ACCOUNT", ""))
     parser.add_argument("--reply-to", default=os.environ.get("QUANT_OPENCLAW_REPLY_TO", ""))
     parser.add_argument("--message-channel", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_CHANNEL", ""))
     parser.add_argument("--message-target", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_TARGET", ""))
@@ -313,13 +314,15 @@ import pathlib
 import subprocess
 import sys
 
-openclaw, agent, session_key, timeout_s, deliver, reply_channel, reply_to, prompt_path = sys.argv[1:9]
+openclaw, agent, session_key, timeout_s, deliver, reply_channel, reply_account, reply_to, prompt_path = sys.argv[1:10]
 message = pathlib.Path(prompt_path).read_text(encoding="utf-8")
 cmd = [openclaw, "agent", "--agent", agent, "--session-key", session_key, "--message", message, "--timeout", timeout_s, "--json"]
 if deliver == "1":
     cmd.append("--deliver")
     if reply_channel:
         cmd.extend(["--reply-channel", reply_channel])
+    if reply_account:
+        cmd.extend(["--reply-account", reply_account])
     if reply_to:
         cmd.extend(["--reply-to", reply_to])
 result = subprocess.run(cmd, text=True, capture_output=True)
@@ -339,6 +342,7 @@ sys.exit(result.returncode)
             str(args.agent_timeout),
             "1" if args.agent_deliver else "0",
             args.reply_channel,
+            args.reply_account,
             args.reply_to,
             str(remote_prompt),
         ],
