@@ -129,6 +129,14 @@ MANAGED_REPORT_SECTION_PREFIXES = (
     "## 科创板候选",
     "## 科创板不是",
 )
+EXECUTION_DIARY_SECTION_PREFIXES = (
+    "## 跨市场主线",
+    "## 传导到A股",
+    "## 传到 A股",
+    "## 今天的执行剧本",
+    "## 下一交易窗口执行剧本",
+    "## 失效条件和下一步检查",
+)
 FORBIDDEN_PUBLIC_INDEX_MARKERS = ("Sensex", "Nifty", "印度指数", "印度Sensex", "印度")
 GLOBAL_MARKET_LABEL_ALIASES = {
     "^GSPC": ("标普500",),
@@ -1940,6 +1948,179 @@ def render_us_options_attention_section(packet: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def packet_us_actions(packet: dict[str, Any]) -> list[dict[str, Any]]:
+    us = packet.get("us") if isinstance(packet.get("us"), dict) else {}
+    actions = us.get("actions") if isinstance(us.get("actions"), list) else []
+    return [row for row in actions if isinstance(row, dict) and row.get("symbol")]
+
+
+def packet_cn_candidates(packet: dict[str, Any]) -> list[dict[str, Any]]:
+    cn = packet.get("cn") if isinstance(packet.get("cn"), dict) else {}
+    candidates = cn.get("pipeline_candidates") if isinstance(cn.get("pipeline_candidates"), list) else []
+    return [row for row in candidates if isinstance(row, dict) and row.get("symbol")]
+
+
+def packet_option_watchlist(packet: dict[str, Any]) -> list[dict[str, Any]]:
+    us = packet.get("us") if isinstance(packet.get("us"), dict) else {}
+    context = us.get("option_context") if isinstance(us.get("option_context"), dict) else {}
+    rows = context.get("options_attention_watchlist") if isinstance(context.get("options_attention_watchlist"), list) else []
+    return [row for row in rows if isinstance(row, dict) and row.get("symbol")]
+
+
+def first_star_candidate(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for row in rows:
+        if is_cn_star_symbol(row.get("symbol")):
+            return row
+    return None
+
+
+def symbol_name(row: dict[str, Any]) -> str:
+    symbol = public_cell(row.get("symbol"))
+    name = public_cell(row.get("name"), default="")
+    if name and name != "-" and name.upper() != symbol.upper():
+        return f"{symbol}{name}"
+    return symbol
+
+
+def symbol_list(rows: list[dict[str, Any]], *, limit: int = 4, with_stage: bool = False) -> str:
+    parts: list[str] = []
+    for row in rows[:limit]:
+        label = symbol_name(row)
+        if with_stage:
+            label = f"{label}（{public_cn_stage(row)}）"
+        if label and label != "-":
+            parts.append(label)
+    return "、".join(parts) or "-"
+
+
+def market_row_lookup(packet: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {str(row.get("symbol") or ""): row for row in market_snapshot_public_rows(packet)}
+
+
+def market_row_phrase(row: dict[str, Any]) -> str:
+    label = public_cell(row.get("label") or row.get("symbol"))
+    date_text = public_cell(row.get("date"))
+    change = fmt_market_change_pct(row.get("change_pct"))
+    if change == "-":
+        return f"{label}({date_text})"
+    return f"{label}({date_text}) {change}"
+
+
+def market_temperature_sentence(packet: dict[str, Any]) -> str:
+    rows = market_row_lookup(packet)
+    preferred = ("^GSPC", "^IXIC", "000001.SS", "399001.SZ", "^KS11", "^N225", "ES=F", "NQ=F")
+    phrases = [market_row_phrase(rows[symbol]) for symbol in preferred if symbol in rows]
+    if not phrases:
+        return ""
+    return "温度计里 " + "、".join(phrases[:6]) + "，跨时区读数只按表内日期解释。"
+
+
+def us_execution_sentence(packet: dict[str, Any]) -> str:
+    actions = packet_us_actions(packet)
+    if not actions:
+        return "美股执行池没有给出新的单名动作，A股端只接受指数、期货和风险预算约束。"
+    parts = []
+    for row in actions[:4]:
+        symbol = public_cell(row.get("symbol"))
+        action = public_us_action(row.get("action"))
+        size = fmt_r(row.get("size_r"))
+        parts.append(f"{symbol} {action}，{size}")
+    return "美股执行池保留 " + "；".join(parts) + "。"
+
+
+def option_watch_sentence(packet: dict[str, Any]) -> str:
+    rows = packet_option_watchlist(packet)
+    if rows:
+        parts = [
+            f"{public_cell(row.get('symbol'))}（{public_cell(row.get('reason'))}）"
+            for row in rows[:4]
+            if row.get("symbol")
+        ]
+        return "期权/Gamma 只约束股票仓位和入场节奏，当前重点看 " + "、".join(parts) + "。"
+    us = packet.get("us") if isinstance(packet.get("us"), dict) else {}
+    context = us.get("option_context") if isinstance(us.get("option_context"), dict) else {}
+    gamma_date = context.get("gamma_effective_date")
+    date_part = f"（数据日 {public_cell(gamma_date)}）" if gamma_date else ""
+    return f"期权/Gamma{date_part}没有提供可直接加仓的新增确认，但仍用于收紧股票入场和止损节奏。"
+
+
+def cn_pipeline_sentence(packet: dict[str, Any]) -> str:
+    rows = packet_cn_candidates(packet)
+    if not rows:
+        return "A股端没有新的候选扩散信号，下一轮只做美股主线到中国资产的复盘，不扩大执行范围。"
+    star = first_star_candidate(rows)
+    lead = symbol_list(rows, limit=4, with_stage=True)
+    if star:
+        condition = public_cn_wait_condition(star)
+        return (
+            f"A股候选先看 {lead}；科创板候选 {symbol_name(star)} 已在A股候选管线内，"
+            f"等待条件是 {condition}。"
+        )
+    return f"A股候选先看 {lead}，全部按本域价格、量能和等待条件处理。"
+
+
+def render_execution_diary_sections(packet: dict[str, Any], existing_report: str = "") -> str:
+    market_line = market_temperature_sentence(packet)
+    us_line = us_execution_sentence(packet)
+    option_line = option_watch_sentence(packet)
+    cn_line = cn_pipeline_sentence(packet)
+    rows = packet_cn_candidates(packet)
+    cn_focus = symbol_list(rows, limit=3, with_stage=False)
+    us_focus = ", ".join(public_cell(row.get("symbol")) for row in packet_us_actions(packet)[:3]) or "-"
+
+    sections = [
+        (
+            "## 跨市场主线",
+            "\n".join(
+                part
+                for part in (
+                    "美股仍是主导变量：它给A股的是风险预算、行业顺风和节奏约束，不是反向接受A股指挥。",
+                    market_line,
+                    us_line,
+                    option_line,
+                )
+                if part
+            ),
+        ),
+        (
+            "## 传导到A股",
+            "\n".join(
+                [
+                    cn_line,
+                    "这条传导只从美股到A股：美股主线决定A股要优先检查哪些行业和价格带，A股盘后反馈只用于复盘上一轮映射是否成立。",
+                ]
+            ),
+        ),
+        (
+            "## 今天的执行剧本",
+            "\n".join(
+                [
+                    f"- 美股：{us_focus} 按各自入口、止损和目标线执行，Gamma 与期权读数只改变节奏和风险预算。",
+                    f"- A股：{cn_focus} 先看本域入场区间、处理线和量能确认，不因为美股走强而追价。",
+                    "- 风险：如果指数温度计转弱，先降单名暴露，再减少候选扩散。",
+                ]
+            ),
+        ),
+        (
+            "## 失效条件和下一步检查",
+            "\n".join(
+                [
+                    "- 美股大盘和期货若失去同步，A股只保留观察候选。",
+                    "- 半导体、AI 或宏观新闻如果不能延续到价格和量能，688候选不升级。",
+                    "- 下一次报告重点检查期权 skew/LEAPS 是否从观察变成确认，以及A股候选是否站上入场区间。",
+                ]
+            ),
+        ),
+    ]
+
+    blocks: list[str] = []
+    for heading, body in sections:
+        if any(line.strip().startswith(prefix) for line in existing_report.splitlines() for prefix in (heading,)):
+            continue
+        blocks.append(f"{heading}\n{body}".strip())
+    return "\n\n".join(blocks)
+
+
 def market_snapshot_date_map(packet: dict[str, Any]) -> dict[str, str]:
     date_map: dict[str, str] = {}
     for row in market_snapshot_public_rows(packet):
@@ -2046,6 +2227,17 @@ def insert_after_section(report: str, heading_prefix: str, block: str) -> str:
     return "\n".join(lines[:insert_at] + ["", block, ""] + lines[insert_at:]).strip()
 
 
+def insert_before_section(report: str, heading_prefix: str, block: str) -> str:
+    block = block.strip()
+    if not block:
+        return report.strip()
+    lines = report.strip().splitlines()
+    heading_idx = next((idx for idx, line in enumerate(lines) if line.strip().startswith(heading_prefix)), None)
+    if heading_idx is None:
+        return "\n\n".join(part for part in (report.strip(), block) if part).strip()
+    return "\n".join(lines[:heading_idx] + ["", block, ""] + lines[heading_idx:]).strip()
+
+
 def ensure_market_snapshot_section(report: str, packet: dict[str, Any]) -> str:
     top_blocks = [
         block for block in (
@@ -2147,6 +2339,13 @@ def ensure_cn_pipeline_language(report: str, packet: dict[str, Any]) -> str:
     text = strip_managed_report_sections(report, prefixes=("## A股科创板候选管线",))
     text = strip_star_only_tables(text)
     return repair_star_pipeline_language(text, add_replacement=False).strip()
+
+
+def ensure_execution_diary_sections(report: str, packet: dict[str, Any]) -> str:
+    block = render_execution_diary_sections(packet, existing_report=report)
+    if not block:
+        return report.strip()
+    return insert_before_section(report, "## 附表：其他跨市场数据", block)
 
 
 def fetch_finance_search_prefetch(*, window: str, timeout: int = 90) -> dict[str, Any]:
@@ -3063,6 +3262,26 @@ def public_context_failures(text: str, packet: dict[str, Any] | None = None) -> 
     return failures
 
 
+def public_narrative_failures(text: str, packet: dict[str, Any] | None = None) -> list[str]:
+    if not packet:
+        return []
+
+    failures: list[str] = []
+    h2_count = sum(1 for line in text.splitlines() if line.strip().startswith("## "))
+    if h2_count < 8:
+        failures.append(f"public report too thin: expected at least 8 second-level sections, got {h2_count}")
+
+    required_groups = {
+        "cross-market main line": ("## 跨市场主线", "美股给出的真正信号", "传到 A股", "传导到A股"),
+        "execution script": ("## 今天的执行剧本", "## 下一交易窗口执行剧本", "执行剧本"),
+        "invalidation checks": ("## 失效条件", "下一步检查"),
+    }
+    for label, markers in required_groups.items():
+        if not any(contains_marker(text, marker) for marker in markers):
+            failures.append(f"missing public narrative section: {label}")
+    return failures
+
+
 def validate_shadow_report(
     text: str,
     slot: str,
@@ -3175,6 +3394,7 @@ def validate_shadow_report(
                 continue
             failures.append(f"forbidden public-report marker: {token}")
         failures.extend(public_context_failures(text, packet))
+        failures.extend(public_narrative_failures(text, packet))
     return failures
 
 
@@ -3614,6 +3834,7 @@ def main() -> int:
     report = ensure_us_options_attention_section(report, packet)
     report = ensure_cn_pipeline_section(report, packet)
     report = ensure_cn_pipeline_language(report, packet)
+    report = ensure_execution_diary_sections(report, packet)
     if args.send_email:
         report = normalize_public_report_text(report, args.slot)
     report = strip_diff_artifact_markers(report)

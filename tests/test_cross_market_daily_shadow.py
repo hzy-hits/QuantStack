@@ -940,6 +940,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     report = module.ensure_us_options_attention_section(report, packet)
     report = module.ensure_cn_pipeline_section(report, packet)
     report = module.ensure_cn_pipeline_language(report, packet)
+    report = module.ensure_execution_diary_sections(report, packet)
     report = module.normalize_public_report_text(report, "am")
     report = module.strip_diff_artifact_markers(report)
     report = module.strip_duplicate_report_titles(report, "am")
@@ -963,6 +964,10 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert "## A股执行与候选管线" in report
     assert "## A股科创板候选管线" not in report
     assert "688233.SH" in report
+    assert "## 跨市场主线" in report
+    assert "## 传导到A股" in report
+    assert "## 今天的执行剧本" in report
+    assert "## 失效条件和下一步检查" in report
     assert "AI Infra" not in report
     assert "BFS universe" not in report
     assert "rank by price" not in report
@@ -975,6 +980,89 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert report.index("## 宏观事件与产业新闻") < report.index("## 美股执行标的")
     assert report.rfind("## 附表：其他跨市场数据") > report.index("688233.SH")
     assert failures == []
+
+
+def test_execution_diary_sections_restore_compact_reviewer_output(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    cn.payload["cn_opportunity_ranker"] = {
+        "all_rows": [
+            {
+                "symbol": "688233.SH",
+                "name": "神工股份",
+                "production_tier": "active_watch",
+                "rank": 20,
+                "rank_score": 70.18,
+                "observation_entry_zone": "194.33-198.22",
+                "handling_line": "回落后重新站回入场区",
+                "reason": "AI Infra BFS universe member; 等待A股本域价格和量能确认",
+            }
+        ]
+    }
+    us.payload["options_verdicts"] = {
+        "NVDA": {"effective_date": "2026-06-29", "iv_rank_pct": 18, "iv_hv": 0.8, "skew_z": 1.4}
+    }
+    packet = module.build_packet("pm", cn, us)
+    packet["finance_search_prefetch"] = {
+        "market_rows": [
+            {"symbol": "^GSPC", "label": "标普500", "date": "2026-06-29", "change_pct": 0.42},
+            {"symbol": "000001.SS", "label": "上证指数", "date": "2026-06-29", "change_pct": -0.21},
+            {"symbol": "^KS11", "label": "韩国KOSPI", "date": "2026-06-29", "change_pct": 1.22},
+            {"symbol": "^N225", "label": "日本日经225", "date": "2026-06-29", "change_pct": 0.88},
+            {"symbol": "ES=F", "label": "标普期货", "date": "2026-06-29", "change_pct": 0.18},
+        ]
+    }
+    report = (
+        "# 跨市场晚报\n\n"
+        "## 宏观数据温度计\n"
+        "已有温度计。\n\n"
+        "## 美股执行标的\n"
+        "NVDA 在执行池。\n\n"
+        "## A股执行与候选管线\n"
+        "688233.SH神工股份在观察。\n\n"
+        "## 附表：其他跨市场数据\n"
+        "尾表。"
+    )
+
+    enriched = module.ensure_execution_diary_sections(report, packet)
+
+    assert "## 跨市场主线" in enriched
+    assert "## 传导到A股" in enriched
+    assert "## 今天的执行剧本" in enriched
+    assert "## 失效条件和下一步检查" in enriched
+    assert "NVDA" in enriched
+    assert "688233.SH神工股份" in enriched
+    assert "标普500(2026-06-29)" in enriched
+    assert enriched.index("## 失效条件和下一步检查") < enriched.index("## 附表：其他跨市场数据")
+
+
+def test_public_delivery_rejects_thin_report_when_packet_is_available(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    packet = module.build_packet("am", cn, us)
+    report = (
+        "# 跨市场早报\n\n"
+        "## 宏观数据温度计\n"
+        "标普期货(2026-06-29)和纳指期货(2026-06-29)给出风险线。\n\n"
+        "## 宏观事件与产业新闻\n"
+        "AI 和半导体链条仍是主线。\n\n"
+        "## 美股执行标的\n"
+        "NVDA 期权 Gamma 约束仓位。\n\n"
+        "## 美股期权关注标的（OTM skew / LEAPS IV）\n"
+        "期权 Gamma 只影响股票节奏。\n\n"
+        "## A股执行与候选管线\n"
+        "688981.SH进入A股候选管线。\n\n"
+        "## 附表：其他跨市场数据\n"
+        "黄金(2026-06-29)、WTI原油(2026-06-29)、日经225(2026-06-29)、"
+        "KOSPI(2026-06-29)、恒生(2026-06-29)、德国DAX(2026-06-29)。"
+    )
+
+    failures = module.validate_shadow_report(report, "am", public_delivery=True, packet=packet)
+
+    assert any("public report too thin" in item for item in failures)
+    assert any("missing public narrative section" in item for item in failures)
 
 
 def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: Path) -> None:
