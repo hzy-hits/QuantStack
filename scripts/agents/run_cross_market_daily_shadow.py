@@ -2299,17 +2299,58 @@ def strip_reviewer_note_blocks(text: str) -> str:
 
 def strip_diff_artifact_markers(text: str) -> str:
     lines = text.splitlines()
-    if sum(1 for line in lines if line.startswith("+")) < 5:
+    has_plus_artifacts = sum(1 for line in lines if line.startswith("+")) >= 5
+    has_delete_artifacts = any(
+        line.startswith(("-#", "-|", "--"))
+        or re.match(r"^-\d+[.)]\s", line)
+        or re.match(r"^-[^\s-]", line)
+        for line in lines
+    )
+    has_unified_diff = any(
+        line.startswith(("diff --git ", "@@ "))
+        or re.match(r"^(a|b)/+/", line)
+        or contains_marker(line, "review diff")
+        or bool(re.search(r"omitted \d+ diff line", line, re.IGNORECASE))
+        for line in lines
+    )
+    if not (has_plus_artifacts or has_delete_artifacts or has_unified_diff):
         return text.strip()
 
     output: list[str] = []
-    for line in lines:
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        stripped = line.strip()
+        if (
+            line.startswith(("diff --git ", "@@ "))
+            or re.match(r"^(a|b)/+/", line)
+            or contains_marker(line, "review diff")
+            or re.search(r"omitted \d+ diff line", line, re.IGNORECASE)
+        ):
+            idx += 1
+            while idx < len(lines):
+                next_line = lines[idx]
+                if next_line.startswith("#") and not next_line.startswith(("---", "+++", "@@")):
+                    break
+                idx += 1
+            continue
+        if (
+            line.startswith(("-#", "-|", "--"))
+            or re.match(r"^-\d+[.)]\s", line)
+            or re.match(r"^-[^\s-]", line)
+            or line == "-"
+        ):
+            idx += 1
+            continue
         if line == "+":
             output.append("")
         elif line.startswith("+") and not line.startswith("+++"):
             output.append(line[1:])
+        elif line.startswith("---") or line.startswith("+++"):
+            pass
         else:
             output.append(line)
+        idx += 1
     return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip()
 
 
@@ -2641,7 +2682,16 @@ def public_context_failures(text: str, packet: dict[str, Any] | None = None) -> 
         failures.append("missing concrete public CN STAR/科创板 ticker: 688xxx.SH")
     for raw in text.splitlines():
         line = raw.strip()
-        if raw.startswith("+"):
+        if (
+            raw.startswith("+")
+            or raw.startswith(("-#", "-|", "--"))
+            or re.match(r"^-\d+[.)]\s", raw)
+            or re.match(r"^-[^\s-]", raw)
+            or raw.startswith(("diff --git ", "@@ "))
+            or re.match(r"^(a|b)/+/", raw)
+            or contains_marker(line, "review diff")
+            or re.search(r"omitted \d+ diff line", line, re.IGNORECASE)
+        ):
             failures.append("public report contains diff artifact line")
             break
         if line.startswith("|") and contains_marker(line, "科创板候选"):
@@ -3137,6 +3187,7 @@ def main() -> int:
     report = ensure_us_action_section(report, packet)
     report = ensure_us_options_attention_section(report, packet)
     report = ensure_cn_pipeline_language(report, packet)
+    report = strip_diff_artifact_markers(report)
     failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email, packet=packet)
     if failures:
         restore_output_snapshot(output_snapshot)

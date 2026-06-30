@@ -625,6 +625,66 @@ def test_normalize_public_report_strips_diff_artifacts() -> None:
     assert "旧表格" in text
 
 
+def test_normalize_public_report_strips_reviewer_delete_diff_artifacts() -> None:
+    module = load_module()
+
+    text = module.normalize_public_report_text(
+        (
+            "# 跨市场早报\n\n"
+            "美股影响A股，A股只接受美股风险约束。\n\n"
+            "-| Ticker | 动作 |\n"
+            "-|---|---|\n"
+            "-| NVDA | 删除旧表 |\n"
+            "-## 美股期权关注标的（OTM skew / LEAPS IV）\n"
+            "-这里是被审稿删除的旧段。\n"
+            "-- Reuters：旧新闻。\n"
+            "新的正文继续保留。\n\n"
+            "… omitted 164 diff line(s) across 1 additional file(s)/section(s)\n"
+            "  ┊ review diff\n"
+            "a//home/ubuntu/quant-stack/report.md → b//home/ubuntu/quant-stack/report.md\n"
+            "@@ -82,7 +82,7 @@\n"
+            " 1. 旧上下文\n"
+            "-4. 被删除的宏观条件。\n"
+            "4. 新宏观条件。\n\n"
+            "## 附表：其他跨市场数据\n"
+            "| 类别 | 指标 |\n"
+            "|---|---|\n"
+            "| 美股期货 | 标普期货 |\n"
+        ),
+        "am",
+    )
+
+    assert text.startswith("# 跨市场早报")
+    assert not any(line.startswith("-|") for line in text.splitlines())
+    assert not any(line.startswith("-##") for line in text.splitlines())
+    assert "被审稿删除的旧段" not in text
+    assert "-- Reuters" not in text
+    assert "review diff" not in text
+    assert "@@" not in text
+    assert "omitted 164 diff" not in text
+    assert "新的正文继续保留" in text
+    assert "## 附表：其他跨市场数据" in text
+
+
+def test_public_delivery_rejects_reviewer_diff_artifacts() -> None:
+    module = load_module()
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场早报\n\n"
+            "美股影响A股，标普期货(2026-06-29)和纳指期货(2026-06-29)修复。"
+            "黄金(2026-06-29)、WTI原油(2026-06-29)、日经225(2026-06-29)、"
+            "KOSPI(2026-06-29)、恒生(2026-06-29)、DAX(2026-06-29)。"
+            "期权Gamma约束美股仓位。688233.SH进入A股候选管线。\n"
+            "-## 可核验宏观与产业 headlines\n"
+        ),
+        "am",
+        public_delivery=True,
+    )
+
+    assert any("diff artifact" in item for item in failures)
+
+
 def test_normalize_public_report_repairs_plain_title() -> None:
     module = load_module()
 
