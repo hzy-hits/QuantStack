@@ -148,6 +148,7 @@ def test_us_summary_includes_compact_option_context(tmp_path: Path) -> None:
             "effective_date": "2026-06-26",
             "verdict": "定位中性",
             "iv_ann": 0.2798,
+            "iv_rank_pct": 12.0,
             "iv_hv": 0.594,
             "pc_ratio_z": 0.1245,
             "skew_z": -0.1612,
@@ -164,6 +165,64 @@ def test_us_summary_includes_compact_option_context(tmp_path: Path) -> None:
     assert option_context["options_anomaly_radar"]["status"] == "no_trigger"
     assert option_context["options_tenor_radar"]["status"] == "no_signal"
     assert option_context["options_verdicts"][0]["symbol"] == "NVDA"
+    assert option_context["options_attention_watchlist"][0]["symbol"] == "NVDA"
+    assert "LEAPS IV" in option_context["options_attention_watchlist"][0]["reason"]
+
+
+def test_us_options_attention_section_includes_otm_skew_and_leaps_iv(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    us.payload["options_anomaly_rows"] = [
+        {
+            "symbol": "DLR",
+            "as_of": "2026-06-29",
+            "far_otm_put_volume": 1200,
+            "far_otm_put_vol_oi_ratio": 2.4,
+            "pc_ratio_z": 1.8,
+            "skew_z": 3.2,
+            "selling_pressure_score": 188,
+        }
+    ]
+    us.payload["options_tenor_signals"] = [
+        {
+            "symbol": "ALAB",
+            "pattern": "insider_tilt_long_dated_calls",
+            "score": 42,
+            "guidance": "长端远 OTM call 占主导",
+            "evidence": {"long_horizon_far_otm_call": 2000, "weekly_far_otm_call": 100},
+        }
+    ]
+    us.payload["options_verdicts"] = {
+        "DLR": {
+            "effective_date": "2026-06-29",
+            "verdict": "put 偏空 | 信仰久期中",
+            "iv_ann": 0.2464,
+            "iv_rank_pct": 16,
+            "iv_hv": 0.8355,
+            "pc_ratio_z": 1.8,
+            "skew_z": 3.2,
+        },
+        "ALAB": {
+            "effective_date": "2026-06-29",
+            "verdict": "定位中性 | 信仰久期长(远月堆积)",
+            "iv_ann": 0.9971,
+            "iv_rank_pct": 20,
+            "iv_hv": 0.9332,
+            "pc_ratio_z": 0.1,
+            "skew_z": 1.6,
+        },
+    }
+    packet = module.build_packet("am", cn, us)
+
+    section = module.render_us_options_attention_section(packet)
+
+    assert "## 美股期权关注标的（OTM skew / LEAPS IV）" in section
+    assert "DLR" in section
+    assert "ALAB" in section
+    assert "远 OTM 异常" in section
+    assert "LEAPS tenor 异动" in section
+    assert "0R context" in section
 
 
 def test_am_uses_previous_cn_context_when_target_day_payload_is_missing(tmp_path: Path) -> None:
@@ -363,6 +422,40 @@ def test_public_delivery_rejects_missing_us_action_tickers(tmp_path: Path) -> No
     )
 
     assert any("missing public US action ticker" in item for item in failures)
+
+
+def test_public_delivery_rejects_missing_us_options_watch_tickers(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    us.payload["options_verdicts"] = {
+        "DLR": {
+            "effective_date": "2026-06-29",
+            "verdict": "put 偏空 | 信仰久期中",
+            "iv_rank_pct": 16,
+            "iv_hv": 0.8355,
+            "pc_ratio_z": 1.2,
+            "skew_z": 3.4,
+        }
+    }
+    packet = module.build_packet("am", cn, us)
+
+    failures = module.validate_shadow_report(
+        (
+            "# 跨市场早报\n\n"
+            "NVDA 仍在美股执行清单里。"
+            "美股影响A股。标普期货(2026-06-29)和纳指期货(2026-06-29)给出下一轮风险线。"
+            "黄金、WTI原油同时作为避险和能源温度。"
+            "日经225(2026-06-29)、KOSPI(2026-06-29)、恒生(2026-06-27)和DAX(2026-06-29)展示非美大盘方向。"
+            "期权Gamma没有新增异常信号，但仍约束美股股票仓位。"
+            "科创50(2026-06-29)和688233.SH神工股份覆盖A股半导体候选管线。"
+        ),
+        "am",
+        public_delivery=True,
+        packet=packet,
+    )
+
+    assert any("missing public US options watch ticker" in item for item in failures)
 
 
 def test_public_delivery_rejects_standalone_star_candidate_table() -> None:
@@ -604,6 +697,17 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
     us = artifact(module, "us", "2026-06-26", tmp_path)
+    us.payload["options_verdicts"] = {
+        "DLR": {
+            "effective_date": "2026-06-26",
+            "verdict": "put 偏空 | 信仰久期中",
+            "iv_ann": 0.2464,
+            "iv_rank_pct": 16,
+            "iv_hv": 0.8355,
+            "pc_ratio_z": 1.1,
+            "skew_z": 3.9,
+        }
+    }
     packet = module.build_packet("am", cn, us)
     packet["finance_search_prefetch"] = {
         "market_rows": [
@@ -654,6 +758,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     report = module.annotate_market_snapshot_dates(report, packet)
     report = module.ensure_market_snapshot_section(report, packet)
     report = module.ensure_us_action_section(report, packet)
+    report = module.ensure_us_options_attention_section(report, packet)
     report = module.ensure_cn_pipeline_language(report, packet)
     failures = module.validate_shadow_report(report, "am", public_delivery=True, packet=packet)
 
@@ -669,6 +774,9 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert "Fed officials keep rate-cut timing in focus" not in report
     assert "## 美股执行标的" in report
     assert "NVDA" in report
+    assert "## 美股期权关注标的" in report
+    assert "DLR" in report
+    assert report.index("## 美股执行标的") < report.index("## 美股期权关注标的")
     assert "## A股科创板候选管线" not in report
     assert "688233.SH" in report
     assert "## 附表：其他跨市场数据" in report

@@ -112,6 +112,9 @@ MANAGED_REPORT_SECTION_PREFIXES = (
     "## 宏观与产业",
     "## 美股执行标的",
     "## 美股标的",
+    "## 美股期权关注标的",
+    "## 美股期权观察标的",
+    "## 美股 OTM skew",
     "## 附表：其他跨市场数据",
     "## 附表：外围资产",
     "## 附表：全球风险",
@@ -509,10 +512,306 @@ def compact_option_verdict(symbol: str, row: dict[str, Any]) -> dict[str, Any]:
         "effective_date": row.get("effective_date") or row.get("requested_date"),
         "verdict": row.get("verdict"),
         "iv_ann": compact_float(row.get("iv_ann"), 4),
+        "iv_rank_pct": compact_float(row.get("iv_rank_pct"), 2),
+        "iv_rank_n": row.get("iv_rank_n"),
         "iv_hv": compact_float(row.get("iv_hv"), 4),
+        "vrp": compact_float(row.get("vrp"), 4),
         "pc_ratio_z": compact_float(row.get("pc_ratio_z"), 4),
         "skew_z": compact_float(row.get("skew_z"), 4),
     }
+
+
+def option_row_symbol(row: dict[str, Any]) -> str:
+    return str(row.get("symbol") or row.get("ticker") or "").upper()
+
+
+def compact_option_anomaly_row(row: dict[str, Any]) -> dict[str, Any]:
+    squeeze = compact_float(row.get("short_squeeze_score"), 2)
+    pressure = compact_float(row.get("selling_pressure_score"), 2)
+    if squeeze is not None and squeeze > 0 and (pressure is None or squeeze >= pressure):
+        signal = "far-OTM call squeeze"
+        score = squeeze
+    elif pressure is not None and pressure > 0:
+        signal = "far-OTM put pressure"
+        score = pressure
+    else:
+        signal = "far-OTM flow"
+        score = compact_float(row.get("score"), 2)
+    return {
+        "symbol": option_row_symbol(row),
+        "effective_date": row.get("as_of") or row.get("source_date") or row.get("requested_date"),
+        "signal": signal,
+        "score": score,
+        "spot": compact_float(row.get("spot_close"), 2),
+        "far_otm_call_volume": compact_float(row.get("far_otm_call_volume"), 0),
+        "far_otm_call_vol_oi_ratio": compact_float(row.get("far_otm_call_vol_oi_ratio"), 2),
+        "far_otm_put_volume": compact_float(row.get("far_otm_put_volume"), 0),
+        "far_otm_put_vol_oi_ratio": compact_float(row.get("far_otm_put_vol_oi_ratio"), 2),
+        "pc_ratio_z": compact_float(row.get("pc_ratio_z"), 4),
+        "skew_z": compact_float(row.get("skew_z"), 4),
+    }
+
+
+def compact_option_tenor_signal(row: dict[str, Any]) -> dict[str, Any]:
+    evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+    compact_evidence = {
+        key: evidence.get(key)
+        for key in (
+            "weekly_far_otm_call",
+            "monthly_far_otm_call",
+            "long_horizon_far_otm_call",
+            "weekly_far_otm_put",
+            "long_horizon_far_otm_put",
+            "weekly_pc_ratio",
+            "tenors",
+            "ratios",
+        )
+        if evidence.get(key) is not None
+    }
+    return {
+        "symbol": option_row_symbol(row),
+        "effective_date": row.get("as_of") or row.get("source_date") or row.get("requested_date"),
+        "pattern": row.get("pattern"),
+        "score": compact_float(row.get("score"), 2),
+        "guidance": row.get("guidance"),
+        "evidence": compact_evidence,
+    }
+
+
+def option_verdict_long_tenor(row: dict[str, Any]) -> bool:
+    verdict = str(row.get("verdict") or "")
+    return any(marker in verdict for marker in ("信仰久期长", "远月", "LEAPS", "leaps"))
+
+
+def option_attention_verdict_reason(symbol: str, row: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    skew_z = compact_float(row.get("skew_z"), 4)
+    iv_rank = compact_float(row.get("iv_rank_pct"), 2)
+    iv_hv = compact_float(row.get("iv_hv"), 4)
+    if skew_z is not None and abs(skew_z) >= 1.0:
+        reasons.append("OTM skew 偏离")
+    if iv_rank is not None and iv_rank <= 20:
+        reasons.append("LEAPS IV 低位")
+    if option_verdict_long_tenor(row):
+        reasons.append("远月 LEAPS 久期")
+    if (iv_rank is not None and iv_rank >= 70) or (iv_hv is not None and iv_hv >= 1.25):
+        reasons.append("高 IV 等回落")
+    return reasons
+
+
+def option_attention_reading(reason: str, row: dict[str, Any]) -> str:
+    skew_z = compact_float(row.get("skew_z"), 4)
+    iv_rank = compact_float(row.get("iv_rank_pct"), 2)
+    iv_hv = compact_float(row.get("iv_hv"), 4)
+    if "OTM skew" in reason:
+        if skew_z is not None and skew_z >= 1.0:
+            return "put skew 抬升，仓位要等价格确认并收紧止损"
+        if skew_z is not None and skew_z <= -1.0:
+            return "skew 向上行/挤压侧偏，避免追高"
+        return "skew 偏离，作为入场节奏约束"
+    if "LEAPS IV" in reason:
+        suffix = f"IV rank {iv_rank:.0f}%" if iv_rank is not None else "IV 低位"
+        return f"{suffix}，只作远月方向成本观察"
+    if "远月" in reason:
+        return "远月久期存在，作为趋势信念观察"
+    if "高 IV" in reason:
+        if iv_hv is not None:
+            return f"IV/HV {iv_hv:.2f}x，等波动回落或用股票表达"
+        return "IV 分位偏高，避免把股票观点写成期权追价"
+    return "期权读数只约束股票仓位和节奏"
+
+
+def option_attention_candidate(
+    symbol: str,
+    verdicts: dict[str, Any],
+    reason: str,
+    *,
+    priority: int,
+    score: float = 0.0,
+    reading: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    verdict = verdicts.get(symbol) if isinstance(verdicts.get(symbol), dict) else {}
+    row = {**verdict, **(extra or {})}
+    return {
+        "_priority": priority,
+        "_score": score,
+        "symbol": symbol,
+        "reason": reason,
+        "effective_date": row.get("effective_date") or row.get("requested_date") or row.get("as_of"),
+        "iv_ann": compact_float(row.get("iv_ann"), 4),
+        "iv_rank_pct": compact_float(row.get("iv_rank_pct"), 2),
+        "iv_hv": compact_float(row.get("iv_hv"), 4),
+        "pc_ratio_z": compact_float(row.get("pc_ratio_z"), 4),
+        "skew_z": compact_float(row.get("skew_z"), 4),
+        "reading": reading or option_attention_reading(reason, row),
+    }
+
+
+def merge_option_attention_rows(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    def duplicate_reason(existing_reasons: list[str], new_reason: str) -> bool:
+        if new_reason in existing_reasons:
+            return True
+        if new_reason.endswith("排行"):
+            base = new_reason.removesuffix(" 排行")
+            return any(reason.startswith(base) for reason in existing_reasons)
+        return False
+
+    merged: dict[str, dict[str, Any]] = {}
+    for row in sorted(rows, key=lambda item: (item.get("_priority", 999), -float(item.get("_score") or 0.0), item["symbol"])):
+        symbol = str(row.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        existing = merged.get(symbol)
+        if existing is None:
+            merged[symbol] = dict(row)
+            continue
+        reasons = [part.strip() for part in str(existing.get("reason") or "").split("/") if part.strip()]
+        new_reason = str(row.get("reason") or "").strip()
+        if new_reason and not duplicate_reason(reasons, new_reason):
+            reasons.append(new_reason)
+            existing["reason"] = " / ".join(reasons)
+        reading = str(row.get("reading") or "").strip()
+        if reading and reading not in str(existing.get("reading") or ""):
+            existing["reading"] = f"{existing.get('reading')}; {reading}"
+        for key in ("effective_date", "iv_ann", "iv_rank_pct", "iv_hv", "pc_ratio_z", "skew_z"):
+            if existing.get(key) is None and row.get(key) is not None:
+                existing[key] = row.get(key)
+    selected = list(merged.values())[:limit]
+    for row in selected:
+        row.pop("_priority", None)
+        row.pop("_score", None)
+    return selected
+
+
+def select_us_options_attention(
+    payload: dict[str, Any],
+    actions: list[dict[str, Any]],
+    *,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    verdicts = payload.get("options_verdicts") if isinstance(payload.get("options_verdicts"), dict) else {}
+    candidates: list[dict[str, Any]] = []
+
+    anomaly_rows = payload.get("options_anomaly_rows") if isinstance(payload.get("options_anomaly_rows"), list) else []
+    for raw in anomaly_rows:
+        if not isinstance(raw, dict):
+            continue
+        row = compact_option_anomaly_row(raw)
+        symbol = str(row.get("symbol") or "")
+        if not symbol:
+            continue
+        signal = str(row.get("signal") or "far-OTM flow")
+        score = float(row.get("score") or 0.0)
+        candidates.append(
+            option_attention_candidate(
+                symbol,
+                verdicts,
+                "远 OTM 异常",
+                priority=0,
+                score=score,
+                reading=f"{signal} 触发，只作股票节奏/风险约束",
+                extra=row,
+            )
+        )
+
+    tenor_signals = payload.get("options_tenor_signals") if isinstance(payload.get("options_tenor_signals"), list) else []
+    for raw in tenor_signals:
+        if not isinstance(raw, dict):
+            continue
+        row = compact_option_tenor_signal(raw)
+        symbol = str(row.get("symbol") or "")
+        if not symbol:
+            continue
+        pattern = fmt(row.get("pattern"), default="tenor signal")
+        score = float(row.get("score") or 0.0)
+        candidates.append(
+            option_attention_candidate(
+                symbol,
+                verdicts,
+                "LEAPS tenor 异动",
+                priority=5,
+                score=score,
+                reading=f"{pattern}，远月/跨 tenor 只作 0R context",
+                extra=row,
+            )
+        )
+
+    for symbol, raw in verdicts.items():
+        if not isinstance(raw, dict):
+            continue
+        symbol_key = str(symbol or "").upper()
+        if not symbol_key:
+            continue
+        reasons = option_attention_verdict_reason(symbol_key, raw)
+        for reason in reasons:
+            priority = 20
+            score = 0.0
+            if reason.startswith("OTM skew"):
+                priority = 10
+                score = abs(compact_float(raw.get("skew_z"), 4) or 0.0)
+            elif reason.startswith("LEAPS IV"):
+                priority = 15
+                iv_rank = compact_float(raw.get("iv_rank_pct"), 2)
+                score = 100.0 - (iv_rank if iv_rank is not None else 100.0)
+            elif reason.startswith("远月"):
+                priority = 18
+                score = 1.0
+            elif reason.startswith("高 IV"):
+                priority = 30
+                score = compact_float(raw.get("iv_rank_pct"), 2) or compact_float(raw.get("iv_hv"), 4) or 0.0
+            candidates.append(
+                option_attention_candidate(
+                    symbol_key,
+                    verdicts,
+                    reason,
+                    priority=priority,
+                    score=score,
+                    reading=option_attention_reading(reason, raw),
+                )
+            )
+
+    if verdicts:
+        ranked_by_iv = sorted(
+            (
+                (str(symbol).upper(), row, compact_float(row.get("iv_rank_pct"), 2))
+                for symbol, row in verdicts.items()
+                if isinstance(row, dict) and compact_float(row.get("iv_rank_pct"), 2) is not None
+            ),
+            key=lambda item: item[2] if item[2] is not None else 999.0,
+        )
+        for symbol, row, iv_rank in ranked_by_iv[:5]:
+            candidates.append(
+                option_attention_candidate(
+                    symbol,
+                    verdicts,
+                    "LEAPS IV 排行",
+                    priority=9,
+                    score=100.0 - float(iv_rank or 100.0),
+                    reading=option_attention_reading("LEAPS IV 排行", row),
+                )
+            )
+        ranked_by_skew = sorted(
+            (
+                (str(symbol).upper(), row, abs(compact_float(row.get("skew_z"), 4) or 0.0))
+                for symbol, row in verdicts.items()
+                if isinstance(row, dict) and compact_float(row.get("skew_z"), 4) is not None
+            ),
+            key=lambda item: -item[2],
+        )
+        for symbol, row, score in ranked_by_skew[:5]:
+            candidates.append(
+                option_attention_candidate(
+                    symbol,
+                    verdicts,
+                    "OTM skew 排行",
+                    priority=10,
+                    score=score,
+                    reading=option_attention_reading("OTM skew 排行", row),
+                )
+            )
+
+    return merge_option_attention_rows(candidates, limit=limit)
 
 
 def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, Any]], *, limit: int = 10) -> dict[str, Any]:
@@ -582,7 +881,18 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
             "signal_count": len(tenor_signals),
             "status": "no_signal" if not tenor_signals else "triggered",
         },
+        "options_anomaly_rows": [
+            compact_option_anomaly_row(row)
+            for row in anomaly_rows
+            if isinstance(row, dict) and option_row_symbol(row)
+        ][:limit],
+        "options_tenor_signals": [
+            compact_option_tenor_signal(row)
+            for row in tenor_signals
+            if isinstance(row, dict) and option_row_symbol(row)
+        ][:limit],
         "options_verdicts": selected_verdicts,
+        "options_attention_watchlist": select_us_options_attention(payload, actions, limit=limit),
     }
 
 
@@ -904,7 +1214,7 @@ def build_coverage_checklist(slot: str) -> list[str]:
         return [
             "Open with the US/global market driver that most changes CN risk for the next open.",
             "Include the managed macro thermometer: top only US broad indices, CN broad indices, KOSPI, Nikkei 225; put all other snapshots in the tail table.",
-            "Use packet.us.option_context to explain US options/Gamma pressure, signal absence, and stock risk limits.",
+            "Use packet.us.option_context to explain US options/Gamma pressure, OTM skew / LEAPS IV watch names, signal absence, and stock risk limits.",
             "Explain the US -> CN transmission path and where it can fail.",
             "Map AI/semiconductor signals into A-share execution, including 科创板/STAR candidates when verifiable.",
             "Translate the driver into CN execution limits, sector priority, and watch items.",
@@ -914,7 +1224,7 @@ def build_coverage_checklist(slot: str) -> list[str]:
     return [
         "Review CN post-market action as feedback on prior US-to-CN transmission.",
         "Summarize global and US pre-market context from US/global facts, not from CN direction; use the managed top thermometer plus tail appendix shape.",
-        "Use packet.us.option_context to explain US options/Gamma pressure, signal absence, and stock risk limits.",
+        "Use packet.us.option_context to explain US options/Gamma pressure, OTM skew / LEAPS IV watch names, signal absence, and stock risk limits.",
         "Check whether 科创板/STAR semiconductor moves confirm or reject the prior US-to-CN read-through.",
         "State explicitly that CN feedback cannot raise or cut US positioning.",
         "Identify what the next US session can change for the following CN session.",
@@ -1285,6 +1595,27 @@ def public_us_constraint(row: dict[str, Any]) -> str:
     return public_cell(f"{prefix}{hedge_text}")
 
 
+def fmt_public_percent(value: Any) -> str:
+    number = compact_float(value, 2)
+    if number is None:
+        return "-"
+    return f"{number:.0f}%"
+
+
+def fmt_public_ratio(value: Any) -> str:
+    number = compact_float(value, 2)
+    if number is None:
+        return "-"
+    return f"{number:.2f}x"
+
+
+def fmt_public_signed(value: Any) -> str:
+    number = compact_float(value, 2)
+    if number is None:
+        return "-"
+    return f"{number:+.2f}"
+
+
 def render_us_action_section(packet: dict[str, Any]) -> str:
     us = packet.get("us") if isinstance(packet.get("us"), dict) else {}
     actions = us.get("actions") if isinstance(us.get("actions"), list) else []
@@ -1310,6 +1641,47 @@ def render_us_action_section(packet: dict[str, Any]) -> str:
                 stop=public_cell(stop),
                 target=public_cell(target),
                 constraint=public_us_constraint(row),
+            )
+        )
+    return "\n".join(lines)
+
+
+def render_us_options_attention_section(packet: dict[str, Any]) -> str:
+    us = packet.get("us") if isinstance(packet.get("us"), dict) else {}
+    context = us.get("option_context") if isinstance(us.get("option_context"), dict) else {}
+    rows = context.get("options_attention_watchlist") if isinstance(context.get("options_attention_watchlist"), list) else []
+    rows = [row for row in rows if isinstance(row, dict) and row.get("symbol")]
+    if not rows:
+        return ""
+
+    anomaly = context.get("options_anomaly_radar") if isinstance(context.get("options_anomaly_radar"), dict) else {}
+    tenor = context.get("options_tenor_radar") if isinstance(context.get("options_tenor_radar"), dict) else {}
+    lines = [
+        "## 美股期权关注标的（OTM skew / LEAPS IV）",
+        (
+            "这里不是期权下单清单；只把远 OTM skew、LEAPS/tenor 和 IV 分位映射回股票仓位、"
+            "入场节奏、止损和等待条件。"
+        ),
+        (
+            f"当日 far-OTM 异常 {fmt(anomaly.get('row_count'))} 条，"
+            f"跨 tenor/LEAPS 信号 {fmt(tenor.get('signal_count'))} 条；"
+            "没有触发时仍保留 skew/IV 排行观察。"
+        ),
+        "",
+        "| Ticker | 关注点 | 日期 | IV rank | IV/HV | PC z | Skew z | 处理 |",
+        "|---|---|---|---:|---:|---:|---:|---|",
+    ]
+    for row in rows[:10]:
+        lines.append(
+            "| {symbol} | {reason} | {date} | {iv_rank} | {iv_hv} | {pc_z} | {skew_z} | {reading} |".format(
+                symbol=public_cell(row.get("symbol")),
+                reason=public_cell(row.get("reason")),
+                date=public_cell(row.get("effective_date")),
+                iv_rank=fmt_public_percent(row.get("iv_rank_pct")),
+                iv_hv=fmt_public_ratio(row.get("iv_hv")),
+                pc_z=fmt_public_signed(row.get("pc_ratio_z")),
+                skew_z=fmt_public_signed(row.get("skew_z")),
+                reading=public_cell(row.get("reading")),
             )
         )
     return "\n".join(lines)
@@ -1450,6 +1822,21 @@ def ensure_us_action_section(report: str, packet: dict[str, Any]) -> str:
         return insert_after_section(text, "## 宏观事件与产业新闻", section)
     if "## 宏观事件 Headlines" in text:
         return insert_after_section(text, "## 宏观事件 Headlines", section)
+    return insert_after_section(text, "## 宏观数据温度计", section)
+
+
+def ensure_us_options_attention_section(report: str, packet: dict[str, Any]) -> str:
+    section = render_us_options_attention_section(packet)
+    text = strip_managed_report_sections(
+        report,
+        prefixes=("## 美股期权关注标的", "## 美股期权观察标的", "## 美股 OTM skew"),
+    )
+    if not section:
+        return text.strip()
+    if "## 美股执行标的" in text:
+        return insert_after_section(text, "## 美股执行标的", section)
+    if "## 宏观事件与产业新闻" in text:
+        return insert_after_section(text, "## 宏观事件与产业新闻", section)
     return insert_after_section(text, "## 宏观数据温度计", section)
 
 
@@ -1756,6 +2143,7 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 - 如果 packet.finance_search_prefetch.ok=true,必须优先使用其中的 market_rows 和 news_items 写宏观数据温度计和宏观事件 headlines;
   这些是脚本侧已经从 finance-search 取回的证据,不要再写成缺失或工具失败。
 - 必须读取 packet.us.option_context。美股段要覆盖期权/Gamma 对股票仓位、入场节奏、止损收紧和风险预算的影响;
+  如果有 options_attention_watchlist,要写出 OTM skew / LEAPS IV 值得关注的具体美股标的;
   如果 options_anomaly_radar 或 options_tenor_radar 是 no_trigger/no_signal,要自然写成“没有新增异常/tenor确认”,不要写成数据没跑。
 - 可以启发式使用 finance-search MCP 工具,尤其是:
   quant_stack_daily_snapshot, quant_stack_spine_triage, quant_stack_task_status,
@@ -1818,7 +2206,8 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 - 保留 draft/packet 里已有的 ticker、日期、R、价格线和结论;不得新增事实、价格、新闻或仓位。
 - 把全球新闻/宏观/指数/期货/油金和 A股半导体/科创板线索整合成同一个故事;不要拆成美股报告+A股报告。
 - 美股段必须融合 packet.us.option_context,包括 Gamma/期权定位/异常与 tenor 是否触发;它们是股票仓位和风险节奏证据,
-  不是期权交易指令。如果 anomaly/tenor 为 0,写成没有新增确认,不要省略成“美股没发完”。
+  不是期权交易指令。如果 packet.us.option_context 有 options_attention_watchlist,保留其中 OTM skew / LEAPS IV 关注标的。
+  如果 anomaly/tenor 为 0,写成没有新增确认,不要省略成“美股没发完”。
 - 宏观数据温度计顶部只能保留美股大盘、A股大盘、KOSPI、日经225;美股期货、油、金、
   欧洲/其他亚洲、VIX、汇率、利率和科创50等只能放报告尾部附表。如果 draft 已遗漏,
   只能从 packet/工具返回中补入,不能虚构数字。
@@ -2221,6 +2610,21 @@ def public_context_failures(text: str, packet: dict[str, Any] | None = None) -> 
         missing_us_symbols = [symbol for symbol in us_symbols if symbol and symbol not in text]
         if missing_us_symbols:
             failures.append("missing public US action ticker(s): " + ", ".join(missing_us_symbols[:5]))
+
+        context = us.get("option_context") if isinstance(us.get("option_context"), dict) else {}
+        watch_rows = (
+            context.get("options_attention_watchlist")
+            if isinstance(context.get("options_attention_watchlist"), list)
+            else []
+        )
+        watch_symbols = [
+            str(row.get("symbol") or "").upper()
+            for row in watch_rows
+            if isinstance(row, dict) and row.get("symbol")
+        ]
+        missing_watch_symbols = [symbol for symbol in watch_symbols if symbol and symbol not in text]
+        if missing_watch_symbols:
+            failures.append("missing public US options watch ticker(s): " + ", ".join(missing_watch_symbols[:5]))
 
     if not re.search(r"(?<!\d)688\d{3}\.SH(?![A-Z0-9])", text):
         failures.append("missing concrete public CN STAR/科创板 ticker: 688xxx.SH")
@@ -2720,6 +3124,7 @@ def main() -> int:
     report = annotate_market_snapshot_dates(report, packet)
     report = ensure_market_snapshot_section(report, packet)
     report = ensure_us_action_section(report, packet)
+    report = ensure_us_options_attention_section(report, packet)
     report = ensure_cn_pipeline_language(report, packet)
     failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email, packet=packet)
     if failures:
