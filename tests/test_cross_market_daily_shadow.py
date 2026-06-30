@@ -863,7 +863,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
             "pipeline_stage": "active_watch",
             "rank": 20,
             "rank_score": 70.18,
-            "reason": "等待A股本域价格和量能确认",
+            "reason": "AI Infra BFS universe member; 等待A股本域价格和量能确认",
         }
     ]
     report = (
@@ -888,6 +888,9 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     report = module.ensure_us_options_attention_section(report, packet)
     report = module.ensure_cn_pipeline_section(report, packet)
     report = module.ensure_cn_pipeline_language(report, packet)
+    report = module.normalize_public_report_text(report, "am")
+    report = module.strip_diff_artifact_markers(report)
+    report = module.strip_duplicate_report_titles(report, "am")
     failures = module.validate_shadow_report(report, "am", public_delivery=True, packet=packet)
 
     assert "标普500(2026-06-26)" in report
@@ -908,6 +911,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert "## A股执行与候选管线" in report
     assert "## A股科创板候选管线" not in report
     assert "688233.SH" in report
+    assert "AI Infra" not in report
     assert "## 附表：其他跨市场数据" in report
     assert "资产/指数" not in report
     assert "| 科创板候选 |" not in report

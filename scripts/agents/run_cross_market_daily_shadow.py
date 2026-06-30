@@ -3278,6 +3278,8 @@ def main() -> int:
     report = ensure_us_options_attention_section(report, packet)
     report = ensure_cn_pipeline_section(report, packet)
     report = ensure_cn_pipeline_language(report, packet)
+    if args.send_email:
+        report = normalize_public_report_text(report, args.slot)
     report = strip_diff_artifact_markers(report)
     report = strip_duplicate_report_titles(report, args.slot)
     failures = validate_shadow_report(report, args.slot, public_delivery=args.send_email, packet=packet)
