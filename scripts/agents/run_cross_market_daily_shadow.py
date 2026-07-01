@@ -136,6 +136,7 @@ MANAGED_REPORT_SECTION_PREFIXES = (
     "## 全球市场温度",
     "## 全球温度",
     "## 宏观数据温度计",
+    "## 宏观温度计",
     "## 顶部宏观数据温度计",
     "## 宏观事件 Headlines",
     "## 宏观事件与产业新闻",
@@ -166,6 +167,33 @@ EXECUTION_DIARY_SECTION_PREFIXES = (
     "## 今天的执行剧本",
     "## 下一交易窗口执行剧本",
     "## 失效条件和下一步检查",
+)
+EXECUTION_DIARY_SEMANTIC_PREFIXES = (
+    (
+        "## 跨市场主线",
+        "## 今天的交易逻辑",
+        "## 今天的交易故事",
+        "## 隔夜真正改变",
+        "## 美股给出的真正信号",
+    ),
+    (
+        "## 传导到A股",
+        "## 传到 A股",
+        "## A股盘前",
+        "## 科创板具体标的",
+    ),
+    (
+        "## 今天的执行剧本",
+        "## 下一交易窗口执行剧本",
+        "## 今天的交易逻辑",
+        "## 今天的交易故事",
+        "## A股盘前",
+    ),
+    (
+        "## 失效条件和下一步检查",
+        "## 失效条件",
+        "## 下一步检查",
+    ),
 )
 FORBIDDEN_PUBLIC_INDEX_MARKERS = ("Sensex", "Nifty", "印度指数", "印度Sensex", "印度")
 GLOBAL_MARKET_LABEL_ALIASES = {
@@ -2797,6 +2825,7 @@ def render_execution_diary_sections(packet: dict[str, Any], existing_report: str
     sections = [
         (
             "## 跨市场主线",
+            EXECUTION_DIARY_SEMANTIC_PREFIXES[0],
             "\n".join(
                 part
                 for part in (
@@ -2810,6 +2839,7 @@ def render_execution_diary_sections(packet: dict[str, Any], existing_report: str
         ),
         (
             "## 传导到A股",
+            EXECUTION_DIARY_SEMANTIC_PREFIXES[1],
             "\n".join(
                 [
                     cn_line,
@@ -2819,6 +2849,7 @@ def render_execution_diary_sections(packet: dict[str, Any], existing_report: str
         ),
         (
             "## 今天的执行剧本",
+            EXECUTION_DIARY_SEMANTIC_PREFIXES[2],
             "\n".join(
                 [
                     f"- 美股：{us_focus} 按各自入口、止损和目标线执行，Gamma 与期权读数只改变节奏和风险预算。",
@@ -2829,6 +2860,7 @@ def render_execution_diary_sections(packet: dict[str, Any], existing_report: str
         ),
         (
             "## 失效条件和下一步检查",
+            EXECUTION_DIARY_SEMANTIC_PREFIXES[3],
             "\n".join(
                 [
                     "- 美股大盘和期货若失去同步，A股只保留观察候选。",
@@ -2839,9 +2871,10 @@ def render_execution_diary_sections(packet: dict[str, Any], existing_report: str
         ),
     ]
 
+    existing_lines = [line.strip() for line in existing_report.splitlines()]
     blocks: list[str] = []
-    for heading, body in sections:
-        if any(line.strip().startswith(prefix) for line in existing_report.splitlines() for prefix in (heading,)):
+    for heading, prefixes, body in sections:
+        if any(line.startswith(prefix) for line in existing_lines for prefix in prefixes):
             continue
         blocks.append(f"{heading}\n{body}".strip())
     return "\n\n".join(blocks)

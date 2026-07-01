@@ -1359,6 +1359,32 @@ def test_execution_diary_sections_restore_compact_reviewer_output(tmp_path: Path
     assert enriched.index("## 失效条件和下一步检查") < enriched.index("## 附表：其他跨市场数据")
 
 
+def test_execution_diary_sections_respect_natural_reviewer_headings(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    packet = module.build_packet("am", cn, us)
+    report = (
+        "# 跨市场早报\n\n"
+        "## 今天的交易逻辑：反弹是门，纪律是锁\n"
+        "已有主线。\n\n"
+        "## A股盘前：守住入场区\n"
+        "已有执行。\n\n"
+        "## 失效条件\n"
+        "- 已有失效条件。\n\n"
+        "## 附表：其他跨市场数据\n"
+        "尾表。"
+    )
+
+    enriched = module.ensure_execution_diary_sections(report, packet)
+
+    assert enriched.count("## 跨市场主线") == 0
+    assert enriched.count("## 传导到A股") == 0
+    assert enriched.count("## 今天的执行剧本") == 0
+    assert enriched.count("## 失效条件和下一步检查") == 0
+    assert "已有主线" in enriched
+
+
 def test_public_delivery_rejects_thin_report_when_packet_is_available(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
@@ -1409,6 +1435,8 @@ def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: P
         "美股影响A股。\n\n"
         "## 顶部宏观数据温度计\n"
         "旧顶部表。\n\n"
+        "## 宏观温度计\n"
+        "旧宏观温度计。\n\n"
         "## 宏观与产业 headlines\n"
         "- 幻觉新闻。\n\n"
         "## 可核验宏观与产业 headlines\n"
@@ -1427,6 +1455,7 @@ def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: P
     report = module.ensure_cn_pipeline_language(report, packet)
 
     assert "旧顶部表" not in report
+    assert "旧宏观温度计" not in report
     assert "幻觉新闻" not in report
     assert "旧英文新闻" not in report
     assert "可核验宏观与产业" not in report
