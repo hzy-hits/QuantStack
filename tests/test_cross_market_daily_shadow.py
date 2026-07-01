@@ -8,6 +8,8 @@ from datetime import date
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "agents" / "run_cross_market_daily_shadow.py"
@@ -20,6 +22,11 @@ def load_module():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def disable_live_leaps_fallback(monkeypatch) -> None:
+    monkeypatch.setenv("QUANT_LIVE_LEAPS_IV_FALLBACK", "0")
 
 
 def artifact(module, market: str, report_date: str, tmp_path: Path):
@@ -433,6 +440,96 @@ def test_long_dated_iv_history_uses_live_fallback_when_db_missing(tmp_path: Path
 
     assert out["MSFT"]["coverage_status"] == "live_only"
     assert calls == [(["MSFT"], "2026-06-29")]
+
+
+def test_live_long_iv_fallback_symbols_lists_tech_growth_universe(monkeypatch) -> None:
+    module = load_module()
+    monkeypatch.setenv("QUANT_LIVE_LEAPS_IV_FALLBACK", "1")
+    monkeypatch.delenv("QUANT_LIVE_LEAPS_IV_SYMBOLS", raising=False)
+    monkeypatch.setenv("QUANT_LIVE_LEAPS_IV_MAX_SYMBOLS", "40")
+
+    symbols = module.live_long_iv_fallback_symbols({})
+    universe = module.tech_growth_option_universe({"MSFT", "GOOGL", "AVGO"})
+    groups = {row["group"]: row for row in universe}
+
+    assert {"MSFT", "GOOGL", "AVGO", "NVDA", "SMH", "QQQ", "VGT", "CRWV", "NBIS", "VRT"} <= set(symbols)
+    assert "Hyperscaler/平台" in groups
+    assert "AI 半导体/设备" in groups
+    assert groups["Hyperscaler/平台"]["covered_symbols"] == ["MSFT", "GOOGL"]
+    assert groups["AI 半导体/设备"]["covered_symbols"] == ["AVGO"]
+
+
+def test_us_options_attention_section_includes_tech_live_pool_and_spy_quadrant(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    us.payload["options_verdicts"] = {
+        "SPY": {
+            "effective_date": "2026-06-29",
+            "iv_hv": 1.0,
+            "pc_ratio_z": 1.2,
+            "skew_z": 0.1,
+        }
+    }
+    us.payload["long_dated_iv_history"] = {
+        "MSFT": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.24,
+            "avg_dte": 380,
+            "rank_pct": None,
+            "rank_n": 1,
+            "coverage_status": "live_only",
+            "source": "cboe_live",
+        },
+        "GOOGL": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.27,
+            "avg_dte": 370,
+            "rank_pct": None,
+            "rank_n": 1,
+            "coverage_status": "live_only",
+            "source": "cboe_live",
+        },
+        "AVGO": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.33,
+            "avg_dte": 390,
+            "rank_pct": None,
+            "rank_n": 1,
+            "coverage_status": "live_only",
+            "source": "cboe_live",
+        },
+        "NVDA": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.31,
+            "avg_dte": 365,
+            "rank_pct": 18,
+            "rank_n": 40,
+            "coverage_status": "ok",
+        },
+    }
+    packet = module.build_packet("am", cn, us)
+    packet["finance_search_prefetch"] = {
+        "market_rows": [
+            {"symbol": "SPY", "label": "SPY", "date": "2026-06-29", "change_pct": 0.62},
+        ],
+    }
+
+    section = module.render_us_options_attention_section(packet)
+
+    assert "科技成长 LEAPS 覆盖池" in section
+    assert "MSFT" in section
+    assert "GOOGL" in section
+    assert "AVGO" in section
+    assert "NVDA" in section
+    assert "科技成长 LEAPS 观察池" in section
+    assert "本地历史不足，不能判定低位/高位" in section
+    assert "SPY 象限：SPY(2026-06-29) +0.62%" in section
+    assert "上涨但 put/call 偏高" in section
 
 
 def test_cboe_quote_day_prefers_last_trade_time() -> None:
@@ -1078,6 +1175,8 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     }
     packet = module.build_packet("am", cn, us)
     packet["finance_search_prefetch"] = {
+        "generated_at": "2026-06-29T12:00:00Z",
+        "lookback_hours": 12,
         "market_rows": [
             {"symbol": "^GSPC", "label": "标普500", "date": "2026-06-26", "close": 6088.9, "change_pct": -0.05},
             {"symbol": "^VIX", "label": "VIX波动率", "date": "2026-06-26", "close": 18.41, "change_pct": -2.54},
@@ -1093,8 +1192,8 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
             {"symbol": "CL=F", "label": "WTI原油期货", "date": "2026-06-29", "close": 70.12, "change_pct": 1.29},
         ],
         "news_items": [
-            {"title": "Fed officials keep rate-cut timing in focus", "source": "Reuters", "published_at": "2026-06-29"},
-            {"title": "AI chip supply chain leads Asia trading", "source": "NewsNow", "published_at": "2026-06-29"},
+            {"title": "Fed officials keep rate-cut timing in focus", "source": "Reuters", "published_at": "2026-06-29T08:30:00Z"},
+            {"title": "AI chip supply chain leads Asia trading", "source": "NewsNow", "published_at": "2026-06-28T20:00:00Z"},
         ],
     }
     packet["cn"]["pipeline_candidates"] = [
@@ -1144,6 +1243,7 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert report.count("## 宏观数据温度计") == 1
     assert "## 宏观事件与产业新闻" in report
     assert "美联储利率路径仍是全球风险资产的核心变量" in report
+    assert "AI 和半导体链条仍是跨市场风险偏好的主线" not in report
     assert "Fed officials keep rate-cut timing in focus" not in report
     assert "## 美股执行标的" in report
     assert "NVDA" in report
@@ -1169,6 +1269,39 @@ def test_market_snapshot_dates_are_annotated_and_inserted_for_public_report(tmp_
     assert report.index("## 宏观事件与产业新闻") < report.index("## 美股执行标的")
     assert report.rfind("## 附表：其他跨市场数据") > report.index("688233.SH")
     assert failures == []
+
+
+def test_macro_headlines_keep_only_recent_timestamped_news() -> None:
+    module = load_module()
+    section = module.render_macro_headline_section(
+        {
+            "finance_search_prefetch": {
+                "generated_at": "2026-06-30T12:00:00Z",
+                "lookback_hours": 12,
+                "news_items": [
+                    {
+                        "title": "Fed officials keep rate-cut timing in focus",
+                        "source": "Reuters",
+                        "published_at": "2026-06-30T08:00:00Z",
+                    },
+                    {
+                        "title": "AI chip supply chain leads Asia trading",
+                        "source": "NewsNow",
+                        "published_at": "2026-06-29T23:30:00Z",
+                    },
+                    {
+                        "title": "Gold and silver fall as Fed risk rises",
+                        "source": "Wire",
+                        "published_at": "2026-06-30",
+                    },
+                ],
+            }
+        }
+    )
+
+    assert "美联储利率路径仍是全球风险资产的核心变量" in section
+    assert "AI 和半导体链条仍是跨市场风险偏好的主线" not in section
+    assert "美联储利率重定价压过避险需求" not in section
 
 
 def test_execution_diary_sections_restore_compact_reviewer_output(tmp_path: Path) -> None:
@@ -1260,6 +1393,8 @@ def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: P
     us = artifact(module, "us", "2026-06-26", tmp_path)
     packet = module.build_packet("pm", cn, us)
     packet["finance_search_prefetch"] = {
+        "generated_at": "2026-06-29T12:00:00Z",
+        "lookback_hours": 12,
         "market_rows": [
             {"symbol": "^GSPC", "label": "标普500", "date": "2026-06-26", "close": 6088.9, "change_pct": -0.05},
             {"symbol": "^N225", "label": "日本日经225", "date": "2026-06-29", "close": 41000, "change_pct": -1.04},
@@ -1267,7 +1402,7 @@ def test_managed_market_sections_strip_common_agent_heading_variants(tmp_path: P
             {"symbol": "000001.SS", "label": "上证指数", "date": "2026-06-29", "close": 3300, "change_pct": 0.2},
             {"symbol": "ES=F", "label": "标普期货", "date": "2026-06-29", "close": 7000, "change_pct": 0.5},
         ],
-        "news_items": [{"title": "Fed rate risk remains in focus", "source": "Reuters", "published_at": "2026-06-29"}],
+        "news_items": [{"title": "Fed rate risk remains in focus", "source": "Reuters", "published_at": "2026-06-29T09:00:00Z"}],
     }
     report = (
         "# 跨市场晚报\n\n"

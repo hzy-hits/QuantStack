@@ -18,6 +18,7 @@ to let the lead editor agent rewrite the same packet.
 from __future__ import annotations
 
 import argparse
+from email.utils import parsedate_to_datetime
 import hashlib
 import json
 import os
@@ -25,7 +26,7 @@ import re
 import subprocess
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -105,7 +106,31 @@ MARKET_TAIL_GROUPS = (
 MIN_PUBLIC_IV_RANK_OBS = 30
 LEAPS_MIN_DTE = 365
 LONG_DATED_MIN_DTE = 221
-DEFAULT_LIVE_LONG_IV_FALLBACK_SYMBOLS = ("MSFT", "GOOGL", "GOOG", "AVGO")
+MACRO_NEWS_LOOKBACK_HOURS = 12.0
+TECH_GROWTH_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("ETF/指数代理", ("SMH", "QQQ", "VGT")),
+    ("Hyperscaler/平台", ("MSFT", "GOOGL", "GOOG", "AMZN", "META", "ORCL")),
+    ("AI 半导体/设备", ("NVDA", "AVGO", "AMD", "ARM", "MRVL", "TSM", "ASML", "AMAT", "LRCX", "KLAC", "MU")),
+    ("NeoCloud/数据中心", ("CRWV", "NBIS", "APLD", "CORZ", "IREN", "CIFR", "WULF", "BTBT")),
+    ("电力/散热/网络", ("VRT", "ETN", "PWR", "CEG", "NRG", "GEV", "ANET", "DELL", "SMCI", "HPE", "CIEN", "GLW")),
+)
+TECH_GROWTH_OPTION_DISPLAY_PRIORITY = (
+    "MSFT",
+    "GOOGL",
+    "AVGO",
+    "NVDA",
+    "SMH",
+    "QQQ",
+    "VGT",
+    "CRWV",
+    "NBIS",
+    "VRT",
+)
+DEFAULT_LIVE_LONG_IV_FALLBACK_SYMBOLS = tuple(
+    symbol
+    for _group, symbols in TECH_GROWTH_OPTION_GROUPS
+    for symbol in symbols
+)
 DEFAULT_US_OPTIONS_DB = ROOT / "quant-research-v1" / "data" / "quant.duckdb"
 MANAGED_REPORT_SECTION_PREFIXES = (
     "## 全球市场温度",
@@ -717,8 +742,41 @@ def live_long_iv_fallback_symbols(verdicts: dict[str, Any]) -> list[str]:
         os.environ.get("QUANT_LIVE_LEAPS_IV_SYMBOLS")
         or ",".join(DEFAULT_LIVE_LONG_IV_FALLBACK_SYMBOLS)
     )
-    verdict_symbols = {str(symbol or "").upper() for symbol in verdicts if symbol}
-    return [symbol for symbol in configured if symbol in verdict_symbols]
+    verdict_symbols = [str(symbol or "").upper() for symbol in verdicts if symbol]
+    max_symbols = int(os.environ.get("QUANT_LIVE_LEAPS_IV_MAX_SYMBOLS", "40") or "40")
+    symbols: list[str] = []
+    for symbol in [*configured, *verdict_symbols]:
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+        if len(symbols) >= max_symbols:
+            break
+    return symbols
+
+
+def tech_growth_option_universe(symbols_with_data: set[str] | None = None) -> list[dict[str, Any]]:
+    data = symbols_with_data or set()
+    out: list[dict[str, Any]] = []
+    for group, symbols in TECH_GROWTH_OPTION_GROUPS:
+        out.append(
+            {
+                "group": group,
+                "symbols": list(symbols),
+                "covered_symbols": [symbol for symbol in symbols if symbol in data],
+            }
+        )
+    return out
+
+
+def tech_growth_option_symbol_order() -> dict[str, int]:
+    ordered: list[str] = []
+    for symbol in TECH_GROWTH_OPTION_DISPLAY_PRIORITY:
+        if symbol not in ordered:
+            ordered.append(symbol)
+    for _group, symbols in TECH_GROWTH_OPTION_GROUPS:
+        for symbol in symbols:
+            if symbol not in ordered:
+                ordered.append(symbol)
+    return {symbol: index for index, symbol in enumerate(ordered)}
 
 
 def nearest_atm_chain_iv(chain: Any, current_price: float) -> tuple[float, int, int] | None:
@@ -1020,13 +1078,41 @@ def long_dated_iv_reason(row: dict[str, Any]) -> str:
 def long_dated_iv_reading(row: dict[str, Any]) -> str:
     tenor = str(row.get("tenor") or "远月")
     rank = compact_float(row.get("rank_pct"), 2)
-    rank_n = row.get("rank_n")
+    rank_n = option_iv_rank_observation_count({"iv_rank_n": row.get("rank_n")})
     atm_iv = compact_float(row.get("atm_iv"), 4)
     dte = compact_float(row.get("avg_dte"), 1)
-    rank_text = f"{rank:.0f}%" if rank is not None else "-"
     iv_text = f"，ATM IV {atm_iv * 100:.0f}%" if atm_iv is not None else ""
     dte_text = f"，DTE约{dte:.0f}" if dte is not None else ""
-    return f"{tenor} IV rank {rank_text}，样本N={fmt(rank_n)}{dte_text}{iv_text}，只作股票方向成本观察"
+    if rank is None or rank_n < MIN_PUBLIC_IV_RANK_OBS:
+        return (
+            f"当前{tenor}链样本N={fmt(rank_n)}{dte_text}{iv_text}，"
+            "本地历史不足，不能判定低位/高位；只放进科技成长LEAPS观察池"
+        )
+    return (
+        f"{tenor} IV 历史分位 {rank:.0f}%（样本N={rank_n}）{dte_text}{iv_text}，"
+        "若价格确认且IV继续回落，才把LEAPS作为科技成长方向的成本窗口"
+    )
+
+
+def option_pc_skew_interpretation(row: dict[str, Any]) -> str:
+    pc_z = compact_float(row.get("pc_ratio_z"), 4)
+    skew_z = compact_float(row.get("skew_z"), 4)
+    if skew_z is not None and skew_z >= 1.0:
+        if pc_z is not None and pc_z >= 1.0:
+            return "put skew 与 put/call 同升，更像近端价外 put 保护或避险需求，股票仓位要等价格确认并收紧止损"
+        if pc_z is not None and pc_z <= -1.0:
+            return "put skew 抬升但 put/call 不配合，可能是翼端报价或卖方收IV背景，先观察价格确认"
+        return "put skew 抬升，说明下行保护变贵，仓位要等价格确认并收紧止损"
+    if skew_z is not None and skew_z <= -1.0:
+        if pc_z is not None and pc_z <= -1.0:
+            return "call 侧/上行挤压更贵且 put/call 偏低，可能是追涨或近端价外 call 需求，避免追高"
+        if pc_z is not None and pc_z >= 1.0:
+            return "上行 skew 偏贵但 put/call 同时抬升，说明多空分歧加大，不把股票观点写成期权追价"
+        return "skew 向上行/挤压侧偏，避免追高"
+    if pc_z is not None and abs(pc_z) >= 1.0:
+        side = "put/call 偏高，可能有近端保护需求" if pc_z > 0 else "put/call 偏低，可能偏向 call 侧追涨"
+        return f"{side}，但未得到 skew 同向确认，只作仓位节奏约束"
+    return "期权偏度和 put/call 未形成强确认，只作股票仓位和节奏约束"
 
 
 def option_attention_verdict_reason(
@@ -1054,29 +1140,26 @@ def option_attention_verdict_reason(
 
 
 def option_attention_reading(reason: str, row: dict[str, Any]) -> str:
-    skew_z = compact_float(row.get("skew_z"), 4)
     iv_rank = compact_float(row.get("iv_rank_pct"), 2)
     iv_hv = compact_float(row.get("iv_hv"), 4)
     iv_rank_n = option_iv_rank_observation_count(row)
     if "OTM skew" in reason:
-        if skew_z is not None and skew_z >= 1.0:
-            return "put skew 抬升，仓位要等价格确认并收紧止损"
-        if skew_z is not None and skew_z <= -1.0:
-            return "skew 向上行/挤压侧偏，避免追高"
-        return "skew 偏离，作为入场节奏约束"
+        return option_pc_skew_interpretation(row)
     if "LEAPS IV" in reason:
-        suffix = f"IV rank {iv_rank:.0f}%" if iv_rank is not None else "IV 低位"
+        suffix = f"整体IV rank {iv_rank:.0f}%（非LEAPS）" if iv_rank is not None else "整体IV低位"
         if iv_rank_n:
             suffix = f"{suffix}，样本N={iv_rank_n}"
-        return f"{suffix}，只作远月方向成本观察"
+        return f"{suffix}，只作远月方向成本背景，不替代真实LEAPS历史分位"
     if "远月" in reason:
-        return "远月久期存在，作为趋势信念观察"
+        return "远月久期存在，作为趋势信念观察；真正买LEAPS仍要等IV回落和价格确认"
     if "高 IV" in reason:
         if iv_rank is not None and iv_rank_n >= MIN_PUBLIC_IV_RANK_OBS:
-            return f"IV rank {iv_rank:.0f}%（样本N={iv_rank_n}），等回落或用股票表达"
+            return f"整体IV rank {iv_rank:.0f}%（样本N={iv_rank_n}，非LEAPS），买方期权成本偏贵；等IV回落，或用股票/价差表达"
         if iv_hv is not None:
+            if iv_hv >= 1.25:
+                return f"IV/HV {iv_hv:.2f}x，波动溢价偏高；可能适合卖方收IV观察，但不作为买LEAPS信号"
             return f"IV/HV {iv_hv:.2f}x，等波动回落或用股票表达"
-        return "IV 分位偏高，避免把股票观点写成期权追价"
+        return "整体IV偏高，避免把股票观点写成期权追价"
     return "期权读数只约束股票仓位和节奏"
 
 
@@ -1193,6 +1276,8 @@ def select_us_options_attention(
     long_iv_history: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     verdicts = payload.get("options_verdicts") if isinstance(payload.get("options_verdicts"), dict) else {}
+    verdict_symbol_keys = {str(symbol).upper() for symbol in verdicts}
+    tech_symbol_order = tech_growth_option_symbol_order()
     long_iv_history = long_iv_history or {}
     candidates: list[dict[str, Any]] = []
 
@@ -1324,6 +1409,59 @@ def select_us_options_attention(
                 )
             )
 
+    ranked_universe_long_iv = sorted(
+        (
+            (str(symbol).upper(), long_iv, compact_float(long_iv.get("rank_pct"), 2))
+            for symbol, long_iv in long_iv_history.items()
+            if str(symbol).upper() not in verdict_symbol_keys
+            and long_dated_iv_public_reliable(long_iv)
+            and compact_float(long_iv.get("rank_pct"), 2) is not None
+            and float(compact_float(long_iv.get("rank_pct"), 2) or 999.0) <= 20.0
+        ),
+        key=lambda item: item[2] if item[2] is not None else 999.0,
+    )
+    for symbol, long_iv, iv_rank in ranked_universe_long_iv[:5]:
+        reason = long_dated_iv_reason(long_iv)
+        candidates.append(
+            option_attention_candidate(
+                symbol,
+                verdicts,
+                f"{reason} 科技成长池",
+                priority=12,
+                score=100.0 - float(iv_rank or 100.0),
+                reading=long_dated_iv_reading(long_iv),
+                long_iv=long_iv,
+            )
+        )
+
+    live_or_short_history_universe = sorted(
+        (
+            (str(symbol).upper(), long_iv)
+            for symbol, long_iv in long_iv_history.items()
+            if str(symbol).upper() not in verdict_symbol_keys
+            and str(symbol).upper() in tech_symbol_order
+            and isinstance(long_iv, dict)
+            and not long_dated_iv_public_reliable(long_iv)
+            and (
+                compact_float(long_iv.get("atm_iv"), 4) is not None
+                or option_iv_rank_observation_count({"iv_rank_n": long_iv.get("rank_n")}) > 0
+            )
+        ),
+        key=lambda item: tech_symbol_order.get(item[0], 999),
+    )
+    for symbol, long_iv in live_or_short_history_universe[:8]:
+        candidates.append(
+            option_attention_candidate(
+                symbol,
+                verdicts,
+                "科技成长 LEAPS 观察池",
+                priority=16,
+                score=1.0,
+                reading=long_dated_iv_reading(long_iv),
+                long_iv=long_iv,
+            )
+        )
+
     return merge_option_attention_rows(candidates, limit=limit)
 
 
@@ -1371,8 +1509,9 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
         else {}
     )
     live_fallback = live_long_iv_fallback_symbols(verdicts)
+    long_iv_symbols = sorted({str(symbol).upper() for symbol in [*verdicts.keys(), *live_fallback] if symbol})
     long_iv_history = precomputed_long_iv or fetch_long_dated_iv_history(
-        list(verdicts.keys()),
+        long_iv_symbols,
         effective_options_date,
         live_fallback_symbols=live_fallback,
     )
@@ -1422,6 +1561,7 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
             for symbol, row in long_iv_history.items()
             if symbol in requested_symbols or symbol in live_fallback or long_dated_iv_public_reliable(row)
         },
+        "tech_growth_option_universe": tech_growth_option_universe(set(long_iv_history.keys())),
         "options_attention_watchlist": select_us_options_attention(
             payload,
             actions,
@@ -1675,7 +1815,7 @@ def build_tool_manifest(slot: str, cn_summary: dict[str, Any], us_summary: dict[
             "market": "global",
             "source": "Hermes MCP server: finance-search",
             "returns": ["deduped_news_items", "diagnostics"],
-            "agent_use": "Use for timely macro, geopolitical, AI, semiconductor, and China market catalysts.",
+            "agent_use": "Use only for macro, geopolitical, AI, semiconductor, and China market catalysts published in the last 12 hours.",
         },
         {
             "name": "finance-search.research_brief",
@@ -2087,10 +2227,50 @@ def translate_macro_news_title(title: Any) -> str:
     return "外部宏观和产业新闻继续影响跨市场风险偏好"
 
 
+def parse_public_datetime(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        try:
+            parsed = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def macro_news_reference_time(prefetch: dict[str, Any]) -> datetime:
+    parsed = parse_public_datetime(prefetch.get("generated_at"))
+    if parsed is not None:
+        return parsed
+    return datetime.now(timezone.utc)
+
+
+def recent_macro_news_items(prefetch: dict[str, Any], items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    lookback = compact_float(prefetch.get("lookback_hours"), 2) or MACRO_NEWS_LOOKBACK_HOURS
+    reference = macro_news_reference_time(prefetch)
+    start = reference - timedelta(hours=float(lookback))
+    # Allow a small future tolerance for provider clock skew.
+    end = reference + timedelta(minutes=10)
+    out: list[dict[str, Any]] = []
+    for item in items:
+        published = parse_public_datetime(item.get("published_at") or item.get("date"))
+        if published is not None and start <= published <= end:
+            out.append(item)
+    return out
+
+
 def render_macro_headline_section(packet: dict[str, Any]) -> str:
     prefetch = packet.get("finance_search_prefetch") if isinstance(packet.get("finance_search_prefetch"), dict) else {}
     raw_items = prefetch.get("news_items") if isinstance(prefetch.get("news_items"), list) else []
     items = [item for item in raw_items if isinstance(item, dict) and item.get("title")]
+    items = recent_macro_news_items(prefetch, items)
     filtered = [item for item in items if is_contentful_macro_news(str(item.get("title") or ""))]
     if filtered:
         items = filtered
@@ -2389,6 +2569,56 @@ def ensure_sec_13f_section(report: str, packet: dict[str, Any]) -> str:
     return insert_after_section(text, "## 宏观数据温度计", section)
 
 
+def option_context_verdict(context: dict[str, Any], symbol: str) -> dict[str, Any]:
+    rows = context.get("options_verdicts") if isinstance(context.get("options_verdicts"), list) else []
+    for row in rows:
+        if isinstance(row, dict) and str(row.get("symbol") or "").upper() == symbol.upper():
+            return row
+    return {}
+
+
+def render_tech_growth_universe_line(context: dict[str, Any]) -> str:
+    universe = context.get("tech_growth_option_universe") if isinstance(context.get("tech_growth_option_universe"), list) else []
+    parts: list[str] = []
+    for row in universe:
+        if not isinstance(row, dict):
+            continue
+        group = public_cell(row.get("group"), default="")
+        symbols = row.get("symbols") if isinstance(row.get("symbols"), list) else []
+        shown = "/".join(public_cell(symbol) for symbol in symbols[:8] if symbol)
+        if group and shown:
+            parts.append(f"{group}: {shown}")
+    if not parts:
+        return ""
+    return "科技成长 LEAPS 覆盖池：" + "；".join(parts) + "。"
+
+
+def spy_put_call_quadrant_line(packet: dict[str, Any], context: dict[str, Any]) -> str:
+    rows = market_row_lookup(packet)
+    spy_market = rows.get("SPY")
+    spy_verdict = option_context_verdict(context, "SPY")
+    pc_z = compact_float(spy_verdict.get("pc_ratio_z"), 4)
+    if not spy_market or pc_z is None:
+        return ""
+    change = compact_float(spy_market.get("change_pct"), 4)
+    if change is None:
+        return ""
+    date_text = public_cell(spy_market.get("date"))
+    change_text = fmt_market_change_pct(change)
+    pc_text = fmt_public_signed(pc_z)
+    if change > 0.2 and pc_z > 0.5:
+        reading = "上涨但 put/call 偏高，像反弹中买保护，风险偏好不算干净"
+    elif change > 0.2 and pc_z < -0.5:
+        reading = "上涨且 put/call 偏低，偏追涨/看涨需求，避免把强势直接追成高IV买权"
+    elif change < -0.2 and pc_z > 0.5:
+        reading = "下跌且 put/call 偏高，避险需求同步升温，先降风险预算"
+    elif change < -0.2 and pc_z < -0.5:
+        reading = "下跌但 put/call 偏低，恐慌未充分释放，等待价格确认"
+    else:
+        reading = "价格和 put/call 都没有给出极端单边确认，作为仓位节奏背景"
+    return f"SPY 象限：SPY({date_text}) {change_text}，put/call z {pc_text}，{reading}。"
+
+
 def render_us_options_attention_section(packet: dict[str, Any]) -> str:
     us = packet.get("us") if isinstance(packet.get("us"), dict) else {}
     context = us.get("option_context") if isinstance(us.get("option_context"), dict) else {}
@@ -2411,10 +2641,21 @@ def render_us_options_attention_section(packet: dict[str, Any]) -> str:
             f"没有触发时仍保留 skew/真实远月IV观察。LEAPS/远月 IV rank 来自逐合约链，"
             f"至少需要 {MIN_PUBLIC_IV_RANK_OBS} 个历史点；不足时只作背景，不作为低位/高位结论。"
         ),
-        "",
-        "| Ticker | 关注点 | 日期 | LEAPS/远月 IV rank | 样本 | DTE | IV/HV | PC z | Skew z | 处理 |",
-        "|---|---|---|---:|---|---:|---:|---:|---:|---|",
+        (
+            "策略口径：科技高成长只在真实远月/LEAPS IV 回落、价格确认之后，才考虑用 LEAPS 表达方向；"
+            "IV 特别高或 put/call、skew 异动时，先解释近端价外保护、追涨需求或卖方收 IV 背景。"
+        ),
     ]
+    for extra_line in (render_tech_growth_universe_line(context), spy_put_call_quadrant_line(packet, context)):
+        if extra_line:
+            lines.append(extra_line)
+    lines.extend(
+        [
+            "",
+            "| Ticker | 关注点 | 日期 | LEAPS/远月 IV rank | 样本 | DTE | IV/HV | PC z | Skew z | 处理 |",
+            "|---|---|---|---:|---|---:|---:|---:|---:|---|",
+        ]
+    )
     for row in rows[:10]:
         lines.append(
             "| {symbol} | {reason} | {date} | {long_iv_rank} | {long_iv_n} | {long_iv_dte} | {iv_hv} | {pc_z} | {skew_z} | {reading} |".format(
@@ -2911,11 +3152,12 @@ asyncio.run(main())
 
 
 def attach_finance_search_prefetch(packet: dict[str, Any], *, target_cn_date: str) -> None:
-    target = parse_ymd(target_cn_date)
-    window = "72h" if target.weekday() in {0, 5} else "24h"
+    window = "12h"
     payload = fetch_finance_search_prefetch(window=window)
     packet["finance_search_prefetch"] = {
         "window": window,
+        "lookback_hours": MACRO_NEWS_LOOKBACK_HOURS,
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "source": "finance-search local agent read",
         "ok": bool(payload.get("ok")),
         "market_rows": payload.get("market_rows") or [],
@@ -3134,7 +3376,8 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
 
 工作方式:
 - 先读下面 packet。packet 是 quant-stack 已冻结的事实砖和工具清单。
-- 如果 packet.finance_search_prefetch.ok=true,必须优先使用其中的 market_rows 和 news_items 写宏观数据温度计和宏观事件 headlines;
+- 如果 packet.finance_search_prefetch.ok=true,必须优先使用其中的 market_rows 写宏观数据温度计；宏观事件 headlines
+  只能使用 packet.finance_search_prefetch.news_items 中发布时间落在过去12小时窗口内的新闻。
   这些是脚本侧已经从 finance-search 取回的证据,不要再写成缺失或工具失败。
 - 必须读取 packet.us.option_context。美股段要覆盖期权/Gamma 对股票仓位、入场节奏、止损收紧和风险预算的影响;
   如果有 options_attention_watchlist,要写出 OTM skew / LEAPS IV 值得关注的具体美股标的;
@@ -3149,7 +3392,7 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
   美股期货、欧洲、恒生/台湾、VIX、油、金、美元/离岸人民币、利率和科创50等其他数据放报告尾部附表。
 - 引用任何大盘指数或期货时,必须带返回日期,格式类似“德国DAX(2026-06-29)”或“纳指期货(2026-06-29)”;
   跨时区市场尤其不能只写“今天/隔夜”。不要引用印度、Sensex 或 Nifty 指数。
-- 写作前必须尝试检索最新宏观/地缘/AI/半导体/中国市场新闻;只使用返回标题、来源或 URL 可核验的新闻,
+- 写作前必须尝试检索过去12小时内的宏观/地缘/AI/半导体/中国市场新闻;只使用返回标题、来源、URL 和发布时间可核验且落在12小时窗口内的新闻,
   并把宏观事件 headlines 放在顶部温度计之后。
 - A股侧不得只看主板;必须用 packet.cn.actions、packet.cn.pipeline_candidates 或 CN ranker/symbol_context
   选择具体科创板/688xxx.SH 标的。科创板不是单独章节或温度计,它是 A股候选管线的一部分;
@@ -3209,7 +3452,7 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 - 宏观数据温度计顶部只能保留美股大盘、A股大盘、KOSPI、日经225;美股期货、油、金、
   欧洲/其他亚洲、VIX、汇率、利率和科创50等只能放报告尾部附表。如果 draft 已遗漏,
   只能从 packet/工具返回中补入,不能虚构数字。
-- 如果 packet.finance_search_prefetch 有 market_rows/news_items,优先使用这些已取回证据补齐温度计、宏观 headlines 和尾部附表,
+- 如果 packet.finance_search_prefetch 有 market_rows/news_items,只能使用其中发布时间落在 packet.finance_search_prefetch.lookback_hours 之内的 news_items 补齐宏观 headlines；market_rows 可继续用于温度计和尾部附表,
   不要写成缺失、不可用或工具失败。
 - 温度计和尾部附表引用任何大盘指数或期货时必须带返回日期,尤其是欧洲/亚洲/美国期货这类跨时区市场;
   格式类似“日经225(2026-06-29)”或“标普期货(2026-06-29)”。删除印度、Sensex、Nifty 指数。
