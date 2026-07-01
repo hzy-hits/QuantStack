@@ -20,6 +20,7 @@ from typing import Any
 DEFAULT_REMOTE_ROOT = "/home/ivena/.openclaw/quant-stack"
 DEFAULT_OPENCLAW_BIN = "/home/ivena/.local/bin/openclaw"
 WEIXIN_DIRECT_CHANNEL = "openclaw-weixin"
+DELIVERY_MESSAGE_MAX_CHARS = 2600
 
 
 def parse_args() -> argparse.Namespace:
@@ -256,6 +257,168 @@ def build_manifest(args: argparse.Namespace, remote_dir: PurePosixPath, copied: 
     }
 
 
+def read_optional_text(path: Path | None) -> str:
+    if path is None:
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError):
+        return ""
+
+
+def heading_level(line: str) -> int | None:
+    match = re.match(r"^(#{1,6})\s+", line.strip())
+    if not match:
+        return None
+    return len(match.group(1))
+
+
+def extract_markdown_section(text: str, prefixes: tuple[str, ...]) -> str:
+    lines = text.splitlines()
+    start: int | None = None
+    level = 2
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if any(stripped.startswith(prefix) for prefix in prefixes):
+            start = index + 1
+            level = heading_level(stripped) or 2
+            break
+    if start is None:
+        return ""
+
+    section: list[str] = []
+    for line in lines[start:]:
+        current_level = heading_level(line)
+        if current_level is not None and current_level <= level:
+            break
+        section.append(line)
+    return "\n".join(section).strip()
+
+
+def strip_markdown_inline(text: str) -> str:
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"[*_`]+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def table_row_summary(line: str) -> str:
+    cells = [strip_markdown_inline(cell.strip()) for cell in line.strip().strip("|").split("|")]
+    cells = [cell for cell in cells if cell]
+    if not cells:
+        return ""
+    header = " ".join(cells).lower()
+    if re.fullmatch(r"[-:\s|]+", line.strip()) or header.startswith("manager filing") or header.startswith("ticker "):
+        return ""
+    if len(cells) >= 6:
+        return f"{cells[0]}: 新增 {cells[3]}; 增持 {cells[4]}; 减持 {cells[5]}"
+    if len(cells) >= 3:
+        return " / ".join(cells[:4])
+    return ""
+
+
+def clean_summary_line(line: str, *, include_tables: bool = False) -> str:
+    text = line.strip()
+    if not text or heading_level(text) is not None:
+        return ""
+    if text.startswith("|"):
+        return table_row_summary(text) if include_tables else ""
+    text = re.sub(r"^[-*]\s+", "", text)
+    text = re.sub(r"^\d+[.)]\s+", "", text)
+    return strip_markdown_inline(text)
+
+
+def section_summary_lines(section: str, *, limit: int, include_tables: bool = False) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in section.splitlines():
+        text = clean_summary_line(line, include_tables=include_tables)
+        key = re.sub(r"\W+", "", text.lower())
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def first_report_summary_lines(text: str, *, limit: int) -> list[str]:
+    out: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("## ") and out:
+            break
+        text_line = clean_summary_line(stripped, include_tables=False)
+        if not text_line:
+            continue
+        out.append(text_line)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def trim_delivery_message(text: str, remote_report_path: str) -> str:
+    if len(text) <= DELIVERY_MESSAGE_MAX_CHARS:
+        return text
+    path_line = f"全文: {remote_report_path}" if remote_report_path else ""
+    body = text
+    if path_line and path_line in text:
+        body = text.rsplit(path_line, 1)[0].rstrip()
+    budget = DELIVERY_MESSAGE_MAX_CHARS - len(path_line) - 8
+    budget = max(800, budget)
+    trimmed = body[:budget].rstrip()
+    if path_line:
+        return f"{trimmed}\n...\n{path_line}"
+    return f"{trimmed}\n..."
+
+
+def build_delivery_message(manifest: dict[str, Any], report_path: Path | None = None) -> str:
+    text = read_optional_text(report_path)
+    title = str(manifest.get("title") or "QuantStack 报告").strip()
+    meta = " ".join(str(part) for part in (manifest.get("kind"), manifest.get("slot"), manifest.get("date")) if part)
+    remote_report_path = str(manifest.get("remote_report_path") or "").strip()
+
+    digest_section = extract_markdown_section(
+        text,
+        (
+            "## 跨市场主线",
+            "## 今天的交易逻辑",
+            "## 今天的交易故事",
+            "## 今天的执行剧本",
+            "## 美股给出的真正信号",
+        ),
+    )
+    digest = section_summary_lines(digest_section, limit=3) if digest_section else []
+    if not digest:
+        digest = first_report_summary_lines(text, limit=3)
+
+    news = section_summary_lines(
+        extract_markdown_section(text, ("## 宏观事件与产业新闻",)),
+        limit=4,
+    )
+    sec_13f = section_summary_lines(
+        extract_markdown_section(text, ("## SEC 13F 机构持仓快照",)),
+        limit=3,
+        include_tables=True,
+    )
+
+    lines = [title]
+    if meta:
+        lines.append(meta)
+    if digest:
+        lines.extend(["", "报告解读:"])
+        lines.extend(f"- {line}" for line in digest)
+    if news:
+        lines.extend(["", "最新新闻:"])
+        lines.extend(f"- {line}" for line in news)
+    if sec_13f:
+        lines.extend(["", "13F 机构仓位:"])
+        lines.extend(f"- {line}" for line in sec_13f)
+    if remote_report_path:
+        lines.extend(["", f"全文: {remote_report_path}"])
+    return trim_delivery_message("\n".join(lines), remote_report_path)
+
+
 def copy_artifacts(args: argparse.Namespace) -> tuple[PurePosixPath, dict[str, str]]:
     if not args.report_path.exists():
         raise FileNotFoundError(args.report_path)
@@ -341,12 +504,13 @@ def write_prompt(manifest: dict[str, Any], report_path: Path) -> str:
         excerpt = text[:1800].rstrip()
     except FileNotFoundError:
         pass
+    delivery_summary = build_delivery_message(manifest, report_path)
     return (
         "Hermes/QuantStack 已生成一份报告，并已放入树莓派本机 OpenClaw inbox。\n"
         "请把它当作 Oracle Hermes 上游 subagent 的产物登记到 briefing session；不要重写全文，"
-        "只保留一句状态、3 条要点和本机报告路径，供后续对话调用。\n"
+        "只保留一句状态、3 条要点、本次新闻/13F 线索和本机报告路径，供后续对话调用。\n"
         "如果本次 agent 命令带 --deliver，这就是需要发到指定微信会话的日报通知："
-        "最终回复必须是一条可见摘要，包含标题、3 条要点和本机报告路径；"
+        "最终回复必须是一条可见摘要，包含标题、3 条要点、最新新闻/13F 摘要和本机报告路径；"
         "不要回答“没有需要发送的新内容”，也不要只做 session 登记。\n\n"
         f"- kind: {manifest.get('kind')}\n"
         f"- slot: {manifest.get('slot')}\n"
@@ -355,6 +519,8 @@ def write_prompt(manifest: dict[str, Any], report_path: Path) -> str:
         f"- report: {manifest.get('remote_report_path')}\n"
         f"- packet: {manifest.get('remote_packet_path')}\n"
         f"- meta: {manifest.get('remote_meta_path')}\n\n"
+        "通知摘要候选：\n"
+        f"{delivery_summary}\n\n"
         "报告开头摘录：\n"
         f"{excerpt}"
     )
@@ -635,11 +801,11 @@ def send_openclaw_cli_message(
 
 
 def send_message(args: argparse.Namespace, manifest: dict[str, Any]) -> list[dict[str, str]]:
-    message = (
-        f"{manifest.get('title')}\n"
-        f"{manifest.get('kind')} {manifest.get('slot')} {manifest.get('date')}\n"
-        f"{manifest.get('remote_report_path')}"
-    )
+    report_path_arg = getattr(args, "report_path", None)
+    report_path = Path(report_path_arg) if report_path_arg else None
+    if report_path is None and manifest.get("source_report_path"):
+        report_path = Path(str(manifest["source_report_path"]))
+    message = build_delivery_message(manifest, report_path)
     destinations = message_destinations(args)
     deliveries: list[dict[str, str]] = []
     for destination in destinations:

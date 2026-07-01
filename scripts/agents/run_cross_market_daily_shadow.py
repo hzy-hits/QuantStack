@@ -2103,6 +2103,44 @@ def build_external_context_requirements(slot: str) -> dict[str, Any]:
     }
 
 
+def build_report_capabilities() -> dict[str, Any]:
+    return {
+        "fresh_headline_listener": {
+            "kind": "pre_send_evidence",
+            "run_phase": "before_agent_report_and_delivery",
+            "lookback_hours": MACRO_NEWS_LOOKBACK_HOURS,
+            "source_urls": list(DIRECT_HEADLINE_SOURCES),
+            "packet_key": "finance_search_prefetch.news_items",
+            "report_section": "宏观事件与产业新闻",
+            "delivery_summary": True,
+            "status": "configured",
+        },
+        "sec_13f_recent_listener": {
+            "kind": "pre_send_evidence",
+            "run_phase": "before_agent_report_and_delivery",
+            "lookback_hours": 12.0,
+            "source": "SEC current 13F-HR Atom feed + local information-table XML",
+            "packet_key": "sec_13f_recent.filings",
+            "report_section": "SEC 13F 机构持仓快照",
+            "delivery_summary": True,
+            "public_use": "Quarterly-lagged institutional positioning context only.",
+            "status": "configured",
+        },
+    }
+
+
+def update_report_capability(packet: dict[str, Any], name: str, fields: dict[str, Any]) -> None:
+    capabilities = packet.get("report_capabilities")
+    if not isinstance(capabilities, dict):
+        capabilities = build_report_capabilities()
+        packet["report_capabilities"] = capabilities
+    capability = capabilities.get(name)
+    if not isinstance(capability, dict):
+        capability = {}
+        capabilities[name] = capability
+    capability.update(fields)
+
+
 def build_cn_universe_requirement() -> dict[str, Any]:
     return {
         "scope": (
@@ -3511,20 +3549,34 @@ asyncio.run(main())
 def attach_finance_search_prefetch(packet: dict[str, Any], *, target_cn_date: str) -> None:
     window = "12h"
     payload = fetch_finance_search_prefetch(window=window)
+    generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     packet["finance_search_prefetch"] = {
         "window": window,
         "lookback_hours": MACRO_NEWS_LOOKBACK_HOURS,
-        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "generated_at": generated_at,
+        "target_cn_date": target_cn_date,
         "source": "finance-search local agent read",
         "ok": bool(payload.get("ok")),
         "market_rows": payload.get("market_rows") or [],
         "news_items": payload.get("news_items") or [],
+        "direct_headline_sources": payload.get("direct_headline_sources") or {},
         "error": payload.get("error") if not payload.get("ok") else "",
         "public_use": (
             "Use market_rows and news_items as already-fetched evidence for the global market temperature. "
             "Do not mention this prefetch source, diagnostics, or errors in the public report."
         ),
     }
+    update_report_capability(
+        packet,
+        "fresh_headline_listener",
+        {
+            "status": "ok" if payload.get("news_items") else ("degraded" if payload.get("ok") else "failed"),
+            "last_run_at": generated_at,
+            "target_cn_date": target_cn_date,
+            "observed_item_count": len(payload.get("news_items") or []),
+            "direct_headline_sources": payload.get("direct_headline_sources") or {},
+        },
+    )
 
 
 def fetch_sec_13f_recent_summary(*, lookback_hours: float, timeout: int = 45) -> dict[str, Any]:
@@ -3587,6 +3639,19 @@ def fetch_sec_13f_recent_summary(*, lookback_hours: float, timeout: int = 45) ->
 def attach_sec_13f_recent(packet: dict[str, Any], *, lookback_hours: float) -> None:
     payload = fetch_sec_13f_recent_summary(lookback_hours=lookback_hours)
     packet["sec_13f_recent"] = payload
+    update_report_capability(
+        packet,
+        "sec_13f_recent_listener",
+        {
+            "status": "ok" if payload.get("ok") else "failed",
+            "last_run_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "lookback_hours": lookback_hours,
+            "recent_file_count": payload.get("recent_file_count") or 0,
+            "observed_filing_count": len(payload.get("filings") or []),
+            "summary_note": payload.get("note") or "",
+            "error": payload.get("error") if not payload.get("ok") else "",
+        },
+    )
 
 
 def build_packet(slot: str, cn: MarketArtifact, us: MarketArtifact) -> dict[str, Any]:
@@ -3622,6 +3687,7 @@ def build_packet(slot: str, cn: MarketArtifact, us: MarketArtifact) -> dict[str,
         "data_boundary": build_data_boundary(),
         "tool_manifest": build_tool_manifest(slot, cn_summary, us_summary),
         "external_context_requirements": build_external_context_requirements(slot),
+        "report_capabilities": build_report_capabilities(),
         "cn_universe_requirement": build_cn_universe_requirement(),
         "coverage_checklist": build_coverage_checklist(slot),
         "style_brief": build_style_brief(),

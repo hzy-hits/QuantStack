@@ -86,6 +86,8 @@ def test_pm_packet_keeps_us_to_cn_causality(tmp_path: Path) -> None:
     assert any(tool["name"] == "finance-search.quant_stack_ranker" for tool in packet["tool_manifest"])
     assert any(tool["name"] == "finance-search.quant_stack_sec_13f_recent" for tool in packet["tool_manifest"])
     assert "external_context_requirements" in packet
+    assert packet["report_capabilities"]["fresh_headline_listener"]["run_phase"] == "before_agent_report_and_delivery"
+    assert packet["report_capabilities"]["sec_13f_recent_listener"]["delivery_summary"] is True
     assert "科创板" in module.json.dumps(packet["cn_universe_requirement"], ensure_ascii=False)
     assert packet["style_brief"]["reference_url"].startswith("https://boist.org/")
 
@@ -870,6 +872,31 @@ def test_sec_13f_section_renders_recent_holding_changes() -> None:
     assert "季度滞后" in section
 
 
+def test_attach_sec_13f_marks_report_capability(tmp_path: Path, monkeypatch) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    packet = module.build_packet("am", cn, us)
+    monkeypatch.setattr(
+        module,
+        "fetch_sec_13f_recent_summary",
+        lambda *, lookback_hours: {
+            "ok": True,
+            "lookback_hours": lookback_hours,
+            "recent_file_count": 2,
+            "note": "13F values are normalized to USD.",
+            "filings": [{"manager": "TEST MANAGER"}],
+        },
+    )
+
+    module.attach_sec_13f_recent(packet, lookback_hours=12)
+
+    capability = packet["report_capabilities"]["sec_13f_recent_listener"]
+    assert capability["status"] == "ok"
+    assert capability["recent_file_count"] == 2
+    assert capability["observed_filing_count"] == 1
+
+
 def test_public_delivery_rejects_standalone_star_candidate_table() -> None:
     module = load_module()
 
@@ -1369,6 +1396,36 @@ def test_stockanalysis_direct_headlines_keep_recent_items() -> None:
     assert rows[0]["source"] == "CNBC"
     assert rows[0]["published_at"] == "2026-07-01T04:08:00Z"
     assert rows[0]["url"] == "https://www.cnbc.com/ai.html"
+
+
+def test_attach_finance_prefetch_marks_headline_report_capability(tmp_path: Path, monkeypatch) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    packet = module.build_packet("am", cn, us)
+    monkeypatch.setattr(
+        module,
+        "fetch_finance_search_prefetch",
+        lambda *, window: {
+            "ok": True,
+            "market_rows": [],
+            "news_items": [
+                {
+                    "title": "Fed officials keep rate-cut timing in focus",
+                    "source": "Reuters",
+                    "published_at": "2026-07-01T00:00:00Z",
+                }
+            ],
+            "direct_headline_sources": {"stockanalysis": {"ok": True, "count": 1}},
+        },
+    )
+
+    module.attach_finance_search_prefetch(packet, target_cn_date="2026-07-01")
+
+    capability = packet["report_capabilities"]["fresh_headline_listener"]
+    assert capability["status"] == "ok"
+    assert capability["observed_item_count"] == 1
+    assert packet["finance_search_prefetch"]["direct_headline_sources"]["stockanalysis"]["count"] == 1
 
 
 def test_trendforce_direct_headlines_use_asset_timestamp() -> None:

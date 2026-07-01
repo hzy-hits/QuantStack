@@ -133,12 +133,33 @@ def test_notify_agent_fans_out_remote_calls(tmp_path: Path, monkeypatch) -> None
     assert len(deliveries) == 2
 
 
-def test_send_message_fans_out_direct_openclaw_messages(monkeypatch) -> None:
+def test_send_message_fans_out_direct_openclaw_messages(tmp_path: Path, monkeypatch) -> None:
     module = load_module()
+    report = tmp_path / "report.md"
+    report.write_text(
+        """# Hermes 跨市场早报
+
+## 跨市场主线
+美股半导体和 AI 主线继续给 A股风险预算，但 A股仍按本域候选管线等待确认。
+
+## 宏观事件与产业新闻
+- 美联储利率路径仍是全球风险资产的核心变量（Reuters / 2026-07-01T00:00:00Z）
+- DRAM 现货价格继续牵动亚洲半导体链（TrendForce / 2026-07-01T02:49:02Z）
+
+## SEC 13F 机构持仓快照
+过去 12 小时本地新增 1 个 13F 持仓文件；13F 有季度滞后，只作为机构仓位线索，不当作实时资金流。
+
+| Manager | Filing/Report | Holdings | 新增Top5 | 增持Top5 | 减持Top5 |
+|---|---|---:|---|---|---|
+| TEST MANAGER | 2026-06-30 / 2026-03-31 | 3 | NEW AI CO($200.0M) | APPLE INC($75.0M) | OLD CO($-50.0M) |
+""",
+        encoding="utf-8",
+    )
     args = argparse.Namespace(
         openclaw_bin="openclaw",
         timeout=60,
         dry_run=False,
+        report_path=report,
         message_channel="openclaw-weixin",
         message_account="acct-1,acct-2",
         message_target="target-1,target-2",
@@ -179,6 +200,12 @@ def test_send_message_fans_out_direct_openclaw_messages(monkeypatch) -> None:
     ]
     assert [call["argv"][1] for call in remote_calls] == ["acct-1", "acct-2"]
     assert [call["argv"][2] for call in remote_calls] == ["target-1", "target-2"]
+    pushed = remote_calls[0]["argv"][3]
+    assert "报告解读:" in pushed
+    assert "最新新闻:" in pushed
+    assert "13F 机构仓位:" in pushed
+    assert "TEST MANAGER" in pushed
+    assert "/tmp/report.md" in pushed
 
 
 def test_send_message_keeps_openclaw_cli_for_non_weixin_channels(monkeypatch) -> None:
@@ -229,7 +256,13 @@ def test_send_message_keeps_openclaw_cli_for_non_weixin_channels(monkeypatch) ->
 def test_write_prompt_tells_agent_deliver_to_send_visible_summary(tmp_path: Path) -> None:
     module = load_module()
     report = tmp_path / "report.md"
-    report.write_text("# Hermes 跨市场早报\n\nMSFT/GOOGL/AVGO 期权观察。", encoding="utf-8")
+    report.write_text(
+        "# Hermes 跨市场早报\n\n"
+        "MSFT/GOOGL/AVGO 期权观察。\n\n"
+        "## 宏观事件与产业新闻\n"
+        "- AI demand fuels investors' portfolios（CNBC / 2026-07-01T04:08:00Z）\n",
+        encoding="utf-8",
+    )
     manifest = {
         "kind": "cross_market_daily",
         "slot": "am",
@@ -244,4 +277,6 @@ def test_write_prompt_tells_agent_deliver_to_send_visible_summary(tmp_path: Path
 
     assert "--deliver" in prompt
     assert "最终回复必须是一条可见摘要" in prompt
+    assert "最新新闻/13F 摘要" in prompt
+    assert "通知摘要候选" in prompt
     assert "不要回答“没有需要发送的新内容”" in prompt
