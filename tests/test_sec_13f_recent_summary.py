@@ -73,6 +73,7 @@ def test_recent_13f_summary_compares_previous_manager_filing(tmp_path: Path) -> 
     assert filing["new_positions_top5"][0]["issuer"] == "NEW AI CO"
     assert filing["increases_top5"][0]["issuer"] == "APPLE INC"
     assert filing["increases_top5"][0]["value_delta_usd"] == 75_000.0
+    assert filing["increases_top5"][0]["shares_delta"] == 2
     assert filing["decreases_top5"][0]["issuer"] == "OLD CO"
     assert filing["decreases_top5"][0]["value_delta_usd"] == -50_000.0
 

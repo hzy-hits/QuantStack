@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 from email.utils import parsedate_to_datetime
+import html as html_lib
 import hashlib
 import json
 import os
@@ -29,6 +30,8 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
 
@@ -107,6 +110,11 @@ MIN_PUBLIC_IV_RANK_OBS = 30
 LEAPS_MIN_DTE = 365
 LONG_DATED_MIN_DTE = 221
 MACRO_NEWS_LOOKBACK_HOURS = 12.0
+DIRECT_HEADLINE_SOURCES = (
+    "https://stockanalysis.com/news/",
+    "https://www.trendforce.com/news/",
+)
+HTTP_USER_AGENT = "QuantStack/1.0 research contact: 13502448752hzy@gmail.com"
 TECH_GROWTH_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ETF/指数代理", ("SMH", "QQQ", "VGT")),
     ("Hyperscaler/平台", ("MSFT", "GOOGL", "GOOG", "AMZN", "META", "ORCL")),
@@ -2257,6 +2265,19 @@ CONTENTFUL_NEWS_MARKERS = (
     "ai",
     "chip",
     "semiconductor",
+    "dram",
+    "nand",
+    "hbm",
+    "memory",
+    "mlcc",
+    "capacitor",
+    "passive component",
+    "yageo",
+    "tsmc",
+    "intel",
+    "micron",
+    "samsung",
+    "sk hynix",
     "openai",
     "data center",
     "datacenter",
@@ -2289,6 +2310,12 @@ def translate_macro_news_title(title: Any) -> str:
     lower = text.lower()
     if "ai buildout costs" in lower and "fed" in lower:
         return "AI 建设成本和美联储利率预期压制科技风险偏好，纳指期货承压"
+    if "dram" in lower or "nand" in lower or "memory" in lower or "hbm" in lower:
+        return "存储价格和供给变化继续影响 AI 服务器与半导体链条定价"
+    if "mlcc" in lower or "capacitor" in lower or "passive component" in lower or "yageo" in lower:
+        return "被动元件和 MLCC 涨价扩散，AI 服务器供应链成本压力上升"
+    if "tsmc" in lower or "intel" in lower or "samsung" in lower or "sk hynix" in lower or "micron" in lower:
+        return "核心半导体厂商的产能、诉讼或资本开支变化牵动 AI 产业链预期"
     if "chip rout" in lower and "openai" in lower:
         return "芯片链抛售叠加 OpenAI IPO 延后，科技股盘前继续承压"
     if "chip stock selloff" in lower:
@@ -3172,12 +3199,241 @@ def ensure_execution_diary_sections(report: str, packet: dict[str, Any]) -> str:
     return insert_before_section(report, "## 附表：其他跨市场数据", block)
 
 
+def fetch_url_text(url: str, *, timeout: int = 20) -> str:
+    request = Request(
+        url,
+        headers={
+            "User-Agent": HTTP_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Encoding": "identity",
+        },
+    )
+    with urlopen(request, timeout=timeout) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def strip_html(value: str) -> str:
+    text = re.sub(r"<script\b.*?</script>", " ", value, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", html_lib.unescape(text)).strip()
+
+
+def stockanalysis_datetime(value: str) -> datetime | None:
+    text = html_lib.unescape(value).strip()
+    match = re.fullmatch(
+        r"([A-Za-z]{3})\s+(\d{1,2}),\s+(\d{4}),\s+(\d{1,2}):(\d{2})\s+(AM|PM)\s+([A-Z]{2,4})",
+        text,
+    )
+    if not match:
+        return parse_public_datetime(text)
+    mon, day, year, hour, minute, meridiem, zone = match.groups()
+    try:
+        month = datetime.strptime(mon, "%b").month
+    except ValueError:
+        return None
+    hour_int = int(hour)
+    if meridiem == "PM" and hour_int != 12:
+        hour_int += 12
+    if meridiem == "AM" and hour_int == 12:
+        hour_int = 0
+    offsets = {
+        "UTC": 0,
+        "GMT": 0,
+        "EST": -5,
+        "EDT": -4,
+        "CST": -6,
+        "CDT": -5,
+        "MST": -7,
+        "MDT": -6,
+        "PST": -8,
+        "PDT": -7,
+    }
+    offset = offsets.get(zone)
+    if offset is None:
+        return None
+    parsed = datetime(
+        int(year),
+        month,
+        int(day),
+        hour_int,
+        int(minute),
+        tzinfo=timezone(timedelta(hours=offset)),
+    )
+    return parsed.astimezone(timezone.utc)
+
+
+def parse_stockanalysis_news_html(
+    text: str,
+    *,
+    reference: datetime,
+    lookback_hours: float,
+    limit: int = 12,
+) -> list[dict[str, Any]]:
+    start = reference - timedelta(hours=lookback_hours)
+    end = reference + timedelta(minutes=10)
+    pattern = re.compile(
+        r"<h3\b[^>]*>\s*(?P<title_block>.*?)\s*</h3>.*?"
+        r"<div\b[^>]*\btitle=\"(?P<published>[^\"]+)\"[^>]*>(?P<meta>.*?)</div>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    out: list[dict[str, Any]] = []
+    for match in pattern.finditer(text):
+        title_block = match.group("title_block")
+        href_match = re.search(r"\bhref=\"([^\"]+)\"", title_block)
+        url = html_lib.unescape(href_match.group(1)) if href_match else ""
+        title = strip_html(title_block)
+        if not title:
+            continue
+        published = stockanalysis_datetime(match.group("published"))
+        if published is None or not (start <= published <= end):
+            continue
+        meta = strip_html(match.group("meta"))
+        source = "StockAnalysis"
+        if " - " in meta:
+            source = meta.rsplit(" - ", 1)[-1].strip() or source
+        out.append(
+            {
+                "title": title,
+                "source": source,
+                "published_at": published.isoformat().replace("+00:00", "Z"),
+                "url": url,
+                "source_feed": "stockanalysis.com/news",
+                "date_precision": "minute",
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def trendforce_asset_datetime(prefix: str) -> datetime | None:
+    matches = list(re.finditer(r"/uploads/(\d{4})/(\d{2})/(\d{2})(\d{2})(\d{2})(\d{2})/", prefix))
+    if not matches:
+        return None
+    year, month, day, hour, minute, second = matches[-1].groups()
+    try:
+        parsed = datetime(
+            int(year),
+            int(month),
+            int(day),
+            int(hour),
+            int(minute),
+            int(second),
+            tzinfo=LOCAL_TZ,
+        )
+    except ValueError:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def parse_trendforce_news_html(
+    text: str,
+    *,
+    reference: datetime,
+    lookback_hours: float,
+    limit: int = 8,
+) -> list[dict[str, Any]]:
+    start = reference - timedelta(hours=lookback_hours)
+    end = reference + timedelta(minutes=10)
+    pattern = re.compile(
+        r"<div\s+class=\"insight-tag\">\s*<i\b[^>]*calendar[^>]*></i>\s*"
+        r"(?P<date>\d{4}-\d{2}-\d{2})\s*"
+        r"<h2\b[^>]*>\s*<a\b[^>]*class=\"title-link\"[^>]*href=\"(?P<url>[^\"]+)\"[^>]*>\s*"
+        r"<strong>(?P<title>.*?)</strong>",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    out: list[dict[str, Any]] = []
+    for match in pattern.finditer(text):
+        prefix = text[max(0, match.start() - 2200):match.start()]
+        published = trendforce_asset_datetime(prefix)
+        precision = "asset_second"
+        if published is None:
+            precision = "day"
+            try:
+                local_midnight = datetime.fromisoformat(match.group("date")).replace(tzinfo=LOCAL_TZ)
+            except ValueError:
+                continue
+            published = local_midnight.astimezone(timezone.utc)
+        same_local_date = published.astimezone(LOCAL_TZ).date() == reference.astimezone(LOCAL_TZ).date()
+        if not (start <= published <= end or (precision == "day" and same_local_date)):
+            continue
+        out.append(
+            {
+                "title": strip_html(match.group("title")),
+                "source": "TrendForce",
+                "published_at": published.isoformat().replace("+00:00", "Z"),
+                "url": html_lib.unescape(match.group("url")),
+                "source_feed": "trendforce.com/news",
+                "date_precision": precision,
+            }
+        )
+        if len(out) >= limit:
+            break
+    return out
+
+
+def news_sort_key(item: dict[str, Any]) -> datetime:
+    return parse_public_datetime(item.get("published_at") or item.get("date")) or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def merge_news_items(*groups: list[dict[str, Any]], limit: int = 16) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            if not isinstance(item, dict) or not item.get("title"):
+                continue
+            key = str(item.get("url") or item.get("title") or "").strip().lower()
+            key = re.sub(r"\s+", " ", key)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+    merged.sort(key=news_sort_key, reverse=True)
+    return merged[:limit]
+
+
+def fetch_direct_headline_sources(*, lookback_hours: float, timeout: int = 20) -> dict[str, Any]:
+    reference = datetime.now(timezone.utc)
+    diagnostics: dict[str, Any] = {}
+    items: list[dict[str, Any]] = []
+    try:
+        stockanalysis = fetch_url_text("https://stockanalysis.com/news/", timeout=timeout)
+        rows = parse_stockanalysis_news_html(stockanalysis, reference=reference, lookback_hours=lookback_hours)
+        diagnostics["stockanalysis"] = {"ok": True, "count": len(rows)}
+        items.extend(rows)
+    except (OSError, URLError, TimeoutError, ValueError) as exc:
+        diagnostics["stockanalysis"] = {"ok": False, "error": str(exc)[-300:]}
+
+    try:
+        trendforce = fetch_url_text("https://www.trendforce.com/news/", timeout=timeout)
+        rows = parse_trendforce_news_html(trendforce, reference=reference, lookback_hours=lookback_hours)
+        diagnostics["trendforce"] = {"ok": True, "count": len(rows)}
+        items.extend(rows)
+    except (OSError, URLError, TimeoutError, ValueError) as exc:
+        diagnostics["trendforce"] = {"ok": False, "error": str(exc)[-300:]}
+
+    return {
+        "items": merge_news_items(items, limit=16),
+        "diagnostics": diagnostics,
+        "source": ",".join(DIRECT_HEADLINE_SOURCES),
+    }
+
+
 def fetch_finance_search_prefetch(*, window: str, timeout: int = 90) -> dict[str, Any]:
+    direct = fetch_direct_headline_sources(lookback_hours=MACRO_NEWS_LOOKBACK_HOURS)
     root = Path(os.environ.get("FINANCE_SEARCH_AGENT_ROOT", "/home/ubuntu/services/finance-search-agent"))
     python = Path(os.environ.get("FINANCE_SEARCH_PYTHON", str(root / ".venv" / "bin" / "python")))
     server = root / "server.py"
     if not python.exists() or not server.exists():
-        return {"ok": False, "error": "finance-search agent runtime not found"}
+        return {
+            "ok": bool(direct.get("items")),
+            "error": "finance-search agent runtime not found",
+            "market_rows": [],
+            "news_items": direct.get("items") or [],
+            "direct_headline_sources": direct.get("diagnostics") or {},
+        }
     code = r"""
 import asyncio
 import json
@@ -3234,16 +3490,19 @@ asyncio.run(main())
     payload["market_rows"] = compact_market_snapshot_rows(snapshot)
     news = payload.get("news") if isinstance(payload.get("news"), dict) else {}
     items = news.get("items") if isinstance(news.get("items"), list) else []
-    payload["news_items"] = [
+    finance_news_items = [
         {
             "title": item.get("title"),
             "source": item.get("source") or item.get("provider"),
             "published_at": item.get("published_at") or item.get("date"),
             "url": item.get("url"),
+            "source_feed": item.get("source_feed") or "finance-search",
         }
         for item in items[:8]
         if isinstance(item, dict) and item.get("title")
     ]
+    payload["news_items"] = merge_news_items(direct.get("items") or [], finance_news_items, limit=16)
+    payload["direct_headline_sources"] = direct.get("diagnostics") or {}
     payload.pop("news", None)
     payload.pop("market_snapshot", None)
     return payload
@@ -3269,6 +3528,26 @@ def attach_finance_search_prefetch(packet: dict[str, Any], *, target_cn_date: st
 
 
 def fetch_sec_13f_recent_summary(*, lookback_hours: float, timeout: int = 45) -> dict[str, Any]:
+    fetcher = ROOT / "scripts" / "fetch_sec_13f_recent.py"
+    if fetcher.exists() and os.environ.get("CROSS_MARKET_SEC_13F_FETCH", "on").lower() not in {"0", "false", "no"}:
+        try:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(fetcher),
+                    "--lookback-hours",
+                    str(lookback_hours),
+                    "--limit-filings",
+                    os.environ.get("CROSS_MARKET_SEC_13F_FETCH_LIMIT", "20"),
+                ],
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+                cwd=ROOT,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     script = ROOT / "scripts" / "sec_13f_recent_summary.py"
     if not script.exists():
         return {"ok": False, "error": "sec 13f summary script not found", "filings": []}

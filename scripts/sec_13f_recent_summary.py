@@ -101,7 +101,9 @@ def first_text(elem: ET.Element, *names: str) -> str:
     wanted = {name.lower() for name in names}
     for child in elem.iter():
         if local_name(child.tag) in wanted and child.text:
-            return child.text.strip()
+            text = child.text.strip()
+            if text:
+                return text
     return ""
 
 

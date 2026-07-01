@@ -1349,6 +1349,53 @@ def test_macro_headlines_keep_only_recent_timestamped_news() -> None:
     assert "美联储利率重定价压过避险需求" not in section
 
 
+def test_stockanalysis_direct_headlines_keep_recent_items() -> None:
+    module = load_module()
+    html = """
+    <h3><a href="https://www.cnbc.com/ai.html">CNBC Daily Open: AI demand fuels investors' portfolios</a></h3>
+    <p>AI demand...</p>
+    <div title="Jul 1, 2026, 12:08 AM EDT">45 minutes ago - CNBC</div>
+    <h3><a href="https://example.com/old.html">Old Fed story</a></h3>
+    <div title="Jun 30, 2026, 07:08 AM EDT">18 hours ago - Wire</div>
+    """
+
+    rows = module.parse_stockanalysis_news_html(
+        html,
+        reference=module.datetime(2026, 7, 1, 5, 0, tzinfo=module.timezone.utc),
+        lookback_hours=12,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["source"] == "CNBC"
+    assert rows[0]["published_at"] == "2026-07-01T04:08:00Z"
+    assert rows[0]["url"] == "https://www.cnbc.com/ai.html"
+
+
+def test_trendforce_direct_headlines_use_asset_timestamp() -> None:
+    module = load_module()
+    html = """
+    <img src="https://img.trendforce.com/blog/wp-content/uploads/2026/07/01104902/YAGEO-MLCC.jpg" />
+    <div class="insight-list-item-info">
+      <div class="insight-tag"><i class="fa fa fa-calendar"></i>
+        2026-07-01
+        <h2 class="text-ellipsis-2"><a class="title-link" href="https://www.trendforce.com/news/example/"><strong>[News] Passive Component Prices Rise as YAGEO Reportedly Begins Broadest Capacitor Hike</strong></a></h2>
+      </div>
+    </div>
+    """
+
+    rows = module.parse_trendforce_news_html(
+        html,
+        reference=module.datetime(2026, 7, 1, 5, 0, tzinfo=module.timezone.utc),
+        lookback_hours=12,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["source"] == "TrendForce"
+    assert rows[0]["published_at"] == "2026-07-01T02:49:02Z"
+    assert rows[0]["date_precision"] == "asset_second"
+    assert "YAGEO" in rows[0]["title"]
+
+
 def test_execution_diary_sections_restore_compact_reviewer_output(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
