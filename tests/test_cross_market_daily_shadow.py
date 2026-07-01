@@ -27,6 +27,7 @@ def load_module():
 @pytest.fixture(autouse=True)
 def disable_live_leaps_fallback(monkeypatch) -> None:
     monkeypatch.setenv("QUANT_LIVE_LEAPS_IV_FALLBACK", "0")
+    monkeypatch.setenv("QUANT_INDEX_OPTION_SENTIMENT_CONTEXT", "0")
 
 
 def artifact(module, market: str, report_date: str, tmp_path: Path):
@@ -534,6 +535,7 @@ def test_us_options_attention_section_includes_tech_live_pool_and_spy_quadrant(t
 
 def test_spy_quadrant_uses_index_option_sentiment_when_payload_lacks_spy(tmp_path: Path, monkeypatch) -> None:
     module = load_module()
+    monkeypatch.setenv("QUANT_INDEX_OPTION_SENTIMENT_CONTEXT", "1")
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
     us = artifact(module, "us", "2026-06-29", tmp_path)
     us.payload["options_verdicts"] = {}

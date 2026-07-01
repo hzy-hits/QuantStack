@@ -1592,7 +1592,9 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
 
     verdicts = payload.get("options_verdicts") if isinstance(payload.get("options_verdicts"), dict) else {}
     effective_options_date = infer_options_effective_date(payload)
-    index_option_sentiment = fetch_option_sentiment_context(["SPY", "QQQ", "SMH"], effective_options_date)
+    index_option_sentiment = {}
+    if os.environ.get("QUANT_INDEX_OPTION_SENTIMENT_CONTEXT", "1").lower() not in {"0", "false", "no", "off"}:
+        index_option_sentiment = fetch_option_sentiment_context(["SPY", "QQQ", "SMH"], effective_options_date)
     context_verdicts = {**index_option_sentiment, **verdicts}
     precomputed_long_iv = (
         payload.get("long_dated_iv_history")
