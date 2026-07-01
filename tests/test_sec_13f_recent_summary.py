@@ -72,10 +72,20 @@ def test_recent_13f_summary_compares_previous_manager_filing(tmp_path: Path) -> 
     assert filing["baseline_found"] is True
     assert filing["new_positions_top5"][0]["issuer"] == "NEW AI CO"
     assert filing["increases_top5"][0]["issuer"] == "APPLE INC"
-    assert filing["increases_top5"][0]["value_delta_usd"] == 75_000.0
+    assert filing["increases_top5"][0]["value_delta_usd"] == 75.0
     assert filing["increases_top5"][0]["shares_delta"] == 2
     assert filing["decreases_top5"][0]["issuer"] == "OLD CO"
-    assert filing["decreases_top5"][0]["value_delta_usd"] == -50_000.0
+    assert filing["decreases_top5"][0]["value_delta_usd"] == -50.0
+
+
+def test_13f_value_scale_detects_thousand_usd_rows(tmp_path: Path) -> None:
+    module = load_module()
+    current = tmp_path / "MANAGER" / "0001" / "infotable.xml"
+    write_13f(current, [("LARGE CO", "123456789", 15000, 100000)])
+
+    rows = module.parse_holdings_file(current)
+
+    assert rows[0].value_usd == 15_000_000.0
 
 
 def test_recent_13f_markdown_uses_top5_labels(tmp_path: Path) -> None:

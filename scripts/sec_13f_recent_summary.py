@@ -17,6 +17,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from statistics import median
 from typing import Any
 
 
@@ -156,22 +157,50 @@ def parse_xml_holdings(xml_text: str) -> list[Holding]:
         root = ET.fromstring(xml_text)
     except ET.ParseError:
         return []
-    holdings: list[Holding] = []
+    raw_rows: list[tuple[str, str, str, float, float, str]] = []
     for elem in root.iter():
         if local_name(elem.tag) != "infotable":
             continue
-        value_thousands = number(first_text(elem, "value"))
+        raw_rows.append(
+            (
+                first_text(elem, "nameOfIssuer"),
+                first_text(elem, "titleOfClass"),
+                first_text(elem, "cusip").upper(),
+                number(first_text(elem, "value")),
+                number(first_text(elem, "sshPrnamt", "shrsOrPrnAmt")),
+                first_text(elem, "putCall"),
+            )
+        )
+    value_scale = infer_13f_value_scale(raw_rows)
+    holdings: list[Holding] = []
+    for issuer, title, cusip, raw_value, shares, put_call in raw_rows:
         holdings.append(
             Holding(
-                issuer=first_text(elem, "nameOfIssuer"),
-                title=first_text(elem, "titleOfClass"),
-                cusip=first_text(elem, "cusip").upper(),
-                value_usd=value_thousands * 1000.0,
-                shares=number(first_text(elem, "sshPrnamt", "shrsOrPrnAmt")),
-                put_call=first_text(elem, "putCall"),
+                issuer=issuer,
+                title=title,
+                cusip=cusip,
+                value_usd=raw_value * value_scale,
+                shares=shares,
+                put_call=put_call,
             )
         )
     return [row for row in holdings if row.issuer or row.cusip]
+
+
+def infer_13f_value_scale(raw_rows: list[tuple[str, str, str, float, float, str]]) -> float:
+    implied_prices = [
+        raw_value / shares
+        for _issuer, _title, _cusip, raw_value, shares, _put_call in raw_rows
+        if raw_value > 0 and shares > 0
+    ]
+    if not implied_prices:
+        return 1000.0
+    raw_price = median(implied_prices)
+    if 1.0 <= raw_price <= 5000.0:
+        return 1.0
+    if 1.0 <= raw_price * 1000.0 <= 5000.0:
+        return 1000.0
+    return 1000.0
 
 
 def parse_holdings_file(path: Path) -> list[Holding]:
@@ -426,7 +455,7 @@ def summarize_recent(source_dirs: list[Path], lookback_hours: float, limit_filin
         "available_filing_count": len(all_filings),
         "recent_file_count": len(recent),
         "filings": out_filings,
-        "note": "13F values are reported in thousands of USD by SEC information tables and converted here to USD.",
+        "note": "13F values are normalized to USD; parser auto-detects whether an information table reports raw USD or thousands of USD.",
     }
 
 
