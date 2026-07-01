@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reply-account", default=os.environ.get("QUANT_OPENCLAW_REPLY_ACCOUNT", ""))
     parser.add_argument("--reply-to", default=os.environ.get("QUANT_OPENCLAW_REPLY_TO", ""))
     parser.add_argument("--message-channel", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_CHANNEL", ""))
+    parser.add_argument("--message-account", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_ACCOUNT", ""))
     parser.add_argument("--message-target", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_TARGET", ""))
     parser.add_argument(
         "--allow-duplicate-event",
@@ -127,6 +128,31 @@ def reply_destinations(args: argparse.Namespace) -> list[dict[str, str]]:
         {"reply_channel": channel, "reply_account": account, "reply_to": target}
         for channel, account, target in zip(channels, accounts, targets, strict=True)
     ]
+
+
+def message_destinations(args: argparse.Namespace) -> list[dict[str, str]]:
+    channels = split_multi_value(args.message_channel)
+    accounts = split_multi_value(getattr(args, "message_account", ""))
+    targets = split_multi_value(args.message_target)
+    if not channels and not targets and args.reply_channel and args.reply_to:
+        channels = split_multi_value(args.reply_channel)
+        accounts = split_multi_value(args.reply_account)
+        targets = split_multi_value(args.reply_to)
+    count = max(len(channels), len(accounts), len(targets), 1)
+    channels = expand_multi_value("message-channel", channels, count)
+    accounts = expand_multi_value("message-account", accounts, count)
+    targets = expand_multi_value("message-target", targets, count)
+    destinations = [
+        {"message_channel": channel, "message_account": account, "message_target": target}
+        for channel, account, target in zip(channels, accounts, targets, strict=True)
+        if channel and target
+    ]
+    if not destinations:
+        raise ValueError(
+            "--message-channel and --message-target are required for mode=message/all "
+            "unless --reply-channel and --reply-to are configured"
+        )
+    return destinations
 
 
 def ssh_command(
@@ -390,39 +416,42 @@ sys.exit(result.returncode)
     return deliveries
 
 
-def send_message(args: argparse.Namespace, manifest: dict[str, Any]) -> None:
-    if not args.message_channel or not args.message_target:
-        raise ValueError("--message-channel and --message-target are required for mode=message/all")
+def send_message(args: argparse.Namespace, manifest: dict[str, Any]) -> list[dict[str, str]]:
     message = (
         f"{manifest.get('title')}\n"
         f"{manifest.get('kind')} {manifest.get('slot')} {manifest.get('date')}\n"
         f"{manifest.get('remote_report_path')}"
     )
-    cmd = [
-        args.openclaw_bin,
-        "message",
-        "send",
-        "--channel",
-        args.message_channel,
-        "--target",
-        args.message_target,
-        "--message",
-        message,
-        "--media",
-        manifest["remote_report_path"],
-        "--force-document",
-        "--json",
-    ]
     code = "import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:]).returncode)"
-    run_remote_python_script(
-        args,
-        code,
-        PurePosixPath(manifest["remote_dir"]),
-        "openclaw_send_message.py",
-        cmd,
-        timeout=args.timeout,
-        dry_run=args.dry_run,
-    )
+    destinations = message_destinations(args)
+    for destination in destinations:
+        cmd = [
+            args.openclaw_bin,
+            "message",
+            "send",
+            "--channel",
+            destination["message_channel"],
+            "--target",
+            destination["message_target"],
+            "--message",
+            message,
+            "--media",
+            manifest["remote_report_path"],
+            "--force-document",
+            "--json",
+        ]
+        if destination["message_account"]:
+            cmd.extend(["--account", destination["message_account"]])
+        run_remote_python_script(
+            args,
+            code,
+            PurePosixPath(manifest["remote_dir"]),
+            "openclaw_send_message.py",
+            cmd,
+            timeout=args.timeout,
+            dry_run=args.dry_run,
+        )
+    return destinations
 
 
 def main() -> int:
@@ -441,17 +470,20 @@ def main() -> int:
         )
         is_new_event = install_manifest(args, manifest["remote_manifest_path"])
         agent_deliveries: list[dict[str, str]] = []
+        message_deliveries: list[dict[str, str]] = []
         if args.mode in {"agent", "all"} and is_new_event:
             prompt_path.write_text(write_prompt(manifest, args.report_path), encoding="utf-8")
             agent_deliveries = notify_agent(args, manifest, prompt_path)
         if args.mode in {"message", "all"} and is_new_event:
-            send_message(args, manifest)
+            message_deliveries = send_message(args, manifest)
         print(json.dumps(
             {
                 "ok": True,
                 "new_event": is_new_event,
                 "agent_delivery_count": len(agent_deliveries),
                 "agent_deliveries": agent_deliveries,
+                "message_delivery_count": len(message_deliveries),
+                "message_deliveries": message_deliveries,
                 "manifest": manifest,
             },
             ensure_ascii=False,

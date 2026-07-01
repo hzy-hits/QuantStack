@@ -71,24 +71,36 @@ class TasklibTests(unittest.TestCase):
         self.assertNotIn("QUANT_TEST_RECIPIENT", evening["env"])
         self.assertEqual(evening["env"]["RESEND_ENV_FILE"], "/home/ubuntu/apps/multica/.env")
         self.assertEqual(morning["env"]["QUANT_OPENCLAW_PUBLISH"], "1")
-        self.assertEqual(morning["env"]["QUANT_OPENCLAW_MODE"], "agent")
+        self.assertEqual(morning["env"]["QUANT_OPENCLAW_MODE"], "all")
         self.assertEqual(morning["env"]["QUANT_OPENCLAW_HOST"], "100.109.146.30")
         self.assertEqual(morning["env"]["QUANT_OPENCLAW_USER"], "ivena")
         self.assertEqual(morning["env"]["QUANT_OPENCLAW_IDENTITY_FILE"], "/home/ubuntu/.ssh/id_ed25519_quant_pi")
         self.assertEqual(evening["env"]["QUANT_OPENCLAW_PUBLISH"], "1")
-        self.assertEqual(evening["env"]["QUANT_OPENCLAW_MODE"], "agent")
-        self.assertEqual(morning["env"]["QUANT_OPENCLAW_AGENT_DELIVER"], "1")
-        self.assertEqual(evening["env"]["QUANT_OPENCLAW_AGENT_DELIVER"], "1")
+        self.assertEqual(evening["env"]["QUANT_OPENCLAW_MODE"], "all")
+        self.assertEqual(morning["env"]["QUANT_OPENCLAW_AGENT_DELIVER"], "0")
+        self.assertEqual(evening["env"]["QUANT_OPENCLAW_AGENT_DELIVER"], "0")
         self.assertEqual(morning["env"]["QUANT_OPENCLAW_REPLY_CHANNEL"], "openclaw-weixin")
         self.assertEqual(morning["env"]["QUANT_OPENCLAW_REPLY_ACCOUNT"], "912f45c70aa5-im-bot,86fb46c4a557-im-bot")
         self.assertEqual(
             morning["env"]["QUANT_OPENCLAW_REPLY_TO"],
             "o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat",
         )
+        self.assertEqual(morning["env"]["QUANT_OPENCLAW_MESSAGE_CHANNEL"], "openclaw-weixin")
+        self.assertEqual(morning["env"]["QUANT_OPENCLAW_MESSAGE_ACCOUNT"], "912f45c70aa5-im-bot,86fb46c4a557-im-bot")
+        self.assertEqual(
+            morning["env"]["QUANT_OPENCLAW_MESSAGE_TARGET"],
+            "o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat",
+        )
         self.assertEqual(evening["env"]["QUANT_OPENCLAW_REPLY_CHANNEL"], "openclaw-weixin")
         self.assertEqual(evening["env"]["QUANT_OPENCLAW_REPLY_ACCOUNT"], "912f45c70aa5-im-bot,86fb46c4a557-im-bot")
         self.assertEqual(
             evening["env"]["QUANT_OPENCLAW_REPLY_TO"],
+            "o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat",
+        )
+        self.assertEqual(evening["env"]["QUANT_OPENCLAW_MESSAGE_CHANNEL"], "openclaw-weixin")
+        self.assertEqual(evening["env"]["QUANT_OPENCLAW_MESSAGE_ACCOUNT"], "912f45c70aa5-im-bot,86fb46c4a557-im-bot")
+        self.assertEqual(
+            evening["env"]["QUANT_OPENCLAW_MESSAGE_TARGET"],
             "o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat",
         )
         self.assertTrue(morning["sends_email"])

@@ -58,6 +58,40 @@ def test_reply_destinations_reject_mismatched_lists() -> None:
         raise AssertionError("expected mismatched fan-out lists to fail")
 
 
+def test_message_destinations_fan_out_accounts_and_targets() -> None:
+    module = load_module()
+    args = argparse.Namespace(
+        message_channel="openclaw-weixin",
+        message_account="acct-1,acct-2",
+        message_target="target-1,target-2",
+        reply_channel="",
+        reply_account="",
+        reply_to="",
+    )
+
+    assert module.message_destinations(args) == [
+        {"message_channel": "openclaw-weixin", "message_account": "acct-1", "message_target": "target-1"},
+        {"message_channel": "openclaw-weixin", "message_account": "acct-2", "message_target": "target-2"},
+    ]
+
+
+def test_message_destinations_can_reuse_reply_config() -> None:
+    module = load_module()
+    args = argparse.Namespace(
+        message_channel="",
+        message_account="",
+        message_target="",
+        reply_channel="openclaw-weixin",
+        reply_account="acct-1,acct-2",
+        reply_to="target-1,target-2",
+    )
+
+    assert module.message_destinations(args) == [
+        {"message_channel": "openclaw-weixin", "message_account": "acct-1", "message_target": "target-1"},
+        {"message_channel": "openclaw-weixin", "message_account": "acct-2", "message_target": "target-2"},
+    ]
+
+
 def test_notify_agent_fans_out_remote_calls(tmp_path: Path, monkeypatch) -> None:
     module = load_module()
     prompt = tmp_path / "prompt.txt"
@@ -97,6 +131,42 @@ def test_notify_agent_fans_out_remote_calls(tmp_path: Path, monkeypatch) -> None
         ["openclaw-weixin", "acct-2", "target-2"],
     ]
     assert len(deliveries) == 2
+
+
+def test_send_message_fans_out_direct_openclaw_messages(monkeypatch) -> None:
+    module = load_module()
+    args = argparse.Namespace(
+        openclaw_bin="openclaw",
+        timeout=60,
+        dry_run=False,
+        message_channel="openclaw-weixin",
+        message_account="acct-1,acct-2",
+        message_target="target-1,target-2",
+        reply_channel="",
+        reply_account="",
+        reply_to="",
+    )
+    manifest = {
+        "title": "Hermes 跨市场早报",
+        "kind": "cross_market_daily",
+        "slot": "am",
+        "date": "2026-07-01",
+        "remote_report_path": "/tmp/report.md",
+        "remote_dir": "/tmp/openclaw",
+    }
+    remote_calls: list[list[str]] = []
+
+    def fake_remote_script(*call_args, **_kwargs):
+        remote_calls.append(call_args[4])
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(module, "run_remote_python_script", fake_remote_script)
+
+    deliveries = module.send_message(args, manifest)
+
+    assert [item["message_account"] for item in deliveries] == ["acct-1", "acct-2"]
+    assert [call[call.index("--target") + 1] for call in remote_calls] == ["target-1", "target-2"]
+    assert [call[call.index("--account") + 1] for call in remote_calls] == ["acct-1", "acct-2"]
 
 
 def test_write_prompt_tells_agent_deliver_to_send_visible_summary(tmp_path: Path) -> None:

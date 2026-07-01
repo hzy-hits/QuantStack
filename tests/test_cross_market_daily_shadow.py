@@ -1575,6 +1575,7 @@ def test_openclaw_publish_invokes_helper(tmp_path: Path) -> None:
         openclaw_reply_account="912f45c70aa5-im-bot,86fb46c4a557-im-bot",
         openclaw_reply_to="o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat",
         openclaw_message_channel="",
+        openclaw_message_account="",
         openclaw_message_target="",
         openclaw_allow_duplicate_event=False,
         openclaw_required=True,

@@ -239,17 +239,20 @@ tasks:
       QUANT_DELIVERY_MODE: prod
       RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
       QUANT_OPENCLAW_PUBLISH: "1"
-      QUANT_OPENCLAW_MODE: agent
+      QUANT_OPENCLAW_MODE: all
       QUANT_OPENCLAW_HOST: 100.109.146.30
       QUANT_OPENCLAW_USER: ivena
       QUANT_OPENCLAW_REMOTE_ROOT: /home/ivena/.openclaw/quant-stack
       QUANT_OPENCLAW_IDENTITY_FILE: /home/ubuntu/.ssh/id_ed25519_quant_pi
       QUANT_OPENCLAW_AGENT: main
       QUANT_OPENCLAW_AGENT_TIMEOUT: "180"
-      QUANT_OPENCLAW_AGENT_DELIVER: "1"
+      QUANT_OPENCLAW_AGENT_DELIVER: "0"
       QUANT_OPENCLAW_REPLY_CHANNEL: openclaw-weixin
       QUANT_OPENCLAW_REPLY_ACCOUNT: 912f45c70aa5-im-bot,86fb46c4a557-im-bot
       QUANT_OPENCLAW_REPLY_TO: o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat
+      QUANT_OPENCLAW_MESSAGE_CHANNEL: openclaw-weixin
+      QUANT_OPENCLAW_MESSAGE_ACCOUNT: 912f45c70aa5-im-bot,86fb46c4a557-im-bot
+      QUANT_OPENCLAW_MESSAGE_TARGET: o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat
     command:
       - quant-research-v1/.venv/bin/python
       - scripts/agents/run_cross_market_daily_shadow.py
@@ -289,17 +292,20 @@ tasks:
       QUANT_DELIVERY_MODE: prod
       RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
       QUANT_OPENCLAW_PUBLISH: "1"
-      QUANT_OPENCLAW_MODE: agent
+      QUANT_OPENCLAW_MODE: all
       QUANT_OPENCLAW_HOST: 100.109.146.30
       QUANT_OPENCLAW_USER: ivena
       QUANT_OPENCLAW_REMOTE_ROOT: /home/ivena/.openclaw/quant-stack
       QUANT_OPENCLAW_IDENTITY_FILE: /home/ubuntu/.ssh/id_ed25519_quant_pi
       QUANT_OPENCLAW_AGENT: main
       QUANT_OPENCLAW_AGENT_TIMEOUT: "180"
-      QUANT_OPENCLAW_AGENT_DELIVER: "1"
+      QUANT_OPENCLAW_AGENT_DELIVER: "0"
       QUANT_OPENCLAW_REPLY_CHANNEL: openclaw-weixin
       QUANT_OPENCLAW_REPLY_ACCOUNT: 912f45c70aa5-im-bot,86fb46c4a557-im-bot
       QUANT_OPENCLAW_REPLY_TO: o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat
+      QUANT_OPENCLAW_MESSAGE_CHANNEL: openclaw-weixin
+      QUANT_OPENCLAW_MESSAGE_ACCOUNT: 912f45c70aa5-im-bot,86fb46c4a557-im-bot
+      QUANT_OPENCLAW_MESSAGE_TARGET: o9cq801qjkqxtXS-B8BAuJEzUM0A@im.wechat,o9cq80-w8F7HxwCfvSJdoF-vN2os@im.wechat
     command:
       - quant-research-v1/.venv/bin/python
       - scripts/agents/run_cross_market_daily_shadow.py

@@ -319,6 +319,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--openclaw-reply-account", default=os.environ.get("QUANT_OPENCLAW_REPLY_ACCOUNT", ""))
     parser.add_argument("--openclaw-reply-to", default=os.environ.get("QUANT_OPENCLAW_REPLY_TO", ""))
     parser.add_argument("--openclaw-message-channel", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_CHANNEL", ""))
+    parser.add_argument("--openclaw-message-account", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_ACCOUNT", ""))
     parser.add_argument("--openclaw-message-target", default=os.environ.get("QUANT_OPENCLAW_MESSAGE_TARGET", ""))
     parser.add_argument(
         "--openclaw-allow-duplicate-event",
@@ -4204,6 +4205,8 @@ def publish_openclaw_if_requested(path: Path, packet: dict[str, Any], args: argp
         cmd.extend(["--reply-to", args.openclaw_reply_to])
     if args.openclaw_message_channel:
         cmd.extend(["--message-channel", args.openclaw_message_channel])
+    if args.openclaw_message_account:
+        cmd.extend(["--message-account", args.openclaw_message_account])
     if args.openclaw_message_target:
         cmd.extend(["--message-target", args.openclaw_message_target])
     if args.openclaw_allow_duplicate_event:
