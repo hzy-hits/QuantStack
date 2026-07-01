@@ -26,6 +26,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -4098,6 +4099,62 @@ def strip_duplicate_report_titles(text: str, slot: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip()
 
 
+def hermes_prompt_file_query(prompt_path: Path) -> str:
+    return (
+        f"Read the local UTF-8 prompt file at {prompt_path}. "
+        "It contains the complete QuantStack instructions and facts for this run. "
+        "Follow that file exactly and output only the final markdown report text. "
+        "Do not mention the file path or this wrapper message."
+    )
+
+
+def run_hermes_prompt(
+    prompt: str,
+    *,
+    timeout: int,
+    hermes_bin: str,
+    model: str = "",
+    provider: str = "",
+    max_turns: int = 8,
+    source: str,
+    role: str,
+) -> subprocess.CompletedProcess[str]:
+    with tempfile.TemporaryDirectory(prefix=f"quant-hermes-{role}-") as tmp:
+        prompt_path = Path(tmp) / "prompt.md"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        cmd = [
+            hermes_bin,
+            "chat",
+            "-Q",
+            "-q",
+            hermes_prompt_file_query(prompt_path),
+            "--skills",
+            "quant-stack-cross-market-daily",
+            "--accept-hooks",
+            "--max-turns",
+            str(max_turns),
+            "--source",
+            source,
+        ]
+        if model:
+            cmd.extend(["--model", model])
+        if provider:
+            cmd.extend(["--provider", provider])
+        try:
+            return subprocess.run(
+                cmd,
+                cwd=ROOT,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise TimeoutError(f"Hermes cross-market {role} timed out after {timeout}s") from exc
+        except OSError as exc:
+            raise RuntimeError(f"Hermes cross-market {role} launch failed: {exc}") from exc
+
+
 def call_hermes_agent(
     packet: dict[str, Any],
     *,
@@ -4108,37 +4165,16 @@ def call_hermes_agent(
     max_turns: int = 16,
 ) -> str:
     prompt = build_hermes_prompt(packet)
-    cmd = [
-        hermes_bin,
-        "chat",
-        "-Q",
-        "-q",
+    result = run_hermes_prompt(
         prompt,
-        "--skills",
-        "quant-stack-cross-market-daily",
-        "--accept-hooks",
-        "--max-turns",
-        str(max_turns),
-        "--source",
-        "quant-stack-cron",
-    ]
-    if model:
-        cmd.extend(["--model", model])
-    if provider:
-        cmd.extend(["--provider", provider])
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError(f"Hermes cross-market agent timed out after {timeout}s") from exc
-    except OSError as exc:
-        raise RuntimeError(f"Hermes cross-market agent launch failed: {exc}") from exc
+        timeout=timeout,
+        hermes_bin=hermes_bin,
+        model=model,
+        provider=provider,
+        max_turns=max_turns,
+        source="quant-stack-cron",
+        role="agent",
+    )
     if result.returncode != 0:
         tail = ((result.stderr or "") + "\n" + (result.stdout or ""))[-1600:]
         raise RuntimeError(f"Hermes cross-market agent failed with exit={result.returncode}: {tail}")
@@ -4163,37 +4199,16 @@ def call_hermes_reviewer(
     max_turns: int = 8,
 ) -> str:
     prompt = build_hermes_review_prompt(packet, draft)
-    cmd = [
-        hermes_bin,
-        "chat",
-        "-Q",
-        "-q",
+    result = run_hermes_prompt(
         prompt,
-        "--skills",
-        "quant-stack-cross-market-daily",
-        "--accept-hooks",
-        "--max-turns",
-        str(max_turns),
-        "--source",
-        "quant-stack-reviewer",
-    ]
-    if model:
-        cmd.extend(["--model", model])
-    if provider:
-        cmd.extend(["--provider", provider])
-    try:
-        result = subprocess.run(
-            cmd,
-            cwd=ROOT,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise TimeoutError(f"Hermes cross-market reviewer timed out after {timeout}s") from exc
-    except OSError as exc:
-        raise RuntimeError(f"Hermes cross-market reviewer launch failed: {exc}") from exc
+        timeout=timeout,
+        hermes_bin=hermes_bin,
+        model=model,
+        provider=provider,
+        max_turns=max_turns,
+        source="quant-stack-reviewer",
+        role="reviewer",
+    )
     if result.returncode != 0:
         tail = ((result.stderr or "") + "\n" + (result.stdout or ""))[-1600:]
         raise RuntimeError(f"Hermes cross-market reviewer failed with exit={result.returncode}: {tail}")

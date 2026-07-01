@@ -1685,7 +1685,19 @@ def test_call_hermes_agent_uses_hermes_skill(tmp_path: Path) -> None:
         stdout="session_id: 20260629_085722_8ca7b6\n# 跨市场早报 — 2026-06-29\n\n美股影响A股。",
         stderr="",
     )
-    with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
+
+    def fake_run(cmd, **_kwargs):
+        query = cmd[4]
+        assert len(query) < 500
+        assert "Read the local UTF-8 prompt file" in query
+        prompt_path = Path(query.split(" at ", 1)[1].split(". It contains", 1)[0])
+        assert prompt_path.exists()
+        prompt = prompt_path.read_text(encoding="utf-8")
+        assert "packet:" in prompt
+        assert "quant-stack-cross-market-daily skill" in prompt
+        return completed
+
+    with mock.patch.object(module.subprocess, "run", side_effect=fake_run) as run:
         report = module.call_hermes_agent(
             packet,
             timeout=30,
@@ -1718,7 +1730,19 @@ def test_call_hermes_reviewer_uses_review_source(tmp_path: Path) -> None:
         stdout="session_id: 20260629_085722_8ca7b6\n# 跨市场早报 — 2026-06-29\n\n编辑后的一封合并日报。",
         stderr="",
     )
-    with mock.patch.object(module.subprocess, "run", return_value=completed) as run:
+
+    def fake_run(cmd, **_kwargs):
+        query = cmd[4]
+        assert len(query) < 500
+        assert "Read the local UTF-8 prompt file" in query
+        prompt_path = Path(query.split(" at ", 1)[1].split(". It contains", 1)[0])
+        assert prompt_path.exists()
+        prompt = prompt_path.read_text(encoding="utf-8")
+        assert "待二审 draft" in prompt
+        assert "输出一封合并日报" in prompt
+        return completed
+
+    with mock.patch.object(module.subprocess, "run", side_effect=fake_run) as run:
         report = module.call_hermes_reviewer(
             packet,
             "# 跨市场早报\n\nMCP snapshot",
