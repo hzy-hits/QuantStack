@@ -236,7 +236,8 @@ tasks:
       CROSS_MARKET_SEND_EMAIL: "1"
       QUANT_EMAIL_PROVIDER: resend
       QUANT_EMAIL_FALLBACK_PROVIDER: gmail
-      QUANT_DELIVERY_MODE: prod
+      QUANT_DELIVERY_MODE: test
+      QUANT_TEST_RECIPIENT: 13502448752hzy@gmail.com
       RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
       QUANT_OPENCLAW_PUBLISH: "1"
       QUANT_OPENCLAW_MODE: all
@@ -289,7 +290,8 @@ tasks:
       CROSS_MARKET_SEND_EMAIL: "1"
       QUANT_EMAIL_PROVIDER: resend
       QUANT_EMAIL_FALLBACK_PROVIDER: gmail
-      QUANT_DELIVERY_MODE: prod
+      QUANT_DELIVERY_MODE: test
+      QUANT_TEST_RECIPIENT: 13502448752hzy@gmail.com
       RESEND_ENV_FILE: /home/ubuntu/apps/multica/.env
       QUANT_OPENCLAW_PUBLISH: "1"
       QUANT_OPENCLAW_MODE: all

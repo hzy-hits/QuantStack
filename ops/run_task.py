@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import fcntl
 import json
 import os
@@ -51,14 +52,27 @@ class Tee:
         self.files = files
 
     def write(self, text: str) -> None:
+        live_files: list[TextIO] = []
         for fh in self.files:
-            fh.write(text)
-            fh.flush()
+            try:
+                fh.write(text)
+                fh.flush()
+                live_files.append(fh)
+            except BrokenPipeError:
+                continue
+            except OSError as exc:
+                if exc.errno == errno.EPIPE:
+                    continue
+                raise
+        self.files = live_files
 
     def close(self) -> None:
         for fh in self.files:
             if fh not in {sys.stdout, sys.stderr}:
-                fh.close()
+                try:
+                    fh.close()
+                except BrokenPipeError:
+                    pass
 
 
 def open_logs(task: dict[str, object]) -> Tee:

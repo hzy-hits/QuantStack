@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import sys
 import unittest
 from pathlib import Path
@@ -10,7 +11,16 @@ OPS_ROOT = STACK_ROOT / "ops"
 if str(OPS_ROOT) not in sys.path:
     sys.path.insert(0, str(OPS_ROOT))
 
+from run_task import Tee  # noqa: E402
 from tasklib import materialize_task  # noqa: E402
+
+
+class BrokenPipeStream:
+    def write(self, _text: str) -> None:
+        raise BrokenPipeError()
+
+    def flush(self) -> None:
+        raise BrokenPipeError()
 
 
 class TasklibTests(unittest.TestCase):
@@ -65,10 +75,10 @@ class TasklibTests(unittest.TestCase):
         self.assertEqual(morning["env"]["CROSS_MARKET_SEND_EMAIL"], "1")
         self.assertEqual(morning["env"]["QUANT_EMAIL_PROVIDER"], "resend")
         self.assertEqual(morning["env"]["QUANT_EMAIL_FALLBACK_PROVIDER"], "gmail")
-        self.assertEqual(morning["env"]["QUANT_DELIVERY_MODE"], "prod")
-        self.assertEqual(evening["env"]["QUANT_DELIVERY_MODE"], "prod")
-        self.assertNotIn("QUANT_TEST_RECIPIENT", morning["env"])
-        self.assertNotIn("QUANT_TEST_RECIPIENT", evening["env"])
+        self.assertEqual(morning["env"]["QUANT_DELIVERY_MODE"], "test")
+        self.assertEqual(evening["env"]["QUANT_DELIVERY_MODE"], "test")
+        self.assertEqual(morning["env"]["QUANT_TEST_RECIPIENT"], "13502448752hzy@gmail.com")
+        self.assertEqual(evening["env"]["QUANT_TEST_RECIPIENT"], "13502448752hzy@gmail.com")
         self.assertEqual(evening["env"]["RESEND_ENV_FILE"], "/home/ubuntu/apps/multica/.env")
         self.assertEqual(morning["env"]["QUANT_OPENCLAW_PUBLISH"], "1")
         self.assertEqual(morning["env"]["QUANT_OPENCLAW_MODE"], "all")
@@ -142,6 +152,15 @@ class TasklibTests(unittest.TestCase):
         self.assertFalse(interval["schedule"])
         self.assertFalse(reboot["sends_email"])
         self.assertFalse(interval["sends_email"])
+
+    def test_run_task_tee_keeps_file_log_when_stdout_pipe_breaks(self) -> None:
+        log = io.StringIO()
+        tee = Tee([BrokenPipeStream(), log])
+
+        tee.write("still log this\n")
+
+        self.assertEqual(log.getvalue(), "still log this\n")
+        self.assertEqual(tee.files, [log])
 
 
 if __name__ == "__main__":
