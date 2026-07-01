@@ -789,6 +789,18 @@ def select_live_long_dated_iv_snapshot(symbol: str, expiry_data: dict[str, Any],
     return min(choices, key=lambda row: (0 if row["tenor"] == "LEAPS" else 1, abs(row["avg_dte"] - row["target_dte"])))
 
 
+def cboe_quote_day(raw: dict[str, Any], fallback: date) -> date:
+    data = raw.get("data", raw) if isinstance(raw, dict) else {}
+    for value in (data.get("last_trade_time"), raw.get("timestamp") if isinstance(raw, dict) else None):
+        text = str(value or "").strip()
+        if len(text) >= 10:
+            try:
+                return date.fromisoformat(text[:10])
+            except ValueError:
+                continue
+    return fallback
+
+
 def fetch_live_long_dated_iv_snapshots(symbols: list[str], as_of: str | None) -> dict[str, dict[str, Any]]:
     symbols = sorted({str(symbol or "").upper() for symbol in symbols if symbol})
     if not symbols or not as_of:
@@ -810,7 +822,7 @@ def fetch_live_long_dated_iv_snapshots(symbols: list[str], as_of: str | None) ->
             if raw is None:
                 continue
             expiry_data = _cboe_to_dataframes(raw, symbol, as_of_day)
-            snapshot = select_live_long_dated_iv_snapshot(symbol, expiry_data, as_of_day)
+            snapshot = select_live_long_dated_iv_snapshot(symbol, expiry_data, cboe_quote_day(raw, as_of_day))
         except Exception:
             continue
         if snapshot:

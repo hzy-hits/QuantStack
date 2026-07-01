@@ -435,6 +435,15 @@ def test_long_dated_iv_history_uses_live_fallback_when_db_missing(tmp_path: Path
     assert calls == [(["MSFT"], "2026-06-29")]
 
 
+def test_cboe_quote_day_prefers_last_trade_time() -> None:
+    module = load_module()
+
+    assert module.cboe_quote_day(
+        {"data": {"last_trade_time": "2026-06-30T15:59:59"}, "timestamp": "2026-07-01 00:39:28"},
+        date(2026, 6, 29),
+    ) == date(2026, 6, 30)
+
+
 def test_am_uses_previous_cn_context_when_target_day_payload_is_missing(tmp_path: Path) -> None:
     module = load_module()
     artifact(module, "cn", "2026-06-26", tmp_path)
