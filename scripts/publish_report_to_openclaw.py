@@ -317,7 +317,10 @@ def write_prompt(manifest: dict[str, Any], report_path: Path) -> str:
     return (
         "Hermes/QuantStack 已生成一份报告，并已放入树莓派本机 OpenClaw inbox。\n"
         "请把它当作 Oracle Hermes 上游 subagent 的产物登记到 briefing session；不要重写全文，"
-        "只保留一句状态、3 条要点和本机报告路径，供后续对话调用。\n\n"
+        "只保留一句状态、3 条要点和本机报告路径，供后续对话调用。\n"
+        "如果本次 agent 命令带 --deliver，这就是需要发到指定微信会话的日报通知："
+        "最终回复必须是一条可见摘要，包含标题、3 条要点和本机报告路径；"
+        "不要回答“没有需要发送的新内容”，也不要只做 session 登记。\n\n"
         f"- kind: {manifest.get('kind')}\n"
         f"- slot: {manifest.get('slot')}\n"
         f"- date: {manifest.get('date')}\n"

@@ -97,3 +97,24 @@ def test_notify_agent_fans_out_remote_calls(tmp_path: Path, monkeypatch) -> None
         ["openclaw-weixin", "acct-2", "target-2"],
     ]
     assert len(deliveries) == 2
+
+
+def test_write_prompt_tells_agent_deliver_to_send_visible_summary(tmp_path: Path) -> None:
+    module = load_module()
+    report = tmp_path / "report.md"
+    report.write_text("# Hermes 跨市场早报\n\nMSFT/GOOGL/AVGO 期权观察。", encoding="utf-8")
+    manifest = {
+        "kind": "cross_market_daily",
+        "slot": "am",
+        "date": "2026-07-01",
+        "title": "Hermes 跨市场早报 - 2026-07-01",
+        "remote_report_path": "/home/ivena/.openclaw/quant-stack/reports/2026-07-01/cross_market_daily_am/report.md",
+        "remote_packet_path": "/home/ivena/.openclaw/quant-stack/reports/2026-07-01/cross_market_daily_am/packet.json",
+        "remote_meta_path": "/home/ivena/.openclaw/quant-stack/reports/2026-07-01/cross_market_daily_am/meta.json",
+    }
+
+    prompt = module.write_prompt(manifest, report)
+
+    assert "--deliver" in prompt
+    assert "最终回复必须是一条可见摘要" in prompt
+    assert "不要回答“没有需要发送的新内容”" in prompt

@@ -105,6 +105,7 @@ MARKET_TAIL_GROUPS = (
 MIN_PUBLIC_IV_RANK_OBS = 30
 LEAPS_MIN_DTE = 365
 LONG_DATED_MIN_DTE = 221
+DEFAULT_LIVE_LONG_IV_FALLBACK_SYMBOLS = ("MSFT", "GOOGL", "GOOG", "AVGO")
 DEFAULT_US_OPTIONS_DB = ROOT / "quant-research-v1" / "data" / "quant.duckdb"
 MANAGED_REPORT_SECTION_PREFIXES = (
     "## 全球市场温度",
@@ -699,25 +700,154 @@ def infer_options_effective_date(payload: dict[str, Any]) -> str | None:
     return gamma.get("effective_date") or gamma.get("as_of") or payload.get("as_of")
 
 
+def split_symbol_list(value: str | None) -> list[str]:
+    symbols: list[str] = []
+    for part in re.split(r"[,;，；\s]+", value or ""):
+        symbol = part.strip().upper()
+        if symbol and symbol not in symbols:
+            symbols.append(symbol)
+    return symbols
+
+
+def live_long_iv_fallback_symbols(verdicts: dict[str, Any]) -> list[str]:
+    if os.environ.get("QUANT_LIVE_LEAPS_IV_FALLBACK", "1").lower() in {"0", "false", "no", "off"}:
+        return []
+    configured = split_symbol_list(
+        os.environ.get("QUANT_LIVE_LEAPS_IV_SYMBOLS")
+        or ",".join(DEFAULT_LIVE_LONG_IV_FALLBACK_SYMBOLS)
+    )
+    verdict_symbols = {str(symbol or "").upper() for symbol in verdicts if symbol}
+    return [symbol for symbol in configured if symbol in verdict_symbols]
+
+
+def nearest_atm_chain_iv(chain: Any, current_price: float) -> tuple[float, int, int] | None:
+    if chain is None or getattr(chain, "empty", True):
+        return None
+    best: tuple[float, float, int, int] | None = None
+    for _, row in chain.iterrows():
+        strike = compact_float(row.get("strike"), 6)
+        iv = compact_float(row.get("impliedVolatility"), 6)
+        if strike is None or iv is None or strike != strike or iv != iv or iv <= 0:
+            continue
+        distance = abs(float(strike) - current_price)
+        raw_volume = compact_float(row.get("volume"), 0)
+        raw_open_interest = compact_float(row.get("openInterest"), 0)
+        volume = int(raw_volume) if raw_volume is not None and raw_volume == raw_volume else 0
+        open_interest = int(raw_open_interest) if raw_open_interest is not None and raw_open_interest == raw_open_interest else 0
+        candidate = (distance, float(iv), volume, open_interest)
+        if best is None or candidate[0] < best[0]:
+            best = candidate
+    if best is None:
+        return None
+    _, iv, volume, open_interest = best
+    return iv, volume, open_interest
+
+
+def select_live_long_dated_iv_snapshot(symbol: str, expiry_data: dict[str, Any], as_of_day: date) -> dict[str, Any] | None:
+    choices: list[dict[str, Any]] = []
+    for exp_str, chain in expiry_data.items():
+        try:
+            calls, puts, price = chain
+            current_price = float(price)
+            dte = (datetime.strptime(exp_str, "%Y-%m-%d").date() - as_of_day).days
+        except (TypeError, ValueError):
+            continue
+        if current_price != current_price or current_price <= 0 or dte < LONG_DATED_MIN_DTE:
+            continue
+        legs = [
+            item for item in (
+                nearest_atm_chain_iv(calls, current_price),
+                nearest_atm_chain_iv(puts, current_price),
+            )
+            if item is not None
+        ]
+        if not legs:
+            continue
+        tenor = "LEAPS" if dte >= LEAPS_MIN_DTE else "远月"
+        target_dte = LEAPS_MIN_DTE if tenor == "LEAPS" else LONG_DATED_MIN_DTE
+        choices.append(
+            {
+                "symbol": symbol,
+                "tenor": tenor,
+                "effective_date": as_of_day.isoformat(),
+                "atm_iv": round(sum(item[0] for item in legs) / len(legs), 4),
+                "avg_dte": round(float(dte), 1),
+                "rank_pct": None,
+                "rank_n": 1,
+                "min_dte": LEAPS_MIN_DTE if tenor == "LEAPS" else LONG_DATED_MIN_DTE,
+                "target_dte": target_dte,
+                "max_dte": int(dte),
+                "expiry_count": len(expiry_data),
+                "volume": sum(item[1] for item in legs),
+                "open_interest": sum(item[2] for item in legs),
+                "coverage_status": "live_only",
+                "source": "cboe_live",
+            }
+        )
+    if not choices:
+        return None
+    return min(choices, key=lambda row: (0 if row["tenor"] == "LEAPS" else 1, abs(row["avg_dte"] - row["target_dte"])))
+
+
+def fetch_live_long_dated_iv_snapshots(symbols: list[str], as_of: str | None) -> dict[str, dict[str, Any]]:
+    symbols = sorted({str(symbol or "").upper() for symbol in symbols if symbol})
+    if not symbols or not as_of:
+        return {}
+    try:
+        as_of_day = parse_ymd(as_of)
+    except ValueError:
+        return {}
+    try:
+        sys.path.insert(0, str(ROOT / "quant-research-v1" / "src"))
+        from quant_bot.data_ingestion.options import _cboe_to_dataframes, _fetch_cboe_single
+    except Exception:
+        return {}
+
+    out: dict[str, dict[str, Any]] = {}
+    for symbol in symbols:
+        try:
+            raw = _fetch_cboe_single(symbol)
+            if raw is None:
+                continue
+            expiry_data = _cboe_to_dataframes(raw, symbol, as_of_day)
+            snapshot = select_live_long_dated_iv_snapshot(symbol, expiry_data, as_of_day)
+        except Exception:
+            continue
+        if snapshot:
+            out[symbol] = snapshot
+    return out
+
+
 def fetch_long_dated_iv_history(
     symbols: list[str],
     as_of: str | None,
     *,
     db_path: Path = DEFAULT_US_OPTIONS_DB,
     lookback_days: int = 400,
+    live_fallback_symbols: list[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     symbols = sorted({str(symbol or "").upper() for symbol in symbols if symbol})
-    if not symbols or not as_of or not db_path.exists():
+    live_fallback_symbols = sorted({str(symbol or "").upper() for symbol in live_fallback_symbols or [] if symbol})
+
+    def with_live_fallback(out: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        missing = [symbol for symbol in live_fallback_symbols if symbol in symbols and symbol not in out]
+        if missing:
+            out.update(fetch_live_long_dated_iv_snapshots(missing, as_of))
+        return out
+
+    if not symbols or not as_of:
         return {}
+    if not db_path.exists():
+        return with_live_fallback({})
     try:
         import duckdb
     except ImportError:
-        return {}
+        return with_live_fallback({})
 
     try:
         con = duckdb.connect(str(db_path), read_only=True)
     except Exception:
-        return {}
+        return with_live_fallback({})
     try:
         placeholders = ", ".join("?" for _ in symbols)
         coverage_rows = con.execute(
@@ -752,7 +882,7 @@ def fetch_long_dated_iv_history(
                     "expiry_count": int(expiry_count or 0),
                 }
         if not modes:
-            return {}
+            return with_live_fallback({})
 
         def sql_quote(value: str) -> str:
             return "'" + value.replace("'", "''") + "'"
@@ -812,7 +942,7 @@ def fetch_long_dated_iv_history(
             [as_of, as_of],
         ).fetchall()
     except Exception:
-        return {}
+        return with_live_fallback({})
     finally:
         con.close()
 
@@ -855,8 +985,9 @@ def fetch_long_dated_iv_history(
             "volume": current["volume"],
             "open_interest": current["open_interest"],
             "coverage_status": "ok" if len(values) >= MIN_PUBLIC_IV_RANK_OBS else "short_history",
+            "source": "options_chain_quotes",
         }
-    return out
+    return with_live_fallback(out)
 
 
 def long_dated_iv_public_reliable(row: dict[str, Any] | None) -> bool:
@@ -1226,9 +1357,11 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
         if isinstance(payload.get("long_dated_iv_history"), dict)
         else {}
     )
+    live_fallback = live_long_iv_fallback_symbols(verdicts)
     long_iv_history = precomputed_long_iv or fetch_long_dated_iv_history(
         list(verdicts.keys()),
         effective_options_date,
+        live_fallback_symbols=live_fallback,
     )
     selected_verdicts = []
     for symbol in requested_symbols:
@@ -1274,7 +1407,7 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
         "long_dated_iv_history": {
             symbol: row
             for symbol, row in long_iv_history.items()
-            if symbol in requested_symbols or long_dated_iv_public_reliable(row)
+            if symbol in requested_symbols or symbol in live_fallback or long_dated_iv_public_reliable(row)
         },
         "options_attention_watchlist": select_us_options_attention(
             payload,

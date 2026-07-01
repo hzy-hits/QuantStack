@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import sys
 import types
+from datetime import date
 from pathlib import Path
 from unittest import mock
 
@@ -368,6 +369,70 @@ def test_us_options_attention_does_not_promote_low_iv_rank_with_short_history(tm
     section = module.render_us_options_attention_section(packet)
     assert "N=10，仅参考" in section
     assert "LEAPS/远月 IV rank 来自逐合约链" in section
+
+
+def test_live_long_dated_iv_snapshot_is_current_chain_not_history_rank() -> None:
+    module = load_module()
+
+    class FakeChain:
+        def __init__(self, rows):
+            self.rows = rows
+            self.empty = not rows
+
+        def iterrows(self):
+            return iter(enumerate(self.rows))
+
+    snapshot = module.select_live_long_dated_iv_snapshot(
+        "MSFT",
+        {
+            "2027-07-16": (
+                FakeChain([
+                    {"strike": 490, "impliedVolatility": 0.31, "volume": 5, "openInterest": 10},
+                    {"strike": 500, "impliedVolatility": 0.25, "volume": 7, "openInterest": 20},
+                ]),
+                FakeChain([
+                    {"strike": 500, "impliedVolatility": 0.27, "volume": 11, "openInterest": 30},
+                ]),
+                501.0,
+            ),
+            "2027-02-19": (
+                FakeChain([{"strike": 500, "impliedVolatility": 0.20}]),
+                FakeChain([{"strike": 500, "impliedVolatility": 0.22}]),
+                501.0,
+            ),
+        },
+        date(2026, 6, 29),
+    )
+
+    assert snapshot is not None
+    assert snapshot["symbol"] == "MSFT"
+    assert snapshot["tenor"] == "LEAPS"
+    assert snapshot["rank_pct"] is None
+    assert snapshot["rank_n"] == 1
+    assert snapshot["coverage_status"] == "live_only"
+    assert snapshot["source"] == "cboe_live"
+    assert snapshot["atm_iv"] == 0.26
+
+
+def test_long_dated_iv_history_uses_live_fallback_when_db_missing(tmp_path: Path, monkeypatch) -> None:
+    module = load_module()
+    calls: list[tuple[list[str], str | None]] = []
+
+    def fake_live(symbols, as_of):
+        calls.append((symbols, as_of))
+        return {"MSFT": {"symbol": "MSFT", "rank_pct": None, "rank_n": 1, "coverage_status": "live_only"}}
+
+    monkeypatch.setattr(module, "fetch_live_long_dated_iv_snapshots", fake_live)
+
+    out = module.fetch_long_dated_iv_history(
+        ["MSFT", "AAPL"],
+        "2026-06-29",
+        db_path=tmp_path / "missing.duckdb",
+        live_fallback_symbols=["MSFT", "AVGO"],
+    )
+
+    assert out["MSFT"]["coverage_status"] == "live_only"
+    assert calls == [(["MSFT"], "2026-06-29")]
 
 
 def test_am_uses_previous_cn_context_when_target_day_payload_is_missing(tmp_path: Path) -> None:
