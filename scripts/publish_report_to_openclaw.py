@@ -19,6 +19,7 @@ from typing import Any
 
 DEFAULT_REMOTE_ROOT = "/home/ivena/.openclaw/quant-stack"
 DEFAULT_OPENCLAW_BIN = "/home/ivena/.local/bin/openclaw"
+WEIXIN_DIRECT_CHANNEL = "openclaw-weixin"
 
 
 def parse_args() -> argparse.Namespace:
@@ -416,42 +417,225 @@ sys.exit(result.returncode)
     return deliveries
 
 
+WEIXIN_DIRECT_SEND_CODE = r"""
+import base64
+import json
+import os
+import pathlib
+import random
+import secrets
+import sys
+import time
+import urllib.request
+from urllib.parse import urljoin
+
+
+def state_dir() -> pathlib.Path:
+    override = os.environ.get("OPENCLAW_STATE_DIR") or os.environ.get("CLAWDBOT_STATE_DIR")
+    return pathlib.Path(override).expanduser() if override else pathlib.Path.home() / ".openclaw"
+
+
+def plugin_metadata(root: pathlib.Path) -> tuple[str, str]:
+    matches = sorted(
+        (root / "npm" / "projects").glob("*/node_modules/@tencent-weixin/openclaw-weixin/package.json"),
+        key=lambda item: item.stat().st_mtime,
+        reverse=True,
+    )
+    for path in matches:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        return str(payload.get("version") or "0.0.0"), str(payload.get("ilink_appid") or "bot")
+    return "0.0.0", "bot"
+
+
+def client_version(version: str) -> int:
+    parts = []
+    for part in version.split(".")[:3]:
+        try:
+            parts.append(int(part))
+        except ValueError:
+            parts.append(0)
+    parts.extend([0] * (3 - len(parts)))
+    return ((parts[0] & 0xFF) << 16) | ((parts[1] & 0xFF) << 8) | (parts[2] & 0xFF)
+
+
+def random_wechat_uin() -> str:
+    value = str(random.getrandbits(32)).encode("utf-8")
+    return base64.b64encode(value).decode("ascii")
+
+
+def load_json(path: pathlib.Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise RuntimeError(f"missing OpenClaw Weixin state file: {path}") from exc
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"invalid OpenClaw Weixin state file: {path}") from exc
+
+
+def context_token_for(tokens: dict, target: str) -> tuple[str, str]:
+    token = tokens.get(target)
+    if isinstance(token, str) and token:
+        return target, token
+    target_lower = target.lower()
+    for key, value in tokens.items():
+        if isinstance(key, str) and key.lower() == target_lower and isinstance(value, str) and value:
+            return key, value
+    raise RuntimeError(f"missing context token for target={target}")
+
+
+def main() -> int:
+    channel, account_id, target, message = sys.argv[1:5]
+    if channel != "openclaw-weixin":
+        raise RuntimeError(f"unsupported direct Weixin channel: {channel}")
+    if not account_id:
+        raise RuntimeError("openclaw-weixin direct delivery requires message_account")
+
+    root = state_dir()
+    account_path = root / "openclaw-weixin" / "accounts" / f"{account_id}.json"
+    tokens_path = root / "openclaw-weixin" / "accounts" / f"{account_id}.context-tokens.json"
+    account = load_json(account_path)
+    tokens = load_json(tokens_path)
+    resolved_target, context_token = context_token_for(tokens, target)
+    version, app_id = plugin_metadata(root)
+    base_url = str(account.get("baseUrl") or "https://ilinkai.weixin.qq.com")
+    bot_token = str(account.get("token") or "")
+    if not bot_token:
+        raise RuntimeError(f"missing bot token for account={account_id}")
+
+    client_id = f"openclaw-weixin:{int(time.time() * 1000)}-{secrets.token_hex(4)}"
+    body = {
+        "msg": {
+            "from_user_id": "",
+            "to_user_id": resolved_target,
+            "client_id": client_id,
+            "message_type": 2,
+            "message_state": 2,
+            "item_list": [{"type": 1, "text_item": {"text": message}}],
+            "context_token": context_token,
+        },
+        "base_info": {
+            "channel_version": version,
+            "bot_agent": "OpenClaw",
+        },
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "AuthorizationType": "ilink_bot_token",
+        "Authorization": f"Bearer {bot_token}",
+        "X-WECHAT-UIN": random_wechat_uin(),
+        "iLink-App-Id": app_id,
+        "iLink-App-ClientVersion": str(client_version(version)),
+    }
+    request = urllib.request.Request(
+        urljoin(base_url.rstrip("/") + "/", "ilink/bot/sendmessage"),
+        data=json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=15) as response:
+        raw = response.read().decode("utf-8", errors="replace")
+    parsed = None
+    if raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            parsed = {"raw": raw[:500]}
+    if isinstance(parsed, dict) and parsed.get("ret") not in (None, 0):
+        raise RuntimeError(f"weixin sendmessage returned ret={parsed.get('ret')}: {parsed}")
+    print(json.dumps({
+        "channel": channel,
+        "account": account_id,
+        "target": resolved_target,
+        "messageId": client_id,
+        "contextToken": "present",
+        "response": parsed,
+    }, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+"""
+
+
+def send_weixin_direct(
+    args: argparse.Namespace,
+    manifest: dict[str, Any],
+    destination: dict[str, str],
+    message: str,
+) -> dict[str, str]:
+    if not destination["message_account"]:
+        raise ValueError("openclaw-weixin direct delivery requires --message-account")
+    run_remote_python_script(
+        args,
+        WEIXIN_DIRECT_SEND_CODE,
+        PurePosixPath(manifest["remote_dir"]),
+        "openclaw_send_weixin_direct.py",
+        [
+            destination["message_channel"],
+            destination["message_account"],
+            destination["message_target"],
+            message,
+        ],
+        timeout=args.timeout,
+        dry_run=args.dry_run,
+    )
+    return {**destination, "message_transport": "weixin-direct-api"}
+
+
+def send_openclaw_cli_message(
+    args: argparse.Namespace,
+    manifest: dict[str, Any],
+    destination: dict[str, str],
+    message: str,
+) -> dict[str, str]:
+    code = "import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:]).returncode)"
+    cmd = [
+        args.openclaw_bin,
+        "message",
+        "send",
+        "--channel",
+        destination["message_channel"],
+        "--target",
+        destination["message_target"],
+        "--message",
+        message,
+        "--media",
+        manifest["remote_report_path"],
+        "--force-document",
+        "--json",
+    ]
+    if destination["message_account"]:
+        cmd.extend(["--account", destination["message_account"]])
+    run_remote_python_script(
+        args,
+        code,
+        PurePosixPath(manifest["remote_dir"]),
+        "openclaw_send_message.py",
+        cmd,
+        timeout=args.timeout,
+        dry_run=args.dry_run,
+    )
+    return {**destination, "message_transport": "openclaw-cli"}
+
+
 def send_message(args: argparse.Namespace, manifest: dict[str, Any]) -> list[dict[str, str]]:
     message = (
         f"{manifest.get('title')}\n"
         f"{manifest.get('kind')} {manifest.get('slot')} {manifest.get('date')}\n"
         f"{manifest.get('remote_report_path')}"
     )
-    code = "import subprocess,sys; sys.exit(subprocess.run(sys.argv[1:]).returncode)"
     destinations = message_destinations(args)
+    deliveries: list[dict[str, str]] = []
     for destination in destinations:
-        cmd = [
-            args.openclaw_bin,
-            "message",
-            "send",
-            "--channel",
-            destination["message_channel"],
-            "--target",
-            destination["message_target"],
-            "--message",
-            message,
-            "--media",
-            manifest["remote_report_path"],
-            "--force-document",
-            "--json",
-        ]
-        if destination["message_account"]:
-            cmd.extend(["--account", destination["message_account"]])
-        run_remote_python_script(
-            args,
-            code,
-            PurePosixPath(manifest["remote_dir"]),
-            "openclaw_send_message.py",
-            cmd,
-            timeout=args.timeout,
-            dry_run=args.dry_run,
-        )
-    return destinations
+        if destination["message_channel"] == WEIXIN_DIRECT_CHANNEL:
+            deliveries.append(send_weixin_direct(args, manifest, destination, message))
+        else:
+            deliveries.append(send_openclaw_cli_message(args, manifest, destination, message))
+    return deliveries
 
 
 def main() -> int:

@@ -154,10 +154,10 @@ def test_send_message_fans_out_direct_openclaw_messages(monkeypatch) -> None:
         "remote_report_path": "/tmp/report.md",
         "remote_dir": "/tmp/openclaw",
     }
-    remote_calls: list[list[str]] = []
+    remote_calls: list[dict[str, object]] = []
 
     def fake_remote_script(*call_args, **_kwargs):
-        remote_calls.append(call_args[4])
+        remote_calls.append({"script": call_args[3], "argv": call_args[4]})
         return subprocess.CompletedProcess([], 0, "", "")
 
     monkeypatch.setattr(module, "run_remote_python_script", fake_remote_script)
@@ -165,8 +165,58 @@ def test_send_message_fans_out_direct_openclaw_messages(monkeypatch) -> None:
     deliveries = module.send_message(args, manifest)
 
     assert [item["message_account"] for item in deliveries] == ["acct-1", "acct-2"]
-    assert [call[call.index("--target") + 1] for call in remote_calls] == ["target-1", "target-2"]
-    assert [call[call.index("--account") + 1] for call in remote_calls] == ["acct-1", "acct-2"]
+    assert [item["message_transport"] for item in deliveries] == ["weixin-direct-api", "weixin-direct-api"]
+    assert [call["script"] for call in remote_calls] == [
+        "openclaw_send_weixin_direct.py",
+        "openclaw_send_weixin_direct.py",
+    ]
+    assert [call["argv"][1] for call in remote_calls] == ["acct-1", "acct-2"]
+    assert [call["argv"][2] for call in remote_calls] == ["target-1", "target-2"]
+
+
+def test_send_message_keeps_openclaw_cli_for_non_weixin_channels(monkeypatch) -> None:
+    module = load_module()
+    args = argparse.Namespace(
+        openclaw_bin="openclaw",
+        timeout=60,
+        dry_run=False,
+        message_channel="slack",
+        message_account="",
+        message_target="#reports",
+        reply_channel="",
+        reply_account="",
+        reply_to="",
+    )
+    manifest = {
+        "title": "Hermes 跨市场早报",
+        "kind": "cross_market_daily",
+        "slot": "am",
+        "date": "2026-07-01",
+        "remote_report_path": "/tmp/report.md",
+        "remote_dir": "/tmp/openclaw",
+    }
+    remote_calls: list[dict[str, object]] = []
+
+    def fake_remote_script(*call_args, **_kwargs):
+        remote_calls.append({"script": call_args[3], "argv": call_args[4]})
+        return subprocess.CompletedProcess([], 0, "", "")
+
+    monkeypatch.setattr(module, "run_remote_python_script", fake_remote_script)
+
+    deliveries = module.send_message(args, manifest)
+
+    assert deliveries == [
+        {
+            "message_channel": "slack",
+            "message_account": "",
+            "message_target": "#reports",
+            "message_transport": "openclaw-cli",
+        }
+    ]
+    assert remote_calls[0]["script"] == "openclaw_send_message.py"
+    argv = remote_calls[0]["argv"]
+    assert argv[argv.index("--channel") + 1] == "slack"
+    assert argv[argv.index("--target") + 1] == "#reports"
 
 
 def test_write_prompt_tells_agent_deliver_to_send_visible_summary(tmp_path: Path) -> None:
