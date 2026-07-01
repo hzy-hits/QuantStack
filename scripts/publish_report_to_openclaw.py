@@ -569,7 +569,7 @@ def send_weixin_direct(
 ) -> dict[str, str]:
     if not destination["message_account"]:
         raise ValueError("openclaw-weixin direct delivery requires --message-account")
-    run_remote_python_script(
+    result = run_remote_python_script(
         args,
         WEIXIN_DIRECT_SEND_CODE,
         PurePosixPath(manifest["remote_dir"]),
@@ -583,7 +583,19 @@ def send_weixin_direct(
         timeout=args.timeout,
         dry_run=args.dry_run,
     )
-    return {**destination, "message_transport": "weixin-direct-api"}
+    delivery = {**destination, "message_transport": "weixin-direct-api"}
+    if not args.dry_run:
+        try:
+            payload = json.loads((result.stdout or "").strip().splitlines()[-1])
+        except (IndexError, json.JSONDecodeError):
+            payload = {}
+        if payload.get("messageId"):
+            delivery["message_id"] = str(payload["messageId"])
+        if payload.get("contextToken"):
+            delivery["context_token"] = str(payload["contextToken"])
+        if payload.get("response") is not None:
+            delivery["weixin_response"] = json.dumps(payload["response"], ensure_ascii=False, sort_keys=True)
+    return delivery
 
 
 def send_openclaw_cli_message(

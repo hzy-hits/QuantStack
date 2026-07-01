@@ -158,7 +158,12 @@ def test_send_message_fans_out_direct_openclaw_messages(monkeypatch) -> None:
 
     def fake_remote_script(*call_args, **_kwargs):
         remote_calls.append({"script": call_args[3], "argv": call_args[4]})
-        return subprocess.CompletedProcess([], 0, "", "")
+        return subprocess.CompletedProcess(
+            [],
+            0,
+            '{"messageId":"openclaw-weixin:test","contextToken":"present","response":{"ret":0}}\n',
+            "",
+        )
 
     monkeypatch.setattr(module, "run_remote_python_script", fake_remote_script)
 
@@ -166,6 +171,8 @@ def test_send_message_fans_out_direct_openclaw_messages(monkeypatch) -> None:
 
     assert [item["message_account"] for item in deliveries] == ["acct-1", "acct-2"]
     assert [item["message_transport"] for item in deliveries] == ["weixin-direct-api", "weixin-direct-api"]
+    assert [item["message_id"] for item in deliveries] == ["openclaw-weixin:test", "openclaw-weixin:test"]
+    assert [item["context_token"] for item in deliveries] == ["present", "present"]
     assert [call["script"] for call in remote_calls] == [
         "openclaw_send_weixin_direct.py",
         "openclaw_send_weixin_direct.py",
