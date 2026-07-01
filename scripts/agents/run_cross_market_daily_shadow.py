@@ -1089,6 +1089,67 @@ def fetch_long_dated_iv_history(
     return with_live_fallback(out)
 
 
+def fetch_option_sentiment_context(
+    symbols: list[str],
+    as_of: str | None,
+    *,
+    db_path: Path = DEFAULT_US_OPTIONS_DB,
+) -> dict[str, dict[str, Any]]:
+    symbols = sorted({str(symbol or "").upper() for symbol in symbols if symbol})
+    if not symbols or not as_of or not db_path.exists():
+        return {}
+    try:
+        import duckdb
+    except ImportError:
+        return {}
+    try:
+        con = duckdb.connect(str(db_path), read_only=True)
+    except Exception:
+        return {}
+    try:
+        latest = con.execute(
+            "SELECT MAX(as_of) FROM options_sentiment WHERE as_of <= CAST(? AS DATE)",
+            [as_of],
+        ).fetchone()
+        effective = latest[0] if latest and latest[0] else as_of
+        placeholders = ", ".join("?" for _ in symbols)
+        rows = con.execute(
+            f"""
+            SELECT symbol, pc_ratio_z, skew_z, vrp, iv_ann, rv_ann, pc_ratio_raw, skew_raw
+            FROM options_sentiment
+            WHERE as_of = CAST(? AS DATE)
+              AND symbol IN ({placeholders})
+            """,
+            [effective, *symbols],
+        ).fetchall()
+    except Exception:
+        return {}
+    finally:
+        con.close()
+
+    out: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        symbol = str(row[0] or "").upper()
+        if not symbol:
+            continue
+        iv_ann = compact_float(row[4], 4)
+        rv_ann = compact_float(row[5], 4)
+        iv_hv = iv_ann / rv_ann if iv_ann is not None and rv_ann not in (None, 0) else None
+        out[symbol] = {
+            "effective_date": str(effective),
+            "verdict": "指数期权情绪背景",
+            "iv_ann": iv_ann,
+            "rv_ann": rv_ann,
+            "iv_hv": compact_float(iv_hv, 4),
+            "vrp": compact_float(row[3], 4),
+            "pc_ratio_z": compact_float(row[1], 4),
+            "skew_z": compact_float(row[2], 4),
+            "pc_ratio_raw": compact_float(row[6], 4),
+            "skew_raw": compact_float(row[7], 4),
+        }
+    return out
+
+
 def long_dated_iv_public_reliable(row: dict[str, Any] | None) -> bool:
     if not isinstance(row, dict):
         return False
@@ -1531,6 +1592,8 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
 
     verdicts = payload.get("options_verdicts") if isinstance(payload.get("options_verdicts"), dict) else {}
     effective_options_date = infer_options_effective_date(payload)
+    index_option_sentiment = fetch_option_sentiment_context(["SPY", "QQQ", "SMH"], effective_options_date)
+    context_verdicts = {**index_option_sentiment, **verdicts}
     precomputed_long_iv = (
         payload.get("long_dated_iv_history")
         if isinstance(payload.get("long_dated_iv_history"), dict)
@@ -1545,7 +1608,7 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
     )
     selected_verdicts = []
     for symbol in requested_symbols:
-        row = verdicts.get(symbol)
+        row = context_verdicts.get(symbol)
         if isinstance(row, dict):
             selected_verdicts.append(compact_option_verdict(symbol, row))
         if len(selected_verdicts) >= limit:

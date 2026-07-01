@@ -532,6 +532,49 @@ def test_us_options_attention_section_includes_tech_live_pool_and_spy_quadrant(t
     assert "上涨但 put/call 偏高" in section
 
 
+def test_spy_quadrant_uses_index_option_sentiment_when_payload_lacks_spy(tmp_path: Path, monkeypatch) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    us.payload["options_verdicts"] = {}
+    us.payload["long_dated_iv_history"] = {
+        "NVDA": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.31,
+            "avg_dte": 365,
+            "rank_pct": 18,
+            "rank_n": 40,
+            "coverage_status": "ok",
+        },
+    }
+
+    monkeypatch.setattr(
+        module,
+        "fetch_option_sentiment_context",
+        lambda symbols, as_of: {
+            "SPY": {
+                "effective_date": "2026-06-29",
+                "verdict": "指数期权情绪背景",
+                "pc_ratio_z": -1.1,
+                "skew_z": 0.2,
+            }
+        },
+    )
+
+    packet = module.build_packet("am", cn, us)
+    packet["finance_search_prefetch"] = {
+        "market_rows": [
+            {"symbol": "SPY", "label": "SPY", "date": "2026-06-29", "change_pct": 0.72},
+        ],
+    }
+
+    section = module.render_us_options_attention_section(packet)
+
+    assert "SPY 象限：SPY(2026-06-29) +0.72%" in section
+    assert "上涨且 put/call 偏低" in section
+
+
 def test_cboe_quote_day_prefers_last_trade_time() -> None:
     module = load_module()
 
