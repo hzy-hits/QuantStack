@@ -445,24 +445,20 @@ def test_long_dated_iv_history_uses_live_fallback_when_db_missing(tmp_path: Path
     assert calls == [(["MSFT"], "2026-06-29")]
 
 
-def test_live_long_iv_fallback_symbols_lists_tech_growth_universe(monkeypatch) -> None:
+def test_live_long_iv_fallback_symbols_use_dynamic_scan_not_static_pool(monkeypatch) -> None:
     module = load_module()
     monkeypatch.setenv("QUANT_LIVE_LEAPS_IV_FALLBACK", "1")
     monkeypatch.delenv("QUANT_LIVE_LEAPS_IV_SYMBOLS", raising=False)
     monkeypatch.setenv("QUANT_LIVE_LEAPS_IV_MAX_SYMBOLS", "40")
 
-    symbols = module.live_long_iv_fallback_symbols({})
-    universe = module.tech_growth_option_universe({"MSFT", "GOOGL", "AVGO"})
-    groups = {row["group"]: row for row in universe}
+    assert module.live_long_iv_fallback_symbols({}) == []
+    assert module.live_long_iv_fallback_symbols({"NVDA": {}}, ["MSFT", "GOOGL"]) == ["MSFT", "GOOGL", "NVDA"]
 
-    assert {"MSFT", "GOOGL", "AVGO", "NVDA", "SMH", "QQQ", "VGT", "CRWV", "NBIS", "VRT"} <= set(symbols)
-    assert "Hyperscaler/平台" in groups
-    assert "AI 半导体/设备" in groups
-    assert groups["Hyperscaler/平台"]["covered_symbols"] == ["MSFT", "GOOGL"]
-    assert groups["AI 半导体/设备"]["covered_symbols"] == ["AVGO"]
+    monkeypatch.setenv("QUANT_LIVE_LEAPS_IV_SYMBOLS", "AVGO,MSFT")
+    assert module.live_long_iv_fallback_symbols({"NVDA": {}}, ["MSFT", "GOOGL"]) == ["AVGO", "MSFT", "GOOGL", "NVDA"]
 
 
-def test_us_options_attention_section_includes_tech_live_pool_and_spy_quadrant(tmp_path: Path) -> None:
+def test_us_options_attention_section_excludes_static_live_pool_and_keeps_dynamic_iv(tmp_path: Path) -> None:
     module = load_module()
     cn = artifact(module, "cn", "2026-06-29", tmp_path)
     us = artifact(module, "us", "2026-06-29", tmp_path)
@@ -524,15 +520,50 @@ def test_us_options_attention_section_includes_tech_live_pool_and_spy_quadrant(t
 
     section = module.render_us_options_attention_section(packet)
 
-    assert "科技成长 LEAPS 覆盖池" in section
-    assert "MSFT" in section
-    assert "GOOGL" in section
-    assert "AVGO" in section
     assert "NVDA" in section
-    assert "科技成长 LEAPS 观察池" in section
-    assert "本地历史不足，不能判定低位/高位" in section
+    assert "LEAPS IV 低位" in section
+    assert "科技成长 LEAPS 覆盖池" not in section
+    assert "科技成长 LEAPS 观察池" not in section
+    assert "MSFT" not in section
+    assert "GOOGL" not in section
+    assert "AVGO" not in section
+    assert "本地历史不足，不能判定低位/高位" not in section
     assert "SPY 象限：SPY(2026-06-29) +0.62%" in section
     assert "上涨但 put/call 偏高" in section
+
+
+def test_options_attention_watchlist_ignores_live_only_static_names(tmp_path: Path) -> None:
+    module = load_module()
+    cn = artifact(module, "cn", "2026-06-29", tmp_path)
+    us = artifact(module, "us", "2026-06-29", tmp_path)
+    us.payload["options_verdicts"] = {}
+    us.payload["long_dated_iv_history"] = {
+        "MSFT": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.24,
+            "avg_dte": 380,
+            "rank_pct": None,
+            "rank_n": 1,
+            "coverage_status": "live_only",
+            "source": "cboe_live",
+        },
+        "GOOGL": {
+            "tenor": "LEAPS",
+            "effective_date": "2026-06-29",
+            "atm_iv": 0.27,
+            "avg_dte": 370,
+            "rank_pct": None,
+            "rank_n": 1,
+            "coverage_status": "live_only",
+            "source": "cboe_live",
+        },
+    }
+
+    packet = module.build_packet("am", cn, us)
+
+    assert packet["us"]["option_context"]["options_attention_watchlist"] == []
+    assert module.render_us_options_attention_section(packet) == ""
 
 
 def test_spy_quadrant_uses_index_option_sentiment_when_payload_lacks_spy(tmp_path: Path, monkeypatch) -> None:

@@ -116,30 +116,6 @@ DIRECT_HEADLINE_SOURCES = (
     "https://www.trendforce.com/news/",
 )
 HTTP_USER_AGENT = "QuantStack/1.0 research contact: 13502448752hzy@gmail.com"
-TECH_GROWTH_OPTION_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("ETF/指数代理", ("SMH", "QQQ", "VGT")),
-    ("Hyperscaler/平台", ("MSFT", "GOOGL", "GOOG", "AMZN", "META", "ORCL")),
-    ("AI 半导体/设备", ("NVDA", "AVGO", "AMD", "ARM", "MRVL", "TSM", "ASML", "AMAT", "LRCX", "KLAC", "MU")),
-    ("NeoCloud/数据中心", ("CRWV", "NBIS", "APLD", "CORZ", "IREN", "CIFR", "WULF", "BTBT")),
-    ("电力/散热/网络", ("VRT", "ETN", "PWR", "CEG", "NRG", "GEV", "ANET", "DELL", "SMCI", "HPE", "CIEN", "GLW")),
-)
-TECH_GROWTH_OPTION_DISPLAY_PRIORITY = (
-    "MSFT",
-    "GOOGL",
-    "AVGO",
-    "NVDA",
-    "SMH",
-    "QQQ",
-    "VGT",
-    "CRWV",
-    "NBIS",
-    "VRT",
-)
-DEFAULT_LIVE_LONG_IV_FALLBACK_SYMBOLS = tuple(
-    symbol
-    for _group, symbols in TECH_GROWTH_OPTION_GROUPS
-    for symbol in symbols
-)
 DEFAULT_US_OPTIONS_DB = ROOT / "quant-research-v1" / "data" / "quant.duckdb"
 MANAGED_REPORT_SECTION_PREFIXES = (
     "## 全球市场温度",
@@ -772,48 +748,56 @@ def split_symbol_list(value: str | None) -> list[str]:
     return symbols
 
 
-def live_long_iv_fallback_symbols(verdicts: dict[str, Any]) -> list[str]:
+def append_symbol_once(out: list[str], value: Any) -> None:
+    symbol = str(value or "").upper().strip()
+    if symbol and symbol not in out:
+        out.append(symbol)
+
+
+def us_dynamic_option_scan_symbols(
+    payload: dict[str, Any],
+    actions: list[dict[str, Any]],
+    *,
+    limit: int = 60,
+) -> list[str]:
+    symbols: list[str] = []
+    for row in actions:
+        if isinstance(row, dict):
+            append_symbol_once(symbols, row.get("symbol"))
+
+    for row_key in ("options_anomaly_rows", "options_tenor_signals"):
+        rows = payload.get(row_key) if isinstance(payload.get(row_key), list) else []
+        for row in rows:
+            if isinstance(row, dict):
+                append_symbol_once(symbols, option_row_symbol(row))
+
+    verdicts = payload.get("options_verdicts") if isinstance(payload.get("options_verdicts"), dict) else {}
+    for symbol in verdicts:
+        append_symbol_once(symbols, symbol)
+
+    ranker = payload.get("us_opportunity_ranker") if isinstance(payload.get("us_opportunity_ranker"), dict) else {}
+    for row_key in ("production_basket", "all_rows", "current"):
+        rows = ranker.get(row_key) if isinstance(ranker.get(row_key), list) else []
+        for row in rows:
+            if isinstance(row, dict):
+                append_symbol_once(symbols, row.get("symbol") or row.get("ticker"))
+            if len(symbols) >= limit:
+                return symbols[:limit]
+    return symbols[:limit]
+
+
+def live_long_iv_fallback_symbols(verdicts: dict[str, Any], dynamic_symbols: list[str] | None = None) -> list[str]:
     if os.environ.get("QUANT_LIVE_LEAPS_IV_FALLBACK", "1").lower() in {"0", "false", "no", "off"}:
         return []
-    configured = split_symbol_list(
-        os.environ.get("QUANT_LIVE_LEAPS_IV_SYMBOLS")
-        or ",".join(DEFAULT_LIVE_LONG_IV_FALLBACK_SYMBOLS)
-    )
+    configured = split_symbol_list(os.environ.get("QUANT_LIVE_LEAPS_IV_SYMBOLS"))
     verdict_symbols = [str(symbol or "").upper() for symbol in verdicts if symbol]
     max_symbols = int(os.environ.get("QUANT_LIVE_LEAPS_IV_MAX_SYMBOLS", "40") or "40")
     symbols: list[str] = []
-    for symbol in [*configured, *verdict_symbols]:
-        if symbol and symbol not in symbols:
-            symbols.append(symbol)
+    for symbol in [*configured, *(dynamic_symbols or []), *verdict_symbols]:
+        append_symbol_once(symbols, symbol)
         if len(symbols) >= max_symbols:
             break
     return symbols
-
-
-def tech_growth_option_universe(symbols_with_data: set[str] | None = None) -> list[dict[str, Any]]:
-    data = symbols_with_data or set()
-    out: list[dict[str, Any]] = []
-    for group, symbols in TECH_GROWTH_OPTION_GROUPS:
-        out.append(
-            {
-                "group": group,
-                "symbols": list(symbols),
-                "covered_symbols": [symbol for symbol in symbols if symbol in data],
-            }
-        )
-    return out
-
-
-def tech_growth_option_symbol_order() -> dict[str, int]:
-    ordered: list[str] = []
-    for symbol in TECH_GROWTH_OPTION_DISPLAY_PRIORITY:
-        if symbol not in ordered:
-            ordered.append(symbol)
-    for _group, symbols in TECH_GROWTH_OPTION_GROUPS:
-        for symbol in symbols:
-            if symbol not in ordered:
-                ordered.append(symbol)
-    return {symbol: index for index, symbol in enumerate(ordered)}
 
 
 def nearest_atm_chain_iv(chain: Any, current_price: float) -> tuple[float, int, int] | None:
@@ -1170,7 +1154,9 @@ def long_dated_iv_public_reliable(row: dict[str, Any] | None) -> bool:
 
 def long_dated_iv_reason(row: dict[str, Any]) -> str:
     tenor = str(row.get("tenor") or "远月")
-    return "LEAPS IV 低位" if tenor.upper() == "LEAPS" else "远月 IV 低位"
+    rank = compact_float(row.get("rank_pct"), 2)
+    side = "高位" if rank is not None and rank >= 80.0 else "低位"
+    return f"{'LEAPS' if tenor.upper() == 'LEAPS' else '远月'} IV {side}"
 
 
 def long_dated_iv_reading(row: dict[str, Any]) -> str:
@@ -1184,7 +1170,12 @@ def long_dated_iv_reading(row: dict[str, Any]) -> str:
     if rank is None or rank_n < MIN_PUBLIC_IV_RANK_OBS:
         return (
             f"当前{tenor}链样本N={fmt(rank_n)}{dte_text}{iv_text}，"
-            "本地历史不足，不能判定低位/高位；只放进科技成长LEAPS观察池"
+            "本地历史不足，不能判定低位/高位；不作为日报关注触发"
+        )
+    if rank >= 80.0:
+        return (
+            f"{tenor} IV 历史分位 {rank:.0f}%（样本N={rank_n}）{dte_text}{iv_text}，"
+            "买方期权成本偏贵；等IV回落，或用股票/价差表达"
         )
     return (
         f"{tenor} IV 历史分位 {rank:.0f}%（样本N={rank_n}）{dte_text}{iv_text}，"
@@ -1225,7 +1216,8 @@ def option_attention_verdict_reason(
     if skew_z is not None and abs(skew_z) >= 1.0:
         reasons.append("OTM skew 偏离")
     if long_dated_iv_public_reliable(long_iv) and compact_float(long_iv.get("rank_pct"), 2) is not None:
-        if float(long_iv.get("rank_pct") or 0.0) <= 20.0:
+        long_rank = float(long_iv.get("rank_pct") or 0.0)
+        if long_rank <= 20.0 or long_rank >= 80.0:
             reasons.append(long_dated_iv_reason(long_iv))
     if option_verdict_long_tenor(row):
         reasons.append("远月 LEAPS 久期")
@@ -1243,7 +1235,9 @@ def option_attention_reading(reason: str, row: dict[str, Any]) -> str:
     iv_rank_n = option_iv_rank_observation_count(row)
     if "OTM skew" in reason:
         return option_pc_skew_interpretation(row)
-    if "LEAPS IV" in reason:
+    if "LEAPS IV" in reason or reason.startswith("远月 IV"):
+        if "高位" in reason:
+            return "远月/LEAPS IV 已处自身历史高位，买方成本偏贵；等IV回落，或用股票/价差表达"
         suffix = f"整体IV rank {iv_rank:.0f}%（非LEAPS）" if iv_rank is not None else "整体IV低位"
         if iv_rank_n:
             suffix = f"{suffix}，样本N={iv_rank_n}"
@@ -1312,7 +1306,7 @@ def merge_option_attention_rows(rows: list[dict[str, Any]], *, limit: int) -> li
         return False
 
     def refine_reasons(existing_reasons: list[str], new_reason: str) -> list[str]:
-        if new_reason.startswith(("LEAPS IV 低位", "远月 IV 低位")):
+        if new_reason.startswith(("LEAPS IV", "远月 IV")):
             existing_reasons = [
                 reason for reason in existing_reasons
                 if not (
@@ -1375,7 +1369,6 @@ def select_us_options_attention(
 ) -> list[dict[str, Any]]:
     verdicts = payload.get("options_verdicts") if isinstance(payload.get("options_verdicts"), dict) else {}
     verdict_symbol_keys = {str(symbol).upper() for symbol in verdicts}
-    tech_symbol_order = tech_growth_option_symbol_order()
     long_iv_history = long_iv_history or {}
     candidates: list[dict[str, Any]] = []
 
@@ -1468,9 +1461,12 @@ def select_us_options_attention(
                 if isinstance(row, dict)
                 and long_dated_iv_public_reliable(long_iv)
                 and compact_float(long_iv.get("rank_pct"), 2) is not None
-                and float(compact_float(long_iv.get("rank_pct"), 2) or 999.0) <= 20.0
+                and (
+                    float(compact_float(long_iv.get("rank_pct"), 2) or 999.0) <= 20.0
+                    or float(compact_float(long_iv.get("rank_pct"), 2) or 0.0) >= 80.0
+                )
             ),
-            key=lambda item: item[3] if item[3] is not None else 999.0,
+            key=lambda item: min(float(item[3] or 50.0), 100.0 - float(item[3] or 50.0)),
         )
         for symbol, row, long_iv, iv_rank in ranked_by_long_iv[:5]:
             reason = long_dated_iv_reason(long_iv)
@@ -1479,8 +1475,8 @@ def select_us_options_attention(
                     symbol,
                     verdicts,
                     f"{reason} 排行",
-                    priority=9,
-                    score=100.0 - float(iv_rank or 100.0),
+                    priority=9 if float(iv_rank or 50.0) <= 20.0 else 28,
+                    score=abs(float(iv_rank or 50.0) - 50.0),
                     reading=long_dated_iv_reading(long_iv),
                     long_iv=long_iv,
                 )
@@ -1514,9 +1510,12 @@ def select_us_options_attention(
             if str(symbol).upper() not in verdict_symbol_keys
             and long_dated_iv_public_reliable(long_iv)
             and compact_float(long_iv.get("rank_pct"), 2) is not None
-            and float(compact_float(long_iv.get("rank_pct"), 2) or 999.0) <= 20.0
+            and (
+                float(compact_float(long_iv.get("rank_pct"), 2) or 999.0) <= 20.0
+                or float(compact_float(long_iv.get("rank_pct"), 2) or 0.0) >= 80.0
+            )
         ),
-        key=lambda item: item[2] if item[2] is not None else 999.0,
+        key=lambda item: min(float(item[2] or 50.0), 100.0 - float(item[2] or 50.0)),
     )
     for symbol, long_iv, iv_rank in ranked_universe_long_iv[:5]:
         reason = long_dated_iv_reason(long_iv)
@@ -1524,37 +1523,9 @@ def select_us_options_attention(
             option_attention_candidate(
                 symbol,
                 verdicts,
-                f"{reason} 科技成长池",
-                priority=12,
-                score=100.0 - float(iv_rank or 100.0),
-                reading=long_dated_iv_reading(long_iv),
-                long_iv=long_iv,
-            )
-        )
-
-    live_or_short_history_universe = sorted(
-        (
-            (str(symbol).upper(), long_iv)
-            for symbol, long_iv in long_iv_history.items()
-            if str(symbol).upper() not in verdict_symbol_keys
-            and str(symbol).upper() in tech_symbol_order
-            and isinstance(long_iv, dict)
-            and not long_dated_iv_public_reliable(long_iv)
-            and (
-                compact_float(long_iv.get("atm_iv"), 4) is not None
-                or option_iv_rank_observation_count({"iv_rank_n": long_iv.get("rank_n")}) > 0
-            )
-        ),
-        key=lambda item: tech_symbol_order.get(item[0], 999),
-    )
-    for symbol, long_iv in live_or_short_history_universe[:8]:
-        candidates.append(
-            option_attention_candidate(
-                symbol,
-                verdicts,
-                "科技成长 LEAPS 观察池",
-                priority=16,
-                score=1.0,
+                f"{reason} 动态筛选",
+                priority=12 if float(iv_rank or 50.0) <= 20.0 else 32,
+                score=abs(float(iv_rank or 50.0) - 50.0),
                 reading=long_dated_iv_reading(long_iv),
                 long_iv=long_iv,
             )
@@ -1610,7 +1581,8 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
         if isinstance(payload.get("long_dated_iv_history"), dict)
         else {}
     )
-    live_fallback = live_long_iv_fallback_symbols(verdicts)
+    dynamic_scan_symbols = us_dynamic_option_scan_symbols(payload, actions)
+    live_fallback = live_long_iv_fallback_symbols(verdicts, dynamic_scan_symbols)
     long_iv_symbols = sorted({str(symbol).upper() for symbol in [*verdicts.keys(), *live_fallback] if symbol})
     long_iv_history = precomputed_long_iv or fetch_long_dated_iv_history(
         long_iv_symbols,
@@ -1663,7 +1635,7 @@ def compact_us_option_context(payload: dict[str, Any], actions: list[dict[str, A
             for symbol, row in long_iv_history.items()
             if symbol in requested_symbols or symbol in live_fallback or long_dated_iv_public_reliable(row)
         },
-        "tech_growth_option_universe": tech_growth_option_universe(set(long_iv_history.keys())),
+        "dynamic_option_scan_symbols": dynamic_scan_symbols[:limit],
         "options_attention_watchlist": select_us_options_attention(
             payload,
             actions,
@@ -2002,7 +1974,7 @@ def build_coverage_checklist(slot: str) -> list[str]:
         return [
             "Open with the US/global market driver that most changes CN risk for the next open.",
             "Include the managed macro thermometer: top only US broad indices, CN broad indices, KOSPI, Nikkei 225; put all other snapshots in the tail table.",
-            "Use packet.us.option_context to explain US options/Gamma pressure, OTM skew / LEAPS IV watch names, signal absence, and stock risk limits.",
+            "Use packet.us.option_context to explain US options/Gamma pressure, dynamic OTM skew / LEAPS IV watch names, signal absence, and stock risk limits; never invent or repeat a static tech ticker pool.",
             "Explain the US -> CN transmission path and where it can fail.",
             "Map AI/semiconductor signals into A-share execution, including 科创板/STAR candidates when verifiable.",
             "Translate the driver into CN execution limits, sector priority, and watch items.",
@@ -2012,7 +1984,7 @@ def build_coverage_checklist(slot: str) -> list[str]:
     return [
         "Review CN post-market action as feedback on prior US-to-CN transmission.",
         "Summarize global and US pre-market context from US/global facts, not from CN direction; use the managed top thermometer plus tail appendix shape.",
-        "Use packet.us.option_context to explain US options/Gamma pressure, OTM skew / LEAPS IV watch names, signal absence, and stock risk limits.",
+        "Use packet.us.option_context to explain US options/Gamma pressure, dynamic OTM skew / LEAPS IV watch names, signal absence, and stock risk limits; never invent or repeat a static tech ticker pool.",
         "Check whether 科创板/STAR semiconductor moves confirm or reject the prior US-to-CN read-through.",
         "State explicitly that CN feedback cannot raise or cut US positioning.",
         "Identify what the next US session can change for the following CN session.",
@@ -2736,22 +2708,6 @@ def option_context_verdict(context: dict[str, Any], symbol: str) -> dict[str, An
     return {}
 
 
-def render_tech_growth_universe_line(context: dict[str, Any]) -> str:
-    universe = context.get("tech_growth_option_universe") if isinstance(context.get("tech_growth_option_universe"), list) else []
-    parts: list[str] = []
-    for row in universe:
-        if not isinstance(row, dict):
-            continue
-        group = public_cell(row.get("group"), default="")
-        symbols = row.get("symbols") if isinstance(row.get("symbols"), list) else []
-        shown = "/".join(public_cell(symbol) for symbol in symbols[:8] if symbol)
-        if group and shown:
-            parts.append(f"{group}: {shown}")
-    if not parts:
-        return ""
-    return "科技成长 LEAPS 覆盖池：" + "；".join(parts) + "。"
-
-
 def spy_put_call_quadrant_line(packet: dict[str, Any], context: dict[str, Any]) -> str:
     rows = market_row_lookup(packet)
     spy_market = rows.get("SPY")
@@ -2797,7 +2753,8 @@ def render_us_options_attention_section(packet: dict[str, Any]) -> str:
         (
             f"当日 far-OTM 异常 {fmt(anomaly.get('row_count'))} 条，"
             f"跨 tenor/LEAPS 信号 {fmt(tenor.get('signal_count'))} 条；"
-            f"没有触发时仍保留 skew/真实远月IV观察。LEAPS/远月 IV rank 来自逐合约链，"
+            f"没有触发时只保留由 skew、put/call 或可靠远月IV分位筛出的动态观察，不补静态科技池。"
+            f"LEAPS/远月 IV rank 来自逐合约链，"
             f"至少需要 {MIN_PUBLIC_IV_RANK_OBS} 个历史点；不足时只作背景，不作为低位/高位结论。"
         ),
         (
@@ -2805,7 +2762,7 @@ def render_us_options_attention_section(packet: dict[str, Any]) -> str:
             "IV 特别高或 put/call、skew 异动时，先解释近端价外保护、追涨需求或卖方收 IV 背景。"
         ),
     ]
-    for extra_line in (render_tech_growth_universe_line(context), spy_put_call_quadrant_line(packet, context)):
+    for extra_line in (spy_put_call_quadrant_line(packet, context),):
         if extra_line:
             lines.append(extra_line)
     lines.extend(
@@ -3825,6 +3782,7 @@ def build_hermes_prompt(packet: dict[str, Any]) -> str:
   这些是脚本侧已经从 finance-search 取回的证据,不要再写成缺失或工具失败。
 - 必须读取 packet.us.option_context。美股段要覆盖期权/Gamma 对股票仓位、入场节奏、止损收紧和风险预算的影响;
   如果有 options_attention_watchlist,要写出 OTM skew / LEAPS IV 值得关注的具体美股标的;
+  options_attention_watchlist 只代表当天动态筛选结果;没有动态行时不得补任何静态科技池名单;
   如果 options_anomaly_radar 或 options_tenor_radar 是 no_trigger/no_signal,要自然写成“没有新增异常/tenor确认”,不要写成数据没跑。
 - 如果 packet.sec_13f_recent.filings 非空,必须把过去12小时新增的 SEC 13F 文件解读为“季度滞后的机构仓位线索”,
   覆盖每个 manager 的新增持仓、增持、减持 Top5;如果为空,公开报告自然省略,不要写缺失提示。
@@ -3890,6 +3848,7 @@ def build_hermes_review_prompt(packet: dict[str, Any], draft: str) -> str:
 - 把全球新闻/宏观/指数/期货/油金和 A股半导体/科创板线索整合成同一个故事;不要拆成美股报告+A股报告。
 - 美股段必须融合 packet.us.option_context,包括 Gamma/期权定位/异常与 tenor 是否触发;它们是股票仓位和风险节奏证据,
   不是期权交易指令。如果 packet.us.option_context 有 options_attention_watchlist,保留其中 OTM skew / LEAPS IV 关注标的。
+  options_attention_watchlist 为空时只写“没有新增动态期权关注标的”,不要补静态科技成长股名单。
   如果 anomaly/tenor 为 0,写成没有新增确认,不要省略成“美股没发完”。
 - 如果 packet.sec_13f_recent.filings 非空,保留 SEC 13F 机构持仓快照:每个 manager 的新增持仓、增持、减持 Top5。
   必须说明 13F 是季度滞后数据,只能作为机构仓位背景,不能写成实时资金流或今日买卖。
