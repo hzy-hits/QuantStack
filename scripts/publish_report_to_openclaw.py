@@ -816,6 +816,30 @@ def send_message(args: argparse.Namespace, manifest: dict[str, Any]) -> list[dic
     return deliveries
 
 
+def deliver_new_event(
+    args: argparse.Namespace,
+    manifest: dict[str, Any],
+    prompt_path: Path,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], str]:
+    agent_deliveries: list[dict[str, str]] = []
+    message_deliveries: list[dict[str, str]] = []
+    agent_error = ""
+
+    if args.mode in {"message", "all"}:
+        message_deliveries = send_message(args, manifest)
+
+    if args.mode in {"agent", "all"}:
+        prompt_path.write_text(write_prompt(manifest, args.report_path), encoding="utf-8")
+        try:
+            agent_deliveries = notify_agent(args, manifest, prompt_path)
+        except Exception as exc:
+            if args.mode == "agent":
+                raise
+            agent_error = str(exc)[-1200:]
+
+    return agent_deliveries, message_deliveries, agent_error
+
+
 def main() -> int:
     args = parse_args()
     with tempfile.TemporaryDirectory(prefix="openclaw-publish-") as tmp:
@@ -833,17 +857,16 @@ def main() -> int:
         is_new_event = install_manifest(args, manifest["remote_manifest_path"])
         agent_deliveries: list[dict[str, str]] = []
         message_deliveries: list[dict[str, str]] = []
-        if args.mode in {"agent", "all"} and is_new_event:
-            prompt_path.write_text(write_prompt(manifest, args.report_path), encoding="utf-8")
-            agent_deliveries = notify_agent(args, manifest, prompt_path)
-        if args.mode in {"message", "all"} and is_new_event:
-            message_deliveries = send_message(args, manifest)
+        agent_error = ""
+        if is_new_event:
+            agent_deliveries, message_deliveries, agent_error = deliver_new_event(args, manifest, prompt_path)
         print(json.dumps(
             {
                 "ok": True,
                 "new_event": is_new_event,
                 "agent_delivery_count": len(agent_deliveries),
                 "agent_deliveries": agent_deliveries,
+                "agent_error": agent_error,
                 "message_delivery_count": len(message_deliveries),
                 "message_deliveries": message_deliveries,
                 "manifest": manifest,

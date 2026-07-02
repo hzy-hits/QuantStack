@@ -253,6 +253,41 @@ def test_send_message_keeps_openclaw_cli_for_non_weixin_channels(monkeypatch) ->
     assert argv[argv.index("--target") + 1] == "#reports"
 
 
+def test_deliver_new_event_all_mode_keeps_message_when_agent_fails(tmp_path: Path, monkeypatch) -> None:
+    module = load_module()
+    report = tmp_path / "report.md"
+    prompt = tmp_path / "prompt.txt"
+    report.write_text("# Hermes 跨市场早报\n\n今天的报告。", encoding="utf-8")
+    args = argparse.Namespace(mode="all", report_path=report)
+    manifest = {
+        "title": "Hermes 跨市场早报",
+        "kind": "cross_market_daily",
+        "slot": "am",
+        "date": "2026-07-02",
+        "remote_report_path": "/tmp/report.md",
+    }
+    calls: list[str] = []
+
+    def fake_send_message(_args, _manifest):
+        calls.append("message")
+        return [{"message_channel": "openclaw-weixin"}]
+
+    def fake_notify_agent(_args, _manifest, _prompt_path):
+        calls.append("agent")
+        raise TimeoutError("agent timed out after 180 seconds")
+
+    monkeypatch.setattr(module, "send_message", fake_send_message)
+    monkeypatch.setattr(module, "notify_agent", fake_notify_agent)
+
+    agent_deliveries, message_deliveries, agent_error = module.deliver_new_event(args, manifest, prompt)
+
+    assert calls == ["message", "agent"]
+    assert agent_deliveries == []
+    assert message_deliveries == [{"message_channel": "openclaw-weixin"}]
+    assert "agent timed out" in agent_error
+    assert prompt.exists()
+
+
 def test_write_prompt_tells_agent_deliver_to_send_visible_summary(tmp_path: Path) -> None:
     module = load_module()
     report = tmp_path / "report.md"
